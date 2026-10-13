@@ -2,7 +2,8 @@
 //!
 //! Identity is stable; a [`Revision`] orders concurrent edits to one record;
 //! a [`Generation`] invalidates stale work (architecture brief section 6.1).
-//! Both start at 1 and only move forward.
+//! A [`BootEpoch`] numbers engine starts. All start at 1 and only move
+//! forward.
 
 use std::fmt;
 use std::num::NonZeroU64;
@@ -77,6 +78,12 @@ define_counter!(
     /// Optimistic-concurrency version of a record. Every accepted change to
     /// the record advances it; a command carrying an older revision conflicts.
     Revision
+);
+define_counter!(
+    /// Engine start count for one state directory. Each engine start gets a
+    /// new epoch, so clients can discard ephemeral data (such as progress
+    /// samples) from a previous run.
+    BootEpoch
 );
 define_counter!(
     /// Execution generation of a job. Only the coordinator advances it, and
