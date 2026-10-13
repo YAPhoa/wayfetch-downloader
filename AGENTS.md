@@ -21,7 +21,7 @@ Build working software, not a permanent record of agent activity. Keep the repos
 - Preserve source identity, provider/account/route distinctions, expiring transfer leases, and non-replayable request semantics. A provider resolver is not merely `url -> url`.
 - Preserve crash-safe resume/publication and generation-checked cancellation. File length alone is not completed coverage. Never append blindly after an ignored range request.
 - Keep downloaded archives by default. Extraction is a separate confined workflow; cancelling and restarting elsewhere must not destroy inputs. A subprocess alone is not a proven sandbox.
-- No JVM/JDownloader sidecar, invented compatibility, borrowed provider identity, unapproved paid activity, or unexplained security bypass. Proposed memory numbers are targets, not measurements.
+- No JVM or third-party download-manager sidecar, invented compatibility, borrowed provider identity, unapproved paid activity, or unexplained security bypass. Proposed memory numbers are targets, not measurements.
 
 ## 3. Coordinate without administrative sprawl
 
