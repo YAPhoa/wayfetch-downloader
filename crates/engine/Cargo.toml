@@ -1,0 +1,16 @@
+[package]
+name = "wayfetch-engine"
+description = "Reusable Wayfetch Downloader engine library and lifecycle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+wayfetch-domain.workspace = true
+wayfetch-protocol.workspace = true
+
+[lints]
+workspace = true
