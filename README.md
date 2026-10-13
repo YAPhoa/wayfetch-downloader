@@ -44,6 +44,8 @@ wayfetch-downloader/
 ├── deploy/                 # Future deployment configuration
 ├── docs/architecture.md    # Canonical design and decision register
 ├── AGENTS.md               # Agent workflow and repository policy
+├── LICENSE-APACHE          # Apache License 2.0
+├── LICENSE-MIT             # MIT License
 └── CONTRIBUTING.md         # Contribution guidance
 ```
 
@@ -67,5 +69,7 @@ At implementation kickoff, establish and verify the Rust workspace, pinned
 toolchain, dependency choices, and build/test commands. The current CI checks only
 repository hygiene; product tests do not exist yet.
 
-A project license has not yet been selected. Resolve it before incorporating or
-redistributing external code.
+## License
+
+Wayfetch Downloader is dual-licensed under [MIT](LICENSE-MIT) or
+[Apache-2.0](LICENSE-APACHE), at your option.
