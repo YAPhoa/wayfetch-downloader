@@ -258,6 +258,32 @@ mod tests {
     }
 
     #[test]
+    fn older_decoders_ignore_new_fields_but_not_new_event_kinds() {
+        // The compatibility rule on `ProtocolVersion`: a minor version may
+        // add optional fields, but a new event kind needs a major version.
+        let item = StreamItem::Event(DurableEvent {
+            cursor: EventCursor {
+                instance: InstanceId::generate(),
+                position: 7,
+            },
+            kind: EventKind::BatchAccepted {
+                batch: BatchId::from_u64(1).unwrap(),
+                accepted: 2,
+            },
+        });
+        let mut json = serde_json::to_value(&item).unwrap();
+        json["added_in_minor"] = json!(true);
+        json["kind"]["added_in_minor"] = json!("x");
+        assert_eq!(
+            serde_json::from_value::<StreamItem>(json.clone()).unwrap(),
+            item
+        );
+
+        json["kind"]["type"] = json!("added_in_major");
+        assert!(serde_json::from_value::<StreamItem>(json).is_err());
+    }
+
+    #[test]
     fn resync_wire_form() {
         let item = StreamItem::Resync {
             reason: ResyncReason::Lagged,

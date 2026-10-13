@@ -660,6 +660,8 @@ Once a file job enters `Publishing`, publication is not interrupted by pause or 
 
 **Decision:** durable low-rate state events via an outbox; coalesced ephemeral progress; paginated read models; bounded per-client SSE queues. A slow client gets a resync instruction or disconnect, not unbounded event retention.
 
+A protocol minor version may only add optional fields, which older decoders ignore, and new commands or queries, which older clients never send. Any new value a client must decode from the engine (an event kind, stream item, error code, job stage, failure code, or resync reason) requires a new major version, which the handshake refuses. Add capability negotiation before extending event vocabularies within a major version.
+
 **Why:** a remote API needs event/diff delivery, but the queue must not be serialized in full on every UI refresh.
 
 **Gate:** a disconnected or slow UI cannot grow daemon RAM, hold a DB read transaction open, or delay transfers.

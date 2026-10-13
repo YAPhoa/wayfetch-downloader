@@ -42,8 +42,14 @@ impl std::fmt::Display for InstanceId {
     }
 }
 
-/// Protocol version. Minor versions only add optional fields, commands, and
-/// event kinds; a major version change may break any of them.
+/// Protocol version.
+///
+/// A minor version may only add optional fields, which older decoders
+/// ignore, and new commands or queries, which older clients never send. Any
+/// new value a client must decode from the engine (an event kind, stream
+/// item, error code, job stage, failure code, or resync reason) needs a new
+/// major version, because an older client cannot decode it. Extending those
+/// vocabularies within a major version needs capability negotiation first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProtocolVersion {
     /// Incompatible changes.

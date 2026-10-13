@@ -64,20 +64,33 @@ pub enum Permission {
 
 /// One URL to ingest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Url", into = "Url")]
+#[serde(try_from = "String", into = "String")]
 pub struct InputUrl(Url);
 
 impl InputUrl {
-    /// Validates an input: an `http` or `https` URL of at most
-    /// [`MAX_URL_BYTES`] with no embedded credentials. Credentials belong to
-    /// accounts, never to queue entries.
+    /// Parses and validates submitted text. The raw text is bounded by
+    /// [`MAX_URL_BYTES`] before parsing, because parsing strips characters
+    /// such as embedded newlines and tabs; the parsed URL is then checked by
+    /// [`InputUrl::new`].
+    pub fn parse(raw: &str) -> Result<Self, ProtocolError> {
+        if raw.len() > MAX_URL_BYTES {
+            return Err(url_too_long());
+        }
+        let url = Url::parse(raw)
+            .map_err(|_| ProtocolError::new(ErrorCode::InvalidRequest, "not a valid URL"))?;
+        Self::new(url)
+    }
+
+    /// Validates a parsed URL: `http` or `https`, at most [`MAX_URL_BYTES`]
+    /// after normalization, with a host and no embedded credentials.
+    /// Credentials belong to accounts, never to queue entries.
     pub fn new(url: Url) -> Result<Self, ProtocolError> {
         let invalid = |m: &str| ProtocolError::new(ErrorCode::InvalidRequest, m);
         if !matches!(url.scheme(), "http" | "https") {
             return Err(invalid("only http and https URLs are supported"));
         }
         if url.as_str().len() > MAX_URL_BYTES {
-            return Err(ProtocolError::new(ErrorCode::LimitExceeded, "URL too long"));
+            return Err(url_too_long());
         }
         if !url.username().is_empty() || url.password().is_some() {
             return Err(invalid("URLs must not contain credentials"));
@@ -94,17 +107,29 @@ impl InputUrl {
     }
 }
 
-impl TryFrom<Url> for InputUrl {
-    type Error = ProtocolError;
+fn url_too_long() -> ProtocolError {
+    ProtocolError::new(ErrorCode::LimitExceeded, "URL too long")
+}
 
-    fn try_from(url: Url) -> Result<Self, Self::Error> {
-        Self::new(url)
+impl std::str::FromStr for InputUrl {
+    type Err = ProtocolError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
     }
 }
 
-impl From<InputUrl> for Url {
+impl TryFrom<String> for InputUrl {
+    type Error = ProtocolError;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        Self::parse(&raw)
+    }
+}
+
+impl From<InputUrl> for String {
     fn from(value: InputUrl) -> Self {
-        value.0
+        value.0.into()
     }
 }
 
@@ -283,7 +308,7 @@ mod tests {
     use serde_json::json;
 
     fn url(s: &str) -> Result<InputUrl, ProtocolError> {
-        InputUrl::new(Url::parse(s).unwrap())
+        InputUrl::parse(s)
     }
 
     fn pause(job: u64, revision: u64) -> Command {
@@ -306,6 +331,22 @@ mod tests {
         }
         let long = format!("https://files.example/{}", "a".repeat(MAX_URL_BYTES));
         assert_eq!(url(&long).unwrap_err().code, ErrorCode::LimitExceeded);
+    }
+
+    #[test]
+    fn raw_url_length_is_checked_before_parsing() {
+        // Parsing strips embedded newlines and tabs, so the normalized URL
+        // alone would fit the limit.
+        let padded = format!("https://files.example/a{}", "\n".repeat(MAX_URL_BYTES + 1));
+        assert!(Url::parse(&padded).unwrap().as_str().len() <= MAX_URL_BYTES);
+        assert_eq!(url(&padded).unwrap_err().code, ErrorCode::LimitExceeded);
+        let json = json!({"type": "submit", "items": [padded], "package": null});
+        let err = serde_json::from_value::<Command>(json).unwrap_err();
+        assert!(err.to_string().contains("URL too long"), "{err}");
+        // A URL whose percent-encoded form exceeds the limit is still refused.
+        let encoded = format!("https://files.example/{}z", " ".repeat(MAX_URL_BYTES / 3));
+        assert!(encoded.len() <= MAX_URL_BYTES);
+        assert_eq!(url(&encoded).unwrap_err().code, ErrorCode::LimitExceeded);
     }
 
     #[test]
