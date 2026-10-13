@@ -126,16 +126,20 @@ impl JobStage {
         self.into()
     }
 
-    /// Whether the coordinator may move a job from `self` to `to`.
+    /// Whether the coordinator may move a job from `self` to `to` with
+    /// [`JobState::advance`].
     ///
-    /// This is the complete transition table; anything not listed is
-    /// rejected. Entering [`JobStage::Recovering`] from an active stage only
-    /// happens through [`JobState::recover_after_restart`].
+    /// This is the complete coordinator table; anything not listed is
+    /// rejected. User requests are not in it: leaving `Paused`, `Failed`, or
+    /// `Cancelled` and parking a job on pause or cancel happen only through
+    /// the `request_*` methods, which check the revision and allocate a new
+    /// generation where needed. Entering [`JobStage::Recovering`] from an
+    /// active stage only happens through [`JobState::recover_after_restart`].
     pub const fn can_transition_to(self, to: Self) -> bool {
         use JobStage::*;
         matches!(
             (self, to),
-            (Queued, Resolving | Waiting | Blocked | Paused | Cancelled)
+            (Queued, Resolving | Waiting | Blocked)
                 | (
                     Resolving,
                     Transferring | Queued | Waiting | NeedsInput | Blocked | Failed | Paused
@@ -150,15 +154,12 @@ impl JobStage {
                 | (Publishing, Complete | Blocked | Failed)
                 | (
                     Recovering,
-                    Transferring | Verifying | Publishing | Complete | Queued | Blocked | Failed
-                        | Paused | Cancelled
+                    Resolving | Transferring | Verifying | Publishing | Complete | Queued
+                        | Blocked | Failed | Paused | Cancelled
                 )
-                | (Waiting, Queued | Paused | Cancelled)
-                | (NeedsInput, Queued | Failed | Paused | Cancelled)
-                | (Blocked, Queued | Recovering | Failed | Paused | Cancelled)
-                | (Paused, Queued | Cancelled)
-                | (Failed, Queued | Cancelled)
-                | (Cancelled, Queued)
+                | (Waiting, Queued)
+                | (NeedsInput, Queued | Failed)
+                | (Blocked, Queued | Recovering | Failed)
         )
     }
 }
@@ -492,9 +493,10 @@ impl JobState {
     /// Records a stage change reported by the coordinator for work of the
     /// `presented` generation.
     ///
-    /// Restarting from scratch (verification or recovery back to
-    /// [`JobStage::Queued`]) advances the generation so the old partial and
-    /// any late worker lose their authority.
+    /// Returning an active job to [`JobStage::Queued`] (admission rollback,
+    /// restart after a verification failure, or recovery without reusable
+    /// progress) advances the generation, so a late worker from the
+    /// abandoned run cannot report into the next one.
     pub fn advance(&mut self, to: JobStage, presented: Generation) -> Result<Outcome, JobError> {
         if presented != self.generation {
             return Err(JobError::StaleGeneration {
@@ -532,38 +534,27 @@ impl JobState {
         }
         let mut next = *self;
         next.stage = to;
-        if to == JobStage::Queued
-            && matches!(self.stage, JobStage::Verifying | JobStage::Recovering)
-        {
+        if to == JobStage::Queued && self.stage.is_active() {
             next.generation = self.generation.next()?;
         }
         self.commit(next)
     }
 
     /// Reconciles a stored state after the engine restarted. Work from the
-    /// previous process is gone, so its generation is retired:
+    /// previous process is gone, so every active job moves to
+    /// [`JobStage::Recovering`] under a new generation, including a job that
+    /// was already recovering when the engine stopped again. A resolving job
+    /// recovers too: it may be re-resolving an expired lease while holding a
+    /// partial. Recovery then reconciles any partial or publication before
+    /// the job resolves, transfers, or publishes again.
     ///
-    /// * transferring, verifying, or publishing jobs move to
-    ///   [`JobStage::Recovering`] to reconcile their partial or publication,
-    ///   never straight back to the queue;
-    /// * resolving jobs, which hold no durable bytes, settle according to
-    ///   their desired state.
-    ///
-    /// Other stages are already durable and are left unchanged.
+    /// Parked and settled stages are already durable and are left unchanged.
     pub fn recover_after_restart(&mut self) -> Result<Outcome, JobError> {
-        let to = match self.stage {
-            JobStage::Transferring | JobStage::Verifying | JobStage::Publishing => {
-                JobStage::Recovering
-            }
-            JobStage::Resolving => match self.desired {
-                DesiredState::Running => JobStage::Queued,
-                DesiredState::Paused => JobStage::Paused,
-                DesiredState::Cancelled => JobStage::Cancelled,
-            },
-            _ => return Ok(Outcome::Unchanged),
-        };
+        if !self.stage.is_active() {
+            return Ok(Outcome::Unchanged);
+        }
         let mut next = *self;
-        next.stage = to;
+        next.stage = JobStage::Recovering;
         next.generation = self.generation.next()?;
         self.commit(next)
     }
@@ -631,7 +622,10 @@ mod tests {
             (Verifying, Complete),
             (Waiting, Resolving),
             (Paused, Resolving),
+            (Paused, Queued),
             (Failed, Resolving),
+            (Failed, Queued),
+            (Cancelled, Queued),
             (Queued, Recovering),
             (Transferring, Recovering),
         ];
@@ -835,8 +829,8 @@ mod tests {
     }
 
     #[test]
-    fn recovery_after_restart_never_requeues_transfers() {
-        for stage in [Transferring, Verifying, Publishing] {
+    fn recovery_after_restart_never_requeues_active_work() {
+        for stage in [Resolving, Transferring, Verifying, Publishing, Recovering] {
             let mut job = running(stage);
             let old = job.generation();
             job.recover_after_restart().unwrap();
@@ -847,10 +841,72 @@ mod tests {
         }
         let mut job = at(Resolving, DesiredState::Paused);
         job.recover_after_restart().unwrap();
-        assert_eq!(job.stage(), Paused);
+        assert_eq!(job.display(), DisplayState::Pausing);
+        job.advance(Paused, job.generation()).unwrap();
 
         let mut job = running(Waiting);
         assert_eq!(job.recover_after_restart(), Ok(Outcome::Unchanged));
+    }
+
+    /// Review finding P1: a second restart while recovering must retire the
+    /// first recovery's generation.
+    #[test]
+    fn repeated_restart_during_recovery_retires_each_generation() {
+        let mut job = running(Transferring);
+        job.recover_after_restart().unwrap();
+        let first_recovery = job.generation();
+        job.recover_after_restart().unwrap();
+        assert!(job.generation() > first_recovery);
+        assert!(matches!(
+            job.advance(Complete, first_recovery),
+            Err(JobError::StaleGeneration { .. })
+        ));
+        assert_eq!(
+            job.advance(Complete, job.generation()),
+            Ok(Outcome::Changed)
+        );
+    }
+
+    /// Review finding P2: only `request_retry` may requeue a failed or
+    /// cancelled job, and it allocates a new generation.
+    #[test]
+    fn coordinator_cannot_requeue_settled_jobs() {
+        for stage in [Failed, Cancelled, Paused, Complete] {
+            let mut job = settled(stage);
+            let before = job;
+            assert!(
+                matches!(
+                    job.advance(Queued, job.generation()),
+                    Err(JobError::InvalidTransition { .. })
+                ),
+                "{stage} -> queued"
+            );
+            assert_eq!(job, before);
+        }
+    }
+
+    /// Review finding P3: a job re-resolving an expired lease may hold a
+    /// partial, so a restart sends it through recovery, which can then
+    /// re-resolve without abandoning the partial's generation.
+    #[test]
+    fn restart_during_reresolution_recovers_the_partial() {
+        let mut job = running(Transferring);
+        job.advance(Resolving, job.generation()).unwrap();
+        job.recover_after_restart().unwrap();
+        assert_eq!(job.stage(), Recovering);
+        let g = job.generation();
+        job.advance(Resolving, g).unwrap();
+        assert_eq!(job.generation(), g);
+    }
+
+    #[test]
+    fn returning_active_work_to_the_queue_retires_the_generation() {
+        for stage in [Resolving, Verifying, Recovering] {
+            let mut job = running(stage);
+            let old = job.generation();
+            job.advance(Queued, old).unwrap();
+            assert!(job.generation() > old, "from {stage}");
+        }
     }
 
     #[test]
