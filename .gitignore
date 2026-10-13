@@ -7,3 +7,4 @@
 /ui/node_modules/
 .env
 .env.local
+__pycache__/

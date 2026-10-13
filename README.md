@@ -14,7 +14,8 @@ frontend packages, or runnable product builds exist yet.
 wayfetch-downloader/
 ├── Cargo.toml / Cargo.lock  # Workspace manifest and locked dependencies
 ├── rust-toolchain.toml      # Pinned Rust toolchain
-├── .github/workflows/       # Repository hygiene CI
+├── .github/workflows/       # Hygiene, Rust, and dependency-boundary CI
+├── scripts/                 # Maintained check scripts used by CI
 ├── apps/
 │   ├── wayfetchd/           # Headless server and bundled UI host
 │   ├── wayfetch-cli/        # CLI client
@@ -68,15 +69,31 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md), and the relevan
 sections of [the architecture brief](docs/architecture.md) before implementation.
 The brief describes intended behavior and acceptance gates, not existing features.
 
-The Rust toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on
-first use. Building the engine needs only that toolchain, with no JavaScript or
-desktop tooling:
+### Developer commands
+
+You need `rustup` and Python 3. The Rust toolchain is pinned in
+`rust-toolchain.toml`; `rustup toolchain install` (or the first `cargo` command)
+installs it with rustfmt and Clippy. No JavaScript or desktop tooling is needed
+for the engine. These are the checks CI runs on every push and pull request:
 
 ```sh
-cargo build --locked -p wayfetch-engine
+cargo fmt --all -- --check                                   # formatting
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo build --locked -p wayfetch-engine                      # engine alone
+python3 scripts/check_dependency_boundaries.py               # crate boundaries
+python3 -m unittest discover -s scripts                       # tests for the check
 ```
 
-The current CI checks only repository hygiene; product tests do not exist yet.
+`scripts/check_dependency_boundaries.py` fails if the domain, protocol, or engine
+crates gain a server, desktop, or UI-toolkit dependency (for example Axum, Tauri,
+or GTK), or if the domain and protocol crates depend on the engine. It checks
+every target with all features enabled, so optional dependencies count too. CI
+also runs a repository hygiene check that rejects tracked agent-output
+directories.
+
+Use `cargo fmt --all` to apply formatting. The crates have no behavior yet, so
+`cargo test` currently runs zero tests.
 
 ## License
 
