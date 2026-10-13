@@ -2,8 +2,10 @@
 """Check the crate dependency boundaries in docs/architecture.md section 4.5.
 
 Fails when a guarded workspace package has a forbidden crate anywhere in its
-normal or build dependency graph for any target. Guarded packages that do not
-exist yet are skipped, so rules for future hosts can be listed up front.
+normal or build dependency graph, for any target and with all of its features
+enabled, so an optional dependency behind a feature is caught too. Guarded
+packages that do not exist yet are skipped, so rules for future hosts can be
+listed up front. Runs against the workspace in the current directory.
 """
 
 from fnmatch import fnmatch
@@ -52,7 +54,7 @@ def main() -> int:
             continue
         checked += 1
         tree = cargo(
-            "tree", "--locked", "-p", package, "-e", "no-dev",
+            "tree", "--locked", "-p", package, "-e", "no-dev", "--all-features",
             "--target", "all", "--prefix", "none", "-f", "{p}",
         )
         deps = {line.split()[0] for line in tree.splitlines() if line.strip()}

@@ -82,12 +82,15 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo build --locked -p wayfetch-engine                      # engine alone
 python3 scripts/check_dependency_boundaries.py               # crate boundaries
+python3 -m unittest discover -s scripts                       # tests for the check
 ```
 
 `scripts/check_dependency_boundaries.py` fails if the domain, protocol, or engine
 crates gain a server, desktop, or UI-toolkit dependency (for example Axum, Tauri,
-or GTK), or if the domain and protocol crates depend on the engine. CI also runs
-a repository hygiene check that rejects tracked agent-output directories.
+or GTK), or if the domain and protocol crates depend on the engine. It checks
+every target with all features enabled, so optional dependencies count too. CI
+also runs a repository hygiene check that rejects tracked agent-output
+directories.
 
 Use `cargo fmt --all` to apply formatting. The crates have no behavior yet, so
 `cargo test` currently runs zero tests.

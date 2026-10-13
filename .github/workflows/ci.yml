@@ -58,4 +58,6 @@ jobs:
       - name: Engine-only build
         run: cargo build --locked -p wayfetch-engine
       - name: Dependency boundaries
-        run: python3 scripts/check_dependency_boundaries.py
+        run: |
+          python3 -m unittest discover -s scripts
+          python3 scripts/check_dependency_boundaries.py
