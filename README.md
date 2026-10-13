@@ -5,7 +5,8 @@ and a desktop application sharing the same engine and UI.
 
 This repository currently contains the design guidance and a bootstrapped Cargo
 workspace with minimal `wayfetch-domain`, `wayfetch-protocol`, and
-`wayfetch-engine` library crates. No download behavior, application hosts,
+`wayfetch-engine` library crates. The domain crate defines typed IDs, job states,
+source identity, and failure scopes; no download behavior, application hosts,
 frontend packages, or runnable product builds exist yet.
 
 ## Repository structure
@@ -92,8 +93,7 @@ every target with all features enabled, so optional dependencies count too. CI
 also runs a repository hygiene check that rejects tracked agent-output
 directories.
 
-Use `cargo fmt --all` to apply formatting. The crates have no behavior yet, so
-`cargo test` currently runs zero tests.
+Use `cargo fmt --all` to apply formatting.
 
 ## License
 
