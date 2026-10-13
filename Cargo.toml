@@ -17,6 +17,11 @@ publish = false
 [workspace.dependencies]
 wayfetch-domain = { path = "crates/domain" }
 wayfetch-protocol = { path = "crates/protocol" }
+serde = { version = "1.0.228", default-features = false, features = ["std", "derive"] }
+serde_json = "1.0.145"
+strum = { version = "0.28.0", features = ["derive"] }
+thiserror = "2.0.17"
+url = "2.5.7"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
