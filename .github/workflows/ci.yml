@@ -34,3 +34,28 @@ jobs:
               sys.exit(1)
           print('Repository hygiene checks passed')
           PYTHON
+
+  rust:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        # With no arguments rustup installs the toolchain in rust-toolchain.toml.
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked --workspace
+      - name: Engine-only build
+        run: cargo build --locked -p wayfetch-engine
+      - name: Dependency boundaries
+        run: python3 scripts/check_dependency_boundaries.py
