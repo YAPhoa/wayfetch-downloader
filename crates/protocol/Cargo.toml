@@ -1,0 +1,15 @@
+[package]
+name = "wayfetch-protocol"
+description = "Transport-neutral Wayfetch Downloader commands, queries, errors, and events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+wayfetch-domain.workspace = true
+
+[lints]
+workspace = true

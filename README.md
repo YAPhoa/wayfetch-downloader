@@ -3,14 +3,17 @@
 A planned Rust download manager with a reusable engine, a self-hosted server UI,
 and a desktop application sharing the same engine and UI.
 
-This repository currently contains **only the initial repository structure and
-design guidance**. No application code, Cargo workspace, dependency lockfiles,
-frontend packages, or runnable product builds have been added.
+This repository currently contains the design guidance and a bootstrapped Cargo
+workspace with minimal `wayfetch-domain`, `wayfetch-protocol`, and
+`wayfetch-engine` library crates. No download behavior, application hosts,
+frontend packages, or runnable product builds exist yet.
 
 ## Repository structure
 
 ```text
 wayfetch-downloader/
+├── Cargo.toml / Cargo.lock  # Workspace manifest and locked dependencies
+├── rust-toolchain.toml      # Pinned Rust toolchain
 ├── .github/workflows/       # Repository hygiene CI
 ├── apps/
 │   ├── wayfetchd/           # Headless server and bundled UI host
@@ -65,9 +68,15 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md), and the relevan
 sections of [the architecture brief](docs/architecture.md) before implementation.
 The brief describes intended behavior and acceptance gates, not existing features.
 
-At implementation kickoff, establish and verify the Rust workspace, pinned
-toolchain, dependency choices, and build/test commands. The current CI checks only
-repository hygiene; product tests do not exist yet.
+The Rust toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on
+first use. Building the engine needs only that toolchain, with no JavaScript or
+desktop tooling:
+
+```sh
+cargo build --locked -p wayfetch-engine
+```
+
+The current CI checks only repository hygiene; product tests do not exist yet.
 
 ## License
 
