@@ -402,6 +402,8 @@ These are proposed decisions. Keep them in this register and retain their IDs. A
 
 **Decision:** one engine instance owns job state and transitions for each state directory; SQLite is the initial store. The owner may be the server host or the embedded desktop host. Reject an event-bus/microservice decomposition and a mandatory database server.
 
+Domain record IDs are distinct, store-allocated positive integer types, never reused, with canonical prefixed text forms such as `job-42`. They are separate from optimistic-concurrency revisions and execution generations; distributed UUID allocation is not required for this single-owner design.
+
 **Why:** separating download control, list management, and link collection is useful, but it need not imply separate services.
 
 **Tradeoff:** this is a single-node application. HA scheduling and active-active writers are explicitly absent. A second engine-owning process—including a desktop app started beside a daemon—must fail its startup lock, not race the first. A remote client does not open that database.
@@ -539,6 +541,8 @@ These are proposed decisions. Keep them in this register and retain their IDs. A
 ### ADR-16 — File data must be durable before durable progress claims
 
 **Decision:** checkpoint only acknowledged, synchronized byte intervals; then commit interval metadata. Publish through a recoverable intent record, same-filesystem no-clobber rename, directory synchronization, and final state transaction.
+
+Once a file job enters `Publishing`, publication is not interrupted by pause or cancel. Those requests return `PublicationInProgress` without changing the job; clients observe the settled outcome and retry only if the request still applies. Publication failures and process crashes still require reconciliation; this rule does not make the filesystem and database atomic.
 
 **Why:** partial-file progress and persistent job state are separate concerns.
 
@@ -704,6 +708,8 @@ These are proposed decisions. Keep them in this register and retain their IDs. A
 
 **Decision:** server mode and standalone desktop mode each own an engine only for their selected local state directory. A later attach/remote mode owns no local engine for the target instance. Window close, renderer reload, disconnect, explicit quit, and host crash have separately tested semantics.
 
+File jobs retain separate desired state and observed stage. A pending pause or cancel must finish stopping before the coordinator can park the job as waiting, blocked, or failed. Leaving a paused, failed, or cancelled stage requires the corresponding revision-checked user request; retry allocates a new generation. Cancel and any active-to-queued rollback also retire the generation. Every process restart moves active jobs into `Recovering` under a new generation, including already-recovering jobs and resolving jobs that may hold partial bytes. A blocked job may also enter recovery. Recovery reconciles artifacts before resuming work and preserves pending stop intent. These are domain transition contracts; filesystem enforcement and actual worker shutdown remain implementation gates.
+
 **Tradeoff:** embedded desktop jobs cannot outlive the entire desktop host process. Continuing after a true application exit requires an explicitly installed/selected background service, not a secretly detached child. Background-to-tray mode keeps the host running where supported.
 
 **Gate:** startup locking prevents double writers; UI reload does not stop accepted jobs; quit persists/reconciles work; an unavailable remote endpoint never causes silent fallback to a new local queue.
@@ -711,6 +717,8 @@ These are proposed decisions. Keep them in this register and retain their IDs. A
 ### ADR-35 — Packaging independence is checked, not promised
 
 **Decision:** build the engine and server without desktop dependencies; build desktop packages separately with the same engine revision. Keep frontend asset building out of the engine's build graph. Publish resource and supported-platform evidence separately for server and desktop.
+
+The initial domain serialization feature is optional. While the workspace has no mutually exclusive features, local lint/test commands exercise all features to cover validated serialization. Introduce explicit host and feature matrices as hosts or incompatible feature combinations are added; an all-feature test does not replace the independent engine build.
 
 **Tradeoff:** desktop WebView, native worker, installer, and filesystem support need per-platform validation. An optional feature cannot bypass confinement checks merely because the desktop environment differs from the NAS.
 
