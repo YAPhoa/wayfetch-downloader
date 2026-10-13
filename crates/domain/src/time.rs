@@ -9,6 +9,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Milliseconds since the Unix epoch, UTC. May be negative only for values
 /// before 1970, which the engine never produces but storage may contain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(transparent)
+)]
 pub struct UtcTimestamp(i64);
 
 impl UtcTimestamp {

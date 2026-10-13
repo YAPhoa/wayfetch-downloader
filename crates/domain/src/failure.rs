@@ -7,16 +7,31 @@
 //! so an invalid credential cannot be recorded against a single file and a
 //! provider outage cannot be recorded as the resource being deleted.
 
-use std::fmt;
-
 use crate::id::{AccountId, ArchiveSetId, AttemptId, JobId, ResourceId, RootId};
 use crate::name::{DiagnosticText, HostName, InvalidName, Namespace, ProviderId};
 use crate::time::UtcTimestamp;
 use crate::version::Generation;
 
-/// Stable failure codes. The text form from [`FailureCode::as_str`] is part
-/// of the storage and protocol contract; never renumber or rename.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Stable failure codes. The snake_case text form is part of the storage and
+/// protocol contract; never rename a variant's text.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::Display,
+    strum::EnumString,
+    strum::IntoStaticStr,
+    strum::VariantArray,
+)]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum FailureCode {
     /// Connection or response timed out on a replay-safe request.
     RequestTimeout,
@@ -192,53 +207,9 @@ pub enum NextAction {
 }
 
 impl FailureCode {
-    /// Every code, in declaration order.
-    pub const ALL: [Self; 17] = [
-        Self::RequestTimeout,
-        Self::LeaseExpired,
-        Self::LeaseNotFound,
-        Self::OperationAmbiguous,
-        Self::TokenExpired,
-        Self::InvalidCredentials,
-        Self::QuotaExhausted,
-        Self::HostUnavailableViaProvider,
-        Self::ResourceDeleted,
-        Self::ChallengeRequired,
-        Self::AdapterParseFailure,
-        Self::DestinationUnavailable,
-        Self::PermissionDenied,
-        Self::IntegrityMismatch,
-        Self::MissingArchiveVolume,
-        Self::UnsupportedCapability,
-        Self::UserCancelled,
-    ];
-
     /// The stable text code.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RequestTimeout => "request_timeout",
-            Self::LeaseExpired => "lease_expired",
-            Self::LeaseNotFound => "lease_not_found",
-            Self::OperationAmbiguous => "operation_ambiguous",
-            Self::TokenExpired => "token_expired",
-            Self::InvalidCredentials => "invalid_credentials",
-            Self::QuotaExhausted => "quota_exhausted",
-            Self::HostUnavailableViaProvider => "host_unavailable_via_provider",
-            Self::ResourceDeleted => "resource_deleted",
-            Self::ChallengeRequired => "challenge_required",
-            Self::AdapterParseFailure => "adapter_parse_failure",
-            Self::DestinationUnavailable => "destination_unavailable",
-            Self::PermissionDenied => "permission_denied",
-            Self::IntegrityMismatch => "integrity_mismatch",
-            Self::MissingArchiveVolume => "missing_archive_volume",
-            Self::UnsupportedCapability => "unsupported_capability",
-            Self::UserCancelled => "user_cancelled",
-        }
-    }
-
-    /// Parses a stable text code.
-    pub fn from_code(code: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|c| c.as_str() == code)
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 
     /// The scopes this code may be recorded against (failure matrix, 7.4).
@@ -315,12 +286,6 @@ impl FailureCode {
     }
 }
 
-impl fmt::Display for FailureCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// A provider's own error code, kept under the adapter's namespace so it is
 /// never confused with a [`FailureCode`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -339,7 +304,10 @@ impl ProviderCode {
             || code.len() > Self::MAX_LEN
             || !code.bytes().all(|b| b.is_ascii_graphic())
         {
-            return Err(InvalidName::provider_code());
+            return Err(InvalidName::new(
+                "provider code",
+                "must be 1 to 64 printable ASCII bytes",
+            ));
         }
         Ok(Self {
             namespace,
@@ -408,21 +376,14 @@ impl RetryBudget {
 }
 
 /// A code was recorded against a scope the failure matrix does not allow.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{code} cannot apply to a {scope:?} scope")]
 pub struct ScopeMismatch {
     /// The code.
     pub code: FailureCode,
     /// The rejected scope kind.
     pub scope: ScopeKind,
 }
-
-impl fmt::Display for ScopeMismatch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} cannot apply to a {:?} scope", self.code, self.scope)
-    }
-}
-
-impl std::error::Error for ScopeMismatch {}
 
 /// A failure as persisted and reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -515,6 +476,7 @@ impl Failure {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use strum::VariantArray;
 
     fn account() -> AccountId {
         AccountId::from_u64(1).unwrap()
@@ -531,17 +493,17 @@ mod tests {
     #[test]
     fn codes_round_trip_and_are_unique() {
         let mut seen = HashSet::new();
-        for code in FailureCode::ALL {
+        for &code in FailureCode::VARIANTS {
             assert!(seen.insert(code.as_str()), "duplicate {code}");
-            assert_eq!(FailureCode::from_code(code.as_str()), Some(code));
+            assert_eq!(code.as_str().parse(), Ok(code));
         }
-        assert_eq!(FailureCode::from_code("unknown"), None);
+        assert!("unknown".parse::<FailureCode>().is_err());
     }
 
     #[test]
     fn every_code_has_a_scope_and_a_distinct_priority() {
         let mut priorities = HashSet::new();
-        for code in FailureCode::ALL {
+        for &code in FailureCode::VARIANTS {
             assert!(!code.allowed_scopes().is_empty(), "{code}");
             assert!(
                 priorities.insert(code.priority()),
@@ -554,11 +516,11 @@ mod tests {
     fn priority_is_not_declaration_order() {
         // UserCancelled is declared last but outranks everything; the first
         // declared code ranks lowest.
-        let max = FailureCode::ALL
+        let max = FailureCode::VARIANTS
             .iter()
             .max_by_key(|c| c.priority())
             .unwrap();
-        let min = FailureCode::ALL
+        let min = FailureCode::VARIANTS
             .iter()
             .min_by_key(|c| c.priority())
             .unwrap();

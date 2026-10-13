@@ -79,8 +79,8 @@ for the engine. These are the checks CI runs on every push and pull request:
 
 ```sh
 cargo fmt --all -- --check                                   # formatting
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
 cargo build --locked -p wayfetch-engine                      # engine alone
 python3 scripts/check_dependency_boundaries.py               # crate boundaries
 python3 -m unittest discover -s scripts                       # tests for the check

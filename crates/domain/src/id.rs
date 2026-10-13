@@ -9,27 +9,21 @@ use std::num::NonZeroU64;
 use std::str::FromStr;
 
 /// The text form of an identifier was malformed or had the wrong prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("expected an identifier of the form `{expected_prefix}-<positive integer>`")]
 pub struct ParseIdError {
     expected_prefix: &'static str,
 }
-
-impl fmt::Display for ParseIdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "expected an identifier of the form `{}-<positive integer>`",
-            self.expected_prefix
-        )
-    }
-}
-
-impl std::error::Error for ParseIdError {}
 
 macro_rules! define_id {
     ($(#[$meta:meta])* $name:ident, $prefix:literal) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[cfg_attr(
+            feature = "serde",
+            derive(serde::Serialize, serde::Deserialize),
+            serde(try_from = "String", into = "String")
+        )]
         pub struct $name(NonZeroU64);
 
         impl $name {
@@ -82,6 +76,20 @@ macro_rules! define_id {
                     .parse::<NonZeroU64>()
                     .map(Self)
                     .map_err(|_| err)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = ParseIdError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.to_string()
             }
         }
     };

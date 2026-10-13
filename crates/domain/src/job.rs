@@ -16,11 +16,29 @@
 //!   result from old work is rejected (tests T17 and T27).
 
 use std::fmt;
+use std::str::FromStr;
 
 use crate::version::{CounterExhausted, Generation, Revision};
 
 /// What the user has asked the job to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::Display,
+    strum::EnumString,
+    strum::IntoStaticStr,
+    strum::VariantArray,
+)]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum DesiredState {
     /// Make progress whenever the job is eligible.
     Running,
@@ -31,7 +49,24 @@ pub enum DesiredState {
 }
 
 /// What the engine is observed to be doing with the job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::Display,
+    strum::EnumString,
+    strum::IntoStaticStr,
+    strum::VariantArray,
+)]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum JobStage {
     /// Eligible and waiting for scheduler admission.
     Queued,
@@ -87,22 +122,8 @@ impl JobStage {
     }
 
     /// Stable lowercase name, for storage and display.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::Resolving => "resolving",
-            Self::Transferring => "transferring",
-            Self::Verifying => "verifying",
-            Self::Publishing => "publishing",
-            Self::Recovering => "recovering",
-            Self::Waiting => "waiting",
-            Self::NeedsInput => "needs_input",
-            Self::Paused => "paused",
-            Self::Blocked => "blocked",
-            Self::Complete => "complete",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 
     /// Whether the coordinator may move a job from `self` to `to`.
@@ -142,14 +163,14 @@ impl JobStage {
     }
 }
 
-impl fmt::Display for JobStage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// What a client should show for a job.
+/// What a client should show for a job. Its text form is `pausing`,
+/// `stopping`, or the stage name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(try_from = "String", into = "&'static str")
+)]
 pub enum DisplayState {
     /// The observed stage, with no pending stop request.
     Stage(JobStage),
@@ -157,6 +178,49 @@ pub enum DisplayState {
     Pausing,
     /// A cancel was accepted; work is still stopping.
     Stopping,
+}
+
+impl DisplayState {
+    /// Stable lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stage(stage) => stage.as_str(),
+            Self::Pausing => "pausing",
+            Self::Stopping => "stopping",
+        }
+    }
+}
+
+impl fmt::Display for DisplayState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<DisplayState> for &'static str {
+    fn from(value: DisplayState) -> Self {
+        value.as_str()
+    }
+}
+
+impl FromStr for DisplayState {
+    type Err = strum::ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pausing" => Ok(Self::Pausing),
+            "stopping" => Ok(Self::Stopping),
+            other => other.parse().map(Self::Stage),
+        }
+    }
+}
+
+impl TryFrom<String> for DisplayState {
+    type Error = strum::ParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
 }
 
 /// Whether an accepted request changed anything.
@@ -169,9 +233,10 @@ pub enum Outcome {
 }
 
 /// A request or stage report was rejected. The state is left unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum JobError {
     /// The request was based on an older revision.
+    #[error("revision conflict: job is at {current}, request expected {expected}")]
     RevisionConflict {
         /// The job's current revision.
         current: Revision,
@@ -179,6 +244,7 @@ pub enum JobError {
         expected: Revision,
     },
     /// A stage report came from work of an older generation.
+    #[error("stale generation {presented}; job is at generation {current}")]
     StaleGeneration {
         /// The job's current generation.
         current: Generation,
@@ -186,6 +252,7 @@ pub enum JobError {
         presented: Generation,
     },
     /// The transition is not in the stage table.
+    #[error("invalid transition from {from} to {to}")]
     InvalidTransition {
         /// The current stage.
         from: JobStage,
@@ -194,6 +261,7 @@ pub enum JobError {
     },
     /// The stage requires a different desired state, such as entering
     /// `Transferring` while a pause is pending.
+    #[error("cannot enter {to} while desired state is {desired}")]
     DesiredStateMismatch {
         /// The current desired state.
         desired: DesiredState,
@@ -202,6 +270,7 @@ pub enum JobError {
     },
     /// The request does not apply in the current state, such as pausing a
     /// completed job or retrying one that has not failed.
+    #[error("request does not apply to a {stage} job with desired state {desired}")]
     NotApplicable {
         /// The current desired state.
         desired: DesiredState,
@@ -210,8 +279,10 @@ pub enum JobError {
     },
     /// The job is publishing; pause and cancel are accepted once
     /// publication settles.
+    #[error("job is publishing; try again once it settles")]
     PublicationInProgress,
     /// A stored state violates the desired/stage invariants.
+    #[error("inconsistent stored state: stage {stage} with desired state {desired}")]
     Inconsistent {
         /// The stored desired state.
         desired: DesiredState,
@@ -219,57 +290,9 @@ pub enum JobError {
         stage: JobStage,
     },
     /// A revision or generation counter cannot advance.
-    CounterExhausted,
+    #[error(transparent)]
+    CounterExhausted(#[from] CounterExhausted),
 }
-
-impl From<CounterExhausted> for JobError {
-    fn from(_: CounterExhausted) -> Self {
-        Self::CounterExhausted
-    }
-}
-
-impl fmt::Display for JobError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RevisionConflict { current, expected } => {
-                write!(
-                    f,
-                    "revision conflict: job is at {current}, request expected {expected}"
-                )
-            }
-            Self::StaleGeneration { current, presented } => {
-                write!(
-                    f,
-                    "stale generation {presented}; job is at generation {current}"
-                )
-            }
-            Self::InvalidTransition { from, to } => {
-                write!(f, "invalid transition from {from} to {to}")
-            }
-            Self::DesiredStateMismatch { desired, to } => {
-                write!(f, "cannot enter {to} while desired state is {desired:?}")
-            }
-            Self::NotApplicable { desired, stage } => {
-                write!(
-                    f,
-                    "request does not apply to a {stage} job with desired state {desired:?}"
-                )
-            }
-            Self::PublicationInProgress => {
-                f.write_str("job is publishing; try again once it settles")
-            }
-            Self::Inconsistent { desired, stage } => {
-                write!(
-                    f,
-                    "inconsistent stored state: stage {stage} with desired state {desired:?}"
-                )
-            }
-            Self::CounterExhausted => f.write_str("revision or generation counter exhausted"),
-        }
-    }
-}
-
-impl std::error::Error for JobError {}
 
 /// The mutable lifecycle state of one file job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -550,22 +573,9 @@ impl JobState {
 mod tests {
     use super::*;
     use JobStage::*;
+    use strum::VariantArray;
 
-    const ALL: [JobStage; 13] = [
-        Queued,
-        Resolving,
-        Transferring,
-        Verifying,
-        Publishing,
-        Recovering,
-        Waiting,
-        NeedsInput,
-        Paused,
-        Blocked,
-        Complete,
-        Failed,
-        Cancelled,
-    ];
+    const ALL: &[JobStage] = JobStage::VARIANTS;
 
     fn at(stage: JobStage, desired: DesiredState) -> JobState {
         JobState::restore(desired, stage, Generation::INITIAL, Revision::INITIAL).unwrap()
@@ -599,7 +609,7 @@ mod tests {
 
     #[test]
     fn complete_is_terminal() {
-        for to in ALL {
+        for &to in ALL {
             assert!(!Complete.can_transition_to(to), "complete -> {to}");
         }
         let mut job = running(Complete);
@@ -638,7 +648,7 @@ mod tests {
 
     #[test]
     fn no_stage_transitions_to_itself() {
-        for stage in ALL {
+        for &stage in ALL {
             assert!(!stage.can_transition_to(stage), "{stage} -> itself");
         }
     }
@@ -880,14 +890,14 @@ mod tests {
             DesiredState::Paused,
             DesiredState::Cancelled,
         ];
-        for from in ALL {
+        for &from in ALL {
             for desired in desires {
                 let Ok(job) =
                     JobState::restore(desired, from, Generation::INITIAL, Revision::INITIAL)
                 else {
                     continue;
                 };
-                for to in ALL {
+                for &to in ALL {
                     let mut next = job;
                     if next.advance(to, next.generation()).is_ok() {
                         JobState::restore(next.desired, next.stage, next.generation, next.revision)

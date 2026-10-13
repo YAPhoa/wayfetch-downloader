@@ -8,21 +8,24 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 /// A counter reached `u64::MAX` and cannot advance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("revision or generation counter exhausted")]
 pub struct CounterExhausted;
 
-impl fmt::Display for CounterExhausted {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("revision or generation counter exhausted")
-    }
-}
-
-impl std::error::Error for CounterExhausted {}
+/// A stored counter value was zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("revisions and generations start at 1")]
+pub struct ZeroCounter;
 
 macro_rules! define_counter {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[cfg_attr(
+            feature = "serde",
+            derive(serde::Serialize, serde::Deserialize),
+            serde(try_from = "u64", into = "u64")
+        )]
         pub struct $name(NonZeroU64);
 
         impl $name {
@@ -51,6 +54,20 @@ macro_rules! define_counter {
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 self.0.fmt(f)
+            }
+        }
+
+        impl TryFrom<u64> for $name {
+            type Error = ZeroCounter;
+
+            fn try_from(value: u64) -> Result<Self, Self::Error> {
+                Self::from_u64(value).ok_or(ZeroCounter)
+            }
+        }
+
+        impl From<$name> for u64 {
+            fn from(value: $name) -> Self {
+                value.get()
             }
         }
     };
