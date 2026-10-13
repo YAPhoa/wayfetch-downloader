@@ -35,7 +35,7 @@ Use a separate development state directory and dedicated test download/extractio
 
 Keep scheduling, job state, authorization invariants, transfers, and recovery in the shared Rust engine. Server HTTP handlers, desktop IPC handlers, CLI commands, and UI components remain thin clients or adapters. Do not implement the same behavior separately for browser and desktop.
 
-The server must serve its complete bundled UI without a vendor portal or runtime asset CDN. Desktop packaging must embed the same engine rather than conceal a JDownloader/JVM or daemon sidecar. Preserve the independent engine/server build and early embedding proof required by the architecture brief.
+The server must serve its complete bundled UI without a vendor portal or runtime asset CDN. Desktop packaging must embed the same engine rather than conceal a JVM, third-party download-manager, or daemon sidecar. Preserve the independent engine/server build and early embedding proof required by the architecture brief.
 
 Follow existing code style and error conventions. Validate untrusted input at its boundary, propagate actionable errors, and make resource ownership, cancellation, and cleanup explicit. Bound both item counts and bytes. Explain any necessary `unsafe` code and cover its safety assumptions. Do not weaken TLS, path checks, isolation, quotas, tests, or error handling merely to obtain a passing result.
 
@@ -79,9 +79,9 @@ Passing a contribution's checks does not certify every provider, release gate, o
 
 ## Dependencies, provenance, and sensitive reports
 
-Follow the repository's chosen license and applicable per-file terms. Record provenance and required notices for material actually incorporated. If the project license or reuse terms are unresolved, raise that before accepting external code; this guide does not choose a license, impose a contributor agreement, or authorize redistribution.
+The project is dual-licensed under MIT or Apache-2.0. Unless you state otherwise, a contribution intentionally submitted for inclusion is licensed under the same terms, without additional terms or conditions. Record provenance and required notices for material actually incorporated, and raise any incompatible third-party terms before accepting external code.
 
-Do not assume that translating JDownloader code to Rust removes reuse obligations, copy provider application identities or service credentials, or describe source-informed work as clean-room. Keep reference checkouts outside shipping sources. A new dependency needs a concrete purpose and review of its features, license, maintenance/security status, and effect on headless builds.
+Do not assume that translating third-party code to Rust removes reuse obligations, copy provider application identities or service credentials, or describe source-informed work as clean-room. Keep reference checkouts outside shipping sources. A new dependency needs a concrete purpose and review of its features, license, maintenance/security status, and effect on headless builds.
 
 AI-assisted work receives the same review and test requirements. Contributors remain responsible for understanding submitted code, checking provenance, and verifying claims. Do not send secrets or private provider responses to external tooling without authorization; no agent transcripts or per-task AI activity reports are required.
 
