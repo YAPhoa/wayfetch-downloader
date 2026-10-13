@@ -1,0 +1,36 @@
+name: Repository checks
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check repository hygiene
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path, PurePosixPath
+          import subprocess
+          import sys
+
+          tracked = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          reserved = {'evidence', 'reports', 'handoffs', 'review-notes', 'artifacts'}
+          errors = []
+          for name in filter(None, tracked):
+              parts = PurePosixPath(name).parts
+              if reserved.intersection(parts[:-1]) or name.startswith('.local/agent-runs/'):
+                  errors.append(f'Reserved agent-output path is tracked: {name}')
+          status = Path('STATUS.md')
+          if status.is_file() and len(status.read_text().splitlines()) > 80:
+              errors.append('STATUS.md exceeds 80 lines')
+          for error in errors:
+              print(error, file=sys.stderr)
+          if errors:
+              sys.exit(1)
+          print('Repository hygiene checks passed')
+          PYTHON
