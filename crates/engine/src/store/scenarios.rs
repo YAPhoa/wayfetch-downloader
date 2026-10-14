@@ -12,7 +12,7 @@ use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{BootEpoch, Generation, Revision};
 use wayfetch_protocol::command::{InputUrl, SubmitItems};
 use wayfetch_protocol::event::EventKind;
-use wayfetch_protocol::query::{JobFilter, JobSummary, PageSize};
+use wayfetch_protocol::query::{ArtifactSummary, JobFilter, JobSummary, PageSize};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, IdempotencyKey, InstanceId, Query,
     QueryResult,
@@ -20,6 +20,7 @@ use wayfetch_protocol::{
 
 use super::{Store, StoreError, outbox};
 use crate::fs::{PublicationCheck, RelativePath, Root, StagingFile};
+use crate::transfer::lease::Representation;
 
 const NOW: UtcTimestamp = UtcTimestamp::from_unix_millis(1_700_000_000_000);
 
@@ -110,7 +111,7 @@ impl Fixture {
 
     fn events(&mut self) -> Vec<EventKind> {
         let tx = self.store.read().unwrap();
-        outbox::after(&tx, 0).into_iter().map(|(_, k)| k).collect()
+        outbox::all(&tx).into_iter().map(|(_, k)| k).collect()
     }
 
     fn advance(&mut self, job: JobId, to: JobStage) -> Result<Outcome, StoreError> {
@@ -539,7 +540,17 @@ fn publication_reserves_its_target_and_completes_the_job() {
     let file = f.files.remove(&(job, generation)).unwrap();
     f.root.publish(file, &intent.target, intent.size).unwrap();
     f.store.complete_publication(job, generation, NOW).unwrap();
-    assert_eq!(f.summary(job).stage, JobStage::Complete);
+    let done = f.summary(job);
+    assert_eq!(done.stage, JobStage::Complete);
+    assert_eq!(
+        done.artifact,
+        Some(ArtifactSummary {
+            root: f.root.id(),
+            path: "out/a.bin".into(),
+            size: 5,
+        })
+    );
+    assert_eq!(f.summary(sibling).artifact, None);
     assert_eq!(f.store.pending_publication(job).unwrap(), None);
     assert_eq!(f.store.latest_staging(job).unwrap(), None);
     assert_eq!(
@@ -654,8 +665,11 @@ fn only_a_previous_starts_file_is_adopted() {
     let mut f = f.reopen();
     f.store.recover_after_restart(NOW).unwrap();
     let current = f.summary(job).generation;
-    let (record, durable_end) = f.store.latest_staging(job).unwrap().unwrap();
+    let partial = f.store.latest_staging(job).unwrap().unwrap();
+    let (record, durable_end) = (partial.record, partial.durable_end);
     assert_eq!((record.generation, durable_end), (generation, 6));
+    assert!(partial.contiguous);
+    assert_eq!(partial.representation, None);
     // Within the boot that created it, a live writer could still hold it.
     assert!(matches!(
         f.store.adopt_staging(job, current, first_boot),
@@ -666,10 +680,8 @@ fn only_a_previous_starts_file_is_adopted() {
     let adopted = f.store.adopt_staging(job, current, second_boot).unwrap();
     assert_eq!(adopted.generation, current);
     assert_eq!(adopted.identity, record.identity);
-    assert_eq!(
-        f.store.latest_staging(job).unwrap(),
-        Some((adopted.clone(), 6))
-    );
+    let partial = f.store.latest_staging(job).unwrap().unwrap();
+    assert_eq!((partial.record, partial.durable_end), (adopted.clone(), 6));
     assert_eq!(f.summary(job).bytes_done, 6);
 
     // The new generation continues the coverage; the old one cannot (T27).
@@ -685,4 +697,120 @@ fn only_a_previous_starts_file_is_adopted() {
     );
     // Adopting again finds nothing older to take.
     assert!(f.store.adopt_staging(job, current, second_boot).is_err());
+}
+
+#[test]
+fn a_response_is_recorded_once_and_survives_restart() {
+    let mut f = Fixture::new();
+    let (job, generation) = transferring(&mut f, BootEpoch::INITIAL);
+    let seen = Representation {
+        length: Some(10),
+        strong_etag: Some("\"v1\"".into()),
+        last_modified: Some(NOW),
+    };
+    f.store
+        .record_response(job, generation, &seen, Some("game.rar"), NOW)
+        .unwrap();
+    assert_eq!(f.summary(job).bytes_total, Some(10));
+    assert!(matches!(
+        f.events().last(),
+        Some(EventKind::JobChanged { job: summary }) if summary.bytes_total == Some(10)
+    ));
+    // Later responses are compared with it, never recorded over it.
+    let changed = Representation {
+        strong_etag: Some("\"v2\"".into()),
+        ..seen.clone()
+    };
+    assert!(matches!(
+        f.store
+            .record_response(job, generation, &changed, None, NOW),
+        Err(StoreError::Staging(_))
+    ));
+    f.file(job, generation).write_all_at(b"0123", 0).unwrap();
+    f.checkpoint(job, generation, &[(0, 4)]).unwrap();
+
+    let mut f = f.reopen();
+    let partial = f.store.latest_staging(job).unwrap().unwrap();
+    assert_eq!(partial.representation, Some(seen));
+    assert_eq!(partial.suggested_name.as_deref(), Some("game.rar"));
+    assert_eq!((partial.durable_end, partial.contiguous), (4, true));
+    assert!(!partial.is_complete());
+    // Only the transferring generation records a response.
+    f.store.recover_after_restart(NOW).unwrap();
+    assert!(
+        f.store
+            .record_response(job, generation, &changed, None, NOW)
+            .is_err()
+    );
+}
+
+#[test]
+fn a_partial_with_holes_is_not_contiguous() {
+    let mut f = Fixture::new();
+    let (job, generation) = transferring(&mut f, BootEpoch::INITIAL);
+    f.file(job, generation)
+        .write_all_at(b"0123456789", 0)
+        .unwrap();
+    f.checkpoint(job, generation, &[(0, 2), (6, 10)]).unwrap();
+    let partial = f.store.latest_staging(job).unwrap().unwrap();
+    assert_eq!((partial.durable_end, partial.contiguous), (10, false));
+}
+
+#[test]
+fn admission_reads_only_free_slots_recovering_first() {
+    let mut f = Fixture::new();
+    let [first, second, third] = [f.job(), f.job(), f.job()];
+    f.advance(second, JobStage::Resolving).unwrap();
+    let mut f = f.reopen();
+    f.store.recover_after_restart(NOW).unwrap();
+
+    let ready = f.store.admissible(2, &[]).unwrap();
+    let picked: Vec<_> = ready.iter().map(|a| (a.job, a.stage)).collect();
+    assert_eq!(
+        picked,
+        vec![(second, JobStage::Recovering), (first, JobStage::Queued)]
+    );
+    assert_eq!(ready[1].url, "https://files.example/a.bin");
+    assert_eq!(ready[0].generation, f.summary(second).generation);
+    // Running jobs are skipped, and nothing is read without a free slot.
+    let ready = f.store.admissible(2, &[second]).unwrap();
+    let picked: Vec<_> = ready.iter().map(|a| a.job).collect();
+    assert_eq!(picked, vec![first, third]);
+    assert!(f.store.admissible(0, &[]).unwrap().is_empty());
+}
+
+#[test]
+fn retention_prunes_events_and_idempotency_records() {
+    let mut f = Fixture::new();
+    let key = IdempotencyKey::generate();
+    let first = f
+        .run(key, submit_command(&["https://files.example/a.bin"], None))
+        .unwrap();
+    f.store.stage_pending(10, NOW).unwrap();
+    f.job();
+    let head = f.store.event_head().unwrap();
+    assert!(head > 3);
+    assert_eq!(f.store.retained_events().unwrap(), (0, head));
+
+    // Records made before the cutoff go; newer ones stay.
+    let later = UtcTimestamp::from_unix_millis(NOW.unix_millis() + 1);
+    assert_eq!(f.store.prune(2, NOW).unwrap(), (head as usize - 2, 0));
+    assert_eq!(f.store.retained_events().unwrap(), (head - 2, head));
+    let kept = f.store.events_after(0, 10).unwrap();
+    let positions: Vec<_> = kept.iter().map(|(p, _)| *p).collect();
+    assert_eq!(positions, vec![head - 1, head]);
+    assert_eq!(f.store.events_after(head - 1, 10).unwrap().len(), 1);
+    assert_eq!(f.store.events_after(0, 1).unwrap().len(), 1);
+    assert_eq!(f.store.prune(2, later).unwrap(), (0, 2));
+    // Positions never move back and are never reused.
+    assert_eq!(f.store.event_head().unwrap(), head);
+    f.store.prune(0, later).unwrap();
+    assert_eq!(f.store.retained_events().unwrap(), (head, head));
+
+    // Past retention, the same key runs the command again.
+    let again = f
+        .run(key, submit_command(&["https://files.example/a.bin"], None))
+        .unwrap();
+    assert_ne!(again, first);
+    assert_eq!(f.store.event_head().unwrap(), head + 1);
 }

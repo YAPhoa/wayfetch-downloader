@@ -9,17 +9,20 @@
 //! awaits [`EngineOwner::shutdown`] before exiting.
 
 pub mod config;
+mod download;
 pub mod fs;
 pub mod lifecycle;
 pub mod state_dir;
 mod store;
+pub mod subscription;
 pub mod transfer;
 
-pub use config::{ConfigError, EngineConfig};
+pub use config::{ConfigError, EngineConfig, Limits, RootConfig, Timeouts};
 pub use lifecycle::{
     EngineBuilder, EngineHandle, EngineOwner, Readiness, ShutdownReport, ShutdownRequest,
     StartError,
 };
 pub use store::{StoreError, StoreInfo};
+pub use subscription::Subscription;
 pub use wayfetch_domain as domain;
 pub use wayfetch_protocol as protocol;
