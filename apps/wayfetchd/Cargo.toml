@@ -1,0 +1,35 @@
+[package]
+name = "wayfetchd"
+description = "Headless Wayfetch Downloader daemon with an authenticated HTTP API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+wayfetch-api.workspace = true
+wayfetch-engine.workspace = true
+wayfetch-host.workspace = true
+clap.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+
+[dev-dependencies]
+wayfetch-net.workspace = true
+wayfetch-protocol.workspace = true
+bytes.workspace = true
+eventsource-stream = "0.2.3"
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+httparse.workspace = true
+rcgen.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-rustls.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

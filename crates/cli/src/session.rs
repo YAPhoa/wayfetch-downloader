@@ -10,11 +10,9 @@
 
 use std::convert::Infallible;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use wayfetch_engine::domain::id::JobId;
 use wayfetch_engine::domain::version::Revision;
-use wayfetch_engine::fs::Root;
 use wayfetch_engine::protocol::command::{CommandResult, InputUrl, SubmitItems};
 use wayfetch_engine::protocol::event::Subscribe;
 use wayfetch_engine::protocol::query::{JobFilter, JobSummary, PageSize};
@@ -22,20 +20,15 @@ use wayfetch_engine::protocol::{
     Command, CommandEnvelope, ErrorCode, IdempotencyKey, Permission, ProtocolError, Query,
     QueryResult, StreamItem,
 };
-use wayfetch_engine::{
-    EngineBuilder, EngineConfig, EngineHandle, RootConfig, ShutdownRequest, Subscription,
-};
-use wayfetch_net::{CertificateDer, HttpConfig, HttpTransport};
+use wayfetch_engine::{EngineHandle, ShutdownRequest, Subscription};
+use wayfetch_host::{Printer, Signals, Started, Terminal};
 
+use crate::RunArgs;
 use crate::input::{self, Line};
-use crate::output::{HELP, Output, Printer, Terminal};
-use crate::{DOWNLOAD_ROOT, RunArgs, absolute};
+use crate::output::{HELP, Output};
 
 /// The local operator may do everything.
-const OPERATOR: &[Permission] = &[Permission::Read, Permission::Submit, Permission::Control];
-
-/// Largest CA certificate file accepted.
-const MAX_CA_FILE_BYTES: u64 = 1024 * 1024;
+const OPERATOR: &[Permission] = Permission::ALL;
 
 /// Runs a session until it ends; the exit code says whether the engine
 /// stopped cleanly.
@@ -44,27 +37,15 @@ pub async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String>
     // Registered before the engine starts, so a signal during startup
     // still leads to a graceful shutdown.
     let mut signals = Signals::new()?;
-    let state_dir = absolute(&args.state.state_dir)?;
-    let root = absolute(&args.download_root)?;
-    let transport = HttpTransport::new(http_config(&args)?)
-        .map_err(|e| format!("cannot configure HTTP: {e}"))?;
-    let mut config = EngineConfig::new(state_dir);
-    config.roots.push(RootConfig {
-        id: DOWNLOAD_ROOT,
-        path: root.clone(),
-    });
-    config.download_root = Some(DOWNLOAD_ROOT);
-    let owner = EngineBuilder::new(config, tokio::runtime::Handle::current())
-        .transport(Arc::new(transport))
-        .start()
-        .await
-        .map_err(|e| e.to_string())?;
+    let started = wayfetch_host::start_engine(&args.engine).await?;
+    let root_problem = started.root_problem();
+    let Started { owner, .. } = started;
     let session = Session {
         engine: owner.handle(),
         printer,
     };
 
-    let reason = match session.prepare(&root).await {
+    let reason = match session.prepare(root_problem).await {
         Ok(subscription) => {
             session
                 .serve(subscription, input::spawn(), &mut signals)
@@ -80,45 +61,6 @@ pub async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String>
     } else {
         ExitCode::FAILURE
     })
-}
-
-/// Transport settings: the production defaults, plus only the exceptions
-/// the operator named.
-fn http_config(args: &RunArgs) -> Result<HttpConfig, String> {
-    let mut config = HttpConfig::default();
-    config
-        .egress
-        .allowed_networks
-        .extend(args.allow_network.iter().copied());
-    for path in &args.ca_cert {
-        config.extra_roots.extend(read_ca(path)?);
-    }
-    Ok(config)
-}
-
-/// The certificates in a PEM file, or the single certificate in a DER file.
-fn read_ca(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>, String> {
-    use rustls_pki_types::pem::PemObject;
-    use std::io::Read;
-
-    let fail = |e: &dyn std::fmt::Display| format!("CA certificate {}: {e}", path.display());
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|f| f.take(MAX_CA_FILE_BYTES + 1).read_to_end(&mut bytes))
-        .map_err(|e| fail(&e))?;
-    if bytes.len() as u64 > MAX_CA_FILE_BYTES {
-        return Err(fail(&"file too large"));
-    }
-    if !bytes.starts_with(b"-----BEGIN") {
-        return Ok(vec![CertificateDer::from(bytes)]);
-    }
-    let certs = CertificateDer::pem_slice_iter(&bytes)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| fail(&e))?;
-    if certs.is_empty() {
-        return Err(fail(&"no certificate found"));
-    }
-    Ok(certs)
 }
 
 /// Why the session ended.
@@ -137,15 +79,11 @@ struct Session<'a> {
 
 impl Session<'_> {
     /// Announces the session and subscribes to events.
-    async fn prepare(&self, root: &std::path::Path) -> Result<Subscription, Stop> {
+    async fn prepare(&self, root_problem: Option<String>) -> Result<Subscription, Stop> {
         let instance = self.engine.instance();
         self.print(&Output::Ready { instance })?;
-        // The engine blocks jobs on an unusable root by itself; this only
-        // tells the operator early, and never initializes anything.
-        if let Err(e) = Root::open(root, DOWNLOAD_ROOT, instance) {
-            self.print(&Output::RootUnavailable {
-                reason: e.to_string(),
-            })?;
+        if let Some(reason) = root_problem {
+            self.print(&Output::RootUnavailable { reason })?;
         }
         self.subscribe().await
     }
@@ -420,76 +358,9 @@ fn parse_job(text: &str) -> Option<JobId> {
     }
 }
 
-/// Requests to stop: Ctrl+C, and on Unix also `SIGTERM` from a service
-/// manager.
-struct Signals {
-    #[cfg(unix)]
-    interrupt: tokio::signal::unix::Signal,
-    #[cfg(unix)]
-    terminate: tokio::signal::unix::Signal,
-}
-
-impl Signals {
-    #[cfg(unix)]
-    fn new() -> Result<Self, String> {
-        use tokio::signal::unix::{SignalKind, signal};
-        let listen = |kind| signal(kind).map_err(|e| format!("cannot handle signals: {e}"));
-        Ok(Self {
-            interrupt: listen(SignalKind::interrupt())?,
-            terminate: listen(SignalKind::terminate())?,
-        })
-    }
-
-    #[cfg(not(unix))]
-    fn new() -> Result<Self, String> {
-        Ok(Self {})
-    }
-
-    #[cfg(unix)]
-    async fn recv(&mut self) {
-        tokio::select! {
-            _ = self.interrupt.recv() => {}
-            _ = self.terminate.recv() => {}
-        }
-    }
-
-    #[cfg(not(unix))]
-    async fn recv(&mut self) {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ca_files_may_be_pem_or_der() {
-        let tmp = tempfile::tempdir().unwrap();
-        let key = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["ca.test".to_owned()])
-            .unwrap()
-            .self_signed(&key)
-            .unwrap();
-        let write = |name: &str, bytes: &[u8]| {
-            let path = tmp.path().join(name);
-            std::fs::write(&path, bytes).unwrap();
-            path
-        };
-        let pem = write("ca.pem", format!("{0}{0}", cert.pem()).as_bytes());
-        assert_eq!(
-            read_ca(&pem).unwrap(),
-            [cert.der().clone(), cert.der().clone()]
-        );
-        let der = write("ca.der", cert.der());
-        assert_eq!(read_ca(&der).unwrap(), [cert.der().clone()]);
-
-        let empty = write("empty.pem", b"-----BEGIN PRIVATE KEY-----\n");
-        assert!(read_ca(&empty).is_err());
-        let huge = write("huge.der", &vec![0; MAX_CA_FILE_BYTES as usize + 1]);
-        assert!(read_ca(&huge).unwrap_err().contains("too large"));
-        assert!(read_ca(&tmp.path().join("missing")).is_err());
-    }
 
     #[test]
     fn jobs_are_named_by_id_or_number() {

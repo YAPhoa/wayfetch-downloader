@@ -1,0 +1,25 @@
+[package]
+name = "wayfetch-host"
+description = "Shared composition-root pieces for Wayfetch Downloader application hosts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+wayfetch-engine.workspace = true
+wayfetch-net.workspace = true
+clap.workspace = true
+rustls-pki-types = { version = "1.15", features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["signal", "sync"] }
+
+[dev-dependencies]
+rcgen = { workspace = true, features = ["pem"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true
