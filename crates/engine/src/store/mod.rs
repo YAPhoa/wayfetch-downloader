@@ -26,6 +26,11 @@
 //! * [`Store::recover_after_restart`]: every active job moved to recovery,
 //!   with their events.
 //! * [`Store::commit_checkpoint`]: synchronized byte ranges for one partial.
+//! * [`Store::register_staging`] and [`Store::adopt_staging`]: which job
+//!   generation owns a staging file.
+//! * [`Store::begin_publication`], [`Store::complete_publication`] (with
+//!   the job's completion), and [`Store::abandon_publication`]: the
+//!   publication intent around the filesystem link.
 //!
 //! Reads run in a short deferred transaction so a page and its `as_of`
 //! cursor agree, and never span a network request or a subscription.
@@ -36,6 +41,7 @@
 //! engine refuses a database written by a newer schema.
 
 mod commands;
+mod files;
 mod jobs;
 mod outbox;
 mod progress;
@@ -46,9 +52,9 @@ pub mod schema;
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
-use wayfetch_domain::id::{BatchId, JobId, PackageId, SourceLinkId};
+use wayfetch_domain::id::{BatchId, JobId, PackageId, RootId, SourceLinkId};
 use wayfetch_domain::job::JobError;
-use wayfetch_domain::version::{Generation, Revision};
+use wayfetch_domain::version::{BootEpoch, Generation, Revision};
 use wayfetch_protocol::{ErrorCode, ProtocolError};
 
 /// File name of the database inside the state directory.
@@ -93,6 +99,13 @@ pub enum StoreError {
     /// A checkpoint was rejected.
     #[error("checkpoint rejected: {0}")]
     Checkpoint(&'static str),
+    /// A staging or publication record was refused.
+    #[error("staging rejected: {0}")]
+    Staging(&'static str),
+    /// Another publication already reserved the target, or a name that
+    /// collides with it on a case-insensitive filesystem.
+    #[error("target {0} is already reserved")]
+    TargetReserved(crate::fs::RelativePath),
     /// A parked stage was requested without the failure that explains it.
     #[error("moving to {0} requires a failure")]
     MissingFailure(wayfetch_domain::job::JobStage),
@@ -228,8 +241,10 @@ impl_key!(
     BatchId => "batch id",
     JobId => "job id",
     PackageId => "package id",
+    RootId => "root id",
     SourceLinkId => "source link id",
     Generation => "generation",
+    BootEpoch => "boot epoch",
     Revision => "revision",
 );
 

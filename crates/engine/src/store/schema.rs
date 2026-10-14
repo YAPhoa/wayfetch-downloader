@@ -20,7 +20,10 @@ use rusqlite_migration::{M, Migrations, SchemaVersion};
 
 use super::StoreError;
 
-const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("migrations/0001_initial.sql"))];
+const MIGRATIONS: &[M<'static>] = &[
+    M::up(include_str!("migrations/0001_initial.sql")),
+    M::up(include_str!("migrations/0002_staging_publication.sql")),
+];
 
 /// Newest schema version this engine knows.
 pub const LATEST: usize = MIGRATIONS.len();
