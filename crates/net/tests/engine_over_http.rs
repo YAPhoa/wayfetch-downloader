@@ -15,33 +15,21 @@
 mod engine_support;
 mod support;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use engine_support::{KIB, body, complete, jobs, shutdown, wait_for};
+use engine_support::{CHECKPOINT, KIB, body, complete, jobs, settled, shutdown, wait_for};
 use sha2::{Digest, Sha256};
-use support::{Raw, Resource, Route, Server, config_for};
+use support::{Raw, Resource, Route, Server, https_env};
 use wayfetch_engine::{EngineOwner, Timeouts};
-use wayfetch_net::{HttpConfig, HttpTransport};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::JobId;
 use wayfetch_protocol::domain::job::JobStage;
 
 type Env = engine_support::Env<Server>;
 
-/// An HTTPS server and engines that download from it with the real
-/// transport, configured by `configure`.
-async fn env_with(configure: impl FnOnce(&mut HttpConfig)) -> Env {
-    let server = Server::https().await;
-    let mut config = config_for(&server);
-    configure(&mut config);
-    let transport = HttpTransport::new(config).unwrap();
-    Env::new(server, Arc::new(transport))
-}
-
 async fn env() -> Env {
-    env_with(|_| {}).await
+    https_env(|_| {}).await
 }
 
 /// Submits `paths` on the server and returns the new jobs.
@@ -52,16 +40,6 @@ async fn submit(env: &Env, owner: &EngineOwner, paths: &[&str]) -> Vec<JobId> {
 fn digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
-
-/// Whether `durable` bytes are all a transfer stalled at `at` will commit:
-/// checkpoints follow the network's chunking, so the last one lands within
-/// one checkpoint interval of the stall (the engine may commit the rest
-/// while it stops).
-fn settled(durable: u64, at: usize) -> bool {
-    durable + CHECKPOINT as u64 > at as u64
-}
-
-const CHECKPOINT: usize = 4 * KIB;
 
 /// Where the resume after an interruption at `at` started, checking that it
 /// continued from the durable bytes.
@@ -354,7 +332,7 @@ async fn stalled_and_truncated_transfers_fail_without_publishing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn destinations_outside_the_egress_policy_are_never_contacted() {
     // No allowlist: the local server is not a permitted destination.
-    let env = env_with(|config| config.egress.allowed_networks.clear()).await;
+    let env = https_env(|config| config.egress.allowed_networks.clear()).await;
     env.server.put("/a.bin", Resource::new(body(KIB)));
     let owner = env.start().await;
     let [id] = submit(&env, &owner, &["/a.bin"]).await[..] else {
