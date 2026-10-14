@@ -5,7 +5,8 @@
 //! signals, and non-blocking terminal output.
 //!
 //! Hosts differ only in how they talk to people: `wayfetch` reads standard
-//! input, `wayfetchd` serves HTTP. Neither initializes a root implicitly,
+//! input, `wayfetchd` serves HTTP, and `wayfetch-desktop` shows the shared
+//! UI in a window over in-process IPC. Neither initializes a root implicitly,
 //! and both leave persistence, scheduling, and recovery to the engine.
 
 mod signals;
@@ -77,21 +78,30 @@ pub struct EngineArgs {
     pub ca_cert: Vec<PathBuf>,
 }
 
-/// Runs `future` to completion on a new multi-threaded runtime, then shuts
-/// the runtime down without waiting more than [`RUNTIME_RELEASE`] for
+/// Runs `future` to completion on a new [`runtime`], then [`release`]s it.
+pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
+    let runtime = runtime()?;
+    let output = runtime.block_on(future);
+    release(runtime);
+    Ok(output)
+}
+
+/// A new multi-threaded runtime for a host's engine and adapters.
+pub fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("cannot start the runtime: {e}"))
+}
+
+/// Shuts `runtime` down without waiting more than [`RUNTIME_RELEASE`] for
 /// blocking threads. Dropping a runtime waits for every blocking thread, so
 /// one stuck in a filesystem call, such as a read on a hung mount, would
 /// otherwise keep the process alive after a graceful shutdown finished.
 /// Whatever such a thread was doing is already reported unfinished by the
 /// engine's shutdown, and exiting ends it.
-pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("cannot start the runtime: {e}"))?;
-    let output = runtime.block_on(future);
+pub fn release(runtime: tokio::runtime::Runtime) {
     runtime.shutdown_timeout(RUNTIME_RELEASE);
-    Ok(output)
 }
 
 /// Initializes the download root for the instance in the state directory,

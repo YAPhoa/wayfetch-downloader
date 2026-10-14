@@ -4,10 +4,22 @@ import type { InstanceId } from "./InstanceId.js";
 import type { PackageId } from "./PackageId.js";
 
 /**
- * The body of `POST /v1/inputs`.
+ * Submits a batch of URLs.
  */
-export type SubmitRequest = { idempotency_key: IdempotencyKey, target: InstanceId, 
+export type SubmitRequest = { 
+/**
+ * Identifies the command across retries.
+ */
+idempotency_key: IdempotencyKey, 
+/**
+ * The instance the client believes it is talking to.
+ */
+target: InstanceId, 
 /**
  * Raw, so each URL is validated with its own error code and position.
  */
-items: Array<string>, package?: PackageId, };
+items: Array<string>, 
+/**
+ * Package to add the jobs to.
+ */
+package?: PackageId, };
