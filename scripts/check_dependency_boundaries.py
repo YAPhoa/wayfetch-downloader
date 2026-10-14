@@ -13,9 +13,10 @@ import json
 import subprocess
 import sys
 
-# Server, desktop, and UI toolkits the engine-side crates must never pull in.
+# Server, desktop, and UI toolkits, and the embedded web UI, which the
+# engine-side crates must never pull in.
 HOST_AND_UI = [
-    "axum", "axum-*",
+    "axum", "axum-*", "rust-embed", "rust-embed-*",
     "tauri", "tauri-*", "wry", "tao",
     "webkit2gtk*", "javascriptcore*", "gtk", "gtk-*", "gdk", "gdk-*",
     "wayfetchd", "wayfetch-api", "wayfetch-desktop", "wayfetch-cli",

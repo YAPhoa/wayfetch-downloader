@@ -1,0 +1,476 @@
+// Keeps a bounded, current view of jobs over any `WayfetchClient`
+// (architecture brief sections 4.7 and 7.8): a snapshot, then the event
+// stream from the snapshot's cursor.
+//
+// - Only one page of jobs and one inspected job are held, never the whole
+//   queue, and only events about those are applied.
+// - Each held job remembers the event position its copy reflects, so a
+//   replayed or older event never overwrites a newer copy.
+// - When a stream ends, the feed reconnects with backoff, after a fresh
+//   handshake, and resumes from its cursor; a `resync` makes it take a new
+//   snapshot instead. A handshake refused as `unauthenticated` stops the
+//   feed with that status, so the shell can ask the user to sign in again.
+// - Progress samples are shown only for the current boot epoch and the
+//   job's current generation.
+// - Durable progress moves at each checkpoint without an event, so while a
+//   held job is active, the held jobs are re-read now and then: one page
+//   query, never the whole queue. Live progress samples make this
+//   unnecessary once the engine sends them.
+//
+// Nothing here affects downloads: stopping the feed, or losing the page
+// that holds it, only stops watching.
+
+import { WayfetchError, serves } from './contract.js';
+
+/**
+ * @typedef {import('./contract.js').WayfetchClient} WayfetchClient
+ * @typedef {import('./contract.js').Hello} Hello
+ * @typedef {import('./contract.js').JobId} JobId
+ * @typedef {import('./contract.js').JobSummary} JobSummary
+ * @typedef {import('./contract.js').EventCursor} EventCursor
+ * @typedef {import('./contract.js').StreamItem} StreamItem
+ * @typedef {import('./contract.js').ProgressSample} ProgressSample
+ * @typedef {import('./contract.js').Subscription} Subscription
+ *
+ * @typedef {'connecting' | 'live' | 'reconnecting' | 'unauthenticated' | 'incompatible' | 'stopped'} FeedStatus
+ * @typedef {{ job: JobSummary, position: number }} Held
+ */
+
+/** Waits between reconnection attempts, in milliseconds; the last repeats. */
+export const RETRY_DELAYS = Object.freeze([500, 1000, 2000, 4000, 8000]);
+
+/** How often a snapshot older than the stream is taken again. */
+const SNAPSHOT_ATTEMPTS = 3;
+
+/** How often held active jobs are re-read, in milliseconds. */
+export const REFRESH_INTERVAL = 3000;
+
+/** Stages whose durable progress can change without an event. */
+const ACTIVE = new Set(['resolving', 'transferring', 'verifying', 'publishing', 'recovering']);
+
+/**
+ * The copy to hold: `current` if it reflects a later position than a copy
+ * of `job` read at `position`, which can happen when events overtook a
+ * read in flight.
+ * @param {Held | null | undefined} current
+ * @param {JobSummary} job
+ * @param {number} position
+ * @returns {Held}
+ */
+function newer(current, job, position) {
+  return current && current.job.id === job.id && current.position > position
+    ? current
+    : { job, position };
+}
+
+export class JobFeed {
+  /**
+   * @param {WayfetchClient} client
+   * @param {{
+   *   pageSize: number,
+   *   onChange: () => void,
+   *   retryDelays?: readonly number[],
+   *   refreshInterval?: number,
+   * }} options
+   */
+  constructor(client, options) {
+    this.client = client;
+    this.pageSize = options.pageSize;
+    this.onChange = options.onChange;
+    this.retryDelays = options.retryDelays ?? RETRY_DELAYS;
+    this.refreshInterval = options.refreshInterval ?? REFRESH_INTERVAL;
+    /** @type {FeedStatus} */
+    this.status = 'stopped';
+    /** @type {Hello | null} */
+    this.hello = null;
+    /** Where the current page starts: after this job, or at the first. */
+    /** @type {JobId | null} */
+    this.pageAfter = null;
+    /** The current page's jobs, in order. */
+    /** @type {JobId[]} */
+    this.pageIds = [];
+    /** @type {JobId | null} */
+    this.nextAfter = null;
+    /** The inspected job, if any. */
+    /** @type {JobId | null} */
+    this.watched = null;
+    /** `missing` when the inspected job does not exist. */
+    /** @type {'loading' | 'ready' | 'missing'} */
+    this.watchedState = 'loading';
+    /** The last error that stopped the feed or a reconnection attempt. */
+    /** @type {WayfetchError | null} */
+    this.error = null;
+    /** @type {Map<JobId, Held>} */
+    this.page = new Map();
+    /** @type {Held | null} */
+    this.detail = null;
+    /** @type {Map<JobId, ProgressSample>} */
+    this.samples = new Map();
+    /** The last durable event applied, or the snapshot's position. */
+    /** @type {EventCursor | null} */
+    this.cursor = null;
+    /** @type {Subscription | null} */
+    this.subscription = null;
+    /** Increases on every start and stop, so stale work gives up. */
+    this.run = 0;
+    this.attempt = 0;
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    this.timer = undefined;
+    /** @type {ReturnType<typeof setInterval> | undefined} */
+    this.refresher = undefined;
+    this.refreshing = false;
+  }
+
+  /** The current page's jobs, in order. */
+  get jobs() {
+    return this.pageIds.flatMap((id) => {
+      const held = this.page.get(id);
+      return held ? [held.job] : [];
+    });
+  }
+
+  /** The inspected job, once loaded. */
+  get watchedJob() {
+    return this.detail?.job ?? null;
+  }
+
+  /**
+   * A live progress sample for `job`, if a current one arrived.
+   * @param {JobId} job
+   */
+  sample(job) {
+    return this.samples.get(job);
+  }
+
+  /** Connects, takes a snapshot, and follows changes. */
+  start() {
+    this.stop();
+    const run = ++this.run;
+    this.cursor = null;
+    this.setStatus('connecting');
+    void this.connect(run);
+  }
+
+  /** Stops following. Downloads are unaffected. */
+  stop() {
+    this.run += 1;
+    clearTimeout(this.timer);
+    clearInterval(this.refresher);
+    this.subscription?.close();
+    this.subscription = null;
+    if (this.status !== 'unauthenticated' && this.status !== 'incompatible') {
+      this.status = 'stopped';
+    }
+  }
+
+  /**
+   * Shows the page after `after`, or the first page.
+   * @param {JobId | null} after
+   */
+  async showPage(after) {
+    this.pageAfter = after;
+    await this.loadPage(this.run);
+  }
+
+  /**
+   * Inspects `job`, or stops inspecting.
+   * @param {JobId | null} job
+   */
+  async watch(job) {
+    this.watched = job;
+    this.detail = null;
+    this.watchedState = 'loading';
+    this.changed();
+    if (job !== null) await this.loadDetail(this.run);
+  }
+
+  /**
+   * Re-reads one job, for example after a command was refused because it
+   * changed.
+   * @param {JobId} job
+   */
+  async refresh(job) {
+    const snapshot = await this.client.inspectJob(job);
+    this.hold(snapshot.job, snapshot.as_of.position);
+    this.changed();
+  }
+
+  /** @param {FeedStatus} status */
+  setStatus(status) {
+    this.status = status;
+    this.changed();
+  }
+
+  changed() {
+    this.onChange();
+  }
+
+  /**
+   * Handshake, snapshot if needed, subscribe; retried with backoff.
+   * @param {number} run
+   */
+  async connect(run) {
+    try {
+      const hello = await this.client.hello();
+      if (run !== this.run) return;
+      if (!serves(hello.protocol)) {
+        this.stop();
+        this.setStatus('incompatible');
+        return;
+      }
+      if (this.hello?.instance !== hello.instance) this.cursor = null;
+      this.acceptHello(hello);
+      if (this.cursor === null) {
+        await this.snapshot(run);
+        if (run !== this.run) return;
+      }
+      this.subscribe(run);
+    } catch (error) {
+      if (run !== this.run) return;
+      this.failed(run, /** @type {WayfetchError} */ (error));
+    }
+  }
+
+  /**
+   * @param {number} run
+   * @param {WayfetchError} error
+   */
+  failed(run, error) {
+    this.error = error;
+    if (error.code === 'unauthenticated') {
+      this.stop();
+      this.setStatus('unauthenticated');
+      return;
+    }
+    this.subscription?.close();
+    this.subscription = null;
+    clearInterval(this.refresher);
+    this.setStatus('reconnecting');
+    const delays = this.retryDelays;
+    const delay = delays[Math.min(this.attempt, delays.length - 1)];
+    this.attempt += 1;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      if (run === this.run) void this.connect(run);
+    }, delay);
+  }
+
+  /** @param {Hello} hello */
+  acceptHello(hello) {
+    const epoch = this.hello?.boot_epoch;
+    this.hello = hello;
+    if (epoch !== hello.boot_epoch) this.samples.clear();
+  }
+
+  /**
+   * Takes a consistent snapshot of the page and the inspected job, and
+   * sets the cursor to the older of their positions; each copy ignores
+   * events it already reflects.
+   * @param {number} run
+   */
+  async snapshot(run) {
+    this.cursor = null;
+    const page = await this.loadPage(run);
+    const detail = await this.loadDetail(run);
+    if (run !== this.run || page === undefined) return;
+    const instance = /** @type {Hello} */ (this.hello).instance;
+    this.cursor = { instance, position: Math.min(page, detail ?? page) };
+  }
+
+  /**
+   * Loads the current page; returns the position it reflects.
+   * @param {number} run
+   */
+  async loadPage(run) {
+    for (let attempt = 1; ; attempt += 1) {
+      const page = await this.client.listJobs({ after: this.pageAfter, pageSize: this.pageSize });
+      if (run !== this.run) return undefined;
+      if (this.isBehind(page.as_of) && attempt < SNAPSHOT_ATTEMPTS) continue;
+      const position = page.as_of.position;
+      this.page = new Map(
+        page.items.map((job) => [job.id, newer(this.page.get(job.id), job, position)]),
+      );
+      this.pageIds = page.items.map((job) => job.id);
+      this.nextAfter = page.next_after ?? null;
+      this.prune();
+      this.changed();
+      return page.as_of.position;
+    }
+  }
+
+  /**
+   * Loads the inspected job; returns the position it reflects, or
+   * nothing if there is no such job or it is no longer wanted.
+   * @param {number} run
+   */
+  async loadDetail(run) {
+    const job = this.watched;
+    if (job === null) return undefined;
+    for (let attempt = 1; ; attempt += 1) {
+      let snapshot;
+      try {
+        snapshot = await this.client.inspectJob(job);
+      } catch (error) {
+        if (/** @type {WayfetchError} */ (error).code !== 'not_found') throw error;
+        if (run !== this.run || job !== this.watched) return undefined;
+        this.watchedState = 'missing';
+        this.changed();
+        return undefined;
+      }
+      if (run !== this.run || job !== this.watched) return undefined;
+      if (this.isBehind(snapshot.as_of) && attempt < SNAPSHOT_ATTEMPTS) continue;
+      this.detail = newer(this.detail, snapshot.job, snapshot.as_of.position);
+      this.watchedState = 'ready';
+      this.prune();
+      this.changed();
+      return snapshot.as_of.position;
+    }
+  }
+
+  /**
+   * Whether a snapshot at `asOf` misses events the stream already
+   * delivered, which would never reach it.
+   * @param {EventCursor} asOf
+   */
+  isBehind(asOf) {
+    return this.cursor !== null && asOf.position < this.cursor.position;
+  }
+
+  /** @param {number} run */
+  subscribe(run) {
+    this.subscription = this.client.subscribe(this.cursor, {
+      item: (item) => {
+        if (run === this.run) this.receive(run, item);
+      },
+      end: () => {
+        if (run !== this.run) return;
+        this.subscription = null;
+        this.failed(run, new WayfetchError('unavailable', 'the event stream ended'));
+      },
+    });
+  }
+
+  /**
+   * @param {number} run
+   * @param {StreamItem} item
+   */
+  receive(run, item) {
+    switch (item.type) {
+      case 'hello':
+        if (item.instance !== this.hello?.instance) {
+          // Another engine answers at this address now.
+          this.resync(run);
+          return;
+        }
+        this.acceptHello(item);
+        this.attempt = 0;
+        this.error = null;
+        this.setStatus('live');
+        clearInterval(this.refresher);
+        this.refresher = setInterval(() => void this.refreshActive(run), this.refreshInterval);
+        return;
+      case 'event': {
+        const cursor = this.cursor;
+        if (cursor === null || item.cursor.instance !== cursor.instance) return;
+        if (item.cursor.position <= cursor.position) return;
+        this.cursor = item.cursor;
+        const { kind } = item;
+        if (kind.type === 'job_added') this.added(kind.job, item.cursor.position);
+        if (kind.type === 'job_added' || kind.type === 'job_changed') {
+          this.hold(kind.job, item.cursor.position);
+        }
+        this.changed();
+        return;
+      }
+      case 'progress': {
+        const held = this.held(item.job);
+        if (!held || this.hello === null) return;
+        if (item.boot_epoch !== this.hello.boot_epoch || item.generation !== held.job.generation) {
+          return;
+        }
+        this.samples.set(item.job, item);
+        this.changed();
+        return;
+      }
+      case 'resync':
+        this.resync(run);
+        return;
+    }
+  }
+
+  /**
+   * Re-reads the held jobs if any is active. Failures are left to the
+   * event stream, which notices a lost server or session too.
+   * @param {number} run
+   */
+  async refreshActive(run) {
+    const held = [...this.page.values(), ...(this.detail ? [this.detail] : [])];
+    if (this.refreshing || !held.some(({ job }) => ACTIVE.has(job.stage))) return;
+    this.refreshing = true;
+    try {
+      await this.loadPage(run);
+      await this.loadDetail(run);
+    } catch {
+      // The stream reports it.
+    } finally {
+      this.refreshing = false;
+    }
+  }
+
+  /**
+   * Drops the stream and starts again from a new snapshot.
+   * @param {number} run
+   */
+  resync(run) {
+    this.subscription?.close();
+    this.subscription = null;
+    this.cursor = null;
+    void this.connect(run);
+  }
+
+  /**
+   * A new job joins the current page if it is the last page and has room;
+   * if it is full, the page gains a next page instead.
+   * @param {JobSummary} job
+   * @param {number} position
+   */
+  added(job, position) {
+    // New jobs have the highest IDs, so they belong at the end of the
+    // last page.
+    if (this.page.has(job.id) || this.nextAfter !== null) return;
+    const last = this.pageIds.at(-1);
+    if (last !== undefined && this.pageIds.length >= this.pageSize) {
+      this.nextAfter = last;
+      return;
+    }
+    this.pageIds.push(job.id);
+    this.page.set(job.id, { job, position });
+  }
+
+  /**
+   * Replaces held copies of `job` that are older than `position`.
+   * @param {JobSummary} job
+   * @param {number} position
+   */
+  hold(job, position) {
+    for (const held of [this.page.get(job.id), this.detail]) {
+      if (held && held.job.id === job.id && position > held.position) {
+        if (held.job.generation !== job.generation) this.samples.delete(job.id);
+        held.job = job;
+        held.position = position;
+      }
+    }
+  }
+
+  /** @param {JobId} job */
+  held(job) {
+    return this.page.get(job) ?? (this.detail?.job.id === job ? this.detail : undefined);
+  }
+
+  /** Forgets samples of jobs no longer held. */
+  prune() {
+    for (const job of this.samples.keys()) {
+      if (!this.held(job)) this.samples.delete(job);
+    }
+  }
+}

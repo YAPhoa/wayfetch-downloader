@@ -14,6 +14,10 @@
 //! file; `wayfetchd reset-owner` removes the owner so the next start
 //! offers setup again.
 //!
+//! The web UI in `ui/src` is compiled into the binary and served at `/`
+//! from the same origin as the API; it needs nothing at run time beyond
+//! this process.
+//!
 //! `wayfetchd ready` asks a running daemon whether it is ready, for a
 //! container health check: it starts no engine and reads no token.
 
@@ -25,9 +29,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
+use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use url::Url;
-use wayfetch_api::{Api, ApiLimits, BrowserAuth, BrowserConfig, SetupIssued, Tokens};
+use wayfetch_api::{
+    Api, ApiLimits, BrowserAuth, BrowserConfig, SetupIssued, Tokens, UiAssets, UiAssetsError,
+};
 use wayfetch_engine::protocol::InstanceId;
 use wayfetch_engine::{ShutdownReport, ShutdownRequest};
 use wayfetch_host::{EngineArgs, InitRootArgs, Message, Printer, Signals, Terminal};
@@ -40,6 +47,21 @@ const DEFAULT_LISTEN: &str = "127.0.0.1:7878";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Largest readiness response `ready` reads.
 const MAX_PROBE_BYTES: u64 = 16 * 1024;
+
+/// The web UI's source files, served as they are: the UI has no build
+/// step, so building the daemon needs no JavaScript tooling.
+#[derive(Embed)]
+#[folder = "../../ui/src"]
+#[exclude = "**/.gitkeep"]
+struct UiFiles;
+
+/// The embedded web UI.
+fn ui_assets() -> Result<UiAssets, UiAssetsError> {
+    UiAssets::new(UiFiles::iter().filter_map(|path| {
+        let file = UiFiles::get(&path)?;
+        Some((path.into_owned(), file.data))
+    }))
+}
 
 /// The Wayfetch Downloader daemon.
 #[derive(Debug, Parser)]
@@ -275,6 +297,7 @@ async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
         let _ = printer.print(notice);
     };
     let mut signals = Signals::new()?;
+    let ui = ui_assets().map_err(|e| e.to_string())?;
     let (tokens, created) = Tokens::load_or_create(&args.token_file).map_err(|e| e.to_string())?;
     if created {
         print(&Notice::TokenFileCreated {
@@ -320,8 +343,9 @@ async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
     print(&Notice::Listening { address, instance });
 
     let owner = started.owner;
-    let mut api =
-        Api::new(owner.handle(), tokens, ApiLimits::DEFAULT).readiness_check(Arc::new(move || {
+    let mut api = Api::new(owner.handle(), tokens, ApiLimits::DEFAULT)
+        .ui(ui)
+        .readiness_check(Arc::new(move || {
             root_check().map_err(|_| "download_root_unavailable")
         }));
     if let Some((browser, _)) = browser {
@@ -445,6 +469,14 @@ mod tests {
             panic!("not run");
         };
         assert!(args.browser.config().is_none(), "browser access is opt-in");
+    }
+
+    #[test]
+    fn the_web_ui_is_embedded() {
+        let ui = ui_assets().expect("ui/src has an index.html");
+        assert_eq!(ui.version().len(), 16);
+        assert!(UiFiles::get("main.js").is_some());
+        assert!(UiFiles::iter().all(|path| !path.ends_with(".gitkeep")));
     }
 
     #[test]

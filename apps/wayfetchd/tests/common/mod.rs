@@ -73,6 +73,37 @@ impl Client {
         self.send(self.request(reqwest::Method::GET, path)).await
     }
 
+    /// Asserts that the daemon serves its bundled web UI: the entry page,
+    /// and the script it names, from the daemon alone.
+    pub async fn serves_the_ui(&self) {
+        let page = self
+            .http
+            .get(format!("{}/", self.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_eq!(page.headers()["cache-control"], "no-cache");
+        let html = page.text().await.unwrap();
+        let script = html
+            .split_once(r#"<script type="module" src=""#)
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(path, _)| path)
+            .expect("the page names its script");
+        assert!(script.starts_with("/assets/"), "{html}");
+        let script = self
+            .http
+            .get(format!("{}{script}", self.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(script.status(), StatusCode::OK, "{html}");
+        assert_eq!(
+            script.headers()["content-type"],
+            "text/javascript; charset=utf-8"
+        );
+    }
+
     pub async fn post(&self, path: &str, body: &Value) -> (StatusCode, Value) {
         self.send(self.request(reqwest::Method::POST, path).json(body))
             .await

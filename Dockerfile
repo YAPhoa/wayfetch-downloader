@@ -19,6 +19,8 @@ WORKDIR /src
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY apps apps
+# Embedded in the binary: the image serves its UI with no other runtime.
+COPY ui/src ui/src
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     cargo build --locked --release -p wayfetchd \

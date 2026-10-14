@@ -1,0 +1,113 @@
+/* Minimal styling; visual polish comes later. System fonts only. */
+
+:root {
+  color-scheme: light dark;
+  --accent: #2457a6;
+  --muted: #6b7280;
+  --line: #d1d5db;
+  --surface: #ffffff;
+  --background: #f3f4f6;
+  --error: #b91c1c;
+  --warn: #92400e;
+  font-family: system-ui, sans-serif;
+  font-size: 15px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #7aa7f0;
+    --muted: #9ca3af;
+    --line: #374151;
+    --surface: #1f2937;
+    --background: #111827;
+    --error: #f87171;
+    --warn: #fbbf24;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { margin-right: auto; }
+.user { color: var(--muted); }
+
+main, #app > .card, #app > .message { max-width: 72rem; margin: 1rem auto; padding: 0 1rem; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.narrow { max-width: 26rem; margin: 3rem auto; display: grid; gap: 0.75rem; }
+
+h1, h2 { margin: 0 0 0.5rem; font-size: 1.2rem; }
+
+label { display: grid; gap: 0.25rem; }
+
+input, textarea {
+  font: inherit;
+  padding: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+}
+
+textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, monospace; }
+
+button {
+  font: inherit;
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button.secondary { background: transparent; color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+
+.row { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.5rem; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 0.4rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { color: var(--muted); font-weight: normal; }
+td.file { overflow-wrap: anywhere; }
+td.actions, .actions { white-space: nowrap; }
+td.actions button + button, .actions button + button { margin-left: 0.4rem; }
+
+progress { width: 7rem; vertical-align: middle; margin-right: 0.5rem; }
+.rate { color: var(--muted); margin-left: 0.5rem; }
+
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; }
+dt { color: var(--muted); }
+dd { margin: 0; overflow-wrap: anywhere; }
+
+.message { margin: 0.25rem 0; min-height: 1.2em; }
+.message.error { color: var(--error); }
+.message.notice { color: var(--warn); }
+
+.banner { padding: 0.6rem 1rem; margin-bottom: 1rem; border: 1px solid var(--warn); color: var(--warn); border-radius: 6px; }
+
+.status { color: var(--muted); }
+.status[data-status='live'] { color: green; }
+.status[data-status='reconnecting'], .status[data-status='incompatible'] { color: var(--warn); }
+
+.pager { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+
+code { font-family: ui-monospace, monospace; }

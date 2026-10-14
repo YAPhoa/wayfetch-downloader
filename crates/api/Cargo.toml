@@ -18,6 +18,7 @@ getrandom = "0.4"
 governor = { version = "0.10.4", default-features = false, features = ["std"] }
 hyper = { version = "1.12", features = ["http1", "server"] }
 hyper-util = { version = "0.1.21", features = ["http1", "server", "server-graceful", "service", "tokio"] }
+mime_guess = "2.0.5"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -29,6 +30,7 @@ url.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
 
 [lints]
 workspace = true

@@ -61,3 +61,38 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts
           python3 scripts/check_dependency_boundaries.py
+      - name: Engine and server build without JavaScript tooling
+        # Neither the engine nor wayfetchd, which embeds the web UI as it
+        # is, may need Node.js or npm to build.
+        run: |
+          env PATH="$HOME/.cargo/bin:/usr/bin:/bin" sh -c \
+            '! command -v node && ! command -v npm && cargo build --locked -p wayfetch-engine -p wayfetchd'
+
+  ui:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Install development tools
+        run: npm ci
+      - name: Typecheck
+        run: npm run check
+      - name: Unit tests
+        run: npm test
+      - name: Browser tests against wayfetchd
+        run: |
+          cargo build --locked -p wayfetchd
+          npx playwright install --with-deps chromium
+          npm run e2e

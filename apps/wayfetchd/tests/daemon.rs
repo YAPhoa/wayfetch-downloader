@@ -1,13 +1,13 @@
 //! The `wayfetchd` executable driven as a subprocess over its HTTP API,
-//! against the local HTTPS fixture: the complete submit, list, inspect,
-//! pause, resume, and cancel workflow; authentication and scoped tokens;
-//! server-sent events that resume from `Last-Event-ID` or say to
-//! resynchronize; downloads that continue after every client disconnects;
-//! request and stream bounds; graceful shutdown on SIGTERM or SIGINT
-//! with jobs kept for the next start and a single owner per state
-//! directory; and browser access: owner setup with a setup secret,
-//! sign-in, sessions for commands and events, origin and CSRF checks,
-//! sign-out, restarts, and owner reset.
+//! against the local HTTPS fixture: the bundled web UI; the complete
+//! submit, list, inspect, pause, resume, and cancel workflow;
+//! authentication and scoped tokens; server-sent events that resume from
+//! `Last-Event-ID` or say to resynchronize; downloads that continue after
+//! every client disconnects; request and stream bounds; graceful shutdown
+//! on SIGTERM or SIGINT with jobs kept for the next start and a single
+//! owner per state directory; and browser access: owner setup with a setup
+//! secret, sign-in, sessions for commands and events, origin and CSRF
+//! checks, sign-out, restarts, and owner reset.
 //!
 //! Files that stall are large enough to cross a default 8 MiB checkpoint
 //! first, so there are durable bytes to observe and resume from.
@@ -268,6 +268,7 @@ async fn the_complete_workflow_over_http() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(hello["instance"], daemon.instance.as_str());
     assert_eq!(hello["limits"]["max_submit_items"], 1000);
+    client.serves_the_ui().await;
 
     // Submit, inspect, list, and publish the exact bytes.
     let small = body(MIB);

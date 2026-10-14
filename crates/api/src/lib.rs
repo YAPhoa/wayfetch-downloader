@@ -19,6 +19,7 @@ mod error;
 mod routes;
 mod secret;
 mod server;
+mod ui;
 
 use std::future::Future;
 use std::num::NonZeroUsize;
@@ -39,6 +40,7 @@ pub use browser::{
     BrowserAuth, BrowserAuthError, BrowserConfig, CSRF_HEADER, SetupIssued, reset_owner,
 };
 pub use routes::cursor_id;
+pub use ui::{UiAssets, UiAssetsError};
 
 /// A host's own readiness condition, beyond the engine's: for example,
 /// whether the download root is usable. It runs on a blocking thread for
@@ -106,6 +108,7 @@ pub struct Api {
     engine: EngineHandle,
     tokens: Tokens,
     browser: Option<Arc<BrowserAuth>>,
+    ui: Option<UiAssets>,
     limits: ApiLimits,
     readiness_check: Option<ReadinessCheck>,
     shutdown: CancellationToken,
@@ -116,6 +119,7 @@ impl std::fmt::Debug for Api {
         f.debug_struct("Api")
             .field("limits", &self.limits)
             .field("browser", &self.browser.is_some())
+            .field("ui", &self.ui.as_ref().map(UiAssets::version))
             .field("readiness_check", &self.readiness_check.is_some())
             .finish_non_exhaustive()
     }
@@ -128,6 +132,7 @@ impl Api {
             engine,
             tokens,
             browser: None,
+            ui: None,
             limits,
             readiness_check: None,
             shutdown: CancellationToken::new(),
@@ -148,11 +153,19 @@ impl Api {
         self
     }
 
-    /// The routes. Every route but `/v1/ready` and `/v1/auth/*` requires a
-    /// bearer token or an owner session. Readiness answers anyone, so a
-    /// container health check needs no credential, and it reveals only
-    /// whether the instance is ready. The auth routes are how a browser
-    /// gets a session.
+    /// Also serves `ui` as the web UI at `/`.
+    #[must_use]
+    pub fn ui(mut self, ui: UiAssets) -> Self {
+        self.ui = Some(ui);
+        self
+    }
+
+    /// The routes. Every route but `/v1/ready`, `/v1/auth/*`, and the web
+    /// UI's static files requires a bearer token or an owner session.
+    /// Readiness answers anyone, so a container health check needs no
+    /// credential, and it reveals only whether the instance is ready. The
+    /// auth routes are how a browser gets a session, and the UI holds no
+    /// data of its own.
     fn router(&self) -> Router {
         let state = routes::AppState {
             engine: self.engine.clone(),
@@ -166,7 +179,7 @@ impl Api {
             readiness_running: Arc::new(Semaphore::new(1)),
             readiness_timeout: self.limits.readiness_timeout,
         };
-        Router::new()
+        let router = Router::new()
             .route("/v1/capabilities", get(routes::capabilities))
             .route("/v1/inputs", post(routes::submit))
             .route("/v1/jobs", get(routes::list_jobs))
@@ -187,7 +200,11 @@ impl Api {
                     .layer(middleware::map_response(browser::routes::no_store)),
             )
             .layer(DefaultBodyLimit::max(self.limits.max_body_bytes))
-            .with_state(state)
+            .with_state(state);
+        match &self.ui {
+            Some(ui) => router.merge(ui.router()),
+            None => router,
+        }
     }
 
     /// Serves `listener` until `stop` completes, then ends event streams,
