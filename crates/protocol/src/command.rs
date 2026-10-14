@@ -47,6 +47,11 @@ impl IdempotencyKey {
     pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
+
+    /// The key.
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
 }
 
 /// What a principal must be allowed to do to run a command or query.
