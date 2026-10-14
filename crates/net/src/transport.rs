@@ -12,7 +12,8 @@
 //! * Redirects are followed here, one hop at a time, within a hop budget.
 //!   Every target passes the [`EgressPolicy`]; a hop to another origin drops
 //!   credentials and never carries a request body; HTTPS never downgrades
-//!   to HTTP.
+//!   to HTTP; a hop that would resend a body or an unsafe method is
+//!   followed only for a request that may be repeated.
 //! * Names resolve through the policy, so the connector only ever sees
 //!   permitted addresses.
 //!
@@ -151,6 +152,15 @@ pub enum BrokerError {
     /// The broker holds no such request or response.
     #[error("unknown request or response")]
     Unknown,
+    /// The lease's replay policy is not the one the request was prepared
+    /// with; nothing was sent.
+    #[error("the lease's replay policy {lease:?} differs from the prepared {prepared:?}")]
+    PolicyMismatch {
+        /// The policy the request was prepared with.
+        prepared: ReplayPolicy,
+        /// The policy the lease's offer names.
+        lease: ReplayPolicy,
+    },
     /// The broker already holds as many requests or responses as allowed.
     #[error("the broker is full")]
     Full,
@@ -381,7 +391,8 @@ impl HttpTransport {
     /// prepared request or takes the open response; every later one must be
     /// authorized by the lease ([`Transfer::authorize`]), so a
     /// non-replayable request is never sent twice and an open response is
-    /// never cloned (section 6.5).
+    /// never cloned (section 6.5). A lease must name the replay policy its
+    /// request was prepared with, so it cannot weaken it.
     pub async fn open_lease(
         &self,
         transfer: &Transfer,
@@ -392,11 +403,21 @@ impl HttpTransport {
             Replay::Allowed => Ok(()),
             other => Err(BrokerError::Refused(other)),
         };
-        if let Some(purpose) = request.purpose {
-            authorize(purpose)?;
-        }
         let (prepared, replay) = {
             let mut broker = self.broker.lock().expect("unpoisoned");
+            if let LeaseSource::PreparedRequest(id) = transfer.offer().source {
+                let entry = broker.requests.get(&id.0).ok_or(BrokerError::Unknown)?;
+                let lease = transfer.offer().replay;
+                if entry.replay != lease {
+                    return Err(BrokerError::PolicyMismatch {
+                        prepared: entry.replay,
+                        lease,
+                    });
+                }
+            }
+            if let Some(purpose) = request.purpose {
+                authorize(purpose)?;
+            }
             match transfer.offer().source {
                 LeaseSource::OpenResponse(id) => {
                     return broker
@@ -544,6 +565,16 @@ impl HttpTransport {
                 }
                 headers = without_credentials(headers);
             }
+            // Following the redirect sends the request again. A body or an
+            // unsafe method is sent again only if the request may be
+            // repeated: the first one reached the server, so for any other
+            // the outcome is unknown and is never resent (section 6.5, T12).
+            if !out.replay_safe && (out.body.is_some() || !out.method.is_safe()) {
+                return Err(error(
+                    FailureCode::OperationAmbiguous,
+                    format!("HTTP {status} would send a non-replayable request again"),
+                ));
+            }
             out.url = next;
         }
     }
@@ -689,7 +720,7 @@ mod tests {
             length: Some(5),
             strong_etag: Some("\"v1\"".into()),
             last_modified: Some(UtcTimestamp::from_unix_millis(784_111_777_000)),
-            origin: None,
+            resource: None,
         };
         assert_eq!(if_range(&r).unwrap(), "\"v1\"");
         r.strong_etag = None;

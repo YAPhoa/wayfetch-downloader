@@ -180,7 +180,7 @@ impl Store {
                 &format!(
                     "SELECT {STAGING_COLUMNS}, representation_known, representation_length, \
                      representation_etag, representation_modified, suggested_name, \
-                     representation_origin FROM staging_files WHERE job_id = ?1 ORDER BY generation DESC LIMIT 1"
+                     representation_resource FROM staging_files WHERE job_id = ?1 ORDER BY generation DESC LIMIT 1"
                 ),
                 [sql(job)?],
                 |row| {
@@ -206,7 +206,7 @@ impl Store {
         };
         let record = record.decode()?;
         let representation = representation
-            .map(|(length, etag, modified, origin)| {
+            .map(|(length, etag, modified, resource)| {
                 Ok::<_, StoreError>(Representation {
                     length: length
                         .map(u64::try_from)
@@ -214,7 +214,7 @@ impl Store {
                         .map_err(|_| StoreError::Corrupt("representation length"))?,
                     strong_etag: etag,
                     last_modified: modified.map(UtcTimestamp::from_unix_millis),
-                    origin,
+                    resource,
                 })
             })
             .transpose()?;
@@ -258,7 +258,7 @@ impl Store {
         let updated = tx.execute(
             "UPDATE staging_files SET representation_known = 1, representation_length = ?1, \
              representation_etag = ?2, representation_modified = ?3, suggested_name = ?6, \
-             representation_origin = ?7 WHERE job_id = ?4 AND generation = ?5 AND representation_known = 0",
+             representation_resource = ?7 WHERE job_id = ?4 AND generation = ?5 AND representation_known = 0",
             params![
                 length,
                 representation.strong_etag,
@@ -266,7 +266,7 @@ impl Store {
                 sql(job)?,
                 sql(generation)?,
                 suggested_name,
-                representation.origin,
+                representation.resource,
             ],
         )?;
         if updated != 1 {

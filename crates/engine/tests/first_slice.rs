@@ -68,7 +68,7 @@ impl Resource {
             length: Some(self.body.len() as u64),
             strong_etag: self.etag.clone(),
             last_modified: None,
-            origin: None,
+            resource: None,
         }
     }
 }

@@ -6,11 +6,13 @@
 //! failure, never a guess, and an encoded body is refused rather than
 //! decoded, so byte offsets always address the stored representation.
 
+use std::fmt::Write as _;
 use std::time::SystemTime;
 
 use percent_encoding::percent_decode_str;
 use reqwest::StatusCode;
 use reqwest::header::{self, HeaderMap};
+use sha2::{Digest, Sha256};
 use url::Url;
 use wayfetch_engine::domain::failure::FailureCode;
 use wayfetch_engine::domain::time::UtcTimestamp;
@@ -75,9 +77,24 @@ pub(crate) fn read(
             last_modified: header_str(headers, header::LAST_MODIFIED)?
                 .and_then(|v| httpdate::parse_http_date(v).ok())
                 .map(timestamp),
-            origin: Some(url.origin().ascii_serialization()),
+            resource: Some(resource(url)),
         },
         filename: header_str(headers, header::CONTENT_DISPOSITION)?.and_then(disposition_filename),
+    })
+}
+
+/// Identifies the resource `url` names: a digest of the URL without its
+/// fragment, which the client never sends. Validators are compared only
+/// within one resource, so any other final URL, even on the same origin,
+/// restarts a resume (rule 7.5.5). A digest rather than the URL, which may
+/// carry a signed token that must not be stored.
+fn resource(url: &Url) -> String {
+    let mut url = url.clone();
+    url.set_fragment(None);
+    let digest = Sha256::digest(url.as_str());
+    digest.iter().fold(String::from("sha256:"), |mut id, byte| {
+        let _ = write!(id, "{byte:02x}");
+        id
     })
 }
 
@@ -307,6 +324,24 @@ mod tests {
     }
 
     #[test]
+    fn resources_are_told_apart_by_the_whole_url_without_storing_it() {
+        let id = |s: &str| resource(&Url::parse(s).unwrap());
+        let base = id("https://cdn.example/a.bin?sig=secret");
+        assert!(base.starts_with("sha256:") && base.len() == 71, "{base}");
+        assert!(!base.contains("secret"));
+        // The fragment is never sent, so it names the same resource.
+        assert_eq!(id("https://cdn.example/a.bin?sig=secret#part"), base);
+        for other in [
+            "https://cdn.example/b.bin?sig=secret",
+            "https://cdn.example/a.bin?sig=other",
+            "https://cdn.example:8443/a.bin?sig=secret",
+            "http://cdn.example/a.bin?sig=secret",
+        ] {
+            assert_ne!(id(other), base, "{other}");
+        }
+    }
+
+    #[test]
     fn full_and_partial_responses_are_framed() {
         let head = read(
             StatusCode::OK,
@@ -327,8 +362,8 @@ mod tests {
             Some(UtcTimestamp::from_unix_millis(784_111_777_000))
         );
         assert_eq!(
-            head.representation.origin.as_deref(),
-            Some("https://cdn.example:8443")
+            head.representation.resource.as_deref(),
+            Some(resource(&url()).as_str())
         );
         assert_eq!(head.filename.as_deref(), Some("a b.zip"));
 

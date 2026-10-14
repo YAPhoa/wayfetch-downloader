@@ -7,7 +7,8 @@
 //! empty file), T02 and T23 (resume from durable checkpoints after a
 //! restart), T03 (`200` to a range request), T04 (`416` with complete and
 //! incomplete coverage), T05 (representation changed during resume), T06
-//! (resume redirected to another origin), T08 (truncated body), T09
+//! (resume redirected to another origin or another resource on the same
+//! origin), T08 (truncated body), T09
 //! (stalled headers and body), and the egress policy (section 8.2).
 
 #[path = "../../engine/tests/support/mod.rs"]
@@ -268,6 +269,44 @@ async fn a_resume_redirected_to_another_origin_restarts() {
     );
     // The artifact is named after the submitted link.
     assert_eq!(env.published("link"), data);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resume_redirected_to_another_resource_on_the_same_origin_restarts() {
+    let env = env().await;
+    let (old, new) = (body(48 * KIB), body(48 * KIB + 1).slice(1..));
+    assert_ne!(old, new);
+    let at = 16 * KIB;
+    env.server
+        .route("/link", Route::Redirect(302, env.server.url("/old.bin")));
+    env.server.put(
+        "/old.bin",
+        Resource {
+            stall_at: Some(at),
+            ..Resource::new(old)
+        },
+    );
+    let owner = env.start().await;
+    let [id] = submit(&env, &owner, &["/link"]).await[..] else {
+        panic!()
+    };
+    interrupt(owner, id, at).await;
+    // The link now leads to another file on the same server, of the same
+    // length and with the same entity tag.
+    env.server.put("/new.bin", Resource::new(new.clone()));
+    env.server
+        .route("/link", Route::Redirect(302, env.server.url("/new.bin")));
+
+    let owner = env.start().await;
+    complete(&owner, id).await;
+    // T06: an entity tag identifies representations of one resource only;
+    // the range the other file answered was discarded and the job started
+    // over from zero.
+    let ranges = env.server.ranges("/new.bin");
+    assert_eq!((ranges.len(), ranges[1]), (2, None));
+    resumed_from(ranges[0], at);
+    assert_eq!(env.published("link"), new);
     shutdown(owner).await;
 }
 

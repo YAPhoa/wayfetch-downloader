@@ -55,8 +55,9 @@ const NAME_ATTEMPTS: u32 = 100;
 /// Longest entity tag recorded for a staging file (the schema's bound).
 const MAX_VALIDATOR_BYTES: usize = 1024;
 
-/// Longest origin recorded for a staging file (the schema's bound).
-const MAX_ORIGIN_BYTES: usize = 512;
+/// Longest resource identity recorded for a staging file (the schema's
+/// bound).
+const MAX_RESOURCE_BYTES: usize = 512;
 
 /// Why a download stopped before completing its job.
 #[derive(Debug)]
@@ -437,14 +438,14 @@ impl Download {
                 }
                 Ok(Err(e)) => return Err(failed(e.code, e.message)),
                 Ok(Ok(mut response)) => {
-                    // A validator or origin too long to record identifies
+                    // A validator or resource too long to record identifies
                     // nothing the engine can check later.
                     let r = &mut response.representation;
                     if r.strong_etag.as_ref().is_some_and(|e| e.len() > MAX_VALIDATOR_BYTES) {
                         r.strong_etag = None;
                     }
-                    if r.origin.as_ref().is_some_and(|o| o.len() > MAX_ORIGIN_BYTES) {
-                        r.origin = None;
+                    if r.resource.as_ref().is_some_and(|o| o.len() > MAX_RESOURCE_BYTES) {
+                        r.resource = None;
                     }
                     response
                 }
@@ -460,15 +461,17 @@ impl Download {
                 complete,
             } => (start, end, complete),
             // `416` finishes the job only when the durable bytes already
-            // cover exactly the length it reports, from the same
-            // representation (rule 7.5.3, T04).
+            // cover exactly the length it reports, from the same resource
+            // and representation (rule 7.5.3, T04).
             Plan::Reconcile {
                 complete: Some(complete),
             } if continued
                 .is_some_and(|c| c.partial.contiguous && c.partial.durable_end == complete)
-                && stored
-                    .as_ref()
-                    .is_some_and(|s| !s.contradicts(&response.representation)) =>
+                && stored.as_ref().is_some_and(|s| {
+                    s.resource.is_some()
+                        && s.resource == response.representation.resource
+                        && !s.contradicts(&response.representation)
+                }) =>
             {
                 return Ok(Opened::Covered(complete));
             }
@@ -817,7 +820,7 @@ mod tests {
             length: Some(5),
             strong_etag: Some("\"v1\"".into()),
             last_modified: None,
-            origin: None,
+            resource: None,
         };
         store
             .record_response(job, generation, &representation, None, now())

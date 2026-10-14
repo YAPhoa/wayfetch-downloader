@@ -87,10 +87,12 @@ pub struct Representation {
     pub strong_etag: Option<String>,
     /// `Last-Modified`, if sent.
     pub last_modified: Option<UtcTimestamp>,
-    /// The origin (scheme, host, and port) that served it, after redirects.
-    /// Validators are compared only within one origin: the same entity tag
-    /// from another server does not make its bytes equivalent (rule 7.5.5).
-    pub origin: Option<String>,
+    /// An opaque identity of the resource that served it, after redirects,
+    /// as the transport reports it. Validators identify representations of
+    /// one resource only: the same entity tag from another resource, even
+    /// on the same server, does not make its bytes equivalent (rule 7.5.5,
+    /// RFC 9110 section 8.8.3).
+    pub resource: Option<String>,
 }
 
 impl Representation {
@@ -108,7 +110,7 @@ impl Representation {
         conflicts(&self.length, &other.length)
             || conflicts(&self.strong_etag, &other.strong_etag)
             || conflicts(&self.last_modified, &other.last_modified)
-            || conflicts(&self.origin, &other.origin)
+            || conflicts(&self.resource, &other.resource)
     }
 }
 
@@ -403,7 +405,7 @@ mod tests {
             length: Some(100),
             strong_etag: Some("\"v1\"".into()),
             last_modified: None,
-            origin: None,
+            resource: None,
         }
     }
 

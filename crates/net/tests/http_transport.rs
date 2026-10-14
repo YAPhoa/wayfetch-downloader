@@ -1,6 +1,6 @@
 //! The HTTP transport and broker against a local server over real sockets
 //! (architecture brief section 13.1). Brief tests exercised here at the
-//! transport level: T01, T02, T07, T08, T09, T10, T11, and T12, plus TLS
+//! transport level: T01, T02, T06, T07, T08, T09, T10, T11, and T12, plus TLS
 //! verification and the egress policy (section 8.2). The engine-level
 //! scenarios are in `engine_over_http.rs`.
 
@@ -84,13 +84,16 @@ async fn files_download_over_https_and_empty_files_are_valid() {
             length: Some(data.len() as u64)
         }
     );
+    // The resource is identified without storing its URL.
+    let resource = response.representation.resource.clone().unwrap();
+    assert!(!resource.contains("a.bin"), "{resource}");
     assert_eq!(
         response.representation,
         Representation {
             length: Some(data.len() as u64),
             strong_etag: Some("\"v1\"".into()),
             last_modified: None,
-            origin: Some(format!("https://127.0.0.1:{}", server.port())),
+            resource: Some(resource),
         }
     );
     assert_eq!(read_all(&mut response).await.unwrap(), data);
@@ -120,7 +123,7 @@ async fn a_conditional_range_is_requested_and_framed() {
         length: Some(data.len() as u64),
         strong_etag: Some("\"v1\"".into()),
         last_modified: None,
-        origin: None,
+        resource: None,
     });
     let mut response = open(&transport, &ranged).await.unwrap();
     // T02: the returned interval is the requested one.
@@ -269,11 +272,6 @@ async fn credentials_are_stripped_on_cross_origin_redirects() {
         .await
         .unwrap();
     assert_eq!(read_all(&mut response).await.unwrap(), data);
-    // T06 groundwork: the representation names the origin that served it.
-    assert_eq!(
-        response.representation.origin,
-        Some(format!("http://localhost:{}", server.port()))
-    );
 
     let log = server.log();
     let paths: Vec<&str> = log.iter().map(|r| r.path.as_str()).collect();
@@ -289,6 +287,19 @@ async fn credentials_are_stripped_on_cross_origin_redirects() {
     assert_eq!(other.header("x-api-key"), None);
     assert_eq!(other.header("x-trace"), Some("kept"));
     assert!(log.iter().all(|r| r.header("referer").is_none()));
+
+    // T06 groundwork: the representation names the resource that finally
+    // served it, not the one first asked for.
+    let direct = async |url: String| {
+        open(&transport, &request(&url))
+            .await
+            .unwrap()
+            .representation
+            .resource
+    };
+    let served = response.representation.resource.clone();
+    assert_eq!(served, direct(server.url_via("localhost", "/file")).await);
+    assert_ne!(served, direct(server.url("/file")).await);
 }
 
 #[tokio::test]
@@ -305,8 +316,9 @@ async fn bodies_are_never_redirected_to_another_origin() {
         headers: HeaderMap::new(),
         body: Some(Bytes::from_static(b"password=secret")),
     };
+    // Even a request that may be repeated.
     let reference = transport
-        .prepare(prepared, ReplayPolicy::NeverAutomaticallyReplay)
+        .prepare(prepared, ReplayPolicy::Idempotent)
         .unwrap();
     let err = transport
         .submit(reference, Duration::from_secs(5), READ_BUFFER)
@@ -317,6 +329,107 @@ async fn bodies_are_never_redirected_to_another_origin() {
         "{err:?}"
     );
     assert_eq!(server.hits("/elsewhere"), 0);
+}
+
+#[tokio::test]
+async fn redirects_never_resend_a_non_replayable_request() {
+    let server = Server::http().await;
+    server.route("/charge", Route::Redirect(307, "/charge".into()));
+    server.route("/moved", Route::Redirect(308, "/target".into()));
+    server.route("/see-other", Route::Redirect(303, "/target".into()));
+    server.put("/target", Resource::new(body(KIB)));
+    let transport = transport(config_for(&server));
+    let submit = async |path, replay| {
+        let reference = transport.prepare(post(&server, path), replay).unwrap();
+        transport
+            .submit(reference, Duration::from_secs(5), READ_BUFFER)
+            .await
+    };
+
+    // T12: a method-preserving redirect would send the POST again, so it
+    // is not followed; the server saw it once and the outcome is unknown.
+    for replay in [
+        ReplayPolicy::NeverAutomaticallyReplay,
+        ReplayPolicy::AdapterControlled,
+    ] {
+        let err = submit("/charge", replay).await.unwrap_err();
+        assert!(
+            matches!(&err, BrokerError::Transport(e) if e.code == FailureCode::OperationAmbiguous),
+            "{replay:?}: {err:?}"
+        );
+    }
+    assert_eq!(server.hits("/charge"), 2);
+
+    // A 303 answers the POST with another resource to GET, which repeats
+    // nothing.
+    submit("/see-other", ReplayPolicy::NeverAutomaticallyReplay)
+        .await
+        .unwrap();
+    // A request that may be repeated follows a 308 with its body.
+    submit("/moved", ReplayPolicy::Idempotent).await.unwrap();
+    let log = server.log();
+    let target: Vec<_> = log.iter().filter(|r| r.path == "/target").collect();
+    assert_eq!(target.len(), 2);
+    assert_eq!(
+        (target[0].method.as_str(), &target[0].body[..]),
+        ("GET", &b""[..])
+    );
+    assert_eq!(
+        (target[1].method.as_str(), &target[1].body[..]),
+        ("POST", &b"link=abc"[..])
+    );
+}
+
+#[tokio::test]
+async fn a_lease_cannot_weaken_its_prepared_request() {
+    let server = Server::http().await;
+    server.put("/charge", Resource::new(body(KIB)));
+    let transport = transport(config_for(&server));
+    let reference = transport
+        .prepare(
+            post(&server, "/charge"),
+            ReplayPolicy::NeverAutomaticallyReplay,
+        )
+        .unwrap();
+    // A lease that claims the consumptive request is idempotent, or leaves
+    // it to the adapter, is refused before anything is sent.
+    for replay in [ReplayPolicy::Idempotent, ReplayPolicy::AdapterControlled] {
+        let transfer = lease(LeaseSource::PreparedRequest(reference), replay);
+        for purpose in [None, Some(RequestPurpose::Retry)] {
+            assert_eq!(
+                transport
+                    .open_lease(&transfer, &lease_request(purpose))
+                    .await
+                    .unwrap_err(),
+                BrokerError::PolicyMismatch {
+                    prepared: ReplayPolicy::NeverAutomaticallyReplay,
+                    lease: replay,
+                },
+                "{replay:?} {purpose:?}"
+            );
+        }
+    }
+    assert_eq!(server.hits("/charge"), 0);
+
+    // The matching lease sends it once and never again.
+    let transfer = lease(
+        LeaseSource::PreparedRequest(reference),
+        ReplayPolicy::NeverAutomaticallyReplay,
+    );
+    drop(
+        transport
+            .open_lease(&transfer, &lease_request(None))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        transport
+            .open_lease(&transfer, &lease_request(None))
+            .await
+            .unwrap_err(),
+        BrokerError::Refused(Replay::Reresolve)
+    );
+    assert_eq!(server.hits("/charge"), 1);
 }
 
 #[tokio::test]
