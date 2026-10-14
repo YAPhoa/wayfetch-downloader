@@ -7,6 +7,7 @@
 //! | `POST /v1/inputs` | [`Command::Submit`] |
 //! | `GET /v1/jobs` | [`Query::ListJobs`] |
 //! | `GET /v1/jobs/{id}` | [`Query::InspectJob`] |
+//! | `GET /v1/job-counts` | [`Query::CountJobs`] |
 //! | `POST /v1/jobs/{id}/commands` | [`Command::Pause`], [`Command::Resume`], [`Command::Cancel`] |
 //! | `GET /v1/events` | subscription, as server-sent events |
 //! | `GET /v1/ready` | readiness: lifecycle phase, a handshake, the host's check |
@@ -282,8 +283,40 @@ pub async fn list_jobs(
             PageSize::try_from(n)?
         }
     };
-    let stages = params
-        .stage
+    let query = Query::ListJobs {
+        filter: job_filter(params.stage.as_deref(), params.package.as_deref())?,
+        after: params.after.as_deref().map(job_id).transpose()?,
+        page_size,
+    };
+    Ok(Json(app.engine.query(query, &grant.0).await?))
+}
+
+/// The query string of `GET /v1/job-counts`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CountParams {
+    /// Comma-separated stages.
+    stage: Option<String>,
+    package: Option<String>,
+}
+
+/// How many jobs are in each stage.
+pub async fn count_jobs(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    params: Result<UrlQuery<CountParams>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult<QueryResult> {
+    let UrlQuery(params) =
+        params.map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid query string"))?;
+    let query = Query::CountJobs {
+        filter: job_filter(params.stage.as_deref(), params.package.as_deref())?,
+    };
+    Ok(Json(app.engine.query(query, &grant.0).await?))
+}
+
+/// The filter named by `stage` (comma-separated) and `package` parameters.
+fn job_filter(stage: Option<&str>, package: Option<&str>) -> Result<JobFilter, ApiError> {
+    let stages = stage
         .iter()
         .flat_map(|s| s.split(','))
         .map(|s| {
@@ -291,19 +324,13 @@ pub async fn list_jobs(
                 .map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "unknown stage"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let package = params
-        .package
+    let package = package
         .map(|p| {
-            PackageId::from_str(&p)
+            PackageId::from_str(p)
                 .map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid package"))
         })
         .transpose()?;
-    let query = Query::ListJobs {
-        filter: JobFilter { stages, package },
-        after: params.after.as_deref().map(job_id).transpose()?,
-        page_size,
-    };
-    Ok(Json(app.engine.query(query, &grant.0).await?))
+    Ok(JobFilter { stages, package })
 }
 
 /// One job.

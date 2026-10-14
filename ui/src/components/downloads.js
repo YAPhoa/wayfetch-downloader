@@ -14,10 +14,11 @@ import {
   explain,
   fileName,
   formatBytes,
+  groupCount,
   jobName,
   progress,
 } from '../client/jobs.js';
-import { h, show } from './dom.js';
+import { focusedKey, h, refocus, show } from './dom.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -294,6 +295,8 @@ export class Downloads {
       this.signedOut();
       return;
     }
+    // Parts are rebuilt below; keyboard focus stays on the same control.
+    const focused = focusedKey(this.element);
     this.status.dataset.status = feed.status;
     show(this.status, STATUS_LABELS[feed.status]);
     show(this.noticeLine, this.notice);
@@ -302,6 +305,7 @@ export class Downloads {
     this.renderList();
     this.renderActions();
     this.renderInspector();
+    refocus(this.element, focused);
   }
 
   renderBanner() {
@@ -486,22 +490,28 @@ export class Downloads {
   // State filters.
 
   renderFilters() {
+    const counts = this.feed.counts?.stages;
     show(
       this.filters,
       h('span', { class: 'filters-title' }, 'States'),
-      GROUPS.map((group) =>
-        h(
+      GROUPS.map((group) => {
+        const count = counts && groupCount(group, counts);
+        return h(
           'button',
           {
             type: 'button',
             class: 'filter',
+            'data-key': `filter-${group.key}`,
+            // Read as "Done (3)", not "Done3".
+            'aria-label': count === undefined ? null : `${group.label} (${count})`,
             'aria-pressed': String(group.key === this.group),
             onclick: () => this.filter(group.key),
           },
           dot(group.tone),
-          group.label,
-        ),
-      ),
+          h('span', { class: 'filter-label' }, group.label),
+          count !== undefined && h('span', { class: 'count' }, count),
+        );
+      }),
     );
   }
 
@@ -522,6 +532,7 @@ export class Downloads {
   buildTable() {
     const columns = [
       ['Name', 'name'],
+      ['Host', 'host'],
       ['State', 'state'],
       ['Progress', 'progress'],
       ['Size', 'num'],
@@ -575,9 +586,17 @@ export class Downloads {
     show(
       this.pager,
       this.earlier.length > 0 &&
-        h('button', { type: 'button', onclick: () => this.page('back') }, 'Previous page'),
+        h(
+          'button',
+          { type: 'button', 'data-key': 'page-back', onclick: () => this.page('back') },
+          'Previous page',
+        ),
       feed.nextAfter !== null &&
-        h('button', { type: 'button', onclick: () => this.page('next') }, 'Next page'),
+        h(
+          'button',
+          { type: 'button', 'data-key': 'page-next', onclick: () => this.page('next') },
+          'Next page',
+        ),
     );
 
     const rates = feed.jobs.flatMap((job) => feed.sample(job.id)?.bytes_per_second ?? []);
@@ -630,6 +649,7 @@ export class Downloads {
           'a',
           {
             href: path,
+            'data-key': `open-${job.id}`,
             'aria-current': selected ? 'true' : null,
             onclick: (/** @type {MouseEvent} */ event) => {
               if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
@@ -640,6 +660,7 @@ export class Downloads {
           name,
         ),
       ),
+      h('td', { class: 'host', title: job.original_host ?? null }, job.original_host ?? ''),
       h(
         'td',
         { class: `state tone-${state.tone}`, 'data-state': job.display },
@@ -708,6 +729,7 @@ export class Downloads {
           type: 'button',
           role: 'tab',
           id: `tab-${tab}`,
+          'data-key': `tab-${tab}`,
           'aria-selected': String(this.tab === tab),
           'aria-controls': 'inspector-panel',
           tabindex: this.tab === tab ? 0 : -1,
@@ -742,6 +764,7 @@ export class Downloads {
         {
           type: 'button',
           class: 'close',
+          'data-key': 'close-details',
           'aria-label': 'Close details',
           onclick: () => this.navigate('/'),
         },
@@ -804,6 +827,7 @@ export class Downloads {
         ['State', h('span', { class: `tone-${state.tone}` }, state.label)],
         ['Speed', shown.rate && [shown.rate, shown.left && `, ${shown.left} left`].join('')],
         ['File', file],
+        ['Host', job.original_host],
         ['Size', shown.size],
       ]),
       job.failure && h('p', { class: `note tone-${state.tone}` }, explain(job.failure)),

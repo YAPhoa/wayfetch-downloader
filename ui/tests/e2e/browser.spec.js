@@ -145,6 +145,8 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   fixture.release(TRICKY);
   await expectState(page, 'job-1', 'Done');
   await expect(row(page, 'job-1').locator('td.name')).toHaveText(TRICKY);
+  // The host of the link, not the link.
+  await expect(row(page, 'job-1').locator('td.host')).toHaveText('127.0.0.1');
   expect((await daemon.published(TRICKY)).equals(content(0, SIZE))).toBe(true);
 
   // Its details, also after a reload of its address.
@@ -158,12 +160,18 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await page.getByRole('button', { name: 'Close details' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/`);
 
-  // The state filters list only matching jobs.
-  await page.getByRole('button', { name: 'Done', exact: true }).click();
+  // The state filters list only matching jobs, with how many there are,
+  // and keep keyboard focus while the list reloads.
+  await expect(page.getByRole('button', { name: 'All (1)' })).toBeVisible();
+  const done = page.getByRole('button', { name: 'Done (1)' });
+  await done.focus();
+  await page.keyboard.press('Enter');
+  await expect(done).toHaveAttribute('aria-pressed', 'true');
   await expectState(page, 'job-1', 'Done');
-  await page.getByRole('button', { name: 'Active', exact: true }).click();
+  await expect(done).toBeFocused();
+  await page.getByRole('button', { name: 'Active (0)' }).click();
   await expect(page.getByText('No downloads in this state.')).toBeVisible();
-  await page.getByRole('button', { name: 'All', exact: true }).click();
+  await page.getByRole('button', { name: /^All \(/ }).click();
 
   // Cancel a second download mid-transfer.
   await add(page, fixture.put('second.bin', 10 * MIB, 9 * MIB));
@@ -172,6 +180,9 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await page.getByRole('button', { name: 'Cancel job-2' }).click();
   await expectState(page, 'job-2', 'Cancelled');
   await expect(page.getByRole('button', { name: 'Cancel job-2' })).toBeDisabled();
+  // The counts follow the change.
+  await expect(page.getByRole('button', { name: 'Cancelled (1)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'All (2)' })).toBeVisible();
 
   // Text from downloads stayed text.
   expect(await page.locator('img').count()).toBe(0);

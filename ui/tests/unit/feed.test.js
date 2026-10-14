@@ -46,6 +46,7 @@ class FakeClient {
     /** @type {WayfetchError | null} */
     this.refuse = null;
     this.pageReads = 0;
+    this.countReads = 0;
   }
 
   get live() {
@@ -88,6 +89,15 @@ class FakeClient {
     const found = this.jobs.get(id);
     if (!found) throw new WayfetchError('not_found', 'no such job');
     return { job: found, as_of: this.cursor() };
+  }
+
+  async countJobs() {
+    if (this.refuse) throw this.refuse;
+    this.countReads += 1;
+    /** @type {Record<string, number>} */
+    const stages = {};
+    for (const { stage } of this.jobs.values()) stages[stage] = (stages[stage] ?? 0) + 1;
+    return { stages, as_of: this.cursor() };
   }
 
   /** @returns {Promise<never>} */
@@ -157,13 +167,15 @@ const feeds = [];
 /**
  * @param {FakeClient} client
  * @param {number} [pageSize]
+ * @param {number} [countDelay]
  */
-async function started(client, pageSize = 2) {
+async function started(client, pageSize = 2, countDelay = 0) {
   const feed = new JobFeed(client, {
     pageSize,
     onChange: () => {},
     retryDelays: [0],
     refreshInterval: 1e9,
+    countDelay,
   });
   feeds.push(feed);
   feed.start();
@@ -434,4 +446,38 @@ test('a stage filter lists, adds, and drops jobs by stage', async () => {
   assert.deepEqual(feed.jobs.map((j) => j.id), ['job-4']);
   await feed.showStages(null);
   assert.deepEqual(feed.jobs.map((j) => j.id), ['job-1', 'job-2']);
+});
+
+test('counts come with the snapshot and follow job events, one read per burst', async () => {
+  const client = new FakeClient();
+  client.change('job_added', job(1));
+  client.change('job_added', job(2, { stage: 'transferring', display: 'transferring' }));
+  const feed = await started(client, 2, 50);
+  assert.deepEqual(feed.counts?.stages, { queued: 1, transferring: 1 });
+  assert.equal(feed.counts?.as_of.position, 2);
+  assert.equal(client.countReads, 1);
+
+  client.change('job_added', job(3));
+  client.change('job_changed', job(1, { stage: 'paused', display: 'paused', revision: 2 }));
+  client.change('job_added', job(4));
+  await settle();
+  assert.equal(client.countReads, 1);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(client.countReads, 2);
+  assert.deepEqual(feed.counts?.stages, { queued: 2, paused: 1, transferring: 1 });
+});
+
+test('counts are forgotten with the instance that answered them', async () => {
+  const client = new FakeClient();
+  client.change('job_added', job(1));
+  const feed = await started(client);
+  assert.deepEqual(feed.counts?.stages, { queued: 1 });
+
+  client.instance = 'instance-b';
+  client.jobs.clear();
+  client.head = 0;
+  for (const s of client.live) s.sink.item({ type: 'hello', ...client.helloSync() });
+  await settle();
+  assert.deepEqual(feed.counts?.stages, {});
+  assert.equal(feed.counts?.as_of.instance, 'instance-b');
 });

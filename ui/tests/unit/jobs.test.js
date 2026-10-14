@@ -8,6 +8,8 @@ import {
   fileName,
   formatBytes,
   formatDuration,
+  GROUPS,
+  groupCount,
   progress,
 } from '../../src/client/jobs.js';
 
@@ -91,4 +93,20 @@ test('states read as plain words with what went wrong', () => {
     'Waiting until 17:42',
   );
   assert.match(explain(expired), /Add the link again/);
+});
+
+test('each state filter counts the stages it shows', () => {
+  /** @type {Parameters<typeof groupCount>[1]} */
+  const counts = { queued: 4, transferring: 2, verifying: 1, waiting: 3, blocked: 1, complete: 9 };
+  const count = Object.fromEntries(GROUPS.map((group) => [group.key, groupCount(group, counts)]));
+  assert.deepEqual(count, {
+    all: 20,
+    active: 3,
+    waiting: 4,
+    paused: 0,
+    queued: 4,
+    failed: 0,
+    cancelled: 0,
+    done: 9,
+  });
 });

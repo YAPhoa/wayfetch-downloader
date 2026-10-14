@@ -1206,6 +1206,7 @@ A comparison with another download manager requires an independently recorded ru
 | `GET /v1/inputs/{id}` | Paginated discovery/checking results and mixed-status summary |
 | `POST /v1/staging/commit` | Confirm selected staged items; duplicates/conflicts reported |
 | `GET /v1/jobs` | Keyset pagination, stable filters/order, summary fields only |
+| `GET /v1/job-counts` | Jobs per stage under the same filters, with the `as_of` cursor; no job rows |
 | `POST /v1/jobs/{id}/commands` | Version-checked start/pause/cancel/retry/destination changes |
 | `GET /v1/packages` | Package summaries without loading all children |
 | `GET /v1/accounts` | Redacted capability/status data, no credential echo |

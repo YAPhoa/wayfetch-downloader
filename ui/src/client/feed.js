@@ -12,6 +12,9 @@
 //   feed with that status, so the shell can ask the user to sign in again.
 // - Progress samples are shown only for the current boot epoch and the
 //   job's current generation.
+// - Job counts per stage come with the snapshot and are read again after
+//   job events, at most one read at a time and one per `COUNT_DELAY`, so a
+//   burst of events costs one count.
 // - Durable progress moves at each checkpoint without an event, so while a
 //   held job is active, the held jobs are re-read now and then: one page
 //   query, never the whole queue. Live progress samples make this
@@ -27,6 +30,7 @@ import { WayfetchError, serves } from './contract.js';
  * @typedef {import('./contract.js').Hello} Hello
  * @typedef {import('./contract.js').JobId} JobId
  * @typedef {import('./contract.js').JobSummary} JobSummary
+ * @typedef {import('./contract.js').JobCounts} JobCounts
  * @typedef {import('./contract.js').JobStage} JobStage
  * @typedef {import('./contract.js').EventCursor} EventCursor
  * @typedef {import('./contract.js').StreamItem} StreamItem
@@ -45,6 +49,10 @@ const SNAPSHOT_ATTEMPTS = 3;
 
 /** How often held active jobs are re-read, in milliseconds. */
 export const REFRESH_INTERVAL = 3000;
+
+/** How long job events gather before the counts are read again, in
+ * milliseconds. */
+export const COUNT_DELAY = 1000;
 
 /** Stages whose durable progress can change without an event. */
 const ACTIVE = new Set(['resolving', 'transferring', 'verifying', 'publishing', 'recovering']);
@@ -72,6 +80,7 @@ export class JobFeed {
    *   onChange: () => void,
    *   retryDelays?: readonly number[],
    *   refreshInterval?: number,
+   *   countDelay?: number,
    * }} options
    */
   constructor(client, options) {
@@ -80,6 +89,7 @@ export class JobFeed {
     this.onChange = options.onChange;
     this.retryDelays = options.retryDelays ?? RETRY_DELAYS;
     this.refreshInterval = options.refreshInterval ?? REFRESH_INTERVAL;
+    this.countDelay = options.countDelay ?? COUNT_DELAY;
     /** @type {FeedStatus} */
     this.status = 'stopped';
     /** @type {Hello | null} */
@@ -110,6 +120,14 @@ export class JobFeed {
     this.detail = null;
     /** @type {Map<JobId, ProgressSample>} */
     this.samples = new Map();
+    /** Jobs per stage, once read. */
+    /** @type {JobCounts | null} */
+    this.counts = null;
+    /** Whether job events arrived since the counts were last read. */
+    this.countsStale = false;
+    this.counting = false;
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    this.countTimer = undefined;
     /** The last durable event applied, or the snapshot's position. */
     /** @type {EventCursor | null} */
     this.cursor = null;
@@ -167,6 +185,8 @@ export class JobFeed {
     this.run += 1;
     clearTimeout(this.timer);
     clearInterval(this.refresher);
+    clearTimeout(this.countTimer);
+    this.countTimer = undefined;
     this.subscription?.close();
     this.subscription = null;
     if (this.status !== 'unauthenticated' && this.status !== 'incompatible') {
@@ -312,6 +332,7 @@ export class JobFeed {
     this.detail = null;
     this.watchedState = 'loading';
     this.samples.clear();
+    this.counts = null;
     this.changed();
   }
 
@@ -345,6 +366,9 @@ export class JobFeed {
     }
     const detail = await this.loadDetail(run);
     if (run !== this.run || page === undefined) return;
+    // Read last, so the counts reflect at least what the cursor does.
+    await this.loadCounts(run);
+    if (run !== this.run) return;
     const instance = /** @type {Hello} */ (this.hello).instance;
     this.cursor = { instance, position: Math.min(page, detail ?? page) };
   }
@@ -411,6 +435,43 @@ export class JobFeed {
   }
 
   /**
+   * Reads the job counts, unless a later read already answered.
+   * @param {number} run
+   */
+  async loadCounts(run) {
+    const view = this.view;
+    const counts = await this.client.countJobs();
+    if (run !== this.run || !this.answers(view, counts.as_of)) return;
+    if (this.counts && counts.as_of.position < this.counts.as_of.position) return;
+    this.counts = counts;
+    this.changed();
+  }
+
+  /**
+   * Reads the counts again after job events: once the current read, if
+   * any, has answered and `countDelay` has passed.
+   * @param {number} run
+   */
+  recount(run) {
+    this.countsStale = true;
+    if (this.counting || this.countTimer !== undefined) return;
+    this.countTimer = setTimeout(async () => {
+      this.countTimer = undefined;
+      if (run !== this.run) return;
+      this.counting = true;
+      this.countsStale = false;
+      try {
+        await this.loadCounts(run);
+      } catch {
+        // The stream reports a lost server or session.
+      } finally {
+        this.counting = false;
+      }
+      if (this.countsStale && run === this.run) this.recount(run);
+    }, this.countDelay);
+  }
+
+  /**
    * Whether a snapshot at `asOf` misses events the stream already
    * delivered, which would never reach it.
    * @param {EventCursor} asOf
@@ -461,6 +522,7 @@ export class JobFeed {
         if (kind.type === 'job_added') this.added(kind.job, item.cursor.position);
         if (kind.type === 'job_added' || kind.type === 'job_changed') {
           this.hold(kind.job, item.cursor.position);
+          this.recount(run);
         }
         this.changed();
         return;

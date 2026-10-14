@@ -57,6 +57,8 @@ pub enum DesiredState {
     PartialEq,
     Eq,
     Hash,
+    PartialOrd,
+    Ord,
     strum::Display,
     strum::EnumString,
     strum::IntoStaticStr,

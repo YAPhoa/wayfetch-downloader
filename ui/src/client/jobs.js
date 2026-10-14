@@ -6,6 +6,7 @@
  * @typedef {import('./contract.js').JobStage} JobStage
  * @typedef {import('./contract.js').DisplayState} DisplayState
  * @typedef {import('./contract.js').ProgressSample} ProgressSample
+ * @typedef {import('./contract.js').JobCounts} JobCounts
  * @typedef {import('./generated/FailureCode.js').FailureCode} FailureCode
  * @typedef {import('./generated/FailureSummary.js').FailureSummary} FailureSummary
  *
@@ -160,6 +161,16 @@ export const GROUPS = Object.freeze([
   { key: 'cancelled', label: 'Cancelled', tone: 'calm', stages: stages('cancelled') },
   { key: 'done', label: 'Done', tone: 'ok', stages: stages('complete') },
 ]);
+
+/**
+ * How many jobs a state filter shows, from the counts per stage.
+ * @param {{ stages: readonly JobStage[] | null }} group
+ * @param {JobCounts['stages']} counts
+ */
+export function groupCount(group, counts) {
+  const stages = group.stages ?? /** @type {JobStage[]} */ (Object.keys(counts));
+  return stages.reduce((sum, stage) => sum + (counts[stage] ?? 0), 0);
+}
 
 /**
  * A job's state in plain words, such as "Waiting until 17:42" or

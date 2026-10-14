@@ -353,6 +353,20 @@ async fn the_complete_workflow_over_http() {
     );
     let (status, _) = client.get("/v1/jobs?stage=sleeping").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Jobs name the host of their link, never the link itself.
+    assert_eq!(page["items"][0]["original_host"], "127.0.0.1");
+
+    // Counts by stage, with the same filters.
+    let (status, counts) = client.get("/v1/job-counts").await;
+    assert_eq!(status, StatusCode::OK, "{counts}");
+    assert_eq!(counts["type"], "job_counts");
+    assert_eq!(counts["stages"], json!({"complete": 2, "cancelled": 1}));
+    let (_, counts) = client.get("/v1/job-counts?stage=cancelled,paused").await;
+    assert_eq!(counts["stages"], json!({"cancelled": 1}));
+    let (status, _) = client.get("/v1/job-counts?stage=sleeping").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = client.get("/v1/job-counts?after=job-1").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, error) = client.get("/v1/jobs/job-99").await;
     assert_eq!(
         (status, &error["code"]),

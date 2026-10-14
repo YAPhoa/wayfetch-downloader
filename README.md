@@ -140,6 +140,7 @@ is never printed.
 | `POST /v1/inputs` | Submit `{"idempotency_key", "target", "items": [URL...]}` |
 | `GET /v1/jobs` | A page of jobs: `after`, `page_size`, `stage=a,b`, `package` |
 | `GET /v1/jobs/{id}` | One job |
+| `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
 | `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel", "expected_revision"}` |
 | `GET /v1/events` | Server-sent events: `hello`, `event`, `progress`, `resync` |
 | `GET /v1/ready` | Readiness, without a token: `200 {"ready":true}`, or `503` with a `reason` |
@@ -314,8 +315,9 @@ wayfetchd run --state-dir /tmp/wf/state --download-root /tmp/wf/downloads \
 
 The layout is a dense download table for a desktop browser: a toolbar
 (add links, pause, resume, or cancel the selected job, filter by name),
-state filters on the left, details of the selected job below the table, and
-a status bar with the connection state and a compact or comfortable row
+state filters with job counts on the left, the table (each job's name, the
+host of its link, state, progress, size, speed, and time left), details of
+the selected job below the table, and a status bar with the connection state and a compact or comfortable row
 density. It follows the system's light or dark theme and uses the bundled
 IBM Plex Sans typeface (`ui/src/fonts/`, SIL Open Font License 1.1).
 

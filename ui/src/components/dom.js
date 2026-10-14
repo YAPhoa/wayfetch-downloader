@@ -67,3 +67,26 @@ export function fields(form) {
   }
   return values;
 }
+
+/**
+ * The `data-key` of the focused element inside `root`, so that focus can
+ * be put back after `root`'s content is rebuilt.
+ * @param {Element} root
+ * @returns {string | null}
+ */
+export function focusedKey(root) {
+  const active = document.activeElement;
+  return active instanceof HTMLElement && root.contains(active) ? (active.dataset.key ?? null) : null;
+}
+
+/**
+ * Focuses the element with `data-key` `key` inside `root`, unless focus is
+ * already on it.
+ * @param {Element} root
+ * @param {string | null} key
+ */
+export function refocus(root, key) {
+  if (key === null || focusedKey(root) === key) return;
+  const target = root.querySelector(`[data-key="${CSS.escape(key)}"]`);
+  if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+}

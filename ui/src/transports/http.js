@@ -104,6 +104,10 @@ export class HttpClient {
     return this.request('GET', `/v1/jobs/${encodeURIComponent(job)}`);
   }
 
+  countJobs() {
+    return this.request('GET', '/v1/job-counts');
+  }
+
   /** @param {{ idempotencyKey: string, target: string, items: string[] }} request */
   submit({ idempotencyKey, target, items }) {
     /** @type {SubmitRequest} */

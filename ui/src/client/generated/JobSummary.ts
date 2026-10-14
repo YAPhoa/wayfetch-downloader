@@ -4,6 +4,7 @@ import type { DesiredState } from "./DesiredState.js";
 import type { DisplayState } from "./DisplayState.js";
 import type { FailureSummary } from "./FailureSummary.js";
 import type { Generation } from "./Generation.js";
+import type { HostName } from "./HostName.js";
 import type { JobId } from "./JobId.js";
 import type { JobStage } from "./JobStage.js";
 import type { PackageId } from "./PackageId.js";
@@ -57,4 +58,10 @@ failure?: FailureSummary | null,
 /**
  * The published file, once the job is complete.
  */
-artifact?: ArtifactSummary | null, };
+artifact?: ArtifactSummary | null, 
+/**
+ * Host of the submitted link, which may differ from the provider that
+ * serves it. Never the whole link, which can carry a signed token.
+ * Added in protocol 0.2; absent from events recorded before it.
+ */
+original_host?: HostName | null, };

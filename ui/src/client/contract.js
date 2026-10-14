@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
+export const PROTOCOL = Object.freeze({ major: 0, minor: 2 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -24,6 +24,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
  * @typedef {import('./generated/DisplayState.js').DisplayState} DisplayState
  * @typedef {import('./generated/JobSummary.js').JobSummary} JobSummary
  * @typedef {import('./generated/Page.js').Page<JobSummary>} JobPage
+ * @typedef {import('./generated/JobCounts.js').JobCounts} JobCounts
  * @typedef {import('./generated/QueryResult.js').QueryResult} QueryResult
  * @typedef {Omit<Extract<QueryResult, { type: 'job' }>, 'type'>} JobSnapshot
  * @typedef {import('./generated/CommandResult.js').CommandResult} CommandResult
@@ -52,6 +53,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
  *     stages?: readonly JobStage[] | null,
  *   }) => Promise<JobPage>,
  *   inspectJob: (job: JobId) => Promise<JobSnapshot>,
+ *   countJobs: () => Promise<JobCounts>,
  *   submit: (request: { idempotencyKey: string, target: string, items: string[] }) => Promise<CommandResult>,
  *   jobCommand: (job: JobId, request: {
  *     idempotencyKey: string,

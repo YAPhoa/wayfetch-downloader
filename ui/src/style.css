@@ -342,6 +342,8 @@ code { font-family: ui-monospace, monospace; }
 }
 
 .filter .dot { color: var(--calm); }
+.filter .filter-label { flex: 1; }
+.filter .count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
 .filter[aria-pressed='true'] { background: var(--selected); font-weight: 600; }
 .filter[aria-pressed='true']:hover { background: var(--selected); }
 
@@ -387,6 +389,13 @@ table.jobs {
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 500;
+}
+
+.jobs td.host {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
 }
 
 .jobs td.name a { color: inherit; text-decoration: none; }

@@ -7,13 +7,14 @@
 //! so a client can subscribe from exactly that point without missing or
 //! double-applying changes.
 
+use std::collections::BTreeMap;
 use std::num::NonZeroU16;
 
 use serde::{Deserialize, Serialize};
 use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::id::{JobId, PackageId, RootId};
 use wayfetch_domain::job::{DesiredState, DisplayState, JobStage};
-use wayfetch_domain::name::DiagnosticText;
+use wayfetch_domain::name::{DiagnosticText, HostName};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{Generation, Revision};
 
@@ -110,6 +111,12 @@ pub enum Query {
         #[serde(default)]
         page_size: PageSize,
     },
+    /// How many jobs are in each stage. Added in protocol 0.2.
+    CountJobs {
+        /// Which jobs.
+        #[serde(default)]
+        filter: JobFilter,
+    },
 }
 
 impl Query {
@@ -163,6 +170,11 @@ pub struct JobSummary {
     /// The published file, once the job is complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<ArtifactSummary>,
+    /// Host of the submitted link, which may differ from the provider that
+    /// serves it. Never the whole link, which can carry a signed token.
+    /// Added in protocol 0.2; absent from events recorded before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_host: Option<HostName>,
 }
 
 /// A file a job published.
@@ -191,6 +203,17 @@ pub struct Page<T> {
     pub as_of: EventCursor,
 }
 
+/// The number of jobs in each stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct JobCounts {
+    /// Jobs per stage; stages with no jobs are absent.
+    pub stages: BTreeMap<JobStage, u64>,
+    /// The counts reflect every durable event up to and including this
+    /// cursor.
+    pub as_of: EventCursor,
+}
+
 /// A query's answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -205,6 +228,8 @@ pub enum QueryResult {
     },
     /// Answer to [`Query::ListJobs`].
     Jobs(Page<JobSummary>),
+    /// Answer to [`Query::CountJobs`].
+    JobCounts(JobCounts),
 }
 
 #[cfg(test)]
@@ -267,5 +292,50 @@ mod tests {
         assert!(
             from_value::<Query>(json!({"type": "list_jobs", "filter": {"sql": "1=1"}})).is_err()
         );
+        assert!(
+            from_value::<Query>(json!({"type": "count_jobs", "filter": {"stages": many}})).is_err()
+        );
+        assert!(from_value::<Query>(json!({"type": "count_jobs", "after": "job-1"})).is_err());
+    }
+
+    #[test]
+    fn counts_wire_form() {
+        let q: Query = from_value(json!({"type": "count_jobs"})).unwrap();
+        assert_eq!(
+            q,
+            Query::CountJobs {
+                filter: JobFilter::default()
+            }
+        );
+        let instance = crate::InstanceId::generate();
+        let counts = QueryResult::JobCounts(JobCounts {
+            stages: BTreeMap::from([(JobStage::Transferring, 2), (JobStage::Queued, 5)]),
+            as_of: EventCursor {
+                instance,
+                position: 9,
+            },
+        });
+        assert_eq!(
+            serde_json::to_value(&counts).unwrap(),
+            json!({
+                "type": "job_counts",
+                "stages": {"queued": 5, "transferring": 2},
+                "as_of": {"instance": instance, "position": 9},
+            })
+        );
+    }
+
+    #[test]
+    fn summaries_recorded_before_the_host_still_decode() {
+        let old = json!({
+            "id": "job-1", "package": "pkg-1", "stage": "queued", "desired": "running",
+            "display": "queued", "revision": 1, "generation": 1, "bytes_done": 0,
+        });
+        let job: JobSummary = from_value(old.clone()).unwrap();
+        assert_eq!(job.original_host, None);
+        let mut new = old;
+        new["original_host"] = json!("files.example");
+        let job: JobSummary = from_value(new).unwrap();
+        assert_eq!(job.original_host.unwrap().as_str(), "files.example");
     }
 }
