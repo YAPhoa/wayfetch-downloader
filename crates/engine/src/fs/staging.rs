@@ -101,14 +101,14 @@ impl Root {
     /// is derived from both and created exclusively, so no other generation
     /// can share its inode. The directory entry is synchronized before this
     /// returns, so a store record made afterwards never names a file a crash
-    /// could lose. A crash before the record commits leaves an unowned file
-    /// for a later cleanup; it is never adopted.
+    /// could lose. A crash before the record commits leaves an unowned file,
+    /// which is never adopted and which the next start removes.
     pub fn create_staging(
         &self,
         job: JobId,
         generation: Generation,
     ) -> Result<StagingFile, FsError> {
-        let name = format!("{job}.g{generation}.part");
+        let name = staging_name(job, generation);
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         let file = self
@@ -175,6 +175,65 @@ impl Root {
             record: record.clone(),
             file: file.into_std(),
         })
+    }
+}
+
+/// The name of the staging file of `job` at `generation`.
+fn staging_name(job: JobId, generation: Generation) -> String {
+    format!("{job}.g{generation}.part")
+}
+
+/// What removing a staging file found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removal {
+    /// The file was removed, and the removal is durable.
+    Removed,
+    /// Nothing has the name any more, durably.
+    Missing,
+    /// The name holds something other than the expected file, which was
+    /// left in place.
+    Foreign,
+}
+
+impl Root {
+    /// Removes the recorded staging file `record`, after checking that its
+    /// name still holds the very file that was created: a regular file
+    /// with the recorded identity. Anything else is left in place. Whether
+    /// this removed the name or found it already gone, perhaps removed by
+    /// a pass a crash interrupted before its directory sync, the directory
+    /// is synchronized before this returns, so a record deleted afterwards
+    /// never outlives a name a crash could bring back.
+    ///
+    /// Only a recorded identity proves the engine created a file. A file in
+    /// the staging directory that no record names (a crash between creating
+    /// and registering it) is never removed: its name alone does not prove
+    /// it is still the engine's file.
+    ///
+    /// The check and the removal are two steps; a file swapped in between
+    /// by something else with write access to the private staging
+    /// directory would be removed.
+    pub fn remove_staging(&self, record: &StagingRecord) -> Result<Removal, FsError> {
+        if record.root != self.id {
+            return Err(FsError::WrongRoot(record.root));
+        }
+        // Never follows a symlink: a link planted under the name is foreign.
+        let found = match self.staging.symlink_metadata(&record.name) {
+            Ok(meta) if !meta.is_file() || !sys::identity(&meta)?.matches(&record.identity) => {
+                return Ok(Removal::Foreign);
+            }
+            Ok(_) => {
+                crash_point!("cleanup-before-unlink");
+                match self.staging.remove_file(&record.name) {
+                    Ok(()) => Removal::Removed,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => Removal::Missing,
+                    Err(e) => return Err(FsError::io("remove staging file")(e)),
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Removal::Missing,
+            Err(e) => return Err(FsError::io("inspect staging file")(e)),
+        };
+        sys::sync_dir(&self.staging).map_err(FsError::io("sync staging directory"))?;
+        Ok(found)
     }
 }
 
@@ -283,5 +342,60 @@ pub(crate) mod tests {
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(outside.path(), &path).unwrap();
         assert!(root.reopen_staging(&record, 0).is_err());
+    }
+
+    #[test]
+    fn removal_takes_only_the_recorded_file() {
+        let (tmp, root) = root();
+        let staging = root.create_staging(job(), Generation::INITIAL).unwrap();
+        let record = staging.record().clone();
+        drop(staging);
+        let path = staging_path(tmp.path(), &record.name);
+
+        // Replaced by another file under the same name.
+        std::fs::write(path.with_extension("swap"), b"theirs").unwrap();
+        std::fs::rename(path.with_extension("swap"), &path).unwrap();
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Foreign);
+        assert_eq!(std::fs::read(&path).unwrap(), b"theirs");
+
+        // A directory under the name.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Foreign);
+        assert!(path.is_dir());
+        std::fs::remove_dir(&path).unwrap();
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Missing);
+
+        let staging = root
+            .create_staging(job(), Generation::INITIAL.next().unwrap())
+            .unwrap();
+        let record = staging.record().clone();
+        drop(staging);
+        let _ = crate::fs::sys::tests::take_synced();
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Removed);
+        assert!(!staging_path(tmp.path(), &record.name).exists());
+        // The removal was made durable.
+        assert_eq!(crate::fs::sys::tests::take_synced().len(), 1);
+        // Already gone, perhaps unlinked by a pass a crash stopped before
+        // its sync: the directory is synced before that is accepted.
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Missing);
+        assert_eq!(crate::fs::sys::tests::take_synced().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removal_never_follows_a_link() {
+        let (tmp, root) = root();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), b"outside").unwrap();
+        let staging = root.create_staging(job(), Generation::INITIAL).unwrap();
+        let record = staging.record().clone();
+        drop(staging);
+        let path = staging_path(tmp.path(), &record.name);
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &path).unwrap();
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Foreign);
+        assert!(path.is_symlink());
+        assert_eq!(std::fs::read(outside.path()).unwrap(), b"outside");
     }
 }

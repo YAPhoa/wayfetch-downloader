@@ -30,7 +30,11 @@
 //!   staging file's bytes, and the job's expected size.
 //! * [`Store::prune`]: events and idempotency records past retention.
 //! * [`Store::register_staging`] and [`Store::adopt_staging`]: which job
-//!   generation owns a staging file.
+//!   generation owns a staging file. Registering a newer generation's file,
+//!   and queueing a job under a new generation, mark the job's older files
+//!   abandoned in the same transaction.
+//! * [`Store::finish_staging_cleanup`]: what removing an abandoned staging
+//!   file found.
 //! * [`Store::begin_publication`], [`Store::complete_publication`] (with
 //!   the job's completion), and [`Store::abandon_publication`]: the
 //!   publication intent around the filesystem link.

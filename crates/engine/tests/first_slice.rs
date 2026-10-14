@@ -368,6 +368,8 @@ async fn a_resume_the_server_does_not_honor_restarts_from_zero() {
         // old bytes with new ones appended.
         assert_eq!(env.published(&format!("{name}.bin")), data, "{name}");
         assert_eq!(done.artifact.unwrap().size, data.len() as u64);
+        // The abandoned partial was removed before the new generation ran.
+        assert_eq!(env.staging_files(), 0, "{name}");
         shutdown(owner).await;
     }
 }
@@ -453,6 +455,12 @@ async fn pause_keeps_durable_bytes_and_cancel_retires_the_generation() {
     // The cancelled job stays cancelled and published nothing.
     assert_eq!(job(&owner, cancelled).await.stage, JobStage::Cancelled);
     assert!(!env.root.join("cancelled.bin").exists());
+    // Cancelling retains its partial (section 7.2), across a restart too.
+    assert_eq!(env.staging_files(), 1);
+    shutdown(owner).await;
+    let owner = env.start().await;
+    assert_eq!(job(&owner, cancelled).await.bytes_done, 12 * KIB as u64);
+    assert_eq!(env.staging_files(), 1);
     shutdown(owner).await;
 }
 

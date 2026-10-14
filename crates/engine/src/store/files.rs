@@ -6,13 +6,13 @@
 //! job generation owns which file, and what was intended when.
 
 use rusqlite::{OptionalExtension, Transaction, params};
-use wayfetch_domain::id::JobId;
+use wayfetch_domain::id::{JobId, RootId};
 use wayfetch_domain::job::{JobError, JobStage, Outcome};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{BootEpoch, Generation};
 
 use super::{Store, StoreError, jobs, key, progress, sql};
-use crate::fs::{FileIdentity, RelativePath, StagingRecord};
+use crate::fs::{FileIdentity, RelativePath, Removal, StagingRecord};
 use crate::transfer::lease::Representation;
 use crate::transfer::range::is_complete;
 
@@ -111,6 +111,24 @@ pub(super) fn staging(
     .transpose()
 }
 
+/// Marks the staging files of `job` from generations before `below` that a
+/// generation may still reopen as abandoned: none can any more. Called when
+/// a newer generation registers its own file, which is then the only one
+/// the job can continue, and when the job goes back to the queue under a
+/// new generation, which starts from zero (section 7.6).
+pub(super) fn abandon_staging(
+    tx: &Transaction<'_>,
+    job: JobId,
+    below: Generation,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE staging_files SET cleanup = 'pending' \
+         WHERE job_id = ?1 AND generation < ?2 AND cleanup IS NULL",
+        params![sql(job)?, sql(below)?],
+    )?;
+    Ok(())
+}
+
 /// Loads `id` and checks it is at `generation` in one of `stages`.
 fn job_at(
     tx: &Transaction<'_>,
@@ -167,12 +185,13 @@ impl Store {
                 now.unix_millis(),
             ],
         )?;
+        abandon_staging(&tx, file.job, file.generation)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// The newest staging file of `job`, which is what a restart or a
-    /// resumed job reopens.
+    /// The newest staging file of `job` that a generation may still
+    /// reopen, which is what a restart or a resumed job reopens.
     pub fn latest_staging(&mut self, job: JobId) -> Result<Option<Partial>, StoreError> {
         let tx = self.read()?;
         let Some((record, representation, suggested_name)) = tx
@@ -180,7 +199,8 @@ impl Store {
                 &format!(
                     "SELECT {STAGING_COLUMNS}, representation_known, representation_length, \
                      representation_etag, representation_modified, suggested_name, \
-                     representation_resource FROM staging_files WHERE job_id = ?1 ORDER BY generation DESC LIMIT 1"
+                     representation_resource FROM staging_files WHERE job_id = ?1 AND cleanup IS NULL \
+                     ORDER BY generation DESC LIMIT 1"
                 ),
                 [sql(job)?],
                 |row| {
@@ -307,7 +327,7 @@ impl Store {
         let (previous, created): (i64, i64) = tx
             .query_row(
                 "SELECT generation, boot_epoch FROM staging_files WHERE job_id = ?1 \
-                 ORDER BY generation DESC LIMIT 1",
+                 AND cleanup IS NULL ORDER BY generation DESC LIMIT 1",
                 [sql(job)?],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -494,6 +514,72 @@ impl Store {
             "DELETE FROM publications WHERE job_id = ?1 AND state = 'intended'",
             [sql(job)?],
         )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Staging files in `root` that no generation can reopen and cleanup
+    /// has not yet removed, at most `limit`. A file an unfinished
+    /// publication names is never among them.
+    pub fn abandoned_staging(
+        &mut self,
+        root: RootId,
+        limit: usize,
+    ) -> Result<Vec<StagingRecord>, StoreError> {
+        let tx = self.read()?;
+        let mut statement = tx.prepare(&format!(
+            "SELECT {STAGING_COLUMNS} FROM staging_files s \
+             WHERE root_id = ?1 AND cleanup = 'pending' AND NOT EXISTS ( \
+                 SELECT 1 FROM publications p WHERE p.state = 'intended' \
+                 AND p.root_id = s.root_id AND p.staging_name = s.name) \
+             ORDER BY job_id, generation LIMIT ?2"
+        ))?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let raw = statement
+            .query_map(params![sql(root)?, limit], read_staging)?
+            .collect::<Result<Vec<_>, _>>()?;
+        raw.into_iter().map(RawStaging::decode).collect()
+    }
+
+    /// Records what cleanup found for the abandoned staging file `record`.
+    /// A file that was removed or is gone takes its record and recorded
+    /// coverage with it; a name holding another file keeps the record,
+    /// marked so that cleanup leaves the name alone from now on.
+    pub fn finish_staging_cleanup(
+        &mut self,
+        record: &StagingRecord,
+        found: Removal,
+    ) -> Result<(), StoreError> {
+        let tx = self.write()?;
+        let key = params![
+            sql(record.job)?,
+            sql(record.generation)?,
+            sql(record.root)?,
+            record.name,
+            record.identity.device.cast_signed(),
+            record.identity.inode.cast_signed(),
+        ];
+        let matched = "job_id = ?1 AND generation = ?2 AND root_id = ?3 AND name = ?4 \
+             AND file_device = ?5 AND file_inode = ?6 AND cleanup = 'pending'";
+        let changed = match found {
+            Removal::Removed | Removal::Missing => {
+                tx.execute(&format!("DELETE FROM staging_files WHERE {matched}"), key)?
+            }
+            Removal::Foreign => tx.execute(
+                &format!("UPDATE staging_files SET cleanup = 'foreign' WHERE {matched}"),
+                key,
+            )?,
+        };
+        if changed != 1 {
+            return Err(StoreError::Staging("no abandoned staging file to clean up"));
+        }
+        if found != Removal::Foreign {
+            // Its ranges cascade.
+            tx.execute(
+                "DELETE FROM partials WHERE job_id = ?1 AND generation = ?2",
+                params![sql(record.job)?, sql(record.generation)?],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
