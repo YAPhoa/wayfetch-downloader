@@ -1,0 +1,9 @@
+# Only what `cargo build -p wayfetchd` reads is sent to the image build.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!apps/
+!crates/
+**/tests/
+**/target/
