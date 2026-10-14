@@ -14,14 +14,15 @@
 //! <token> read
 //! ```
 //!
-//! Only SHA-256 digests of the tokens are kept in memory and compared, so
-//! comparison time reveals nothing about a token, only about digests an
-//! attacker cannot steer. On Unix, a file other users can read or write is
-//! refused.
+//! Only SHA-256 digests of the tokens are kept in memory and compared. On
+//! Unix, a file other users can read or write is refused.
+//!
+//! When browser access is configured, a request without an
+//! `Authorization` header may instead present an owner session cookie;
+//! see [`crate::browser`].
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -30,10 +31,11 @@ use axum::extract::{Request, State};
 use axum::http::header;
 use axum::middleware::Next;
 use axum::response::Response;
-use sha2::{Digest, Sha256};
 use wayfetch_engine::protocol::Permission;
 
 use crate::error::ApiError;
+use crate::routes::AppState;
+use crate::secret::{self, ReadError};
 
 /// Largest token file accepted.
 const MAX_FILE_BYTES: u64 = 64 * 1024;
@@ -41,8 +43,6 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 const MIN_TOKEN_CHARS: usize = 32;
 /// Longest accepted token.
 const MAX_TOKEN_CHARS: usize = 256;
-/// Random bytes in a generated token.
-const GENERATED_TOKEN_BYTES: usize = 32;
 
 /// The permissions an authenticated request was granted.
 #[derive(Debug, Clone)]
@@ -91,19 +91,14 @@ pub struct Tokens {
 impl Tokens {
     /// Reads the token file at `path`.
     pub fn load(path: &Path) -> Result<Self, TokenFileError> {
-        let io_err = |source| TokenFileError::Io {
-            path: path.to_owned(),
-            source,
-        };
-        let file = File::open(path).map_err(io_err)?;
-        check_private(path, &file)?;
-        let mut text = String::new();
-        file.take(MAX_FILE_BYTES + 1)
-            .read_to_string(&mut text)
-            .map_err(io_err)?;
-        if text.len() as u64 > MAX_FILE_BYTES {
-            return Err(TokenFileError::TooLarge(path.to_owned()));
-        }
+        let text = secret::read_private(path, MAX_FILE_BYTES).map_err(|e| match e {
+            ReadError::Io(source) => TokenFileError::Io {
+                path: path.to_owned(),
+                source,
+            },
+            ReadError::Exposed => TokenFileError::Exposed(path.to_owned()),
+            ReadError::TooLarge => TokenFileError::TooLarge(path.to_owned()),
+        })?;
         Self::parse(&text).map_err(|e| match e {
             ParseError::Line(line, reason) => TokenFileError::Invalid {
                 path: path.to_owned(),
@@ -119,9 +114,9 @@ impl Tokens {
     /// Returns whether it was created. The token is never printed; the
     /// operator reads it from the file.
     pub fn load_or_create(path: &Path) -> Result<(Self, bool), TokenFileError> {
-        let created = match create_owner_only(path) {
+        let created = match secret::create_private(path) {
             Ok(mut file) => {
-                let token = generate_token().map_err(|source| TokenFileError::Io {
+                let token = secret::generate().map_err(|source| TokenFileError::Io {
                     path: path.to_owned(),
                     source,
                 })?;
@@ -179,7 +174,7 @@ impl Tokens {
                 }
             }
             if by_digest
-                .insert(digest(token), Arc::from(granted))
+                .insert(secret::digest(token), Arc::from(granted))
                 .is_some()
             {
                 return Err(invalid("token listed twice"));
@@ -193,7 +188,10 @@ impl Tokens {
 
     /// The permissions of `token`, if it is known.
     fn grant(&self, token: &str) -> Option<Grant> {
-        self.by_digest.get(&digest(token)).cloned().map(Grant)
+        self.by_digest
+            .get(&secret::digest(token))
+            .cloned()
+            .map(Grant)
     }
 }
 
@@ -203,69 +201,26 @@ enum ParseError {
     Empty,
 }
 
-fn digest(token: &str) -> [u8; 32] {
-    Sha256::digest(token.as_bytes()).into()
-}
-
-/// A random hex token.
-fn generate_token() -> io::Result<String> {
-    let mut bytes = [0; GENERATED_TOKEN_BYTES];
-    getrandom::fill(&mut bytes).map_err(io::Error::other)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-#[cfg(unix)]
-fn create_owner_only(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn create_owner_only(path: &Path) -> io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).open(path)
-}
-
-#[cfg(unix)]
-fn check_private(path: &Path, file: &File) -> Result<(), TokenFileError> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = file
-        .metadata()
-        .map_err(|source| TokenFileError::Io {
-            path: path.to_owned(),
-            source,
-        })?
-        .permissions()
-        .mode();
-    if mode & 0o077 != 0 {
-        return Err(TokenFileError::Exposed(path.to_owned()));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_private(_: &Path, _: &File) -> Result<(), TokenFileError> {
-    Ok(())
-}
-
-/// Middleware: admits a request only with a known bearer token, and
-/// attaches its [`Grant`].
+/// Middleware: admits a request with a known bearer token or, when
+/// browser access is configured, an owner session, and attaches its
+/// [`Grant`]. A request that sends an `Authorization` header is judged by
+/// that header alone.
 pub async fn authenticate(
-    State(tokens): State<Arc<Tokens>>,
+    State(app): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let grant = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-        .and_then(|(_, token)| tokens.grant(token.trim()))
-        .ok_or_else(ApiError::unauthenticated)?;
+    let grant = match (request.headers().get(header::AUTHORIZATION), &app.browser) {
+        (Some(value), _) => value
+            .to_str()
+            .ok()
+            .and_then(|value| value.split_once(' '))
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+            .and_then(|(_, token)| app.tokens.grant(token.trim()))
+            .ok_or_else(ApiError::unauthenticated)?,
+        (None, Some(browser)) => browser.authenticate(request.method(), request.headers())?,
+        (None, None) => return Err(ApiError::unauthenticated()),
+    };
     request.extensions_mut().insert(grant);
     Ok(next.run(request).await)
 }
@@ -318,7 +273,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let line = text.lines().find(|l| !l.starts_with('#')).unwrap();
         let (token, scopes) = line.split_once(' ').unwrap();
-        assert_eq!(token.len(), 2 * GENERATED_TOKEN_BYTES);
+        assert_eq!(token.len(), 2 * secret::SECRET_BYTES);
         assert_eq!(scopes, "read,submit,control");
         assert_eq!(created.grant(token).unwrap().0.len(), 3);
 

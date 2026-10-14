@@ -3,9 +3,11 @@
 //! pause, resume, and cancel workflow; authentication and scoped tokens;
 //! server-sent events that resume from `Last-Event-ID` or say to
 //! resynchronize; downloads that continue after every client disconnects;
-//! request and stream bounds; and graceful shutdown on SIGTERM or SIGINT
+//! request and stream bounds; graceful shutdown on SIGTERM or SIGINT
 //! with jobs kept for the next start and a single owner per state
-//! directory.
+//! directory; and browser access: owner setup with a setup secret,
+//! sign-in, sessions for commands and events, origin and CSRF checks,
+//! sign-out, restarts, and owner reset.
 //!
 //! Files that stall are large enough to cross a default 8 MiB checkpoint
 //! first, so there are durable bytes to observe and resume from.
@@ -42,12 +44,14 @@ const MAX_CONNECTIONS: usize = 64;
 /// The API's deadlines for request headers and for a body after them.
 const READ_DEADLINE: Duration = Duration::from_secs(10);
 
-/// A state directory, a download root, a token file, and the fixture's CA.
+/// A state directory, a download root, a token file, and the fixture's CA,
+/// and with browser access, an auth directory.
 struct Dirs {
     tmp: tempfile::TempDir,
     state: PathBuf,
     root: PathBuf,
     tokens: PathBuf,
+    browser: bool,
 }
 
 impl Dirs {
@@ -58,6 +62,7 @@ impl Dirs {
             state: tmp.path().join("state"),
             root: tmp.path().join("downloads"),
             tokens: tmp.path().join("tokens"),
+            browser: false,
             tmp,
         };
         std::fs::create_dir(&dirs.root).unwrap();
@@ -90,6 +95,11 @@ impl Dirs {
 
     fn ca(&self) -> PathBuf {
         self.tmp.path().join("ca.der")
+    }
+
+    /// The auth directory, for browser access over loopback HTTP.
+    fn auth(&self) -> PathBuf {
+        self.tmp.path().join("auth")
     }
 
     fn published(&self, name: &str) -> Vec<u8> {
@@ -146,6 +156,11 @@ impl Daemon {
     }
 
     fn command(dirs: &Dirs) -> Command {
+        Self::command_on(dirs, "127.0.0.1:0")
+    }
+
+    /// The command for a daemon listening on `listen`.
+    fn command_on(dirs: &Dirs, listen: &str) -> Command {
         let mut command = Command::new(BIN);
         command
             .arg("run")
@@ -155,9 +170,16 @@ impl Daemon {
             .arg(&dirs.root)
             .arg("--token-file")
             .arg(&dirs.tokens)
-            .args(["--listen", "127.0.0.1:0", "--json"])
+            .args(["--listen", listen, "--json"])
             .args(["--allow-network", "127.0.0.1/32", "--ca-cert"])
-            .arg(dirs.ca())
+            .arg(dirs.ca());
+        if dirs.browser {
+            command
+                .arg("--auth-dir")
+                .arg(dirs.auth())
+                .arg("--dev-insecure-loopback");
+        }
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -849,4 +871,292 @@ async fn a_stuck_readiness_check_neither_piles_up_nor_holds_up_exit() {
         "{:?}",
         started.elapsed()
     );
+}
+
+/// A browser of one daemon: sends its origin, its session cookie, and its
+/// CSRF token, as a same-origin page would.
+struct Browser {
+    client: Client,
+    origin: String,
+    cookie: Option<String>,
+    csrf: Option<String>,
+}
+
+impl Browser {
+    fn new(daemon: &Daemon) -> Self {
+        Self {
+            client: Client::new(&daemon.base, &daemon.instance, None),
+            origin: daemon.base.clone(),
+            cookie: None,
+            csrf: None,
+        }
+    }
+
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        let mut request = self
+            .client
+            .request(method, path)
+            .header("origin", &self.origin)
+            .header("sec-fetch-site", "same-origin");
+        if let Some(cookie) = &self.cookie {
+            request = request.header("cookie", cookie);
+        }
+        if let Some(csrf) = &self.csrf {
+            request = request.header("x-csrf-token", csrf);
+        }
+        request
+    }
+
+    async fn get(&self, path: &str) -> (StatusCode, Value) {
+        self.client
+            .send(self.request(reqwest::Method::GET, path))
+            .await
+    }
+
+    async fn post(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+        self.client
+            .send(self.request(reqwest::Method::POST, path).json(body))
+            .await
+    }
+
+    /// Posts sign-in or setup `body` to `path`; on success keeps the
+    /// session cookie and CSRF token.
+    async fn sign_in(&mut self, path: &str, body: &Value) -> (StatusCode, Value) {
+        let response = self
+            .request(reqwest::Method::POST, path)
+            .json(body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let set_cookie = response
+            .headers()
+            .get("set-cookie")
+            .map(|v| v.to_str().unwrap().to_owned());
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let result: Value = response.json().await.unwrap();
+        if status == StatusCode::OK {
+            let set_cookie = set_cookie.expect("a session cookie");
+            for attribute in ["HttpOnly", "SameSite=Strict", "Path=/"] {
+                assert!(set_cookie.contains(attribute), "{set_cookie}");
+            }
+            self.cookie = Some(set_cookie.split(';').next().unwrap().to_owned());
+            self.csrf = Some(result["csrf_token"].as_str().unwrap().to_owned());
+        }
+        (status, result)
+    }
+
+    /// The event stream, opened with the session.
+    async fn events(&self) -> Events {
+        let response = self
+            .request(reqwest::Method::GET, "/v1/events")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        Events(Box::pin(response.bytes_stream().eventsource()))
+    }
+}
+
+const PASSWORD: &str = "correct horse battery staple";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browsers_set_up_the_owner_sign_in_and_use_the_api() {
+    let server = Server::https().await;
+    let mut dirs = Dirs::ready(&server);
+    dirs.browser = true;
+    server.put("/a.bin", Resource::new(body(1024)));
+    let daemon = Daemon::start(&dirs).await;
+    let issued = daemon
+        .transcript
+        .iter()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .find(|v| v["type"] == "setup_secret_issued")
+        .expect("a setup secret");
+    assert_eq!(issued["valid_for_secs"], 15 * 60);
+    let secret_path = PathBuf::from(issued["path"].as_str().unwrap());
+    let secret = std::fs::read_to_string(&secret_path).unwrap();
+    let secret = secret.trim();
+
+    let mut browser = Browser::new(&daemon);
+    let (status, session) = browser.get("/v1/auth/session").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        session,
+        json!({"setup_required": true, "authenticated": false})
+    );
+    // Nothing else answers without credentials.
+    assert_eq!(browser.get("/v1/jobs").await.0, StatusCode::UNAUTHORIZED);
+
+    // Setup needs the right origin and secret; it works once.
+    let setup = json!({"setup_secret": secret, "username": "owner", "password": PASSWORD});
+    let mut evil = Browser::new(&daemon);
+    evil.origin = "https://evil.test".to_owned();
+    assert_eq!(
+        evil.sign_in("/v1/auth/setup", &setup).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let wrong = json!({"setup_secret": "0".repeat(64), "username": "owner", "password": PASSWORD});
+    assert_eq!(
+        browser.sign_in("/v1/auth/setup", &wrong).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, signed_in) = browser.sign_in("/v1/auth/setup", &setup).await;
+    assert_eq!(status, StatusCode::OK, "{signed_in}");
+    assert_eq!(signed_in["username"], "owner");
+    assert!(!secret_path.exists());
+
+    // The session reads, submits with its CSRF token, and streams events.
+    let (_, session) = browser.get("/v1/auth/session").await;
+    assert_eq!(session["authenticated"], true);
+    assert_eq!(session["csrf_token"], signed_in["csrf_token"]);
+    let mut events = browser.events().await;
+    events.until(|e, _| e.event == "hello").await;
+    let submit = browser
+        .client
+        .command(json!({"items": [server.url("/a.bin")]}));
+    let mut forged = Browser {
+        csrf: None,
+        ..Browser::new(&daemon)
+    };
+    forged.cookie.clone_from(&browser.cookie);
+    assert_eq!(
+        forged.post("/v1/inputs", &submit).await.0,
+        StatusCode::FORBIDDEN
+    );
+    forged.csrf.clone_from(&browser.csrf);
+    forged.origin = "https://evil.test".to_owned();
+    assert_eq!(
+        forged.post("/v1/inputs", &submit).await.0,
+        StatusCode::FORBIDDEN
+    );
+    // DNS rebinding: the right origin, but another name for the server.
+    let rebound = browser
+        .request(reqwest::Method::GET, "/v1/jobs")
+        .header("host", "evil.test");
+    assert_eq!(browser.client.send(rebound).await.0, StatusCode::FORBIDDEN);
+    let (status, result) = browser.post("/v1/inputs", &submit).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (status, page) = browser.get("/v1/jobs").await;
+    assert_eq!(status, StatusCode::OK);
+    let job = page["items"][0]["id"].as_str().unwrap().to_owned();
+    events.stage(&job, "complete").await;
+
+    // Bearer tokens work as before, cookies or not.
+    let owner = daemon.owner();
+    assert_eq!(owner.job(&job).await["stage"], "complete");
+    let reader = browser
+        .request(reqwest::Method::POST, "/v1/inputs")
+        .bearer_auth(READER_TOKEN)
+        .json(&submit);
+    assert_eq!(browser.client.send(reader).await.0, StatusCode::FORBIDDEN);
+
+    // Sign-out ends the session; failures say only that sign-in failed.
+    let (status, _) = browser.post("/v1/auth/logout", &json!({})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(browser.get("/v1/jobs").await.0, StatusCode::UNAUTHORIZED);
+    let mut other = Browser::new(&daemon);
+    let (status, wrong_password) = other
+        .sign_in(
+            "/v1/auth/login",
+            &json!({"username": "owner", "password": "not the password"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (_, wrong_name) = other
+        .sign_in(
+            "/v1/auth/login",
+            &json!({"username": "nobody", "password": PASSWORD}),
+        )
+        .await;
+    assert_eq!(wrong_password, wrong_name);
+    let login = json!({"username": "owner", "password": PASSWORD});
+    assert_eq!(
+        other.sign_in("/v1/auth/login", &login).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(other.get("/v1/jobs").await.0, StatusCode::OK);
+    // Five attempts a minute, setup included; even the right password
+    // waits after that.
+    let limited = Browser::new(&daemon)
+        .request(reqwest::Method::POST, "/v1/auth/login")
+        .json(&login)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(limited.headers().contains_key("retry-after"));
+
+    // A restart keeps the owner but ends every session.
+    daemon.stop("TERM").await;
+    let mut daemon = Daemon::start(&dirs).await;
+    assert!(
+        !daemon
+            .transcript
+            .iter()
+            .any(|l| l.contains("setup_secret_issued"))
+    );
+    other.client = Client::new(&daemon.base, &daemon.instance, None);
+    other.origin.clone_from(&daemon.base);
+    assert_eq!(other.get("/v1/jobs").await.0, StatusCode::UNAUTHORIZED);
+    let mut again = Browser::new(&daemon);
+    assert_eq!(
+        again.sign_in("/v1/auth/login", &login).await.0,
+        StatusCode::OK
+    );
+
+    // Recovery: reset the owner while stopped, and setup is offered again.
+    let reset = || {
+        std::process::Command::new(BIN)
+            .arg("reset-owner")
+            .arg("--auth-dir")
+            .arg(dirs.auth())
+            .output()
+            .unwrap()
+    };
+    let refused = reset();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("in use"));
+    daemon.signal("TERM");
+    let finished = daemon.finish().await;
+    assert!(finished.status.success(), "{}", finished.stderr);
+    let everything = format!("{:?}{}", finished.lines, finished.stderr);
+    assert!(!everything.contains(secret) && !everything.contains(PASSWORD));
+    assert!(reset().status.success());
+    daemon = Daemon::start(&dirs).await;
+    let (_, session) = Browser::new(&daemon).get("/v1/auth/session").await;
+    assert_eq!(session["setup_required"], true);
+    daemon.stop("TERM").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn insecure_browser_access_is_refused_beyond_loopback() {
+    let server = Server::https().await;
+    let dirs = Dirs::ready(&server);
+    for (listen, args, expected) in [
+        (
+            "0.0.0.0:0",
+            &["--dev-insecure-loopback"][..],
+            "needs a loopback listener",
+        ),
+        (
+            "127.0.0.1:0",
+            &["--browser-origin", "http://192.168.1.2:7878"][..],
+            "use HTTPS",
+        ),
+        ("127.0.0.1:0", &[][..], "at least one browser origin"),
+    ] {
+        let out = Daemon::command_on(&dirs, listen)
+            .arg("--auth-dir")
+            .arg(dirs.auth())
+            .args(args)
+            .output()
+            .await
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+    // Refused before anything was written.
+    assert!(!dirs.auth().exists());
 }

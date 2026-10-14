@@ -142,6 +142,7 @@ is never printed.
 | `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel", "expected_revision"}` |
 | `GET /v1/events` | Server-sent events: `hello`, `event`, `progress`, `resync` |
 | `GET /v1/ready` | Readiness, without a token: `200 {"ready":true}`, or `503` with a `reason` |
+| `GET /v1/auth/session`, `POST /v1/auth/{setup,login,logout}` | Browser sign-in; see [Browser access](#browser-access) |
 
 `target` is the instance from `/v1/capabilities` and `idempotency_key` a fresh
 UUID per logical command; a retry with the same key returns the first result.
@@ -166,6 +167,99 @@ example on a hung mount; one check runs at a time, and a stuck one never
 holds up shutdown). `wayfetchd ready [--address ADDR]` asks a running daemon and
 exits 0 only if it is ready; it starts no engine and reads no token, so it
 serves as a health check.
+
+### Browser access
+
+Browser sign-in is off unless you give `wayfetchd run` an auth directory and
+the origin browsers reach it under. Browsers need HTTPS, so the daemon sits
+behind a TLS reverse proxy and `--browser-origin` is the proxy's address:
+
+```sh
+wayfetchd run --state-dir /srv/wayfetch/state --download-root /srv/downloads \
+    --token-file /srv/wayfetch/api-tokens \
+    --auth-dir /srv/wayfetch/auth --browser-origin https://wayfetch.example.lan
+```
+
+`--auth-dir` holds the owner account, a setup secret, and a lock. It is
+created owner-only (`700`) if missing, and the daemon refuses it if other
+users can read it. `--browser-origin` is repeatable, takes a scheme, host,
+and optional port only, and must be `https://`.
+
+**Setup.** On a start with no owner account, the daemon writes a single-use
+setup secret to `AUTH_DIR/setup-secret` (mode `600`) and logs only the file's
+path. Within 15 minutes, open the origin, read the secret on the server
+(`sudo cat /srv/wayfetch/auth/setup-secret`), and enter it with the owner name
+and a password of at least 12 characters. That creates the local owner
+account and signs you in; the secret is then deleted. A wrong secret creates
+nothing; an expired one is refused and removed, and a restart writes a new
+one. Once an owner exists, further setups are refused (`409`), even
+concurrent ones or from a second process. The account file stores an
+Argon2id hash of the password, never the password.
+
+**Signing in.** `POST /v1/auth/login` with `{"username", "password"}` sets
+an opaque session cookie (`__Host-wayfetch-session`: `Secure`, `HttpOnly`,
+`SameSite=Strict`, host-only) and returns a `csrf_token`. Every failure
+answers only `authentication failed`. Sign-in and setup attempts share a
+limit of five a minute for the whole server, so excess attempts get `429`
+with `Retry-After` even with the right password; existing sessions and API
+tokens keep working meanwhile. `GET /v1/auth/session` tells a page whether
+setup is pending and, when signed in, the owner's name and the CSRF token.
+`POST /v1/auth/logout` ends the session.
+
+A signed-in browser can use every route above, including `/v1/events`, with
+all permissions. State-changing requests must send the session's CSRF token
+in `X-CSRF-Token`. Every cookie-authenticated request must carry a `Host`
+of a configured origin (which stops DNS rebinding), and an `Origin` header
+equal to one where one is sent, which every `POST` must; requests a browser
+marks `Sec-Fetch-Site: cross-site` or `same-site` are refused, and no CORS
+headers are ever sent. A request with an `Authorization` header is judged
+by its bearer token alone, exactly as before.
+
+**Sessions** live in memory only: a session ends after 12 hours unused, 7
+days after sign-in, on sign-out, or when the daemon restarts, which signs
+every browser out (the owner account stays). At most 32 sessions exist; a
+new one beyond that ends the least recently used.
+
+**Recovery.** If the owner password is lost, stop the daemon, remove the
+owner, and start again to get a new setup secret. Downloads, jobs, and API
+tokens are untouched. `reset-owner` is refused while a daemon uses the
+directory.
+
+```sh
+wayfetchd reset-owner --auth-dir /srv/wayfetch/auth
+```
+
+**Reverse proxy requirements.** The proxy terminates TLS for the origin and
+forwards to the daemon's loopback address. It must pass the original `Host`
+(or set it to the origin's host) and leave `Origin`, `Cookie`,
+`X-CSRF-Token`, and `Sec-Fetch-*` untouched; it must not add CORS headers;
+and it must not buffer `/v1/events` or time it out quickly. Caddy does all of
+this by default:
+
+```text
+wayfetch.example.lan {
+    reverse_proxy 127.0.0.1:7878
+}
+```
+
+With nginx, in the TLS `server` block:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:7878;
+    proxy_set_header Host $host;
+    proxy_http_version 1.1;
+    proxy_buffering off;          # server-sent events
+    proxy_read_timeout 1h;
+}
+```
+
+**Loopback development.** `--dev-insecure-loopback` allows sign-in over plain
+HTTP, with a cookie that lacks `Secure` (`wayfetch-session`), for
+development on the same machine. It is refused unless `--listen` is a
+loopback address and every origin is plain-HTTP loopback; without
+`--browser-origin`, the origins are the listener's address and `localhost`
+on its port. Never use it for a deployment.
 
 ## Running in a container
 
@@ -260,6 +354,28 @@ ssh -N -L 7878:127.0.0.1:7878 user@nas      # then use http://127.0.0.1:7878
 The API has no TLS of its own, so do not publish it on a LAN or public
 address directly; put an authenticated TLS reverse proxy in front of it for
 that.
+
+**Browser access** in the container works through such a proxy on the host,
+forwarding to the published loopback port (see the reverse proxy
+requirements above). Add the auth directory inside the token mount and the
+proxy's origin to the image's command, for example by overriding `command`
+in `compose.yaml`:
+
+```yaml
+    command: ["run", "--state-dir", "/state", "--download-root", "/downloads",
+              "--token-file", "/tokens/api-tokens", "--listen", "0.0.0.0:7878",
+              "--auth-dir", "/tokens/auth",
+              "--browser-origin", "https://wayfetch.example.lan"]
+```
+
+The setup secret is then `$WAYFETCH_TOKENS/auth/setup-secret` on the host,
+and owner reset runs with the container stopped:
+
+```sh
+docker compose -f deploy/compose.yaml stop
+docker compose -f deploy/compose.yaml run --rm wayfetchd reset-owner --auth-dir /tokens/auth
+docker compose -f deploy/compose.yaml start
+```
 
 ## Working on the project
 

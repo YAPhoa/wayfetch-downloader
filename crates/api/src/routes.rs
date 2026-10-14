@@ -43,13 +43,18 @@ use wayfetch_engine::protocol::{
 use wayfetch_engine::{EngineHandle, Readiness};
 
 use crate::ReadinessCheck;
-use crate::auth::Grant;
+use crate::auth::{Grant, Tokens};
+use crate::browser::BrowserAuth;
 use crate::error::ApiError;
 
 /// What every handler shares.
 #[derive(Clone)]
 pub struct AppState {
     pub engine: EngineHandle,
+    /// The bearer tokens admitted.
+    pub tokens: Arc<Tokens>,
+    /// Browser sign-in and sessions, if configured.
+    pub browser: Option<Arc<BrowserAuth>>,
     /// One permit per open event stream.
     pub streams: Arc<Semaphore>,
     /// Ends every event stream when the server shuts down.
@@ -396,7 +401,7 @@ fn job_id(text: &str) -> Result<JobId, ApiError> {
 /// A JSON request body, read within the body size limit and the body
 /// deadline. Without the deadline, a client that sends headers and then
 /// stalls its body would hold a connection for as long as it likes.
-pub struct JsonBody<T>(T);
+pub struct JsonBody<T>(pub T);
 
 impl<T: DeserializeOwned> FromRequest<AppState> for JsonBody<T> {
     type Rejection = ApiError;

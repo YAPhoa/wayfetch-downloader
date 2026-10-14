@@ -9,6 +9,11 @@
 //! or `SIGTERM` drains the API and shuts the engine down gracefully,
 //! keeping unfinished jobs for the next start.
 //!
+//! With `--auth-dir` and a browser origin, browsers sign in as the local
+//! owner, created on first start with a setup secret from an owner-only
+//! file; `wayfetchd reset-owner` removes the owner so the next start
+//! offers setup again.
+//!
 //! `wayfetchd ready` asks a running daemon whether it is ready, for a
 //! container health check: it starts no engine and reads no token.
 
@@ -21,7 +26,8 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use wayfetch_api::{Api, ApiLimits, Tokens};
+use url::Url;
+use wayfetch_api::{Api, ApiLimits, BrowserAuth, BrowserConfig, SetupIssued, Tokens};
 use wayfetch_engine::protocol::InstanceId;
 use wayfetch_engine::{ShutdownReport, ShutdownRequest};
 use wayfetch_host::{EngineArgs, InitRootArgs, Message, Printer, Signals, Terminal};
@@ -58,6 +64,48 @@ enum Command {
     /// For health checks: it starts no engine, takes no lock, and needs no
     /// token.
     Ready(ReadyArgs),
+    /// Remove the browser owner account, for example after a forgotten
+    /// password, so the next `run` writes a new setup secret.
+    ///
+    /// Refused while a daemon uses the auth directory. Downloads, jobs,
+    /// and API tokens are untouched.
+    ResetOwner(ResetOwnerArgs),
+}
+
+#[derive(Debug, Args)]
+struct ResetOwnerArgs {
+    /// The auth directory the daemon runs with.
+    #[arg(long, value_name = "DIR")]
+    auth_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct BrowserArgs {
+    /// Owner-only directory for the browser owner account and its setup
+    /// secret; created if missing. Browser sign-in needs it and a browser
+    /// origin.
+    #[arg(long, value_name = "DIR")]
+    auth_dir: Option<PathBuf>,
+    /// An origin browsers use to reach the daemon, such as
+    /// `https://wayfetch.example.lan`: the HTTPS reverse proxy's address,
+    /// which must pass the `Host` header through. Repeatable.
+    #[arg(long = "browser-origin", value_name = "URL", requires = "auth_dir")]
+    origins: Vec<Url>,
+    /// Development only: browser sign-in over plain HTTP on loopback, with
+    /// cookies that lack `Secure`. Needs a loopback `--listen`; the
+    /// origins default to its address and `localhost`.
+    #[arg(long, requires = "auth_dir")]
+    dev_insecure_loopback: bool,
+}
+
+impl BrowserArgs {
+    fn config(&self) -> Option<BrowserConfig> {
+        Some(BrowserConfig {
+            auth_dir: self.auth_dir.clone()?,
+            origins: self.origins.clone(),
+            insecure_loopback: self.dev_insecure_loopback,
+        })
+    }
 }
 
 #[derive(Debug, Args)]
@@ -80,6 +128,8 @@ struct RunArgs {
     /// every permission if missing.
     #[arg(long, value_name = "FILE")]
     token_file: PathBuf,
+    #[command(flatten)]
+    browser: BrowserArgs,
     /// Print one JSON object per line instead of text.
     #[arg(long)]
     json: bool,
@@ -91,6 +141,11 @@ struct RunArgs {
 enum Notice {
     /// A token file was created; the token is in it, never in output.
     TokenFileCreated { path: PathBuf },
+    /// A browser setup secret was written; the secret is in the file,
+    /// never in output.
+    SetupSecretIssued { path: PathBuf, valid_for_secs: u64 },
+    /// Browsers may sign in from these origins.
+    BrowserAccess { origins: Vec<String> },
     /// The API is being served.
     Listening {
         address: SocketAddr,
@@ -125,6 +180,18 @@ impl Message for Notice {
                 "created API token file {} with one token holding every permission",
                 path.display()
             ),
+            Self::SetupSecretIssued {
+                path,
+                valid_for_secs,
+            } => format!(
+                "no owner account yet: complete setup in the browser within {} minutes with \
+                 the setup secret in {}; restart for a new one",
+                valid_for_secs / 60,
+                path.display()
+            ),
+            Self::BrowserAccess { origins } => {
+                format!("browser sign-in from {}", origins.join(", "))
+            }
             Self::Listening { address, instance } => {
                 format!("wayfetchd serving http://{address}/v1 (instance {instance})")
             }
@@ -181,6 +248,16 @@ fn main() -> ExitCode {
         Command::Run(args) => {
             wayfetch_host::block_on(run(args, &terminal)).and_then(|result| result)
         }
+        Command::ResetOwner(args) => wayfetch_api::reset_owner(&args.auth_dir)
+            .map(|existed| {
+                terminal.line(if existed {
+                    "owner account removed; the next start writes a new setup secret".to_owned()
+                } else {
+                    "there was no owner account; the next start writes a setup secret".to_owned()
+                });
+                ExitCode::SUCCESS
+            })
+            .map_err(|e| e.to_string()),
     };
     let code = result.unwrap_or_else(|message| {
         terminal.fatal(&message);
@@ -212,6 +289,14 @@ async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
     let address = listener
         .local_addr()
         .map_err(|e| format!("cannot listen on {}: {e}", args.listen))?;
+    // Also before the engine: a bad origin or a busy auth directory
+    // leaves the state directory untouched.
+    let browser = args
+        .browser
+        .config()
+        .map(|config| BrowserAuth::open(&config, address))
+        .transpose()
+        .map_err(|e| e.to_string())?;
     let started = wayfetch_host::start_engine(&args.engine).await?;
     let instance = started.owner.identity().instance;
     if let Some(reason) = started.root_problem() {
@@ -221,13 +306,27 @@ async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
     if !address.ip().is_loopback() {
         print(&Notice::NotLoopback { address });
     }
+    if let Some((browser, issued)) = &browser {
+        if let Some(SetupIssued { path, valid_for }) = issued {
+            print(&Notice::SetupSecretIssued {
+                path: path.clone(),
+                valid_for_secs: valid_for.as_secs(),
+            });
+        }
+        print(&Notice::BrowserAccess {
+            origins: browser.origins().to_vec(),
+        });
+    }
     print(&Notice::Listening { address, instance });
 
     let owner = started.owner;
-    let api =
+    let mut api =
         Api::new(owner.handle(), tokens, ApiLimits::DEFAULT).readiness_check(Arc::new(move || {
             root_check().map_err(|_| "download_root_unavailable")
         }));
+    if let Some((browser, _)) = browser {
+        api = api.browser_access(browser);
+    }
     let connections_closed = api
         .serve(listener, async {
             signals.recv().await;
@@ -318,6 +417,34 @@ mod tests {
             panic!("not run");
         };
         assert!(args.listen.ip().is_loopback());
+    }
+
+    #[test]
+    fn browser_options_need_an_auth_directory() {
+        let run = [
+            "run",
+            "--state-dir",
+            "s",
+            "--download-root",
+            "d",
+            "--token-file",
+            "t",
+        ];
+        let parse =
+            |extra: &[&str]| Cli::try_parse_from(["wayfetchd"].iter().chain(&run).chain(extra));
+        assert!(parse(&["--browser-origin", "https://wayfetch.example.lan"]).is_err());
+        assert!(parse(&["--dev-insecure-loopback"]).is_err());
+        let Command::Run(args) = parse(&["--auth-dir", "a", "--dev-insecure-loopback"])
+            .unwrap()
+            .command
+        else {
+            panic!("not run");
+        };
+        assert!(args.browser.config().unwrap().insecure_loopback);
+        let Command::Run(args) = parse(&[]).unwrap().command else {
+            panic!("not run");
+        };
+        assert!(args.browser.config().is_none(), "browser access is opt-in");
     }
 
     #[test]
