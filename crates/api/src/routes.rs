@@ -7,6 +7,7 @@
 //! | `POST /v1/inputs` | [`Command::Submit`] |
 //! | `GET /v1/jobs` | [`Query::ListJobs`] |
 //! | `GET /v1/jobs/{id}` | [`Query::InspectJob`] |
+//! | `GET /v1/job-counts` | [`Query::CountJobs`] |
 //! | `POST /v1/jobs/{id}/commands` | [`Command::Pause`], [`Command::Resume`], [`Command::Cancel`] |
 //! | `GET /v1/events` | subscription, as server-sent events |
 //! | `GET /v1/ready` | readiness: lifecycle phase, a handshake, the host's check |
@@ -143,12 +144,14 @@ async fn checks(app: &AppState) -> Option<&'static str> {
 /// The body of `POST /v1/inputs`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SubmitRequest {
     idempotency_key: IdempotencyKey,
     target: InstanceId,
     /// Raw, so each URL is validated with its own error code and position.
     items: Vec<String>,
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
     package: Option<PackageId>,
 }
 
@@ -185,6 +188,7 @@ pub async fn submit(
 /// A job command's action.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Action {
     Pause,
     Resume,
@@ -194,6 +198,7 @@ pub enum Action {
 /// The body of `POST /v1/jobs/{id}/commands`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct JobCommandRequest {
     idempotency_key: IdempotencyKey,
     target: InstanceId,
@@ -278,8 +283,40 @@ pub async fn list_jobs(
             PageSize::try_from(n)?
         }
     };
-    let stages = params
-        .stage
+    let query = Query::ListJobs {
+        filter: job_filter(params.stage.as_deref(), params.package.as_deref())?,
+        after: params.after.as_deref().map(job_id).transpose()?,
+        page_size,
+    };
+    Ok(Json(app.engine.query(query, &grant.0).await?))
+}
+
+/// The query string of `GET /v1/job-counts`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CountParams {
+    /// Comma-separated stages.
+    stage: Option<String>,
+    package: Option<String>,
+}
+
+/// How many jobs are in each stage.
+pub async fn count_jobs(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    params: Result<UrlQuery<CountParams>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult<QueryResult> {
+    let UrlQuery(params) =
+        params.map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid query string"))?;
+    let query = Query::CountJobs {
+        filter: job_filter(params.stage.as_deref(), params.package.as_deref())?,
+    };
+    Ok(Json(app.engine.query(query, &grant.0).await?))
+}
+
+/// The filter named by `stage` (comma-separated) and `package` parameters.
+fn job_filter(stage: Option<&str>, package: Option<&str>) -> Result<JobFilter, ApiError> {
+    let stages = stage
         .iter()
         .flat_map(|s| s.split(','))
         .map(|s| {
@@ -287,19 +324,13 @@ pub async fn list_jobs(
                 .map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "unknown stage"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let package = params
-        .package
+    let package = package
         .map(|p| {
-            PackageId::from_str(&p)
+            PackageId::from_str(p)
                 .map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid package"))
         })
         .transpose()?;
-    let query = Query::ListJobs {
-        filter: JobFilter { stages, package },
-        after: params.after.as_deref().map(job_id).transpose()?,
-        page_size,
-    };
-    Ok(Json(app.engine.query(query, &grant.0).await?))
+    Ok(JobFilter { stages, package })
 }
 
 /// One job.

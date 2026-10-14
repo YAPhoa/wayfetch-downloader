@@ -28,6 +28,7 @@ macro_rules! validated_string {
             derive(serde::Serialize, serde::Deserialize),
             serde(try_from = "String", into = "String")
         )]
+        #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
         pub struct $name(String);
 
         impl $name {
@@ -192,6 +193,7 @@ pub const DIAGNOSTIC_MAX_LEN: usize = 512;
     derive(serde::Serialize, serde::Deserialize),
     serde(from = "String", into = "String")
 )]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DiagnosticText(String);
 
 impl DiagnosticText {

@@ -39,6 +39,7 @@ use crate::version::{CounterExhausted, Generation, Revision};
     derive(serde::Serialize, serde::Deserialize),
     serde(rename_all = "snake_case")
 )]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum DesiredState {
     /// Make progress whenever the job is eligible.
     Running,
@@ -56,6 +57,8 @@ pub enum DesiredState {
     PartialEq,
     Eq,
     Hash,
+    PartialOrd,
+    Ord,
     strum::Display,
     strum::EnumString,
     strum::IntoStaticStr,
@@ -67,6 +70,7 @@ pub enum DesiredState {
     derive(serde::Serialize, serde::Deserialize),
     serde(rename_all = "snake_case")
 )]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum JobStage {
     /// Eligible and waiting for scheduler admission.
     Queued,
@@ -172,8 +176,10 @@ impl JobStage {
     derive(serde::Serialize, serde::Deserialize),
     serde(try_from = "String", into = "&'static str")
 )]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename_all = "snake_case"))]
 pub enum DisplayState {
     /// The observed stage, with no pending stop request.
+    #[cfg_attr(feature = "ts", ts(untagged))]
     Stage(JobStage),
     /// A pause was accepted; work is still stopping.
     Pausing,

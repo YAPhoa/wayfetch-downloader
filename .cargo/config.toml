@@ -1,0 +1,8 @@
+# Where `cargo test --features ts` writes the TypeScript declarations of the
+# wire types (see "Developer commands" in README.md).
+[env]
+TS_RS_EXPORT_DIR = { value = "ui/src/client/generated", relative = true }
+# Engine integers fit in a JavaScript number, and JSON.parse yields numbers.
+TS_RS_LARGE_INT = "number"
+# The UI resolves modules the way Node and browsers do: with extensions.
+TS_RS_IMPORT_EXTENSION = "js"

@@ -1,7 +1,7 @@
 //! Store behavior across commands, staging, transitions, recovery,
 //! checkpoints, and publication.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use tempfile::TempDir;
 use wayfetch_domain::failure::{Failure, FailureCode, FailureScope};
@@ -436,6 +436,69 @@ fn job_pages_are_keyset_ordered_and_filtered() {
     );
     let beyond = list(&mut f, Some(JobId::from_u64(u64::MAX).unwrap()), vec![]);
     assert!(beyond.items.is_empty());
+}
+
+#[test]
+fn job_counts_follow_stages_and_filters() {
+    let mut f = Fixture::new();
+    let jobs: Vec<JobId> = (0..4).map(|_| f.job()).collect();
+    f.advance(jobs[1], JobStage::Resolving).unwrap();
+    f.advance(jobs[2], JobStage::Resolving).unwrap();
+
+    let count = |f: &mut Fixture, stages: Vec<JobStage>, package| {
+        let query = Query::CountJobs {
+            filter: JobFilter { stages, package },
+        };
+        match f.store.query(&query, f.instance).unwrap() {
+            QueryResult::JobCounts(counts) => counts,
+            other => panic!("{other:?}"),
+        }
+    };
+    let all = count(&mut f, vec![], None);
+    assert_eq!(
+        all.stages,
+        BTreeMap::from([(JobStage::Queued, 2), (JobStage::Resolving, 2)])
+    );
+    let tx = f.store.read().unwrap();
+    assert_eq!(all.as_of.position, outbox::head(&tx).unwrap());
+    drop(tx);
+
+    let resolving = count(&mut f, vec![JobStage::Resolving, JobStage::Paused], None);
+    assert_eq!(resolving.stages, BTreeMap::from([(JobStage::Resolving, 2)]));
+
+    let package = f.summary(jobs[1]).package;
+    let in_package = jobs
+        .iter()
+        .filter(|&&job| f.summary(job).package == package)
+        .count();
+    let packaged = count(&mut f, vec![], Some(package));
+    assert_eq!(packaged.stages.values().sum::<u64>(), in_package as u64);
+    let nowhere = count(&mut f, vec![], PackageId::from_u64(u64::MAX));
+    assert!(nowhere.stages.is_empty());
+}
+
+#[test]
+fn summaries_name_the_submitted_host() {
+    let mut f = Fixture::new();
+    f.submit(&[
+        "https://Files.Example/a.bin?token=secret",
+        "http://[2001:DB8::1]:8080/b.bin",
+    ]);
+    let jobs = f.store.stage_pending(10, NOW).unwrap();
+    let hosts: Vec<String> = jobs
+        .iter()
+        .map(|&job| f.summary(job).original_host.unwrap().to_string())
+        .collect();
+    assert_eq!(hosts, ["files.example", "[2001:db8::1]"]);
+    let added: Vec<String> = f
+        .events()
+        .into_iter()
+        .filter_map(|kind| match kind {
+            EventKind::JobAdded { job } => Some(job.original_host.unwrap().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(added, hosts);
 }
 
 /// Moves a fresh job to transferring with a registered staging file.

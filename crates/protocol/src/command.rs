@@ -35,6 +35,7 @@ pub const MAX_URL_BYTES: usize = 8192;
 /// UUID, so clients can generate one without coordination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct IdempotencyKey(Uuid);
 
 impl IdempotencyKey {
@@ -275,6 +276,7 @@ impl CommandFingerprint {
 /// retried envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum CommandResult {
     /// A batch was accepted.
     Submitted {
