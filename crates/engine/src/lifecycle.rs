@@ -53,6 +53,9 @@ pub enum Readiness {
     ShuttingDown,
     /// All engine tasks finished.
     Stopped,
+    /// An engine task failed. The remaining work was cancelled and requests
+    /// are refused; the host should shut the engine down and report it.
+    Failed,
 }
 
 /// Why an engine could not start.
@@ -127,9 +130,17 @@ impl EngineBuilder {
             inbox,
             cancel: owner.cancel.clone(),
             store: Some(store),
+            lock: owner.state_dir.clone(),
         };
         owner.spawn(coordinator.run());
-        owner.readiness.send_replace(Readiness::Ready);
+        // Unless a task already failed.
+        owner.readiness.send_if_modified(|r| {
+            let starting = *r == Readiness::Starting;
+            if starting {
+                *r = Readiness::Ready;
+            }
+            starting
+        });
         Ok(owner)
     }
 }
@@ -191,7 +202,8 @@ impl EngineOwner {
 
     /// Spawns an engine task. The task keeps the state directory locked
     /// until it ends, and must stop promptly once the engine's cancellation
-    /// token fires. A panic is counted and makes shutdown unclean.
+    /// token fires. Engine tasks are critical: a panic is counted, marks the
+    /// engine [`Readiness::Failed`], and cancels the remaining work.
     pub(crate) fn spawn<F>(&self, task: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -202,10 +214,20 @@ impl EngineOwner {
             task.await;
         });
         let failed = Arc::clone(&self.failed_tasks);
+        let readiness = self.readiness.clone();
+        let cancel = self.cancel.clone();
         self.tasks.spawn_on(
             async move {
                 if work.await.is_err() {
                     failed.fetch_add(1, Ordering::Relaxed);
+                    readiness.send_if_modified(|r| {
+                        let running = matches!(*r, Readiness::Starting | Readiness::Ready);
+                        if running {
+                            *r = Readiness::Failed;
+                        }
+                        running
+                    });
+                    cancel.cancel();
                 }
             },
             &self.runtime,
@@ -218,7 +240,10 @@ impl EngineOwner {
     pub async fn shutdown(mut self, request: ShutdownRequest) -> ShutdownReport {
         let started = Instant::now();
         let timeout = request.timeout.unwrap_or(self.config.shutdown_timeout);
-        self.readiness.send_replace(Readiness::ShuttingDown);
+        let failed = *self.readiness.borrow() == Readiness::Failed;
+        if !failed {
+            self.readiness.send_replace(Readiness::ShuttingDown);
+        }
         self.cancel.cancel();
         self.tasks.close();
         let finished = tokio::time::timeout(timeout, self.tasks.wait())
@@ -228,7 +253,8 @@ impl EngineOwner {
             .state_dir
             .take()
             .is_some_and(|dir| Arc::try_unwrap(dir).is_ok());
-        if finished {
+        // A failed engine stays failed, so the host can still see why.
+        if finished && *self.readiness.borrow() != Readiness::Failed {
             self.readiness.send_replace(Readiness::Stopped);
         }
         let failed_tasks = self.failed_tasks.load(Ordering::Relaxed);
@@ -263,6 +289,9 @@ enum Request {
         oneshot::Sender<Result<CommandResult, ProtocolError>>,
     ),
     Query(Query, oneshot::Sender<Result<QueryResult, ProtocolError>>),
+    /// Runs arbitrary store work, for fault-injection tests.
+    #[cfg(test)]
+    Run(Box<dyn FnOnce(&mut Store) + Send>, oneshot::Sender<()>),
 }
 
 /// Cloneable, bounded request facade. Carries no database or filesystem
@@ -373,6 +402,8 @@ struct Coordinator {
     inbox: mpsc::Receiver<Request>,
     cancel: CancellationToken,
     store: Option<Store>,
+    /// The state-directory lock, held by blocking database work too.
+    lock: Option<Arc<StateDir>>,
 }
 
 impl Coordinator {
@@ -424,23 +455,39 @@ impl Coordinator {
                     .await;
                 let _ = reply.send(result);
             }
+            #[cfg(test)]
+            Request::Run(work, reply) => {
+                self.with_store(work).await;
+                let _ = reply.send(());
+            }
         }
     }
 
     /// Runs blocking database work off the async workers. Requests are
     /// handled one at a time, so the store is never shared.
+    ///
+    /// The blocking work holds the state-directory lock until the database
+    /// connection is back or dropped. If the engine is abandoned at a
+    /// shutdown deadline and the runtime then shuts down, the coordinator
+    /// is dropped but this thread may still be committing; another engine
+    /// must not open the directory until it ends.
     async fn with_store<R: Send + 'static>(
         &mut self,
         work: impl FnOnce(&mut Store) -> R + Send + 'static,
     ) -> R {
-        let mut store = self.store.take().expect("the coordinator owns the store");
+        let store = self.store.take().expect("the coordinator owns the store");
+        let lock = self.lock.clone();
         let joined = tokio::task::spawn_blocking(move || {
+            // Declared first so that, on success or unwind, the connection
+            // is dropped before the lock.
+            let lock = lock;
+            let mut store = store;
             let out = work(&mut store);
-            (store, out)
+            (store, out, lock)
         })
         .await;
         match joined {
-            Ok((store, out)) => {
+            Ok((store, out, _lock)) => {
                 self.store = Some(store);
                 out
             }
@@ -524,6 +571,88 @@ mod tests {
         assert!(report.state_dir_released);
         let restarted = start(dir.path()).await.unwrap();
         assert!(restarted.shutdown(ShutdownRequest::default()).await.clean);
+    }
+
+    /// Sends store work straight to the coordinator.
+    fn run_on_store(
+        handle: &EngineHandle,
+        work: impl FnOnce(&mut Store) + Send + 'static,
+    ) -> oneshot::Receiver<()> {
+        let (reply, done) = oneshot::channel();
+        handle.send(Request::Run(Box::new(work), reply)).unwrap();
+        done
+    }
+
+    #[test]
+    fn blocking_store_work_keeps_the_lock_after_the_runtime_shuts_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_owned();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (entered, in_store) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let report = runtime.block_on(async {
+            let owner = start(&path).await.unwrap();
+            let _done = run_on_store(&owner.handle(), move |store| {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+                // Still writing after its engine was abandoned.
+                store.stage_pending(1, now()).unwrap();
+            });
+            in_store.recv().unwrap();
+            owner
+                .shutdown(ShutdownRequest {
+                    timeout: Some(Duration::from_millis(50)),
+                })
+                .await
+        });
+        assert!(!report.clean);
+        assert!(!report.state_dir_released);
+        // Dropping the runtime drops the coordinator, not the blocked thread.
+        runtime.shutdown_timeout(Duration::from_millis(100));
+        assert!(matches!(
+            StateDir::open(&path),
+            Err(StateDirError::Locked(_))
+        ));
+        release.send(()).unwrap();
+        let mut reopened = None;
+        for _ in 0..200 {
+            if let Ok(dir) = StateDir::open(&path) {
+                reopened = Some(dir);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reopened.is_some(), "lock released once the work ended");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn storage_panic_fails_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = start(dir.path()).await.unwrap();
+        let handle = owner.handle();
+        let done = run_on_store(&handle, |_| panic!("injected storage fault"));
+        // The coordinator died without answering.
+        assert!(done.await.is_err());
+        let mut readiness = handle.readiness.clone();
+        let failed = readiness.wait_for(|r| *r == Readiness::Failed);
+        tokio::time::timeout(Duration::from_secs(5), failed)
+            .await
+            .expect("engine marked failed")
+            .unwrap();
+        assert!(!handle.wait_until_ready().await);
+        assert_eq!(
+            handle.hello().await.unwrap_err().code,
+            ErrorCode::ShuttingDown
+        );
+        let report = owner.shutdown(ShutdownRequest::default()).await;
+        assert!(!report.clean);
+        assert_eq!(report.failed_tasks, 1);
+        assert_eq!(report.unfinished_tasks, 0);
+        assert!(report.state_dir_released);
+        assert_eq!(handle.readiness(), Readiness::Failed);
     }
 
     #[tokio::test]
