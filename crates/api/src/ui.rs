@@ -37,11 +37,11 @@ const PLACEHOLDER: &str = "{{assets}}";
 /// Where assets are served.
 const ASSETS: &str = "/assets";
 
-/// Policies of every UI response. Scripts, styles, images, and requests
-/// stay on this origin; nothing may frame the page; and the DOM refuses
-/// to parse strings as HTML.
+/// Policies of every UI response. Scripts, styles, images, fonts, and
+/// requests stay on this origin; nothing may frame the page; and the DOM
+/// refuses to parse strings as HTML.
 const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; \
-    style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; \
+    style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; \
     form-action 'none'; frame-ancestors 'none'; \
     require-trusted-types-for 'script'; trusted-types 'none'";
 

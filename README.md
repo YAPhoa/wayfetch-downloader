@@ -312,6 +312,13 @@ wayfetchd run --state-dir /tmp/wf/state --download-root /tmp/wf/downloads \
 # open http://127.0.0.1:7878 and enter the secret from /tmp/wf/auth/setup-secret
 ```
 
+The layout is a dense download table for a desktop browser: a toolbar
+(add links, pause, resume, or cancel the selected job, filter by name),
+state filters on the left, details of the selected job below the table, and
+a status bar with the connection state and a compact or comfortable row
+density. It follows the system's light or dark theme and uses the bundled
+IBM Plex Sans typeface (`ui/src/fonts/`, SIL Open Font License 1.1).
+
 The UI adds direct links (one per line), lists jobs a page of 50 at a time in
 the order they were added, shows one job at `/jobs/job-N`, and pauses,
 resumes, or cancels them. It follows the event stream and reconnects on its
@@ -324,10 +331,10 @@ daemon restart, which signs every browser out) the page says so and asks to
 sign in again; downloads keep running meanwhile.
 
 Names and messages from downloads are always shown as text. The page's
-Content Security Policy allows scripts, styles, and requests only from its
+Content Security Policy allows scripts, styles, fonts, and requests only from its
 own origin, forbids framing, and enables Trusted Types, so the browser
 refuses to parse any string as HTML. The page is revalidated on every load,
-and its scripts and styles are served below `/assets/VERSION/`, where
+and its scripts, styles, and fonts are served below `/assets/VERSION/`, where
 `VERSION` is a digest of the bundle, and cached for good.
 
 ## Running in a container

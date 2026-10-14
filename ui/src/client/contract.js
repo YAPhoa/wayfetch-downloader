@@ -46,7 +46,11 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
  * `WayfetchError`.
  * @typedef {{
  *   hello: () => Promise<Hello>,
- *   listJobs: (request: { after?: JobId | null, pageSize: number }) => Promise<JobPage>,
+ *   listJobs: (request: {
+ *     after?: JobId | null,
+ *     pageSize: number,
+ *     stages?: readonly JobStage[] | null,
+ *   }) => Promise<JobPage>,
  *   inspectJob: (job: JobId) => Promise<JobSnapshot>,
  *   submit: (request: { idempotencyKey: string, target: string, items: string[] }) => Promise<CommandResult>,
  *   jobCommand: (job: JobId, request: {

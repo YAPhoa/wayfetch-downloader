@@ -67,12 +67,14 @@ class FakeClient {
     };
   }
 
-  /** @param {{ after?: string | null, pageSize: number }} request */
-  async listJobs({ after, pageSize }) {
+  /** @param {{ after?: string | null, pageSize: number, stages?: readonly string[] | null }} request */
+  async listJobs({ after, pageSize, stages }) {
     if (this.refuse) throw this.refuse;
     this.pageReads += 1;
     const start = after ? Number(after.slice(4)) : 0;
-    const all = [...this.jobs.values()].filter((j) => Number(j.id.slice(4)) > start);
+    const all = [...this.jobs.values()].filter(
+      (j) => Number(j.id.slice(4)) > start && (!stages || stages.includes(j.stage)),
+    );
     const items = all.slice(0, pageSize);
     return {
       items,
@@ -415,5 +417,21 @@ test('of two reads of the same page, the later one stands', async () => {
   await feed.showPage(null);
   release();
   await first;
+  assert.deepEqual(feed.jobs.map((j) => j.id), ['job-1', 'job-2']);
+});
+
+test('a stage filter lists, adds, and drops jobs by stage', async () => {
+  const client = new FakeClient();
+  client.change('job_added', job(1, { stage: 'paused' }));
+  client.change('job_added', job(2));
+  const feed = await started(client);
+  await feed.showStages(['queued']);
+  assert.deepEqual(feed.jobs.map((j) => j.id), ['job-2']);
+  client.change('job_added', job(3, { stage: 'paused' }));
+  client.change('job_added', job(4));
+  assert.deepEqual(feed.jobs.map((j) => j.id), ['job-2', 'job-4']);
+  client.change('job_changed', job(2, { stage: 'transferring', revision: 2 }));
+  assert.deepEqual(feed.jobs.map((j) => j.id), ['job-4']);
+  await feed.showStages(null);
   assert.deepEqual(feed.jobs.map((j) => j.id), ['job-1', 'job-2']);
 });

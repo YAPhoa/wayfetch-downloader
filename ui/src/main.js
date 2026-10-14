@@ -89,14 +89,12 @@ class BrowserShell {
   /** @param {SessionStatus} status */
   open(status) {
     this.downloads?.stop();
-    const downloads = new Downloads(this.client, { onSignedOut: () => this.signedOut() });
-    this.downloads = downloads;
     const signOutError = h('span', { class: 'message error', role: 'alert' });
     const signOut = h(
       'button',
       {
         type: 'button',
-        class: 'secondary',
+        class: 'link',
         onclick: async (/** @type {MouseEvent} */ event) => {
           const button = /** @type {HTMLButtonElement} */ (event.currentTarget);
           button.disabled = true;
@@ -120,19 +118,16 @@ class BrowserShell {
       },
       'Sign out',
     );
-    show(
-      this.root,
-      h(
-        'header',
-        null,
-        h('strong', { class: 'brand' }, 'Wayfetch'),
-        downloads.status,
-        h('span', { class: 'user' }, status.username ?? ''),
-        signOutError,
-        signOut,
-      ),
-      downloads.element,
+    const account = h(
+      'span',
+      { class: 'account' },
+      signOutError,
+      status.username && h('span', { class: 'user' }, `Signed in as ${status.username}`),
+      signOut,
     );
+    const downloads = new Downloads(this.client, { onSignedOut: () => this.signedOut(), account });
+    this.downloads = downloads;
+    show(this.root, downloads.element);
     downloads.start();
   }
 }

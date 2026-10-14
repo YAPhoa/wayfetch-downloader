@@ -27,6 +27,7 @@ import { WayfetchError, serves } from './contract.js';
  * @typedef {import('./contract.js').Hello} Hello
  * @typedef {import('./contract.js').JobId} JobId
  * @typedef {import('./contract.js').JobSummary} JobSummary
+ * @typedef {import('./contract.js').JobStage} JobStage
  * @typedef {import('./contract.js').EventCursor} EventCursor
  * @typedef {import('./contract.js').StreamItem} StreamItem
  * @typedef {import('./contract.js').ProgressSample} ProgressSample
@@ -86,6 +87,9 @@ export class JobFeed {
     /** Where the current page starts: after this job, or at the first. */
     /** @type {JobId | null} */
     this.pageAfter = null;
+    /** The stages the list shows, or null for every stage. */
+    /** @type {readonly JobStage[] | null} */
+    this.stages = null;
     /** The current page's jobs, in order. */
     /** @type {JobId[]} */
     this.pageIds = [];
@@ -177,6 +181,28 @@ export class JobFeed {
   async showPage(after) {
     this.pageAfter = after;
     await this.loadPage(this.run);
+  }
+
+  /**
+   * Lists only jobs in `stages`, or every job, from the first page.
+   * @param {readonly JobStage[] | null} stages
+   */
+  async showStages(stages) {
+    this.stages = stages;
+    this.pageAfter = null;
+    this.pageIds = [];
+    this.page = new Map();
+    this.nextAfter = null;
+    this.changed();
+    await this.loadPage(this.run);
+  }
+
+  /**
+   * Whether the list's stage filter admits `job`.
+   * @param {JobSummary} job
+   */
+  admits(job) {
+    return this.stages === null || this.stages.includes(job.stage);
   }
 
   /**
@@ -331,12 +357,13 @@ export class JobFeed {
    */
   async loadPage(run) {
     const request = ++this.pageRequests;
-    const after = this.pageAfter;
-    const view = this.view;
+    const { pageAfter: after, stages, view } = this;
     for (let attempt = 1; ; attempt += 1) {
-      const page = await this.client.listJobs({ after, pageSize: this.pageSize });
+      const page = await this.client.listJobs({ after, pageSize: this.pageSize, stages });
       if (run !== this.run || !this.answers(view, page.as_of)) return undefined;
-      if (after !== this.pageAfter || request < this.pageShown) return undefined;
+      if (after !== this.pageAfter || stages !== this.stages || request < this.pageShown) {
+        return undefined;
+      }
       if (this.isBehind(page.as_of) && attempt < SNAPSHOT_ATTEMPTS) continue;
       this.pageShown = request;
       const position = page.as_of.position;
@@ -494,7 +521,7 @@ export class JobFeed {
   added(job, position) {
     // New jobs have the highest IDs, so they belong at the end of the
     // last page.
-    if (this.page.has(job.id) || this.nextAfter !== null) return;
+    if (this.page.has(job.id) || this.nextAfter !== null || !this.admits(job)) return;
     const last = this.pageIds.at(-1);
     if (last !== undefined && this.pageIds.length >= this.pageSize) {
       this.nextAfter = last;
@@ -516,6 +543,12 @@ export class JobFeed {
         held.job = job;
         held.position = position;
       }
+    }
+    // A job that left the listed stages leaves the list.
+    const listed = this.page.get(job.id);
+    if (listed && !this.admits(listed.job)) {
+      this.page.delete(job.id);
+      this.pageIds = this.pageIds.filter((id) => id !== job.id);
     }
   }
 

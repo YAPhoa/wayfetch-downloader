@@ -14,6 +14,7 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/contract.js').StreamSink} StreamSink
  * @typedef {import('../client/contract.js').JobId} JobId
  * @typedef {import('../client/contract.js').JobAction} JobAction
+ * @typedef {import('../client/contract.js').JobStage} JobStage
  * @typedef {import('../client/generated/SessionStatus.js').SessionStatus} SessionStatus
  * @typedef {import('../client/generated/SetupRequest.js').SetupRequest} SetupRequest
  * @typedef {import('../client/generated/LoginRequest.js').LoginRequest} LoginRequest
@@ -90,10 +91,11 @@ export class HttpClient {
     return this.request('GET', '/v1/capabilities');
   }
 
-  /** @param {{ after?: JobId | null, pageSize: number }} request */
-  listJobs({ after, pageSize }) {
+  /** @param {{ after?: JobId | null, pageSize: number, stages?: readonly JobStage[] | null }} request */
+  listJobs({ after, pageSize, stages }) {
     const query = new URLSearchParams({ page_size: String(pageSize) });
     if (after) query.set('after', after);
+    if (stages) query.set('stage', stages.join(','));
     return this.request('GET', `/v1/jobs?${query}`);
   }
 
