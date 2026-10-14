@@ -1,0 +1,43 @@
+# wayfetchd with least privilege (architecture brief section 11.4). Setup,
+# permissions, and networking are in the README, "Running in a container".
+#
+# Every host path is required: nothing falls back to a directory inside
+# the container, and Compose refuses to start if a path does not exist.
+services:
+  wayfetchd:
+    image: ${WAYFETCH_IMAGE:-wayfetch:local}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # The owner of the three host directories.
+    user: "${WAYFETCH_UID:-1000}:${WAYFETCH_GID:-1000}"
+    # Forwards signals and reaps children, so wayfetchd is not PID 1.
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    pids_limit: 128
+    volumes:
+      - type: bind
+        source: ${WAYFETCH_STATE:?set WAYFETCH_STATE to the state directory}
+        target: /state
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WAYFETCH_DOWNLOADS:?set WAYFETCH_DOWNLOADS to the download root}
+        target: /downloads
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WAYFETCH_TOKENS:?set WAYFETCH_TOKENS to the API token directory}
+        target: /tokens
+        bind: {create_host_path: false}
+    # Loopback of the host only. The API has no TLS of its own; see the
+    # README before publishing it anywhere else.
+    ports:
+      - "${WAYFETCH_PUBLISH:-127.0.0.1:7878}:7878"
+    # On SIGTERM wayfetchd drains the API for up to 5 s, then gives engine
+    # tasks up to 30 s to stop; the grace period covers both before Docker
+    # sends SIGKILL.
+    stop_grace_period: 45s
+    restart: unless-stopped

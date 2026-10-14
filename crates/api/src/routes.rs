@@ -9,6 +9,7 @@
 //! | `GET /v1/jobs/{id}` | [`Query::InspectJob`] |
 //! | `POST /v1/jobs/{id}/commands` | [`Command::Pause`], [`Command::Resume`], [`Command::Cancel`] |
 //! | `GET /v1/events` | subscription, as server-sent events |
+//! | `GET /v1/ready` | readiness: lifecycle phase, a handshake, the host's check |
 //!
 //! Responses carry the protocol's own result and error types, so the JSON
 //! is the same that desktop IPC carries. Commands name an idempotency key
@@ -23,14 +24,13 @@ use std::time::Duration;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Extension, FromRequest, Path, Query as UrlQuery, Request, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::{Stream, StreamExt};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use wayfetch_engine::EngineHandle;
 use wayfetch_engine::domain::id::{JobId, PackageId};
 use wayfetch_engine::domain::job::JobStage;
 use wayfetch_engine::domain::version::Revision;
@@ -40,12 +40,14 @@ use wayfetch_engine::protocol::{
     Command, CommandEnvelope, ErrorCode, EventCursor, Hello, IdempotencyKey, InstanceId, Query,
     QueryResult, StreamItem, Subscribe,
 };
+use wayfetch_engine::{EngineHandle, Readiness};
 
+use crate::ReadinessCheck;
 use crate::auth::Grant;
 use crate::error::ApiError;
 
 /// What every handler shares.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppState {
     pub engine: EngineHandle,
     /// One permit per open event stream.
@@ -55,6 +57,12 @@ pub struct AppState {
     pub keep_alive: Duration,
     /// Time a client has to send a request body once its headers arrived.
     pub body_timeout: Duration,
+    /// The host's own readiness condition.
+    pub readiness_check: Option<ReadinessCheck>,
+    /// One permit, held by the readiness check running, if any.
+    pub readiness_running: Arc<Semaphore>,
+    /// How long a readiness request waits for its checks.
+    pub readiness_timeout: Duration,
 }
 
 type ApiResult<T> = Result<Json<T>, ApiError>;
@@ -62,6 +70,69 @@ type ApiResult<T> = Result<Json<T>, ApiError>;
 /// The handshake.
 pub async fn capabilities(State(app): State<AppState>) -> ApiResult<Hello> {
     Ok(Json(app.engine.hello().await?))
+}
+
+/// The body of `GET /v1/ready`.
+#[derive(Debug, Serialize)]
+pub struct ReadyStatus {
+    ready: bool,
+    /// Why not, as a fixed code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+/// Whether the instance can do its work: the engine admits requests and
+/// answers a handshake, the API is not draining, and the host's check
+/// passes. `503` with a reason otherwise. Needs no credential and reveals
+/// nothing beyond the fixed reason.
+pub async fn ready(State(app): State<AppState>) -> (StatusCode, Json<ReadyStatus>) {
+    let reason = not_ready(&app).await;
+    let status = match reason {
+        None => StatusCode::OK,
+        Some(_) => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    let ready = reason.is_none();
+    (status, Json(ReadyStatus { ready, reason }))
+}
+
+async fn not_ready(app: &AppState) -> Option<&'static str> {
+    if app.shutdown.is_cancelled() {
+        return Some("shutting_down");
+    }
+    match app.engine.readiness() {
+        Readiness::Ready => {}
+        Readiness::Starting => return Some("starting"),
+        Readiness::Failed => return Some("engine_failed"),
+        Readiness::ShuttingDown | Readiness::Stopped => return Some("shutting_down"),
+    }
+    tokio::time::timeout(app.readiness_timeout, checks(app))
+        .await
+        .unwrap_or(Some("check_timed_out"))
+}
+
+/// The checks that can take time: a handshake and the host's check.
+async fn checks(app: &AppState) -> Option<&'static str> {
+    // The engine answers, rather than only saying it would.
+    if app.engine.hello().await.is_err() {
+        return Some("engine_unavailable");
+    }
+    let check = app.readiness_check.clone()?;
+    // One check at a time. A check stuck in a filesystem call keeps its
+    // permit, so later requests time out waiting for it instead of each
+    // tying up another blocking thread.
+    let permit = app
+        .readiness_running
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("the semaphore is never closed");
+    tokio::task::spawn_blocking(move || {
+        let _running = permit;
+        check()
+    })
+    .await
+    .unwrap_or(Err("check_failed"))
+    .err()
 }
 
 /// The body of `POST /v1/inputs`.
