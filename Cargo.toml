@@ -17,6 +17,9 @@ publish = false
 [workspace.dependencies]
 wayfetch-domain = { path = "crates/domain" }
 wayfetch-protocol = { path = "crates/protocol" }
+rangemap = "1.8.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite_migration = "2.6.0"
 serde = { version = "1.0.228", default-features = false, features = ["std", "derive"] }
 serde_json = "1.0.145"
 sha2 = "0.11.1"
