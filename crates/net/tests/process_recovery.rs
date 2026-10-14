@@ -10,7 +10,9 @@
 //! and the checkpoint commit), T24 (crash before and after the link and the
 //! completion commit), T26 (the killed engine held the state directory
 //! until it died, and nothing had to clean its lock up), and T31 (a file
-//! that took the target name meanwhile is never overwritten).
+//! that took the target name meanwhile is never overwritten). Repeated
+//! kills while recovery abandons a partial and while cleanup removes it
+//! show that cleanup is safe to interrupt and repeat (section 7.6).
 //!
 //! The child is this test binary running [`child_engine`]. It stops at a
 //! named boundary of the engine's `failpoints` feature and reports it, so
@@ -48,6 +50,8 @@ const REPORT: &str = "@@wayfetch-child ";
 const CHILD_STATE: &str = "WAYFETCH_CHILD_STATE";
 const CHILD_ROOT: &str = "WAYFETCH_CHILD_ROOT";
 const CHILD_CA: &str = "WAYFETCH_CHILD_CA";
+/// Submitted at start; without it the child takes over the state
+/// directory's only job.
 const CHILD_URL: &str = "WAYFETCH_CHILD_URL";
 /// `<boundary>:<n>`: stop at the `n`th pass through the boundary.
 const CHILD_STOP: &str = "WAYFETCH_CHILD_STOP";
@@ -56,8 +60,9 @@ const CHILD_STOP: &str = "WAYFETCH_CHILD_STOP";
 const DEADLINE: Duration = Duration::from_secs(20);
 
 /// The engine process the tests start and kill. It downloads one URL on the
-/// parent's directories, reports durable progress, and with a stop
-/// boundary blocks there for good after reporting it.
+/// parent's directories, or resumes the job a killed child left, reports
+/// durable progress, and with a stop boundary blocks there for good after
+/// reporting it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "run in a child process by the other tests"]
 async fn child_engine() {
@@ -78,9 +83,11 @@ async fn child_engine() {
         Arc::new(transport),
     );
     let owner = env.start().await;
-    let [id] = engine_support::submit(&owner, [var(CHILD_URL)]).await[..] else {
-        panic!("one job")
+    let ids = match std::env::var(CHILD_URL) {
+        Ok(url) => engine_support::submit(&owner, [url]).await,
+        Err(_) => jobs(&owner).await.iter().map(|j| j.id).collect(),
     };
+    let [id] = ids[..] else { panic!("one job") };
     let mut reported = None;
     loop {
         let job = engine_support::job(&owner, id).await;
@@ -120,8 +127,9 @@ struct Child {
 
 impl Child {
     /// Starts an engine in a child process on `env`'s directories that
-    /// downloads `path`, stopping at the `n`th pass through `boundary`.
-    fn spawn(env: &Env, path: &str, stop: Option<(&str, usize)>) -> Self {
+    /// downloads `path`, or without one resumes the job already there,
+    /// stopping at the `n`th pass through `boundary`.
+    fn spawn(env: &Env, path: Option<&str>, stop: Option<(&str, usize)>) -> Self {
         let ca = env.state.with_file_name("ca.der");
         std::fs::write(&ca, env.server.ca()).unwrap();
         let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
@@ -130,11 +138,14 @@ impl Child {
             .env(CHILD_STATE, &env.state)
             .env(CHILD_ROOT, &env.root)
             .env(CHILD_CA, &ca)
-            .env(CHILD_URL, env.server.url(path))
+            .env_remove(CHILD_URL)
             .env_remove(CHILD_STOP)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(path) = path {
+            command.env(CHILD_URL, env.server.url(path));
+        }
         if let Some((boundary, n)) = stop {
             command.env(CHILD_STOP, format!("{boundary}:{n}"));
         }
@@ -230,6 +241,21 @@ async fn env() -> Env {
     https_env(|_| {}).await
 }
 
+/// Staging records the killed engine left that wait for cleanup.
+fn pending_cleanups(state: &Path) -> i64 {
+    let db = rusqlite::Connection::open_with_flags(
+        state.join("state.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    db.query_row(
+        "SELECT count(*) FROM staging_files WHERE cleanup = 'pending'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
 /// Restarts an engine on `env` and waits for its only job to complete.
 async fn restart(env: &Env) -> (wayfetch_engine::EngineOwner, JobSummary) {
     let owner = env.start().await;
@@ -266,7 +292,7 @@ async fn a_download_killed_while_streaming_resumes_from_its_durable_bytes() {
             ..Resource::new(data.clone())
         },
     );
-    let mut child = Child::spawn(&env, "/big.bin", None);
+    let mut child = Child::spawn(&env, Some("/big.bin"), None);
     // Every byte before the stall is in the staging file and the last
     // checkpoint committed; the response is still open.
     child
@@ -303,7 +329,7 @@ async fn a_download_killed_at_a_checkpoint_resumes_from_committed_bytes_only() {
         let env = env().await;
         let data = body(64 * KIB);
         env.server.put("/c.bin", Resource::new(data.clone()));
-        let mut child = Child::spawn(&env, "/c.bin", Some((boundary, 3)));
+        let mut child = Child::spawn(&env, Some("/c.bin"), Some((boundary, 3)));
         child
             .until(|c| c.stopped.is_some() && (c.durable > 0 || !report_progress))
             .await;
@@ -345,7 +371,7 @@ async fn a_publication_killed_at_any_step_completes_after_restart() {
         let env = env().await;
         let data = body(48 * KIB + 5);
         env.server.put("/p.bin", Resource::new(data.clone()));
-        let mut child = Child::spawn(&env, "/p.bin", Some((boundary, 1)));
+        let mut child = Child::spawn(&env, Some("/p.bin"), Some((boundary, 1)));
         child.until(|c| c.stopped.is_some()).await;
         child.kill(&env.state).await;
 
@@ -363,7 +389,7 @@ async fn a_file_that_took_the_name_during_a_crash_is_never_overwritten() {
     let env = env().await;
     let data = body(48 * KIB);
     env.server.put("/p.bin", Resource::new(data.clone()));
-    let mut child = Child::spawn(&env, "/p.bin", Some(("publish-before-link", 1)));
+    let mut child = Child::spawn(&env, Some("/p.bin"), Some(("publish-before-link", 1)));
     child.until(|c| c.stopped.is_some()).await;
     child.kill(&env.state).await;
     // Someone else's file appears under the reserved name.
@@ -374,5 +400,87 @@ async fn a_file_that_took_the_name_during_a_crash_is_never_overwritten() {
     assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's file");
     assert_eq!(env.server.hits("/p.bin"), 1);
     assert_published(&env, &done, "p (1).bin", &data);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cleanup_of_an_abandoned_partial_survives_repeated_kills() {
+    let env = env().await;
+    let data = body(64 * KIB + 7);
+    let at = 20 * KIB + 300;
+    env.server.put(
+        "/r.bin",
+        Resource {
+            stall_at: Some(at),
+            ..Resource::new(data.clone())
+        },
+    );
+    let mut child = Child::spawn(&env, Some("/r.bin"), None);
+    child
+        .until(|c| settled(c.durable, at) && staging_lengths(&env.root) == [at as u64])
+        .await;
+    child.kill(&env.state).await;
+    let durable = committed_bytes(&env.state);
+    // The server no longer honors ranges, so the partial cannot continue.
+    env.server.update("/r.bin", |r| {
+        r.stall_at = None;
+        r.ranges = false;
+    });
+
+    // Recovery abandons the partial and queues the job to start from zero;
+    // killed as cleanup is about to remove the file.
+    let mut child = Child::spawn(&env, None, Some(("cleanup-before-unlink", 1)));
+    child.until(|c| c.stopped.is_some()).await;
+    child.kill(&env.state).await;
+    assert_eq!(staging_lengths(&env.root), [at as u64]);
+    assert_eq!(pending_cleanups(&env.state), 1);
+
+    // The next start's cleanup removes the file; killed before it forgets
+    // the record.
+    let mut child = Child::spawn(&env, None, Some(("cleanup-before-forget", 1)));
+    child.until(|c| c.stopped.is_some()).await;
+    child.kill(&env.state).await;
+    assert_eq!(staging_lengths(&env.root), Vec::<u64>::new());
+    assert_eq!(pending_cleanups(&env.state), 1);
+
+    // The last start finds the record without its file, forgets it, and
+    // downloads the job from zero.
+    let (owner, done) = restart(&env).await;
+    assert_eq!(pending_cleanups(&env.state), 0);
+    assert_eq!(
+        env.server.ranges("/r.bin"),
+        vec![None, Some((durable, None)), None]
+    );
+    assert_published(&env, &done, "r.bin", &data);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_left_unregistered_by_a_kill_is_never_removed() {
+    let env = env().await;
+    let data = body(16 * KIB);
+    env.server.put("/u.bin", Resource::new(data.clone()));
+    let mut child = Child::spawn(&env, Some("/u.bin"), Some(("staging-before-register", 1)));
+    child.until(|c| c.stopped.is_some()).await;
+    child.kill(&env.state).await;
+    // The file the killed engine created but never recorded is replaced
+    // before the next start; only a record could prove it the engine's.
+    let staging = env.root.join(".wayfetch/staging");
+    let [left] = &std::fs::read_dir(&staging)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one staging file")
+    };
+    let swap = staging.join("swap");
+    std::fs::write(&swap, b"someone else's file").unwrap();
+    std::fs::rename(&swap, left).unwrap();
+
+    let (owner, done) = restart(&env).await;
+    assert_eq!(done.artifact.as_ref().unwrap().path, "u.bin");
+    assert_eq!(env.published("u.bin"), data);
+    assert_eq!(std::fs::read(left).unwrap(), b"someone else's file");
+    assert_eq!(staging_files(&env.root), 1);
     shutdown(owner).await;
 }

@@ -25,7 +25,9 @@
 //! filesystem. The file's identity (device and inode) is recorded with the
 //! store's staging record. After a restart a partial is reopened only by
 //! that record, and a missing, replaced, or shrunk file is a reconciliation
-//! failure, never a reason to append blindly (T28).
+//! failure, never a reason to append blindly (T28). A file no generation
+//! can reopen is removed by [`Root::remove_staging`] only while its name
+//! still holds the recorded file; see the engine's cleanup module.
 //!
 //! # Publication
 //!
@@ -62,7 +64,7 @@ pub use publish::PublicationCheck;
 pub use root::Root;
 #[cfg(test)]
 pub(crate) use staging::tests::{root as test_root, staging_path};
-pub use staging::{StagingFile, StagingRecord, SyncedRanges};
+pub use staging::{Removal, StagingFile, StagingRecord, SyncedRanges};
 use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::id::RootId;
 

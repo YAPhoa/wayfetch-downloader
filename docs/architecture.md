@@ -983,6 +983,8 @@ If a crash occurs after file sync but before DB commit, the file may contain ext
 
 On restart, validate file identity/path, representation metadata, bounds, and interval consistency. Reopen only owned staging files. A missing, replaced, shrunk, or externally modified file is a reconciliation failure. Old attempt completions are rejected by generation checks even when their worker eventually returns.
 
+A partial becomes abandoned, durably and in the same transaction, when no generation can reopen it: a newer generation registers its own file, or the job returns to the queue under a new generation to start from zero. Pause, block, failure, and cancel do not abandon it (cancel retains data by default), and an abandoned partial is never adopted after a restart. Cleanup removes an abandoned file only while its name still holds the recorded regular file, and syncs the staging directory before deleting the record, also when the name is already gone, so an interrupted pass is repeated safely. A name found holding anything else is left in place and its record kept. Only a recorded identity proves ownership, so a file no record names is never removed, whatever its name: one a crash left between creation and registration stays, and a download whose registration is refused removes only its own file, whose identity it still holds. Nothing else in the staging directory, and no published file, is touched.
+
 ### 7.7 Publication protocol
 
 Publication is a recoverable protocol, not an assumed atomic DB/filesystem transaction:
