@@ -13,8 +13,10 @@
 // - Progress samples are shown only for the current boot epoch and the
 //   job's current generation.
 // - Job counts per stage come with the snapshot and are read again after
-//   job events, at most one read at a time and one per `COUNT_DELAY`, so a
-//   burst of events costs one count.
+//   job events, at most one read at a time and one per `READ_DELAY`, so a
+//   burst of events costs one count. While the list is filtered by stage, a
+//   job entering or leaving the filter makes the page be read again the
+//   same way, since its rows may shift.
 // - Durable progress moves at each checkpoint without an event, so while a
 //   held job is active, the held jobs are re-read now and then: one page
 //   query, never the whole queue. Live progress samples make this
@@ -50,12 +52,56 @@ const SNAPSHOT_ATTEMPTS = 3;
 /** How often held active jobs are re-read, in milliseconds. */
 export const REFRESH_INTERVAL = 3000;
 
-/** How long job events gather before the counts are read again, in
- * milliseconds. */
-export const COUNT_DELAY = 1000;
+/** How long job events gather before the counts or a filtered page are
+ * read again, in milliseconds. */
+export const READ_DELAY = 1000;
 
 /** Stages whose durable progress can change without an event. */
 const ACTIVE = new Set(['resolving', 'transferring', 'verifying', 'publishing', 'recovering']);
+
+/**
+ * Runs `read` once `delay` has passed after a request, one run at a time;
+ * requests made while it runs make it run once more afterwards. Failures
+ * are left to the event stream, which notices a lost server or session.
+ */
+class Coalesced {
+  /**
+   * @param {() => Promise<unknown>} read
+   * @param {number} delay
+   */
+  constructor(read, delay) {
+    this.read = read;
+    this.delay = delay;
+    this.wanted = false;
+    this.running = false;
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    this.timer = undefined;
+  }
+
+  request() {
+    this.wanted = true;
+    if (this.running || this.timer !== undefined) return;
+    this.timer = setTimeout(async () => {
+      this.timer = undefined;
+      this.running = true;
+      this.wanted = false;
+      try {
+        await this.read();
+      } catch {
+        // The stream reports it.
+      } finally {
+        this.running = false;
+      }
+      if (this.wanted) this.request();
+    }, this.delay);
+  }
+
+  cancel() {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.wanted = false;
+  }
+}
 
 /**
  * The copy to hold: `current` if it reflects a later position than a copy
@@ -80,7 +126,7 @@ export class JobFeed {
    *   onChange: () => void,
    *   retryDelays?: readonly number[],
    *   refreshInterval?: number,
-   *   countDelay?: number,
+   *   readDelay?: number,
    * }} options
    */
   constructor(client, options) {
@@ -89,7 +135,7 @@ export class JobFeed {
     this.onChange = options.onChange;
     this.retryDelays = options.retryDelays ?? RETRY_DELAYS;
     this.refreshInterval = options.refreshInterval ?? REFRESH_INTERVAL;
-    this.countDelay = options.countDelay ?? COUNT_DELAY;
+    const readDelay = options.readDelay ?? READ_DELAY;
     /** @type {FeedStatus} */
     this.status = 'stopped';
     /** @type {Hello | null} */
@@ -123,11 +169,10 @@ export class JobFeed {
     /** Jobs per stage, once read. */
     /** @type {JobCounts | null} */
     this.counts = null;
-    /** Whether job events arrived since the counts were last read. */
-    this.countsStale = false;
-    this.counting = false;
-    /** @type {ReturnType<typeof setTimeout> | undefined} */
-    this.countTimer = undefined;
+    /** Reads the counts again after job events. */
+    this.recount = new Coalesced(() => this.loadCounts(this.run), readDelay);
+    /** Reads a filtered page again after jobs enter or leave the filter. */
+    this.repage = new Coalesced(() => this.loadPage(this.run), readDelay);
     /** The last durable event applied, or the snapshot's position. */
     /** @type {EventCursor | null} */
     this.cursor = null;
@@ -185,8 +230,8 @@ export class JobFeed {
     this.run += 1;
     clearTimeout(this.timer);
     clearInterval(this.refresher);
-    clearTimeout(this.countTimer);
-    this.countTimer = undefined;
+    this.recount.cancel();
+    this.repage.cancel();
     this.subscription?.close();
     this.subscription = null;
     if (this.status !== 'unauthenticated' && this.status !== 'incompatible') {
@@ -448,30 +493,6 @@ export class JobFeed {
   }
 
   /**
-   * Reads the counts again after job events: once the current read, if
-   * any, has answered and `countDelay` has passed.
-   * @param {number} run
-   */
-  recount(run) {
-    this.countsStale = true;
-    if (this.counting || this.countTimer !== undefined) return;
-    this.countTimer = setTimeout(async () => {
-      this.countTimer = undefined;
-      if (run !== this.run) return;
-      this.counting = true;
-      this.countsStale = false;
-      try {
-        await this.loadCounts(run);
-      } catch {
-        // The stream reports a lost server or session.
-      } finally {
-        this.counting = false;
-      }
-      if (this.countsStale && run === this.run) this.recount(run);
-    }, this.countDelay);
-  }
-
-  /**
    * Whether a snapshot at `asOf` misses events the stream already
    * delivered, which would never reach it.
    * @param {EventCursor} asOf
@@ -521,8 +542,13 @@ export class JobFeed {
         const { kind } = item;
         if (kind.type === 'job_added') this.added(kind.job, item.cursor.position);
         if (kind.type === 'job_added' || kind.type === 'job_changed') {
+          const listed = this.page.has(kind.job.id);
           this.hold(kind.job, item.cursor.position);
-          this.recount(run);
+          // A job that entered or left the filter shifts the page's rows.
+          if (kind.type === 'job_changed' && this.stages !== null && listed !== this.admits(kind.job)) {
+            this.repage.request();
+          }
+          this.recount.request();
         }
         this.changed();
         return;

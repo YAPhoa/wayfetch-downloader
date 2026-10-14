@@ -167,15 +167,15 @@ const feeds = [];
 /**
  * @param {FakeClient} client
  * @param {number} [pageSize]
- * @param {number} [countDelay]
+ * @param {number} [readDelay]
  */
-async function started(client, pageSize = 2, countDelay = 0) {
+async function started(client, pageSize = 2, readDelay = 0) {
   const feed = new JobFeed(client, {
     pageSize,
     onChange: () => {},
     retryDelays: [0],
     refreshInterval: 1e9,
-    countDelay,
+    readDelay,
   });
   feeds.push(feed);
   feed.start();
@@ -480,4 +480,24 @@ test('counts are forgotten with the instance that answered them', async () => {
   await settle();
   assert.deepEqual(feed.counts?.stages, {});
   assert.equal(feed.counts?.as_of.instance, 'instance-b');
+});
+
+test('jobs entering or leaving a stage filter are listed or replaced', async () => {
+  const client = new FakeClient();
+  const done = /** @type {const} */ ({ stage: 'complete', display: 'complete' });
+  client.change('job_added', job(1, { stage: 'transferring', display: 'transferring' }));
+  for (const n of [2, 3, 4]) client.change('job_added', job(n, done));
+  const feed = await started(client, 2);
+  await feed.showStages(['complete']);
+  const ids = () => feed.jobs.map((j) => j.id);
+  assert.deepEqual(ids(), ['job-2', 'job-3']);
+
+  client.change('job_changed', job(1, { ...done, revision: 2 }));
+  await settle();
+  assert.deepEqual(ids(), ['job-1', 'job-2']);
+
+  client.change('job_changed', job(2, { stage: 'failed', display: 'failed', revision: 2 }));
+  await settle();
+  assert.deepEqual(ids(), ['job-1', 'job-3']);
+  assert.equal(feed.nextAfter, 'job-3');
 });

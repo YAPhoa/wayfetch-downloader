@@ -108,6 +108,9 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
 
   // A download that stalls after two checkpoints.
   await add(page, fixture.put(TRICKY, SIZE, STALL));
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(page.getByLabel('Links to download, one per line')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Add links' })).toHaveAttribute('aria-expanded', 'false');
   await expectState(page, 'job-1', 'Downloading');
   await expect(row(page, 'job-1').locator('.bytes')).toHaveText(/^1[67]\.\d MiB of 20\.0 MiB$/);
 
@@ -177,9 +180,13 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await add(page, fixture.put('second.bin', 10 * MIB, 9 * MIB));
   await expect(row(page, 'job-2').locator('.bytes')).toHaveText(/^[89]\.\d MiB of 10\.0 MiB$/);
   await select(page, 'job-2');
+  // While only cancelled jobs are listed, the job joins the list once cancelled.
+  await page.getByRole('button', { name: /^Cancelled \(/ }).click();
+  await expect(page.getByText('No downloads in this state.')).toBeVisible();
   await page.getByRole('button', { name: 'Cancel job-2' }).click();
   await expectState(page, 'job-2', 'Cancelled');
   await expect(page.getByRole('button', { name: 'Cancel job-2' })).toBeDisabled();
+  await page.getByRole('button', { name: /^All \(/ }).click();
   // The counts follow the change.
   await expect(page.getByRole('button', { name: 'Cancelled (1)' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'All (2)' })).toBeVisible();
