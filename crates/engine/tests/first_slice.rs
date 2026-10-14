@@ -749,3 +749,126 @@ async fn pruned_events_and_old_instances_resync_after_restart() {
     );
     shutdown(owner).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_checkpoint_fails_the_job_and_frees_its_slot() {
+    let mut env = Env::new();
+    env.limits.active_files = NonZeroUsize::new(1).unwrap();
+    let mut first = Resource::new(body(32 * KIB));
+    first.stall_at = Some(8 * KIB);
+    env.server.put("/first.bin", first);
+    env.server.put("/second.bin", Resource::new(body(8 * KIB)));
+    let owner = env.start().await;
+    let ids = submit(&owner, &["/first.bin", "/second.bin"]).await;
+    wait_for(&owner, ids[0], |j| j.bytes_done == 8 * KIB as u64).await;
+    // Something outside the transfer removes its staging record, so the
+    // next checkpoint is refused.
+    let db = rusqlite::Connection::open(env.state.join("state.sqlite3")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute("DELETE FROM staging_files", []).unwrap();
+    drop(db);
+    env.server.update("/first.bin", |r| r.stall_at = None);
+
+    let failed = wait_for(&owner, ids[0], |j| j.stage == JobStage::Failed).await;
+    assert_eq!(failed.failure.unwrap().code, FailureCode::IntegrityMismatch);
+    // The response and the slot were released: the next job runs.
+    complete(&owner, ids[1]).await;
+    assert_eq!(env.server.open_bodies.load(Ordering::SeqCst), 0);
+    // Failing is final: the job was not retried.
+    assert_eq!(env.server.requests.lock().unwrap().len(), 2);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unusable_response_metadata_never_loops() {
+    let env = Env::new();
+    let cases = [
+        // Longer than a stored suggestion may be.
+        (
+            "/long-name.bin",
+            Some(format!("{}.bin", "n".repeat(1025))),
+            None,
+        ),
+        // Longer than one path component may be.
+        (
+            "/component.bin",
+            Some(format!("{}.bin", "c".repeat(300))),
+            None,
+        ),
+        // Longer than a stored entity tag may be.
+        (
+            "/long-etag.bin",
+            None,
+            Some(format!("\"{}\"", "e".repeat(2000))),
+        ),
+    ];
+    for (path, filename, etag) in &cases {
+        let mut resource = Resource::new(body(4 * KIB));
+        resource.filename = filename.clone();
+        if etag.is_some() {
+            resource.etag = etag.clone();
+        }
+        env.server.put(path, resource);
+    }
+    let owner = env.start().await;
+    let paths: Vec<&str> = cases.iter().map(|c| c.0).collect();
+    let ids = submit(&owner, &paths).await;
+    for (id, path) in ids.into_iter().zip(&paths) {
+        let done = complete(&owner, id).await;
+        // The URL names the file instead.
+        assert_eq!(done.artifact.unwrap().path, &path[1..]);
+    }
+    // One request and one staging file each.
+    assert_eq!(env.server.requests.lock().unwrap().len(), cases.len());
+    assert_eq!(staging_files(&env.root), 0);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replayed_pause_does_not_interrupt_a_resumed_transfer() {
+    let env = Env::new();
+    let data = body(32 * KIB);
+    let mut resource = Resource::new(data.clone());
+    resource.stall_at = Some(8 * KIB);
+    env.server.put("/job.bin", resource);
+    let owner = env.start().await;
+    let handle = owner.handle();
+    let [id] = submit(&owner, &["/job.bin"]).await[..] else {
+        panic!()
+    };
+    wait_for(&owner, id, |j| j.bytes_done == 8 * KIB as u64).await;
+    let summary = job(&owner, id).await;
+    let pause = envelope(
+        &owner,
+        Command::Pause {
+            job: id,
+            expected_revision: summary.revision,
+        },
+    );
+    let paused = handle.execute(pause.clone(), ALL).await.unwrap();
+    let summary = wait_for(&owner, id, |j| j.stage == JobStage::Paused).await;
+    let resume = Command::Resume {
+        job: id,
+        expected_revision: summary.revision,
+    };
+    handle.execute(envelope(&owner, resume), ALL).await.unwrap();
+    let resumed = wait_for(&owner, id, |j| j.stage == JobStage::Transferring).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // A client retrying its old pause gets the stored result and changes
+    // nothing.
+    assert_eq!(handle.execute(pause, ALL).await.unwrap(), paused);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let now = job(&owner, id).await;
+    assert_eq!(
+        (now.stage, now.generation, now.revision),
+        (JobStage::Transferring, resumed.generation, resumed.revision)
+    );
+    env.server.update("/job.bin", |r| r.stall_at = None);
+    let done = complete(&owner, id).await;
+    assert_eq!(done.generation, resumed.generation);
+    assert_eq!(env.published("job.bin"), data);
+    // The first request and the resume; nothing restarted.
+    assert_eq!(env.server.requests.lock().unwrap().len(), 2);
+    shutdown(owner).await;
+}

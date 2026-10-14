@@ -529,9 +529,11 @@ fn admit(store: &mut Store, free: usize, running: &[JobId]) -> Vec<Admission> {
 }
 
 /// Settles a job whose download task ended while it was still active: a
-/// pause or cancel is completed, and a job that should still run is queued
-/// again under a new generation.
-fn settle(store: &mut Store, job: JobId) -> Result<(), StoreError> {
+/// pause or cancel is completed, and an interrupted job that should run
+/// again (resumed before its download stopped) is queued under a new
+/// generation. A download that gave up for any other reason leaves the job
+/// to restart recovery rather than retrying it at once.
+fn settle(store: &mut Store, job: JobId, interrupted: bool) -> Result<(), StoreError> {
     let state = store.job_state(job)?;
     let (stage, generation) = (state.stage(), state.generation());
     // Publication is never interrupted; one left unfinished is reconciled
@@ -542,6 +544,7 @@ fn settle(store: &mut Store, job: JobId) -> Result<(), StoreError> {
     let to = match state.desired() {
         DesiredState::Paused => JobStage::Paused,
         DesiredState::Cancelled => JobStage::Cancelled,
+        DesiredState::Running if !interrupted => return Ok(()),
         DesiredState::Running => {
             if stage == JobStage::Transferring {
                 store.advance_job(job, JobStage::Resolving, generation, None, now())?;
@@ -559,8 +562,8 @@ type StoreWork = Box<dyn FnOnce(&mut Store) + Send>;
 enum Internal {
     /// Store work from a download.
     Store(StoreWork),
-    /// A download task ended.
-    Finished(JobId),
+    /// A download task ended, and whether it was interrupted.
+    Finished(JobId, bool),
 }
 
 /// A download's way to the store: each call is queued to the coordinator
@@ -644,11 +647,11 @@ impl Coordinator {
                 let _ = reply.send(head.map_err(ProtocolError::from).map(|h| self.hello(h)));
             }
             Request::Execute(envelope, reply) => {
-                let interrupts = match envelope.command {
+                let target = match envelope.command {
                     Command::Pause { job, .. } | Command::Cancel { job, .. } => Some(job),
                     Command::Submit { .. } | Command::Resume { .. } => None,
                 };
-                let result = self
+                let (result, interrupt) = self
                     .with_store(move |store| {
                         let result = store.execute(&envelope, instance, now());
                         if let Ok(CommandResult::Submitted { .. }) = result {
@@ -656,12 +659,18 @@ impl Coordinator {
                             // links left unstaged are staged at the next start.
                             let _ = stage_all(store);
                         }
-                        result
+                        // Interrupt only a job that should now stop: a
+                        // replayed pause from before a resume changes nothing.
+                        let interrupt = target.filter(|&job| {
+                            result.is_ok()
+                                && store
+                                    .job_state(job)
+                                    .is_ok_and(|s| s.desired() != DesiredState::Running)
+                        });
+                        (result, interrupt)
                     })
                     .await;
-                if result.is_ok()
-                    && let Some(token) = interrupts.and_then(|job| self.running.get(&job))
-                {
+                if let Some(token) = interrupt.and_then(|job| self.running.get(&job)) {
                     token.cancel();
                 }
                 let _ = reply.send(result);
@@ -689,10 +698,12 @@ impl Coordinator {
     async fn handle_internal(&mut self, internal: Internal) {
         match internal {
             Internal::Store(work) => self.with_store(work).await,
-            Internal::Finished(job) => {
+            Internal::Finished(job, interrupted) => {
                 self.running.remove(&job);
                 // A failure leaves the job for restart recovery.
-                let _ = self.with_store(move |store| settle(store, job)).await;
+                let _ = self
+                    .with_store(move |store| settle(store, job, interrupted))
+                    .await;
             }
         }
         self.changed().await;
@@ -753,8 +764,8 @@ impl Coordinator {
             };
             let finished = self.client.0.clone();
             self.supervisor.spawn(async move {
-                download.run().await;
-                let _ = finished.send(Internal::Finished(id)).await;
+                let interrupted = download.run().await;
+                let _ = finished.send(Internal::Finished(id, interrupted)).await;
             });
         }
     }

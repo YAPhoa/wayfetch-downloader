@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::id::JobId;
-use wayfetch_domain::job::{DesiredState, JobStage};
+use wayfetch_domain::job::{DesiredState, JobError, JobStage};
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::BootEpoch;
@@ -51,6 +51,9 @@ use crate::transfer::writer::{IntervalWriter, StreamEnd, WriteError};
 
 /// Alternative names tried when a target name is taken.
 const NAME_ATTEMPTS: u32 = 100;
+
+/// Longest entity tag recorded for a staging file (the schema's bound).
+const MAX_VALIDATOR_BYTES: usize = 1024;
 
 /// Why a download stopped before completing its job.
 #[derive(Debug)]
@@ -72,6 +75,16 @@ impl From<StoreError> for Stop {
     /// storage fault that recovery retries after a restart.
     fn from(_: StoreError) -> Self {
         Stop::Abandon
+    }
+}
+
+/// Stops on a checkpoint the store refused: abandoned if the work is stale
+/// or storage failed, else failed, since the recorded transfer no longer
+/// matches the bytes written.
+fn rejected_checkpoint(err: StoreError) -> Stop {
+    match err {
+        StoreError::Job(JobError::StaleGeneration { .. }) | StoreError::Sqlite(_) => Stop::Abandon,
+        other => failed(FailureCode::IntegrityMismatch, other),
     }
 }
 
@@ -129,10 +142,13 @@ pub(crate) struct Download {
 }
 
 impl Download {
-    /// Runs the job until it completes, parks, or stops.
-    pub(crate) async fn run(mut self) {
+    /// Runs the job until it completes, parks, or stops. Returns whether a
+    /// pause, cancel, or shutdown interrupted it, leaving the job for the
+    /// coordinator to settle.
+    pub(crate) async fn run(mut self) -> bool {
         let stopped = match self.drive().await {
-            Ok(()) | Err(Stop::Abandon | Stop::Interrupted) => return,
+            Ok(()) | Err(Stop::Abandon) => return false,
+            Err(Stop::Interrupted) => return true,
             Err(stop) => stop,
         };
         let (job, generation, from) = (self.job.job, self.job.generation, self.job.stage);
@@ -174,6 +190,7 @@ impl Download {
                 }
             })
             .await;
+        false
     }
 
     async fn drive(&mut self) -> Result<(), Stop> {
@@ -200,9 +217,15 @@ impl Download {
             other => other,
         };
         let (response, target) = self.request(&url, continued.as_ref()).await?;
+        // Only a usable name is kept, so a long or hostile header cannot
+        // make the response unrecordable.
         let suggested = match &continued {
             Some(c) => c.partial.suggested_name.clone(),
-            None => response.filename.clone(),
+            None => response
+                .filename
+                .as_deref()
+                .and_then(file_name)
+                .map(|name| name.as_str().to_owned()),
         };
         self.advance(JobStage::Transferring).await?;
         let file = match continued {
@@ -398,7 +421,15 @@ impl Download {
                     ));
                 }
                 Ok(Err(e)) => return Err(failed(e.code, e.message)),
-                Ok(Ok(response)) => response,
+                Ok(Ok(mut response)) => {
+                    // A validator too long to record identifies nothing the
+                    // engine can check later.
+                    let etag = &mut response.representation.strong_etag;
+                    if etag.as_ref().is_some_and(|e| e.len() > MAX_VALIDATOR_BYTES) {
+                        *etag = None;
+                    }
+                    response
+                }
             },
         };
         let known = stored.as_ref().and_then(|r| r.length);
@@ -469,11 +500,14 @@ impl Download {
         let mut writer = IntervalWriter::new(Arc::new(file), target.start, target.end)
             .holding(self.guard.clone());
         let (checkpoints, mut certified) = mpsc::channel(1);
+        // Stops the writer when a checkpoint is rejected, as well as on a
+        // pause, cancel, or shutdown.
+        let stop = self.cancel.child_token();
         let streaming = async {
             let end = writer
                 .stream(
                     response.body.as_mut(),
-                    &self.cancel,
+                    &stop,
                     &checkpoints,
                     self.limits.checkpoint_bytes.get(),
                     self.timeouts.idle_read,
@@ -484,7 +518,10 @@ impl Download {
         };
         let committing = async {
             while let Some(synced) = certified.recv().await {
-                self.call(move |s| s.commit_checkpoint(synced)).await??;
+                if let Err(rejected) = self.call(move |s| s.commit_checkpoint(synced)).await? {
+                    stop.cancel();
+                    return Err(rejected_checkpoint(rejected));
+                }
             }
             Ok::<(), Stop>(())
         };
@@ -634,14 +671,20 @@ fn target_name(job: JobId, suggested: Option<&str>, url: &Url) -> RelativePath {
         .and_then(|segment| percent_decode_str(segment).decode_utf8().ok())
         .map(|name| name.into_owned());
     suggested
-        .map(str::to_owned)
-        .into_iter()
-        .chain(from_url)
-        .filter(|name| !name.contains('/'))
-        .find_map(|name| RelativePath::new(&name).ok())
+        .and_then(file_name)
+        .or_else(|| from_url.as_deref().and_then(file_name))
         .unwrap_or_else(|| {
             RelativePath::new(&format!("download-{}", job.get())).expect("a valid file name")
         })
+}
+
+/// `name` as a single valid path component, which cannot choose a
+/// directory.
+fn file_name(name: &str) -> Option<RelativePath> {
+    if name.contains('/') {
+        return None;
+    }
+    RelativePath::new(name).ok()
 }
 
 #[cfg(test)]
