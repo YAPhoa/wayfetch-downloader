@@ -15,8 +15,14 @@ serde_json.workspace = true
 sha2.workspace = true
 strum.workspace = true
 thiserror.workspace = true
+ts-rs = { workspace = true, optional = true }
 url.workspace = true
 uuid.workspace = true
+
+[features]
+# TypeScript declarations of the wire types, for the UI. `cargo test
+# --features ts` writes them (see .cargo/config.toml).
+ts = ["dep:ts-rs", "ts-rs/uuid-impl", "wayfetch-domain/ts"]
 
 [lints]
 workspace = true

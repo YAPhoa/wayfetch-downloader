@@ -1,13 +1,13 @@
 //! The `wayfetchd` executable driven as a subprocess over its HTTP API,
-//! against the local HTTPS fixture: the complete submit, list, inspect,
-//! pause, resume, and cancel workflow; authentication and scoped tokens;
-//! server-sent events that resume from `Last-Event-ID` or say to
-//! resynchronize; downloads that continue after every client disconnects;
-//! request and stream bounds; graceful shutdown on SIGTERM or SIGINT
-//! with jobs kept for the next start and a single owner per state
-//! directory; and browser access: owner setup with a setup secret,
-//! sign-in, sessions for commands and events, origin and CSRF checks,
-//! sign-out, restarts, and owner reset.
+//! against the local HTTPS fixture: the bundled web UI; the complete
+//! submit, list, inspect, pause, resume, and cancel workflow;
+//! authentication and scoped tokens; server-sent events that resume from
+//! `Last-Event-ID` or say to resynchronize; downloads that continue after
+//! every client disconnects; request and stream bounds; graceful shutdown
+//! on SIGTERM or SIGINT with jobs kept for the next start and a single
+//! owner per state directory; and browser access: owner setup with a setup
+//! secret, sign-in, sessions for commands and events, origin and CSRF
+//! checks, sign-out, restarts, and owner reset.
 //!
 //! Files that stall are large enough to cross a default 8 MiB checkpoint
 //! first, so there are durable bytes to observe and resume from.
@@ -268,6 +268,7 @@ async fn the_complete_workflow_over_http() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(hello["instance"], daemon.instance.as_str());
     assert_eq!(hello["limits"]["max_submit_items"], 1000);
+    client.serves_the_ui().await;
 
     // Submit, inspect, list, and publish the exact bytes.
     let small = body(MIB);
@@ -351,6 +352,20 @@ async fn the_complete_workflow_over_http() {
         (StatusCode::PAYLOAD_TOO_LARGE, &"limit_exceeded".into())
     );
     let (status, _) = client.get("/v1/jobs?stage=sleeping").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Jobs name the host of their link, never the link itself.
+    assert_eq!(page["items"][0]["original_host"], "127.0.0.1");
+
+    // Counts by stage, with the same filters.
+    let (status, counts) = client.get("/v1/job-counts").await;
+    assert_eq!(status, StatusCode::OK, "{counts}");
+    assert_eq!(counts["type"], "job_counts");
+    assert_eq!(counts["stages"], json!({"complete": 2, "cancelled": 1}));
+    let (_, counts) = client.get("/v1/job-counts?stage=cancelled,paused").await;
+    assert_eq!(counts["stages"], json!({"cancelled": 1}));
+    let (status, _) = client.get("/v1/job-counts?stage=sleeping").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = client.get("/v1/job-counts?after=job-1").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, error) = client.get("/v1/jobs/job-99").await;
     assert_eq!(

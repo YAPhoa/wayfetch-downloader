@@ -10,6 +10,7 @@ use wayfetch_domain::version::Revision;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::Display)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ErrorCode {
     /// The request is malformed or fails validation.
     InvalidRequest,
@@ -51,6 +52,7 @@ impl ErrorCode {
 /// An error returned to a client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[error("{code}: {message}")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProtocolError {
     /// Stable code.
     pub code: ErrorCode,

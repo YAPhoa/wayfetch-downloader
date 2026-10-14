@@ -14,6 +14,9 @@ wayfetch-engine.workspace = true
 wayfetch-host.workspace = true
 clap.workspace = true
 httparse.workspace = true
+# Embeds the web UI in every build; `debug-embed` keeps debug builds from
+# reading it from the source tree at run time.
+rust-embed = { version = "8.13.0", features = ["debug-embed", "include-exclude"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread"] }

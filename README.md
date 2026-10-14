@@ -18,9 +18,9 @@ decompression, and a broker that never repeats a request its transfer lease
 does not allow. The `wayfetch` command-line host (`crates/cli`) runs the engine
 in a foreground session, and the `wayfetchd` daemon (`apps/wayfetchd`) serves it
 through an authenticated HTTP/SSE API (`crates/api`); both compose the engine
-the same way through `crates/host`. The `Dockerfile` and
-`deploy/compose.yaml` run the daemon in a least-privilege container. No
-desktop host or frontend package exists yet.
+the same way through `crates/host`. `wayfetchd` also serves a bundled web
+UI (`ui/`) for direct downloads. The `Dockerfile` and `deploy/compose.yaml`
+run the daemon in a least-privilege container. No desktop host exists yet.
 
 ## Repository structure
 
@@ -49,11 +49,12 @@ wayfetch-downloader/
 │   ├── adapters/           # Adapter SDK and provider integrations
 │   ├── extraction/         # Archive workflow and worker supervision
 │   └── api/                # HTTP authentication and REST/SSE adapter
-├── ui/src/
-│   ├── components/         # Shared workflow views
-│   ├── client/             # Client contract and DTO bindings
-│   ├── transports/         # HTTP/SSE and desktop IPC adapters
-│   └── shell/              # Optional native integration
+├── ui/                     # Web UI; package.json has only dev checks
+│   ├── src/components/     # Shared workflow views
+│   ├── src/client/         # WayfetchClient contract, DTOs, event feed
+│   ├── src/transports/     # HTTP/SSE (and later desktop IPC) clients
+│   ├── src/shell/          # Optional native integration
+│   └── tests/              # Unit and real-browser tests
 ├── tests/
 │   ├── fixtures/
 │   ├── integration/
@@ -139,6 +140,7 @@ is never printed.
 | `POST /v1/inputs` | Submit `{"idempotency_key", "target", "items": [URL...]}` |
 | `GET /v1/jobs` | A page of jobs: `after`, `page_size`, `stage=a,b`, `package` |
 | `GET /v1/jobs/{id}` | One job |
+| `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
 | `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel", "expected_revision"}` |
 | `GET /v1/events` | Server-sent events: `hello`, `event`, `progress`, `resync` |
 | `GET /v1/ready` | Readiness, without a token: `200 {"ready":true}`, or `503` with a `reason` |
@@ -187,10 +189,11 @@ and optional port only, and must be `https://`.
 
 **Setup.** On a start with no owner account, the daemon writes a single-use
 setup secret to `AUTH_DIR/setup-secret` (mode `600`) and logs only the file's
-path. Within 15 minutes, send it with the owner name and a password of at
-least 12 characters to `POST /v1/auth/setup`. Until the bundled UI exists,
-do that with `curl` and `jq`; the password is read without echo and passed
-through the environment and standard input, never as an argument:
+path. Within 15 minutes, open the origin in a browser and enter the secret
+with the owner name and a password of at least 12 characters (see
+[The web UI](#the-web-ui)). Without a browser, send the same to
+`POST /v1/auth/setup` with `curl` and `jq`; the password is read without echo
+and passed through the environment and standard input, never as an argument:
 
 ```sh
 ORIGIN=https://wayfetch.example.lan          # the --browser-origin
@@ -295,6 +298,46 @@ development on the same machine. It is refused unless `--listen` is a
 loopback address and every origin is plain-HTTP loopback; without
 `--browser-origin`, the origins are the listener's address and `localhost`
 on its port. Never use it for a deployment.
+
+### The web UI
+
+`wayfetchd` serves its web UI at `/` on the same origin as the API; it is
+compiled into the binary, and the page loads nothing from anywhere else, so
+it works with no internet access. With browser access configured, open the
+origin, complete setup the first time, and sign in. To try it on one
+machine:
+
+```sh
+wayfetchd run --state-dir /tmp/wf/state --download-root /tmp/wf/downloads \
+    --token-file /tmp/wf/api-tokens --auth-dir /tmp/wf/auth --dev-insecure-loopback
+# open http://127.0.0.1:7878 and enter the secret from /tmp/wf/auth/setup-secret
+```
+
+The layout is a dense download table for a desktop browser: a toolbar
+(add links, pause, resume, or cancel the selected job, filter by name),
+state filters with job counts on the left, the table (each job's name, the
+host of its link, state, progress, size, speed, and time left), details of
+the selected job below the table, and a status bar with the connection state and a compact or comfortable row
+density. It follows the system's light or dark theme and uses the bundled
+IBM Plex Sans typeface (`ui/src/fonts/`, SIL Open Font License 1.1).
+
+The UI adds direct links (one per line), lists jobs a page of 50 at a time in
+the order they were added, shows one job at `/jobs/job-N`, and pauses,
+resumes, or cancels them. It follows the event stream and reconnects on its
+own, resuming from the last event it saw, or re-reading the list when the
+server says to resynchronize. Durable progress moves at each 8 MiB
+checkpoint without an event, so while a shown job is active the page
+re-reads its 50 jobs every few seconds. Reloading or closing the tab never
+affects a download. When the session ends (sign-out in any tab, expiry, or a
+daemon restart, which signs every browser out) the page says so and asks to
+sign in again; downloads keep running meanwhile.
+
+Names and messages from downloads are always shown as text. The page's
+Content Security Policy allows scripts, styles, fonts, and requests only from its
+own origin, forbids framing, and enables Trusted Types, so the browser
+refuses to parse any string as HTML. The page is revalidated on every load,
+and its scripts, styles, and fonts are served below `/assets/VERSION/`, where
+`VERSION` is a digest of the bundle, and cached for good.
 
 ## Running in a container
 
@@ -424,16 +467,40 @@ You need `rustup`, Python 3, and a C compiler (the engine builds its bundled
 SQLite). The Rust toolchain is pinned in
 `rust-toolchain.toml`; `rustup toolchain install` (or the first `cargo` command)
 installs it with rustfmt and Clippy. No JavaScript or desktop tooling is needed
-for the engine. These are the checks CI runs on every push and pull request:
+for the engine or for `wayfetchd`: the web UI is plain JavaScript modules,
+served as they are, with no build step. These are the checks CI runs on
+every push and pull request:
 
 ```sh
 cargo fmt --all -- --check                                   # formatting
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-features
+cargo test --locked --workspace --all-features               # also writes UI types
 cargo build --locked -p wayfetch-engine                      # engine alone
 python3 scripts/check_dependency_boundaries.py               # crate boundaries
 python3 -m unittest discover -s scripts                       # tests for the check
 ```
+
+The web UI's checks need Node.js 22 or later. `npm ci` installs only the
+development tools: TypeScript, which type-checks the JavaScript through its
+JSDoc annotations, and Playwright. The browser tests drive Chromium against a
+debug `wayfetchd` (`WAYFETCHD` names another binary) and a local fixture
+server, with every address beyond loopback unreachable:
+
+```sh
+cd ui && npm ci
+npm run check                                     # types
+npm test                                          # unit tests (node --test)
+cargo build --locked -p wayfetchd && npm run e2e  # real browser
+```
+
+`npx playwright install chromium` fetches the browser if Playwright has none.
+
+The UI's types for the API's JSON are generated from the Rust definitions by
+[ts-rs](https://github.com/Aleph-Alpha/ts-rs), behind each wire crate's `ts`
+feature. Tests with that feature (as in `--all-features` above) write them to
+`ui/src/client/generated`, where `npm run check` reads them; commit them
+with the Rust change. CI regenerates them from scratch and fails if they
+differ from the committed files.
 
 The container tests need Docker with the Compose plugin, so they are ignored
 by default. They build `wayfetch:local` with `docker build` first, or test
@@ -445,7 +512,7 @@ cargo test --locked -p wayfetchd --test container -- --ignored
 
 `scripts/check_dependency_boundaries.py` fails if the domain, protocol, engine,
 net, host, or CLI crates gain a server, desktop, or UI-toolkit dependency (for
-example Axum, Tauri, or GTK), if the engine-side crates depend on the host
+example Axum, Tauri, or GTK) or embed the web UI (`rust-embed`), if the engine-side crates depend on the host
 crate, if the HTTP adapter or daemon gain a desktop dependency, if the domain
 and protocol crates depend on the engine, or if the engine depends on the net
 crate. It checks
@@ -460,11 +527,14 @@ process, a rerun of their own test binary, and kill it with `SIGKILL` at named
 boundaries from the engine's test-only `failpoints` feature. The CLI tests
 (`crates/cli/tests/session.rs`) drive the built `wayfetch` executable against
 the same fixture servers, and the daemon tests (`apps/wayfetchd/tests/daemon.rs`)
-drive the built `wayfetchd` over its HTTP API. The container tests
+drive the built `wayfetchd` over its HTTP API. The browser test
+(`ui/tests/e2e/browser.spec.js`) sets up the owner, downloads, pauses,
+resumes, and cancels through the UI, reloads and closes the tab, restarts the
+daemon, and signs out, from a fresh browser profile. The container tests
 (`apps/wayfetchd/tests/container.rs`) run the image through
 `deploy/compose.yaml` with a fixture server on the host's Docker bridge
-address: a download resumes after the container is removed and recreated,
-`docker compose stop` is graceful, a second container cannot take the state
+address: the image serves the UI, a download resumes after the container is
+removed and recreated, `docker compose stop` is graceful, a second container cannot take the state
 directory, and a missing or uninitialized root is refused.
 
 Use `cargo fmt --all` to apply formatting.
