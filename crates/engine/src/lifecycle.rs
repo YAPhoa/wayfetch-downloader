@@ -19,6 +19,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
@@ -30,7 +31,7 @@ use wayfetch_protocol::{
     ErrorCode, Hello, InstanceId, ProtocolError, ProtocolVersion, TransportLimits,
 };
 
-use crate::config::EngineConfig;
+use crate::config::{ConfigError, EngineConfig};
 use crate::state_dir::{Identity, StateDir, StateDirError};
 
 /// Engine lifecycle phase, observable through [`EngineHandle::readiness`].
@@ -49,6 +50,9 @@ pub enum Readiness {
 /// Why an engine could not start.
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
+    /// The configuration is invalid. Nothing was touched on disk.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
     /// The state directory is locked, missing, or unreadable.
     #[error(transparent)]
     StateDir(#[from] StateDirError),
@@ -70,9 +74,11 @@ impl EngineBuilder {
         Self { config, runtime }
     }
 
-    /// Takes ownership of the state directory and starts the engine's
-    /// tasks. Fails if another engine owns the directory.
+    /// Validates the configuration, takes ownership of the state directory,
+    /// and starts the engine's tasks. Fails if another engine owns the
+    /// directory.
     pub async fn start(self) -> Result<EngineOwner, StartError> {
+        self.config.validate()?;
         let path = self.config.state_dir.clone();
         let state_dir = self
             .runtime
@@ -93,6 +99,7 @@ impl EngineBuilder {
             runtime: self.runtime,
             cancel: CancellationToken::new(),
             tasks: TaskTracker::new(),
+            failed_tasks: Arc::default(),
             readiness: readiness_tx,
             state_dir: Some(state_dir),
         };
@@ -118,10 +125,12 @@ pub struct ShutdownRequest {
 /// What a shutdown achieved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShutdownReport {
-    /// Every engine task finished within the deadline.
+    /// Every engine task finished within the deadline and none failed.
     pub clean: bool,
     /// Engine tasks still running at the deadline.
     pub unfinished_tasks: usize,
+    /// Engine tasks that panicked during the engine's lifetime.
+    pub failed_tasks: usize,
     /// Whether the state-directory lock was released. False while any
     /// unfinished task still holds it.
     pub state_dir_released: bool,
@@ -138,6 +147,7 @@ pub struct EngineOwner {
     runtime: Handle,
     cancel: CancellationToken,
     tasks: TaskTracker,
+    failed_tasks: Arc<AtomicUsize>,
     readiness: watch::Sender<Readiness>,
     state_dir: Option<Arc<StateDir>>,
 }
@@ -155,16 +165,22 @@ impl EngineOwner {
 
     /// Spawns an engine task. The task keeps the state directory locked
     /// until it ends, and must stop promptly once the engine's cancellation
-    /// token fires.
+    /// token fires. A panic is counted and makes shutdown unclean.
     pub(crate) fn spawn<F>(&self, task: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
         let guard = self.state_dir.clone();
+        let work = self.runtime.spawn(async move {
+            let _guard = guard;
+            task.await;
+        });
+        let failed = Arc::clone(&self.failed_tasks);
         self.tasks.spawn_on(
             async move {
-                let _guard = guard;
-                task.await;
+                if work.await.is_err() {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                }
             },
             &self.runtime,
         );
@@ -179,19 +195,21 @@ impl EngineOwner {
         self.readiness.send_replace(Readiness::ShuttingDown);
         self.cancel.cancel();
         self.tasks.close();
-        let clean = tokio::time::timeout(timeout, self.tasks.wait())
+        let finished = tokio::time::timeout(timeout, self.tasks.wait())
             .await
             .is_ok();
         let state_dir_released = self
             .state_dir
             .take()
             .is_some_and(|dir| Arc::try_unwrap(dir).is_ok());
-        if clean {
+        if finished {
             self.readiness.send_replace(Readiness::Stopped);
         }
+        let failed_tasks = self.failed_tasks.load(Ordering::Relaxed);
         ShutdownReport {
-            clean,
+            clean: finished && failed_tasks == 0,
             unfinished_tasks: self.tasks.len(),
+            failed_tasks,
             state_dir_released,
             elapsed: started.elapsed(),
         }
@@ -361,6 +379,55 @@ mod tests {
                 .await
                 .clean
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panicked_task_makes_shutdown_unclean() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = start(dir.path()).await.unwrap();
+        let (done, panicked) = oneshot::channel::<()>();
+        owner.spawn(async move {
+            let _done = done;
+            panic!("worker failed");
+        });
+        // The sender drops while the task unwinds.
+        let _ = panicked.await;
+        let report = owner.shutdown(ShutdownRequest::default()).await;
+        assert!(!report.clean, "{report:?}");
+        assert_eq!(report.failed_tasks, 1);
+        assert_eq!(report.unfinished_tasks, 0);
+        // The panic released its hold on the directory.
+        assert!(report.state_dir_released);
+        let restarted = start(dir.path()).await.unwrap();
+        assert!(restarted.shutdown(ShutdownRequest::default()).await.clean);
+    }
+
+    #[tokio::test]
+    async fn invalid_queue_capacity_fails_before_touching_the_state_dir() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("state");
+        let mut config = EngineConfig::new(&dir);
+        config.request_queue = std::num::NonZeroUsize::MAX;
+        let err = EngineBuilder::new(config, Handle::current())
+            .start()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StartError::Config(ConfigError::RequestQueueTooLarge(usize::MAX))
+            ),
+            "{err:?}"
+        );
+        assert!(!dir.exists());
+        let mut config = EngineConfig::new(&dir);
+        config.request_queue =
+            std::num::NonZeroUsize::new(EngineConfig::MAX_REQUEST_QUEUE).unwrap();
+        let owner = EngineBuilder::new(config, Handle::current())
+            .start()
+            .await
+            .unwrap();
+        assert!(owner.shutdown(ShutdownRequest::default()).await.clean);
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@ pub mod config;
 pub mod lifecycle;
 pub mod state_dir;
 
-pub use config::EngineConfig;
+pub use config::{ConfigError, EngineConfig};
 pub use lifecycle::{
     EngineBuilder, EngineHandle, EngineOwner, Readiness, ShutdownReport, ShutdownRequest,
     StartError,
