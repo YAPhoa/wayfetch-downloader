@@ -26,12 +26,22 @@ use wayfetch_protocol::{Command, CommandEnvelope, IdempotencyKey, Permission, Qu
 pub const ALL: &[Permission] = &[Permission::Read, Permission::Submit, Permission::Control];
 pub const ROOT: RootId = RootId::from_u64(1).unwrap();
 pub const KIB: usize = 1024;
+/// The checkpoint interval engines in an [`Env`] use.
+pub const CHECKPOINT: usize = 4 * KIB;
+
+/// Whether `durable` bytes are all a transfer stalled at `at` will commit:
+/// checkpoints follow the network's chunking, so the last one lands within
+/// one checkpoint interval of the stall (the engine may commit the rest
+/// while it stops).
+pub fn settled(durable: u64, at: usize) -> bool {
+    durable + CHECKPOINT as u64 > at as u64
+}
 
 /// A state directory, an initialized download root, and the transport
 /// engines start with. `server` is whatever the test controls the
 /// transport's responses through.
 pub struct Env<S> {
-    _tmp: tempfile::TempDir,
+    _tmp: Option<tempfile::TempDir>,
     pub state: PathBuf,
     pub root: PathBuf,
     pub server: S,
@@ -41,21 +51,31 @@ pub struct Env<S> {
 }
 
 impl<S> Env<S> {
-    /// Small read buffers and checkpoints, so transfers of a few KiB pass
-    /// through several of each.
+    /// A fresh environment in a temporary directory, removed on drop.
     pub fn new(server: S, transport: Arc<dyn Transport>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let (state, root) = (tmp.path().join("state"), tmp.path().join("downloads"));
         std::fs::create_dir(&root).unwrap();
         Self {
-            _tmp: tmp,
+            _tmp: Some(tmp),
+            ..Self::at(state, root, server, transport)
+        }
+    }
+
+    /// Engines on an existing state directory and root that another
+    /// environment owns and removes, for example in a child process. Small
+    /// read buffers and checkpoints, so transfers of a few KiB pass through
+    /// several of each.
+    pub fn at(state: PathBuf, root: PathBuf, server: S, transport: Arc<dyn Transport>) -> Self {
+        Self {
+            _tmp: None,
             state,
             root,
             server,
             transport,
             limits: Limits {
                 read_buffer_bytes: NonZeroUsize::new(4 * KIB).unwrap(),
-                checkpoint_bytes: NonZeroU64::new(4 * KIB as u64).unwrap(),
+                checkpoint_bytes: NonZeroU64::new(CHECKPOINT as u64).unwrap(),
                 ..Limits::DEFAULT
             },
             timeouts: Timeouts::DEFAULT,

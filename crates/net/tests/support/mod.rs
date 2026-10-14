@@ -446,13 +446,29 @@ async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> Option<Logged> {
 
 /// A transport configuration that trusts `server` and may reach it.
 pub fn config_for(server: &Server) -> wayfetch_net::HttpConfig {
+    config_trusting(server.tls.clone())
+}
+
+/// A transport configuration that may reach a local server and trusts `ca`
+/// in addition to the platform roots.
+pub fn config_trusting(ca: Option<CertificateDer<'static>>) -> wayfetch_net::HttpConfig {
     let mut config = wayfetch_net::HttpConfig::default();
     config
         .egress
         .allowed_networks
         .push("127.0.0.1/32".parse().unwrap());
-    if server.tls.is_some() {
-        config.extra_roots.push(server.ca());
-    }
+    config.extra_roots.extend(ca);
     config
+}
+
+/// An HTTPS server and engines that download from it with the real
+/// transport, configured by `configure`.
+pub async fn https_env(
+    configure: impl FnOnce(&mut wayfetch_net::HttpConfig),
+) -> crate::engine_support::Env<Server> {
+    let server = Server::https().await;
+    let mut config = config_for(&server);
+    configure(&mut config);
+    let transport = wayfetch_net::HttpTransport::new(config).unwrap();
+    crate::engine_support::Env::new(server, Arc::new(transport))
 }
