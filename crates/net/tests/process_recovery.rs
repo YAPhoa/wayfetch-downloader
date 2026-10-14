@@ -1,0 +1,378 @@
+//! Hard-kill recovery over real sockets (architecture brief section 13.2,
+//! "crash-injection harness"): an engine runs in a child process against
+//! the local HTTPS fixture and is killed with `SIGKILL` while streaming, at
+//! each checkpoint step, and at each publication step. An engine restarted
+//! on the same state directory must take it over, resume only from the
+//! durable bytes, complete the interrupted publication, and publish exactly
+//! the served bytes without overwriting anything.
+//!
+//! Brief tests exercised here: T23 (crash before and after the file sync
+//! and the checkpoint commit), T24 (crash before and after the link and the
+//! completion commit), T26 (the killed engine held the state directory
+//! until it died, and nothing had to clean its lock up), and T31 (a file
+//! that took the target name meanwhile is never overwritten).
+//!
+//! The child is this test binary running [`child_engine`]. It stops at a
+//! named boundary of the engine's `failpoints` feature and reports it, so
+//! every kill lands on a known step rather than on a timer.
+
+#![cfg(unix)]
+
+#[path = "../../engine/tests/support/mod.rs"]
+mod engine_support;
+mod support;
+
+use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use bytes::Bytes;
+use engine_support::{KIB, body, complete, jobs, settled, shutdown, staging_files};
+use support::{Resource, Server, config_trusting, https_env};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::mpsc;
+use wayfetch_engine::fail;
+use wayfetch_engine::state_dir::{StateDir, StateDirError};
+use wayfetch_net::{CertificateDer, HttpTransport};
+use wayfetch_protocol::query::JobSummary;
+
+type Env = engine_support::Env<Server>;
+
+/// Prefixes every line the child reports on its standard output.
+const REPORT: &str = "@@wayfetch-child ";
+
+/// Environment variables that turn [`child_engine`] on and configure it.
+const CHILD_STATE: &str = "WAYFETCH_CHILD_STATE";
+const CHILD_ROOT: &str = "WAYFETCH_CHILD_ROOT";
+const CHILD_CA: &str = "WAYFETCH_CHILD_CA";
+const CHILD_URL: &str = "WAYFETCH_CHILD_URL";
+/// `<boundary>:<n>`: stop at the `n`th pass through the boundary.
+const CHILD_STOP: &str = "WAYFETCH_CHILD_STOP";
+
+/// How long any one wait for the child may take.
+const DEADLINE: Duration = Duration::from_secs(20);
+
+/// The engine process the tests start and kill. It downloads one URL on the
+/// parent's directories, reports durable progress, and with a stop
+/// boundary blocks there for good after reporting it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run in a child process by the other tests"]
+async fn child_engine() {
+    let Some(state) = std::env::var_os(CHILD_STATE) else {
+        return;
+    };
+    let var = |name| std::env::var(name).unwrap();
+    if let Ok(stop) = std::env::var(CHILD_STOP) {
+        let (boundary, n) = stop.split_once(':').unwrap();
+        stop_at(boundary.to_owned(), n.parse().unwrap());
+    }
+    let ca = CertificateDer::from(std::fs::read(var(CHILD_CA)).unwrap());
+    let transport = HttpTransport::new(config_trusting(Some(ca))).unwrap();
+    let env = engine_support::Env::at(
+        state.into(),
+        var(CHILD_ROOT).into(),
+        (),
+        Arc::new(transport),
+    );
+    let owner = env.start().await;
+    let [id] = engine_support::submit(&owner, [var(CHILD_URL)]).await[..] else {
+        panic!("one job")
+    };
+    let mut reported = None;
+    loop {
+        let job = engine_support::job(&owner, id).await;
+        if reported != Some(job.bytes_done) {
+            println!("{REPORT}durable {}", job.bytes_done);
+            reported = Some(job.bytes_done);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Blocks the thread that makes the `n`th pass through `boundary`, after
+/// reporting it, until the process is killed.
+fn stop_at(boundary: String, n: usize) {
+    let passes = AtomicUsize::new(0);
+    let name = boundary.clone();
+    fail::cfg_callback(boundary, move || {
+        if passes.fetch_add(1, Ordering::SeqCst) + 1 == n {
+            println!("{REPORT}stopped {name}");
+            loop {
+                std::thread::park();
+            }
+        }
+    })
+    .unwrap();
+}
+
+/// A running child engine and what it reported so far.
+struct Child {
+    process: tokio::process::Child,
+    reports: mpsc::UnboundedReceiver<String>,
+    /// Durable bytes the child last reported.
+    durable: u64,
+    /// The boundary the child stopped at.
+    stopped: Option<String>,
+}
+
+impl Child {
+    /// Starts an engine in a child process on `env`'s directories that
+    /// downloads `path`, stopping at the `n`th pass through `boundary`.
+    fn spawn(env: &Env, path: &str, stop: Option<(&str, usize)>) -> Self {
+        let ca = env.state.with_file_name("ca.der");
+        std::fs::write(&ca, env.server.ca()).unwrap();
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["child_engine", "--exact", "--ignored", "--nocapture"])
+            .env(CHILD_STATE, &env.state)
+            .env(CHILD_ROOT, &env.root)
+            .env(CHILD_CA, &ca)
+            .env(CHILD_URL, env.server.url(path))
+            .env_remove(CHILD_STOP)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some((boundary, n)) = stop {
+            command.env(CHILD_STOP, format!("{boundary}:{n}"));
+        }
+        let mut process = command.spawn().unwrap();
+        let mut lines = BufReader::new(process.stdout.take().unwrap()).lines();
+        let (send, reports) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = lines.next_line().await {
+                // The test harness may print on the same line.
+                if let Some((_, report)) = line.split_once(REPORT) {
+                    let _ = send.send(report.to_owned());
+                }
+            }
+        });
+        Self {
+            process,
+            reports,
+            durable: 0,
+            stopped: None,
+        }
+    }
+
+    /// Reads reports until `done` holds, rechecking it at least every few
+    /// milliseconds for conditions outside the reports.
+    async fn until(&mut self, done: impl Fn(&Self) -> bool) {
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        while !done(self) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out: durable {}, stopped {:?}",
+                self.durable,
+                self.stopped
+            );
+            match tokio::time::timeout(Duration::from_millis(5), self.reports.recv()).await {
+                Err(_) => {}
+                Ok(None) => panic!("the child exited: {:?}", self.process.try_wait()),
+                Ok(Some(report)) => match report.split_once(' ').unwrap() {
+                    ("durable", n) => self.durable = n.parse().unwrap(),
+                    ("stopped", boundary) => self.stopped = Some(boundary.to_owned()),
+                    other => panic!("unknown report {other:?}"),
+                },
+            }
+        }
+    }
+
+    /// Kills the child with `SIGKILL`, after checking that it still owns
+    /// `state`, and reaps it.
+    async fn kill(mut self, state: &Path) {
+        assert!(matches!(
+            StateDir::open(state),
+            Err(StateDirError::Locked(_))
+        ));
+        self.process.start_kill().unwrap();
+        let status = self.process.wait().await.unwrap();
+        assert_eq!(status.signal(), Some(SIGKILL), "{status:?}");
+    }
+}
+
+/// The signal number of `SIGKILL` on every Unix.
+const SIGKILL: i32 = 9;
+
+/// Lengths of the staging files in `root`.
+fn staging_lengths(root: &Path) -> Vec<u64> {
+    std::fs::read_dir(root.join(".wayfetch/staging"))
+        .map(|entries| {
+            entries
+                .map(|e| e.unwrap().metadata().unwrap().len())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The durable bytes the store had committed for the job's latest partial,
+/// read from the database the killed engine left.
+fn committed_bytes(state: &Path) -> u64 {
+    let db = rusqlite::Connection::open_with_flags(
+        state.join("state.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    db.query_row(
+        "SELECT coalesce(max(durable_bytes), 0) FROM partials \
+         WHERE id = (SELECT max(id) FROM partials)",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap()
+}
+
+async fn env() -> Env {
+    https_env(|_| {}).await
+}
+
+/// Restarts an engine on `env` and waits for its only job to complete.
+async fn restart(env: &Env) -> (wayfetch_engine::EngineOwner, JobSummary) {
+    let owner = env.start().await;
+    let [job] = &jobs(&owner).await[..] else {
+        panic!("one job")
+    };
+    let done = complete(&owner, job.id).await;
+    // Recovery took the job over under a new generation.
+    assert!(done.generation.get() > 1, "{done:?}");
+    (owner, done)
+}
+
+/// Checks that `done` published `data` at `name` and left no staging file.
+fn assert_published(env: &Env, done: &JobSummary, name: &str, data: &Bytes) {
+    let artifact = done.artifact.as_ref().expect("published");
+    assert_eq!(
+        (artifact.path.as_str(), artifact.size),
+        (name, data.len() as u64)
+    );
+    assert_eq!(env.published(name), *data);
+    assert_eq!(staging_files(&env.root), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_killed_while_streaming_resumes_from_its_durable_bytes() {
+    let env = env().await;
+    let data = body(200 * KIB + 11);
+    // Not on a checkpoint boundary, so written bytes can outrun durable ones.
+    let at = 72 * KIB + 1000;
+    env.server.put(
+        "/big.bin",
+        Resource {
+            stall_at: Some(at),
+            ..Resource::new(data.clone())
+        },
+    );
+    let mut child = Child::spawn(&env, "/big.bin", None);
+    // Every byte before the stall is in the staging file and the last
+    // checkpoint committed; the response is still open.
+    child
+        .until(|c| settled(c.durable, at) && staging_lengths(&env.root) == [at as u64])
+        .await;
+    child.kill(&env.state).await;
+    env.server.update("/big.bin", |r| r.stall_at = None);
+    let durable = committed_bytes(&env.state);
+    assert!(durable > 0 && durable <= at as u64, "{durable}");
+
+    let (owner, done) = restart(&env).await;
+    // The rest was requested from the durable bytes on, conditioned on the
+    // representation; the file's length did not count as coverage.
+    assert_eq!(
+        env.server.ranges("/big.bin"),
+        vec![None, Some((durable, None))]
+    );
+    assert_eq!(env.server.log()[1].header("if-range"), Some("\"v1\""));
+    assert_published(&env, &done, "big.bin", &data);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_killed_at_a_checkpoint_resumes_from_committed_bytes_only() {
+    // Each boundary stops the third checkpoint. Before its sync the
+    // coordinator still commits earlier ones, so the test waits for one to
+    // be reported; the other two hold the coordinator after two committed.
+    let cases = [
+        ("checkpoint-before-sync", true),
+        ("checkpoint-before-commit", false),
+        ("checkpoint-after-commit", false),
+    ];
+    for (boundary, report_progress) in cases {
+        let env = env().await;
+        let data = body(64 * KIB);
+        env.server.put("/c.bin", Resource::new(data.clone()));
+        let mut child = Child::spawn(&env, "/c.bin", Some((boundary, 3)));
+        child
+            .until(|c| c.stopped.is_some() && (c.durable > 0 || !report_progress))
+            .await;
+        assert_eq!(child.stopped.as_deref(), Some(boundary));
+        child.kill(&env.state).await;
+        let written = staging_lengths(&env.root);
+        let durable = committed_bytes(&env.state);
+        let [written] = written[..] else {
+            panic!("{boundary}: {written:?}")
+        };
+        assert!(durable > 0 && durable <= written, "{boundary}: {durable}");
+        if boundary != "checkpoint-after-commit" {
+            // The stopped checkpoint's bytes were written but never
+            // committed.
+            assert!(durable < written, "{boundary}: {durable} of {written}");
+        }
+
+        let (owner, done) = restart(&env).await;
+        assert_eq!(
+            env.server.ranges("/c.bin"),
+            vec![None, Some((durable, None))],
+            "{boundary}"
+        );
+        assert_published(&env, &done, "c.bin", &data);
+        shutdown(owner).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publication_killed_at_any_step_completes_after_restart() {
+    for boundary in [
+        // The intent is recorded; the staging file has no other name.
+        "publish-before-link",
+        // Both names are the staged file.
+        "publish-before-unlink",
+        // Only the target name is left; the completion is not committed.
+        "publish-before-complete",
+    ] {
+        let env = env().await;
+        let data = body(48 * KIB + 5);
+        env.server.put("/p.bin", Resource::new(data.clone()));
+        let mut child = Child::spawn(&env, "/p.bin", Some((boundary, 1)));
+        child.until(|c| c.stopped.is_some()).await;
+        child.kill(&env.state).await;
+
+        let (owner, done) = restart(&env).await;
+        // Reconciliation finished the publication from the staged file;
+        // nothing was downloaded again.
+        assert_eq!(env.server.hits("/p.bin"), 1, "{boundary}");
+        assert_published(&env, &done, "p.bin", &data);
+        shutdown(owner).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_took_the_name_during_a_crash_is_never_overwritten() {
+    let env = env().await;
+    let data = body(48 * KIB);
+    env.server.put("/p.bin", Resource::new(data.clone()));
+    let mut child = Child::spawn(&env, "/p.bin", Some(("publish-before-link", 1)));
+    child.until(|c| c.stopped.is_some()).await;
+    child.kill(&env.state).await;
+    // Someone else's file appears under the reserved name.
+    let theirs = env.root.join("p.bin");
+    std::fs::write(&theirs, b"someone else's file").unwrap();
+
+    let (owner, done) = restart(&env).await;
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's file");
+    assert_eq!(env.server.hits("/p.bin"), 1);
+    assert_published(&env, &done, "p (1).bin", &data);
+    shutdown(owner).await;
+}

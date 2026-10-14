@@ -68,6 +68,7 @@ impl Root {
         let parent = self
             .parent_dir(parent, true)?
             .expect("created parents exist");
+        crash_point!("publish-before-link");
         match self.staging.hard_link(&record.name, &parent, name) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -84,7 +85,10 @@ impl Root {
             return Err(FsError::StagingReplaced(record.name.clone()));
         }
         sys::sync_dir(&parent).map_err(FsError::io("sync target directory"))?;
-        self.remove_staging_name(record)
+        crash_point!("publish-before-unlink");
+        self.remove_staging_name(record)?;
+        crash_point!("publish-before-complete");
+        Ok(())
     }
 
     /// Classifies an interrupted publication of `record` at `target` as an
