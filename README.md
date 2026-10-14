@@ -15,8 +15,9 @@ and deadline set in `EngineConfig`. It reaches the network only through a
 `Transport` the host supplies; `wayfetch-net` provides one over HTTP(S), with
 TLS verification, an egress policy checked on every redirect, no
 decompression, and a broker that never repeats a request its transfer lease
-does not allow. No application hosts, frontend packages, or runnable product
-builds exist yet.
+does not allow. The `wayfetch` command-line host (`crates/cli`) runs the engine
+in a foreground session; no server, desktop host, or frontend package exists
+yet.
 
 ## Repository structure
 
@@ -38,6 +39,7 @@ wayfetch-downloader/
 │   ├── engine/             # Reusable engine and lifecycle
 │   ├── store/              # Persistence and migrations
 │   ├── net/                # HTTP, sessions, streaming transfers
+│   ├── cli/                # Foreground `wayfetch` host
 │   ├── fs/                 # Safe paths, checkpoints, publication
 │   ├── adapters/           # Adapter SDK and provider integrations
 │   ├── extraction/         # Archive workflow and worker supervision
@@ -73,6 +75,41 @@ The product name is **Wayfetch Downloader** and the repository slug is
 `wayfetch-protocol`, `wayfetchd`, and the `wayfetch` CLI remain as specified in the
 architecture.
 
+## Using the `wayfetch` CLI
+
+`wayfetch` runs the engine in the foreground and takes commands on standard
+input. Build it with `cargo build --locked -p wayfetch-cli`
+(`target/debug/wayfetch`).
+
+```sh
+# Once per root: mark an existing directory as the download root. A session
+# never does this itself, so a missing mount is never mistaken for an empty
+# directory.
+wayfetch init-root --state-dir /srv/wayfetch/state /srv/downloads
+
+# A session. Paste or pipe URLs, one or more per line.
+wayfetch run --state-dir /srv/wayfetch/state --download-root /srv/downloads
+```
+
+In a session, a line holding URLs downloads them, and `list`, `inspect JOB`,
+`pause JOB`, `resume JOB`, `cancel JOB`, `help`, and `quit` do what they say
+(`JOB` is `job-1` or `1`). `quit`, end of input, Ctrl+C, or `SIGTERM` shut the
+engine down gracefully: nothing is cancelled, and unfinished jobs resume from
+their durable bytes on the next start. Pause and cancel keep partial data. One
+process owns a state directory at a time; a second `run` or `init-root` on it
+is refused, and controlling a running session from another process is future
+daemon work. `--json` prints one JSON object per line for scripts. Output
+never holds up the session or its shutdown: if the reader stops reading, lines
+beyond a small queue are dropped and the count is reported once there is room.
+
+URLs are read only from standard input, so they never appear in process
+listings, and output never repeats a submitted URL or rejected input. Lines
+over 16 KiB are discarded. Only public addresses are reachable and TLS is
+always verified against the platform's roots; `--allow-network CIDR` and
+`--ca-cert FILE` (PEM or DER) add explicit exceptions, for example a local
+server with its own CA. Live transfer rates are not reported yet; `inspect`
+and `list` show durable progress, which advances at each 8 MiB checkpoint.
+
 ## Working on the project
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md), and the relevant
@@ -97,7 +134,7 @@ python3 -m unittest discover -s scripts                       # tests for the ch
 ```
 
 `scripts/check_dependency_boundaries.py` fails if the domain, protocol, engine,
-or net crates gain a server, desktop, or UI-toolkit dependency (for example Axum,
+net, or CLI crates gain a server, desktop, or UI-toolkit dependency (for example Axum,
 Tauri, or GTK), if the domain and protocol crates depend on the engine, or if the
 engine depends on the net crate. It checks
 every target with all features enabled, so optional dependencies count too. CI
@@ -108,7 +145,9 @@ The HTTP tests start their own HTTP and HTTPS servers on `127.0.0.1`, with a
 certificate generated per test; they need no network access. The crash tests
 (`crates/net/tests/process_recovery.rs`, Unix only) run the engine in a child
 process, a rerun of their own test binary, and kill it with `SIGKILL` at named
-boundaries from the engine's test-only `failpoints` feature.
+boundaries from the engine's test-only `failpoints` feature. The CLI tests
+(`crates/cli/tests/session.rs`) drive the built `wayfetch` executable against
+the same fixture servers.
 
 Use `cargo fmt --all` to apply formatting.
 
