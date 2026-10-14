@@ -55,6 +55,10 @@ const NAME_ATTEMPTS: u32 = 100;
 /// Longest entity tag recorded for a staging file (the schema's bound).
 const MAX_VALIDATOR_BYTES: usize = 1024;
 
+/// Longest resource identity recorded for a staging file (the schema's
+/// bound).
+const MAX_RESOURCE_BYTES: usize = 512;
+
 /// Why a download stopped before completing its job.
 #[derive(Debug)]
 enum Stop {
@@ -123,6 +127,15 @@ struct Continued {
 struct Target {
     start: u64,
     end: Option<u64>,
+}
+
+/// What a request found.
+enum Opened {
+    /// A body to stream into the target.
+    Body(Response, Target),
+    /// Nothing is left to send: the continued partial's durable bytes
+    /// already cover the whole representation of this many bytes.
+    Covered(u64),
 }
 
 /// One job's download, run as an engine task.
@@ -216,7 +229,14 @@ impl Download {
             }
             other => other,
         };
-        let (response, target) = self.request(&url, continued.as_ref()).await?;
+        let (response, target) = match self.request(&url, continued.as_ref()).await? {
+            Opened::Body(response, target) => (response, target),
+            Opened::Covered(size) => {
+                let c = continued.ok_or(Stop::Abandon)?;
+                let name = target_name(self.job.job, c.partial.suggested_name.as_deref(), &url);
+                return self.finish(&root, c.file, size, name).await;
+            }
+        };
         // Only a usable name is kept, so a long or hostile header cannot
         // make the response unrecordable.
         let suggested = match &continued {
@@ -395,11 +415,7 @@ impl Download {
 
     /// Sends the request, from zero or after a continued partial's durable
     /// bytes, and checks the response before any byte is written.
-    async fn request(
-        &self,
-        url: &Url,
-        continued: Option<&Continued>,
-    ) -> Result<(Response, Target), Stop> {
+    async fn request(&self, url: &Url, continued: Option<&Continued>) -> Result<Opened, Stop> {
         let stored = continued.and_then(|c| c.partial.representation.clone());
         let requested = continued.map(|c| (c.partial.durable_end, None));
         let request = OpenRequest {
@@ -422,11 +438,14 @@ impl Download {
                 }
                 Ok(Err(e)) => return Err(failed(e.code, e.message)),
                 Ok(Ok(mut response)) => {
-                    // A validator too long to record identifies nothing the
-                    // engine can check later.
-                    let etag = &mut response.representation.strong_etag;
-                    if etag.as_ref().is_some_and(|e| e.len() > MAX_VALIDATOR_BYTES) {
-                        *etag = None;
+                    // A validator or resource too long to record identifies
+                    // nothing the engine can check later.
+                    let r = &mut response.representation;
+                    if r.strong_etag.as_ref().is_some_and(|e| e.len() > MAX_VALIDATOR_BYTES) {
+                        r.strong_etag = None;
+                    }
+                    if r.resource.as_ref().is_some_and(|o| o.len() > MAX_RESOURCE_BYTES) {
+                        r.resource = None;
                     }
                     response
                 }
@@ -435,15 +454,30 @@ impl Download {
         let known = stored.as_ref().and_then(|r| r.length);
         let plan = range::plan(requested, response.framing, known)
             .map_err(|e| failed(FailureCode::IntegrityMismatch, e))?;
-        let Plan::Write {
-            start,
-            end,
-            complete,
-        } = plan
-        else {
+        let (start, end, complete) = match plan {
+            Plan::Write {
+                start,
+                end,
+                complete,
+            } => (start, end, complete),
+            // `416` finishes the job only when the durable bytes already
+            // cover exactly the length it reports, from the same resource
+            // and representation (rule 7.5.3, T04).
+            Plan::Reconcile {
+                complete: Some(complete),
+            } if continued
+                .is_some_and(|c| c.partial.contiguous && c.partial.durable_end == complete)
+                && stored.as_ref().is_some_and(|s| {
+                    s.resource.is_some()
+                        && s.resource == response.representation.resource
+                        && !s.contradicts(&response.representation)
+                }) =>
+            {
+                return Ok(Opened::Covered(complete));
+            }
             // The server ignored the range, or reports nothing left to send
             // for a partial that is not known to be complete.
-            return Err(Stop::Restart);
+            _ => return Err(Stop::Restart),
         };
         if stored.is_some_and(|stored| stored != response.representation) {
             return Err(Stop::Restart);
@@ -458,7 +492,7 @@ impl Download {
                 format!("response ends at byte {end} of {complete}"),
             ));
         }
-        Ok((response, Target { start, end }))
+        Ok(Opened::Body(response, Target { start, end }))
     }
 
     /// Creates, registers, and describes a new staging file.
@@ -786,6 +820,7 @@ mod tests {
             length: Some(5),
             strong_etag: Some("\"v1\"".into()),
             last_modified: None,
+            resource: None,
         };
         store
             .record_response(job, generation, &representation, None, now())

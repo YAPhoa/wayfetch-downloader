@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/domain", "crates/protocol", "crates/engine"]
+members = ["crates/domain", "crates/protocol", "crates/engine", "crates/net"]
 # Server and desktop hosts are added as members later; default members stay
 # limited to engine-side crates so a plain `cargo build` never pulls in a
 # desktop or frontend toolchain.
-default-members = ["crates/domain", "crates/protocol", "crates/engine"]
+default-members = ["crates/domain", "crates/protocol", "crates/engine", "crates/net"]
 
 [workspace.package]
 version = "0.0.0"
@@ -17,6 +17,7 @@ publish = false
 [workspace.dependencies]
 wayfetch-domain = { path = "crates/domain" }
 wayfetch-protocol = { path = "crates/protocol" }
+wayfetch-engine = { path = "crates/engine" }
 bytes = "1.12.1"
 cap-std = "4.0.3"
 percent-encoding = "2.3.2"

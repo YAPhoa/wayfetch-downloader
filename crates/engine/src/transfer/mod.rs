@@ -23,10 +23,11 @@
 //!    and cancellation, and hands out synchronized checkpoints for the
 //!    store to commit.
 //!
-//! The HTTP client itself, redirects, sessions, and the broker that holds
-//! requests and responses are later work; they plug in through
-//! [`transport::Transport`], which yields a [`range::Framing`] and a
-//! [`writer::ChunkSource`].
+//! The HTTP client, redirects, egress policy, and the broker that holds
+//! prepared requests and open responses live in the `wayfetch-net` crate,
+//! which depends on the engine and plugs in through
+//! [`transport::Transport`], yielding a [`range::Framing`] and a
+//! [`writer::ChunkSource`]. Sessions and cookies are later work.
 
 pub mod lease;
 pub mod range;
