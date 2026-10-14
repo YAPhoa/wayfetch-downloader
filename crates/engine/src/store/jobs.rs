@@ -1,0 +1,375 @@
+//! Job rows: staging, generation-checked transitions, restart recovery, and
+//! read queries.
+
+use std::str::FromStr;
+
+use rusqlite::{OptionalExtension, Transaction, params, params_from_iter};
+use strum::VariantArray;
+use wayfetch_domain::failure::{Failure, FailureCode};
+use wayfetch_domain::id::{JobId, PackageId};
+use wayfetch_domain::job::{DesiredState, JobStage, JobState, Outcome};
+use wayfetch_domain::name::DiagnosticText;
+use wayfetch_domain::time::UtcTimestamp;
+use wayfetch_domain::version::Generation;
+use wayfetch_protocol::event::{EventCursor, EventKind};
+use wayfetch_protocol::query::{FailureSummary, JobSummary, Page, Query, QueryResult};
+use wayfetch_protocol::{InstanceId, ProtocolError};
+
+use super::{Store, StoreError, key, outbox, sql};
+
+/// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
+/// the job's newest partial.
+const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.generation, \
+     j.revision, j.bytes_total, j.failure_code, j.failure_retry_at, j.failure_message, \
+     COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
+               ORDER BY p.generation DESC LIMIT 1), 0)";
+
+/// Stages that are parked with a failure explaining why.
+fn parked(stage: JobStage) -> bool {
+    matches!(
+        stage,
+        JobStage::Waiting | JobStage::Blocked | JobStage::NeedsInput | JobStage::Failed
+    )
+}
+
+/// A stored job, decoded and validated.
+pub(super) struct StoredJob {
+    pub(super) id: JobId,
+    pub(super) state: JobState,
+    package: PackageId,
+    bytes_total: Option<u64>,
+    bytes_done: u64,
+    pub(super) failure: Option<FailureSummary>,
+}
+
+impl StoredJob {
+    pub(super) fn summary(&self) -> JobSummary {
+        JobSummary {
+            id: self.id,
+            package: self.package,
+            stage: self.state.stage(),
+            desired: self.state.desired(),
+            display: self.state.display(),
+            revision: self.state.revision(),
+            generation: self.state.generation(),
+            bytes_done: self.bytes_done,
+            bytes_total: self.bytes_total,
+            failure: self.failure.clone(),
+        }
+    }
+}
+
+/// Row values before validation.
+struct RawJob {
+    id: i64,
+    package: i64,
+    desired: String,
+    stage: String,
+    generation: i64,
+    revision: i64,
+    bytes_total: Option<i64>,
+    failure_code: Option<String>,
+    failure_retry_at: Option<i64>,
+    failure_message: Option<String>,
+    bytes_done: i64,
+}
+
+impl RawJob {
+    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            package: row.get(1)?,
+            desired: row.get(2)?,
+            stage: row.get(3)?,
+            generation: row.get(4)?,
+            revision: row.get(5)?,
+            bytes_total: row.get(6)?,
+            failure_code: row.get(7)?,
+            failure_retry_at: row.get(8)?,
+            failure_message: row.get(9)?,
+            bytes_done: row.get(10)?,
+        })
+    }
+
+    fn decode(self) -> Result<StoredJob, StoreError> {
+        let desired = DesiredState::from_str(&self.desired)
+            .map_err(|_| StoreError::Corrupt("desired state"))?;
+        let stage = JobStage::from_str(&self.stage).map_err(|_| StoreError::Corrupt("stage"))?;
+        let state = JobState::restore(desired, stage, key(self.generation)?, key(self.revision)?)
+            .map_err(|_| StoreError::Corrupt("job state"))?;
+        let bytes = |v: i64| u64::try_from(v).map_err(|_| StoreError::Corrupt("byte count"));
+        Ok(StoredJob {
+            id: key(self.id)?,
+            state,
+            package: key(self.package)?,
+            bytes_total: self.bytes_total.map(bytes).transpose()?,
+            bytes_done: bytes(self.bytes_done)?,
+            failure: self
+                .failure_code
+                .map(|code| {
+                    Ok::<_, StoreError>(FailureSummary {
+                        code: FailureCode::from_str(&code)
+                            .map_err(|_| StoreError::Corrupt("failure code"))?,
+                        retry_at: self.failure_retry_at.map(UtcTimestamp::from_unix_millis),
+                        message: self.failure_message.as_deref().map(DiagnosticText::new),
+                    })
+                })
+                .transpose()?,
+        })
+    }
+}
+
+/// Loads a job, or `NotFound`.
+pub(super) fn load(tx: &Transaction<'_>, id: JobId) -> Result<StoredJob, StoreError> {
+    // An ID beyond the stored range cannot exist.
+    let Ok(id) = sql(id) else {
+        return Err(StoreError::NotFound("job"));
+    };
+    tx.query_row(
+        &format!("SELECT {JOB_COLUMNS} FROM jobs j WHERE j.id = ?1"),
+        [id],
+        RawJob::read,
+    )
+    .optional()?
+    .ok_or(StoreError::NotFound("job"))?
+    .decode()
+}
+
+/// Persists `job.state` over the row last read at `previous` revision, sets
+/// the failure if the new stage is parked (clearing it otherwise), and
+/// appends `job_changed`.
+pub(super) fn save(
+    tx: &Transaction<'_>,
+    job: &mut StoredJob,
+    previous: &JobState,
+    failure: Option<FailureSummary>,
+    now: UtcTimestamp,
+) -> Result<(), StoreError> {
+    let failure = failure.filter(|_| parked(job.state.stage()));
+    let desired: &'static str = job.state.desired().into();
+    let updated = tx.execute(
+        "UPDATE jobs SET desired_state = ?1, stage = ?2, generation = ?3, revision = ?4, \
+         failure_code = ?5, failure_retry_at = ?6, failure_message = ?7, updated_at = ?8 \
+         WHERE id = ?9 AND revision = ?10",
+        params![
+            desired,
+            job.state.stage().as_str(),
+            sql(job.state.generation())?,
+            sql(job.state.revision())?,
+            failure.as_ref().map(|f| f.code.as_str()),
+            failure
+                .as_ref()
+                .and_then(|f| f.retry_at)
+                .map(UtcTimestamp::unix_millis),
+            failure
+                .as_ref()
+                .and_then(|f| f.message.as_ref())
+                .map(DiagnosticText::as_str),
+            now.unix_millis(),
+            sql(job.id)?,
+            sql(previous.revision())?,
+        ],
+    )?;
+    if updated != 1 {
+        // The coordinator is the only writer, so this is a storage fault.
+        return Err(StoreError::Corrupt("job revision"));
+    }
+    job.failure = failure;
+    outbox::append(tx, &EventKind::JobChanged { job: job.summary() }, now)?;
+    Ok(())
+}
+
+impl Store {
+    /// The ingestion step for direct links: creates a queued job for up to
+    /// `limit` submitted links that have none, oldest first, each with a
+    /// `job_added` event. Safe to repeat after a crash; returns the new jobs.
+    pub fn stage_pending(
+        &mut self,
+        limit: u32,
+        now: UtcTimestamp,
+    ) -> Result<Vec<JobId>, StoreError> {
+        let tx = self.write()?;
+        let pending: Vec<(i64, i64)> = tx
+            .prepare(
+                "SELECT s.id, b.package_id FROM source_links s \
+                 JOIN input_batches b ON b.id = s.batch_id \
+                 WHERE s.staged = 0 ORDER BY s.id LIMIT ?1",
+            )?
+            .query_map([limit], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        let state = JobState::new();
+        let desired: &'static str = state.desired().into();
+        let mut staged = Vec::with_capacity(pending.len());
+        for (source, package) in pending {
+            tx.execute(
+                "INSERT INTO jobs (source_link_id, package_id, desired_state, stage, generation, \
+                 revision, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![
+                    source,
+                    package,
+                    desired,
+                    state.stage().as_str(),
+                    sql(state.generation())?,
+                    sql(state.revision())?,
+                    now.unix_millis(),
+                ],
+            )?;
+            let id: JobId = key(tx.last_insert_rowid())?;
+            tx.execute("UPDATE source_links SET staged = 1 WHERE id = ?1", [source])?;
+            let job = load(&tx, id)?;
+            outbox::append(&tx, &EventKind::JobAdded { job: job.summary() }, now)?;
+            staged.push(id);
+        }
+        tx.commit()?;
+        Ok(staged)
+    }
+
+    /// Moves a job to `to` on behalf of work that holds generation
+    /// `presented`. A stale generation is rejected, so a late worker from a
+    /// cancelled, reset, or pre-restart run cannot change the job (T17,
+    /// T27). Parked stages (waiting, blocked, input needed, failed) need the
+    /// failure that explains them.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "called by transfer workers, which arrive with the transfer interfaces"
+        )
+    )]
+    pub fn advance_job(
+        &mut self,
+        id: JobId,
+        to: JobStage,
+        presented: Generation,
+        failure: Option<Failure>,
+        now: UtcTimestamp,
+    ) -> Result<Outcome, StoreError> {
+        if parked(to) && failure.is_none() {
+            return Err(StoreError::MissingFailure(to));
+        }
+        let tx = self.write()?;
+        let mut job = load(&tx, id)?;
+        let previous = job.state;
+        let outcome = job.state.advance(to, presented)?;
+        if outcome == Outcome::Changed {
+            let failure = failure.map(|f| FailureSummary {
+                code: f.code(),
+                retry_at: f.earliest_retry(),
+                message: f.context().cloned(),
+            });
+            save(&tx, &mut job, &previous, failure, now)?;
+        }
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// Runs once at startup, before any work. Every job left in an active
+    /// stage by the previous process moves to recovery under a new
+    /// generation, which retires anything that process authorized. Returns
+    /// the number of jobs moved.
+    pub fn recover_after_restart(&mut self, now: UtcTimestamp) -> Result<usize, StoreError> {
+        let active: Vec<&'static str> = JobStage::VARIANTS
+            .iter()
+            .filter(|s| s.is_active())
+            .map(|s| s.as_str())
+            .collect();
+        let tx = self.write()?;
+        let ids: Vec<i64> = tx
+            .prepare(&format!(
+                "SELECT id FROM jobs WHERE stage IN ({}) ORDER BY id",
+                placeholders(active.len())
+            ))?
+            .query_map(params_from_iter(&active), |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for id in &ids {
+            let mut job = load(&tx, key(*id)?)?;
+            let previous = job.state;
+            if job.state.recover_after_restart()? == Outcome::Changed {
+                save(&tx, &mut job, &previous, None, now)?;
+            }
+        }
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
+    /// Answers a read query from one consistent snapshot.
+    pub fn query(
+        &mut self,
+        query: &Query,
+        instance: InstanceId,
+    ) -> Result<QueryResult, ProtocolError> {
+        let tx = self.read().map_err(ProtocolError::from)?;
+        let as_of = EventCursor {
+            instance,
+            position: outbox::head(&tx)?,
+        };
+        let result = match query {
+            Query::InspectJob { job } => QueryResult::Job {
+                job: load(&tx, *job)?.summary(),
+                as_of,
+            },
+            Query::ListJobs {
+                filter,
+                after,
+                page_size,
+            } => {
+                let stages: Vec<&'static str> = filter.stages.iter().map(|s| s.as_str()).collect();
+                let mut sql_text = format!("SELECT {JOB_COLUMNS} FROM jobs j WHERE j.id > ?1");
+                if filter.package.is_some() {
+                    sql_text.push_str(" AND j.package_id = ?2");
+                }
+                if !stages.is_empty() {
+                    sql_text.push_str(&format!(
+                        " AND j.stage IN ({})",
+                        numbered_placeholders(3, stages.len())
+                    ));
+                }
+                sql_text.push_str(" ORDER BY j.id LIMIT ?3");
+                let after = match after {
+                    // Past the stored range: nothing follows.
+                    Some(id) => sql(*id).unwrap_or(i64::MAX),
+                    None => 0,
+                };
+                // A package beyond the stored range matches nothing.
+                let package = filter.package.map_or(0, |p| sql(p).unwrap_or(-1));
+                // One extra row tells whether another page follows.
+                let limit = i64::from(page_size.get()) + 1;
+                let mut values: Vec<rusqlite::types::Value> =
+                    vec![after.into(), package.into(), limit.into()];
+                values.extend(stages.iter().map(|s| (*s).to_owned().into()));
+                let mut items = tx
+                    .prepare(&sql_text)
+                    .map_err(StoreError::from)?
+                    .query_map(params_from_iter(values), RawJob::read)
+                    .map_err(StoreError::from)?
+                    .map(|raw| Ok(raw?.decode()?.summary()))
+                    .collect::<Result<Vec<_>, StoreError>>()?;
+                let next_after = if items.len() > usize::from(page_size.get()) {
+                    items.truncate(usize::from(page_size.get()));
+                    items.last().map(|j| j.id)
+                } else {
+                    None
+                };
+                QueryResult::Jobs(Page {
+                    items,
+                    next_after,
+                    as_of,
+                })
+            }
+        };
+        Ok(result)
+    }
+}
+
+/// `?, ?, ...` with `n` entries.
+fn placeholders(n: usize) -> String {
+    vec!["?"; n].join(", ")
+}
+
+/// `?start, ?start+1, ...` with `n` entries.
+fn numbered_placeholders(start: usize, n: usize) -> String {
+    (start + 1..=start + n)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}

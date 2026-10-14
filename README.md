@@ -6,8 +6,11 @@ and a desktop application sharing the same engine and UI.
 This repository currently contains the design guidance and a bootstrapped Cargo
 workspace with minimal `wayfetch-domain`, `wayfetch-protocol`, and
 `wayfetch-engine` library crates. The domain crate defines typed IDs, job states,
-source identity, and failure scopes; no download behavior, application hosts,
-frontend packages, or runnable product builds exist yet.
+source identity, and failure scopes; the protocol crate defines commands, queries,
+errors, and events; the engine owns a locked state directory and a SQLite store
+that commits commands durably and recovers jobs after a restart. No download
+behavior, application hosts, frontend packages, or runnable product builds exist
+yet.
 
 ## Repository structure
 
@@ -72,7 +75,8 @@ The brief describes intended behavior and acceptance gates, not existing feature
 
 ### Developer commands
 
-You need `rustup` and Python 3. The Rust toolchain is pinned in
+You need `rustup`, Python 3, and a C compiler (the engine builds its bundled
+SQLite). The Rust toolchain is pinned in
 `rust-toolchain.toml`; `rustup toolchain install` (or the first `cargo` command)
 installs it with rustfmt and Clippy. No JavaScript or desktop tooling is needed
 for the engine. These are the checks CI runs on every push and pull request:
