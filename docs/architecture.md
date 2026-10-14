@@ -542,6 +542,8 @@ Domain record IDs are distinct, store-allocated positive integer types, never re
 
 **Decision:** checkpoint only acknowledged, synchronized byte intervals; then commit interval metadata. Publish through a recoverable intent record, same-filesystem no-clobber rename, directory synchronization, and final state transaction.
 
+Publication gives the staging file its final name with a hard link, which fails instead of replacing an existing name on every supported platform without a platform-specific rename flag, synchronizes the target directory, and then removes the staging name. A crash between the two leaves two names for one file, which reconciliation recognizes by file identity: device and inode, plus birth time where the filesystem reports it, because a freed inode number can be reused at once. A destination without hard links, or a target below a mount point inside the root, is reported unavailable until the cross-filesystem copy protocol (section 7.7) exists.
+
 Once a file job enters `Publishing`, publication is not interrupted by pause or cancel. Those requests return `PublicationInProgress` without changing the job; clients observe the settled outcome and retry only if the request still applies. Publication failures and process crashes still require reconciliation; this rule does not make the filesystem and database atomic.
 
 **Why:** partial-file progress and persistent job state are separate concerns.

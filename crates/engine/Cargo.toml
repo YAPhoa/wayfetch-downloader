@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 wayfetch-domain.workspace = true
 wayfetch-protocol.workspace = true
+bytes.workspace = true
+cap-std.workspace = true
 rangemap.workspace = true
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
