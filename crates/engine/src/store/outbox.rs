@@ -9,7 +9,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_protocol::event::EventKind;
 
-use super::StoreError;
+use super::{Store, StoreError};
 
 /// Appends an event in the caller's transaction and returns its position.
 pub(super) fn append(
@@ -38,20 +38,85 @@ pub(super) fn head(tx: &Transaction<'_>) -> Result<u64, StoreError> {
     u64::try_from(seq.unwrap_or(0)).map_err(|_| StoreError::Corrupt("event position"))
 }
 
-#[cfg(test)]
-pub(super) fn after(tx: &Transaction<'_>, position: u64) -> Vec<(u64, EventKind)> {
-    let mut stmt = tx
-        .prepare("SELECT position, kind FROM event_outbox WHERE position > ?1 ORDER BY position")
-        .unwrap();
-    stmt.query_map([i64::try_from(position).unwrap()], |row| {
-        let position: i64 = row.get(0)?;
-        let kind: String = row.get(1)?;
+/// Up to `limit` events after `position`, oldest first.
+fn after(
+    tx: &Transaction<'_>,
+    position: u64,
+    limit: usize,
+) -> Result<Vec<(u64, EventKind)>, StoreError> {
+    let position = i64::try_from(position).unwrap_or(i64::MAX);
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    tx.prepare(
+        "SELECT position, kind FROM event_outbox WHERE position > ?1 ORDER BY position LIMIT ?2",
+    )?
+    .query_map(params![position, limit], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?
+    .map(|row| {
+        let (position, kind) = row?;
         Ok((
-            u64::try_from(position).unwrap(),
-            serde_json::from_str(&kind).unwrap(),
+            u64::try_from(position).map_err(|_| StoreError::Corrupt("event position"))?,
+            serde_json::from_str(&kind).map_err(|_| StoreError::Corrupt("event"))?,
         ))
     })
-    .unwrap()
-    .collect::<Result<_, _>>()
-    .unwrap()
+    .collect()
+}
+
+impl Store {
+    /// Up to `limit` durable events after `position`, oldest first.
+    pub fn events_after(
+        &mut self,
+        position: u64,
+        limit: usize,
+    ) -> Result<Vec<(u64, EventKind)>, StoreError> {
+        let tx = self.read()?;
+        after(&tx, position, limit)
+    }
+
+    /// Which events can still be replayed: everything after the first
+    /// returned position, up to the second (the head).
+    pub fn retained_events(&mut self) -> Result<(u64, u64), StoreError> {
+        let tx = self.read()?;
+        let head = head(&tx)?;
+        let oldest: Option<i64> =
+            tx.query_row("SELECT MIN(position) FROM event_outbox", [], |row| {
+                row.get(0)
+            })?;
+        let pruned_through = match oldest {
+            Some(oldest) => {
+                u64::try_from(oldest - 1).map_err(|_| StoreError::Corrupt("event position"))?
+            }
+            // Nothing is retained, so nothing up to the head can be replayed.
+            None => head,
+        };
+        Ok((pruned_through, head))
+    }
+
+    /// Keeps the newest `keep_events` events and the idempotency records
+    /// created at or after `commands_since`, in one transaction. Positions
+    /// and the head are unaffected; a subscriber asking for pruned events
+    /// is told to resynchronize. Returns the events and records removed.
+    pub fn prune(
+        &mut self,
+        keep_events: u64,
+        commands_since: UtcTimestamp,
+    ) -> Result<(usize, usize), StoreError> {
+        let tx = self.write()?;
+        let cutoff = head(&tx)?.saturating_sub(keep_events);
+        let events = tx.execute(
+            "DELETE FROM event_outbox WHERE position <= ?1",
+            [i64::try_from(cutoff).map_err(|_| StoreError::Corrupt("event position"))?],
+        )?;
+        let commands = tx.execute(
+            "DELETE FROM commands WHERE created_at < ?1",
+            [commands_since.unix_millis()],
+        )?;
+        tx.commit()?;
+        Ok((events, commands))
+    }
+}
+
+#[cfg(test)]
+pub(super) fn all(tx: &Transaction<'_>) -> Vec<(u64, EventKind)> {
+    after(tx, 0, usize::MAX).unwrap()
 }

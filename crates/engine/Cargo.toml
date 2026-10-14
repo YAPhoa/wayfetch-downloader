@@ -13,6 +13,7 @@ wayfetch-domain.workspace = true
 wayfetch-protocol.workspace = true
 bytes.workspace = true
 cap-std.workspace = true
+percent-encoding.workspace = true
 rangemap.workspace = true
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
@@ -21,6 +22,7 @@ serde_json.workspace = true
 strum.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+url.workspace = true
 # The host supplies the runtime; the engine only spawns onto its handle.
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
