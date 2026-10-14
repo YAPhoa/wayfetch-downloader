@@ -3,8 +3,9 @@
 use std::fs::File;
 use std::io;
 use std::ops::Range;
+use std::str::FromStr;
 
-use cap_std::fs::OpenOptions;
+use cap_std::fs::{Metadata, OpenOptions};
 use wayfetch_domain::id::{JobId, RootId};
 use wayfetch_domain::version::Generation;
 
@@ -101,14 +102,14 @@ impl Root {
     /// is derived from both and created exclusively, so no other generation
     /// can share its inode. The directory entry is synchronized before this
     /// returns, so a store record made afterwards never names a file a crash
-    /// could lose. A crash before the record commits leaves an unowned file
-    /// for a later cleanup; it is never adopted.
+    /// could lose. A crash before the record commits leaves an unowned file,
+    /// which is never adopted and which the next start removes.
     pub fn create_staging(
         &self,
         job: JobId,
         generation: Generation,
     ) -> Result<StagingFile, FsError> {
-        let name = format!("{job}.g{generation}.part");
+        let name = staging_name(job, generation);
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         let file = self
@@ -175,6 +176,119 @@ impl Root {
             record: record.clone(),
             file: file.into_std(),
         })
+    }
+}
+
+/// The name of the staging file of `job` at `generation`.
+fn staging_name(job: JobId, generation: Generation) -> String {
+    format!("{job}.g{generation}.part")
+}
+
+/// The job and generation whose staging file is called `name`, if `name`
+/// is exactly what [`Root::create_staging`] would have created.
+fn parse_staging_name(name: &str) -> Option<(JobId, Generation)> {
+    let (job, generation) = name.strip_suffix(".part")?.rsplit_once(".g")?;
+    let job = JobId::from_str(job).ok()?;
+    let generation = generation.parse().ok().and_then(Generation::from_u64)?;
+    // One text form per file, so no other spelling passes for it.
+    (staging_name(job, generation) == name).then_some((job, generation))
+}
+
+/// A name in a root's staging directory that the engine could have created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagingName {
+    /// The name.
+    pub name: String,
+    /// The job it names.
+    pub job: JobId,
+    /// The generation it names.
+    pub generation: Generation,
+}
+
+/// What removing a staging file found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removal {
+    /// The file was removed, and the removal is durable.
+    Removed,
+    /// Nothing has the name any more.
+    Missing,
+    /// The name holds something other than the expected file, which was
+    /// left in place.
+    Foreign,
+}
+
+impl Root {
+    /// The names in the staging directory that have the form of an
+    /// engine staging file, in directory order. Other entries, and entries
+    /// that cannot be read, are skipped. A name says nothing about who
+    /// created the file; see [`Root::remove_unrecorded_staging`]. Names
+    /// removed or added while iterating may or may not be returned.
+    pub fn staging_names(&self) -> Result<impl Iterator<Item = StagingName>, FsError> {
+        let entries = self
+            .staging
+            .entries()
+            .map_err(FsError::io("list staging directory"))?;
+        Ok(entries.filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            let (job, generation) = parse_staging_name(&name)?;
+            Some(StagingName {
+                name,
+                job,
+                generation,
+            })
+        }))
+    }
+
+    /// Removes the recorded staging file `record`, after checking that its
+    /// name still holds the very file that was created: a regular file
+    /// with the recorded identity. Anything else is left in place. The
+    /// removal is synchronized before this returns, so a record deleted
+    /// afterwards never outlives a name a crash could bring back.
+    ///
+    /// The check and the removal are two steps; a file swapped in between
+    /// by something else with write access to the private staging
+    /// directory would be removed.
+    pub fn remove_staging(&self, record: &StagingRecord) -> Result<Removal, FsError> {
+        if record.root != self.id {
+            return Err(FsError::WrongRoot(record.root));
+        }
+        self.remove_staging_if(&record.name, |meta| {
+            Ok(sys::identity(meta)?.matches(&record.identity))
+        })
+    }
+
+    /// Removes `name`, a staging file no store record names, if it is a
+    /// regular file with no other name. The caller establishes that the
+    /// engine created it and nothing can still claim it: the store records
+    /// every staging file it registered, and a name for an older
+    /// generation than the job's current one that the store does not
+    /// record is one a crash or a refused registration left behind.
+    pub fn remove_unrecorded_staging(&self, name: &StagingName) -> Result<Removal, FsError> {
+        self.remove_staging_if(&name.name, |meta| Ok(sys::link_count(meta)? == 1))
+    }
+
+    fn remove_staging_if(
+        &self,
+        name: &str,
+        expected: impl FnOnce(&Metadata) -> Result<bool, FsError>,
+    ) -> Result<Removal, FsError> {
+        // Never follows a symlink: a link planted under the name is foreign.
+        let meta = match self.staging.symlink_metadata(name) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Removal::Missing),
+            Err(e) => return Err(FsError::io("inspect staging file")(e)),
+        };
+        if !meta.is_file() || !expected(&meta)? {
+            return Ok(Removal::Foreign);
+        }
+        crash_point!("cleanup-before-unlink");
+        match self.staging.remove_file(name) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Removal::Missing),
+            Err(e) => return Err(FsError::io("remove staging file")(e)),
+        }
+        sys::sync_dir(&self.staging).map_err(FsError::io("sync staging directory"))?;
+        Ok(Removal::Removed)
     }
 }
 
@@ -283,5 +397,120 @@ pub(crate) mod tests {
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(outside.path(), &path).unwrap();
         assert!(root.reopen_staging(&record, 0).is_err());
+    }
+
+    #[test]
+    fn only_the_engines_own_spelling_is_a_staging_name() {
+        let generation = Generation::from_u64(3).unwrap();
+        let name = staging_name(job(), generation);
+        assert_eq!(name, "job-7.g3.part");
+        assert_eq!(parse_staging_name(&name), Some((job(), generation)));
+        for other in [
+            "job-7.g03.part",
+            "job-07.g3.part",
+            "job-7.g0.part",
+            "job-7.g3.part.swap",
+            "job-7.g3",
+            "job-7.g.part",
+            "file-7.g3.part",
+            "job-7.g+3.part",
+            "notes.txt",
+        ] {
+            assert_eq!(parse_staging_name(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn removal_takes_only_the_recorded_file() {
+        let (tmp, root) = root();
+        let staging = root.create_staging(job(), Generation::INITIAL).unwrap();
+        let record = staging.record().clone();
+        drop(staging);
+        let path = staging_path(tmp.path(), &record.name);
+
+        // Replaced by another file under the same name.
+        std::fs::write(path.with_extension("swap"), b"theirs").unwrap();
+        std::fs::rename(path.with_extension("swap"), &path).unwrap();
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Foreign);
+        assert_eq!(std::fs::read(&path).unwrap(), b"theirs");
+
+        // A directory under the name.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Foreign);
+        assert!(path.is_dir());
+        std::fs::remove_dir(&path).unwrap();
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Missing);
+
+        let staging = root
+            .create_staging(job(), Generation::INITIAL.next().unwrap())
+            .unwrap();
+        let record = staging.record().clone();
+        drop(staging);
+        let _ = crate::fs::sys::tests::take_synced();
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Removed);
+        assert!(!staging_path(tmp.path(), &record.name).exists());
+        // The removal was made durable.
+        assert_eq!(crate::fs::sys::tests::take_synced().len(), 1);
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Missing);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removal_never_follows_or_takes_a_link() {
+        let (tmp, root) = root();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), b"outside").unwrap();
+        let staging = root.create_staging(job(), Generation::INITIAL).unwrap();
+        let record = staging.record().clone();
+        drop(staging);
+        let path = staging_path(tmp.path(), &record.name);
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &path).unwrap();
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Foreign);
+        let names: Vec<_> = root.staging_names().unwrap().collect();
+        let [name] = &names[..] else {
+            panic!("{names:?}")
+        };
+        assert_eq!(
+            root.remove_unrecorded_staging(name).unwrap(),
+            Removal::Foreign
+        );
+        assert!(path.is_symlink());
+        assert_eq!(std::fs::read(outside.path()).unwrap(), b"outside");
+
+        // A file with a second name elsewhere is not taken for unrecorded.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::hard_link(outside.path(), &path).unwrap();
+        assert_eq!(
+            root.remove_unrecorded_staging(name).unwrap(),
+            Removal::Foreign
+        );
+        assert!(path.exists());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"left behind").unwrap();
+        assert_eq!(
+            root.remove_unrecorded_staging(name).unwrap(),
+            Removal::Removed
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn staging_names_lists_only_engine_names() {
+        let (tmp, root) = root();
+        let staging = root.create_staging(job(), Generation::INITIAL).unwrap();
+        let dir = staging_path(tmp.path(), "");
+        std::fs::write(dir.join("notes.txt"), b"").unwrap();
+        std::fs::write(dir.join("job-7.g01.part"), b"").unwrap();
+        let names: Vec<_> = root.staging_names().unwrap().collect();
+        assert_eq!(
+            names,
+            [StagingName {
+                name: staging.record().name.clone(),
+                job: job(),
+                generation: Generation::INITIAL,
+            }]
+        );
     }
 }

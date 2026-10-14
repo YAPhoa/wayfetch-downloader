@@ -28,6 +28,18 @@ pub(super) fn identity(_meta: &Metadata) -> Result<FileIdentity, FsError> {
     Err(FsError::Unsupported("file identity"))
 }
 
+/// How many names the file `meta` describes has.
+#[cfg(unix)]
+pub(super) fn link_count(meta: &Metadata) -> Result<u64, FsError> {
+    use cap_std::fs::MetadataExt;
+    Ok(meta.nlink())
+}
+
+#[cfg(not(unix))]
+pub(super) fn link_count(_meta: &Metadata) -> Result<u64, FsError> {
+    Err(FsError::Unsupported("link count"))
+}
+
 /// Makes `dir`'s entries durable: new, linked, and removed names.
 #[cfg(unix)]
 pub(super) fn sync_dir(dir: &Dir) -> io::Result<()> {

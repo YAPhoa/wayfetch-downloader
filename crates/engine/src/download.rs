@@ -361,8 +361,9 @@ impl Download {
         };
         let own = partial.record.generation == generation;
         if !own && self.job.stage != JobStage::Recovering {
-            // An older generation's file was abandoned by a cancel or a
-            // restart from zero; it is left for cleanup.
+            // An older generation's file left by a cancel or a restart
+            // from zero is not continued; the file this generation
+            // registers instead abandons it to cleanup.
             return Ok(None);
         }
         let trusted = partial

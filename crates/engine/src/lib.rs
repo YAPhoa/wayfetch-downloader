@@ -18,6 +18,7 @@ macro_rules! crash_point {
     };
 }
 
+mod cleanup;
 pub mod config;
 mod download;
 pub mod fs;
