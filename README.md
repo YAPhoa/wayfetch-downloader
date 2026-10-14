@@ -8,9 +8,12 @@ workspace with minimal `wayfetch-domain`, `wayfetch-protocol`, and
 `wayfetch-engine` library crates. The domain crate defines typed IDs, job states,
 source identity, and failure scopes; the protocol crate defines commands, queries,
 errors, and events; the engine owns a locked state directory and a SQLite store
-that commits commands durably and recovers jobs after a restart. No download
-behavior, application hosts, frontend packages, or runnable product builds exist
-yet.
+that commits commands durably and recovers jobs after a restart. The engine can
+download a direct link into private staging, resume it after a restart, publish
+it into a configured root, and stream bounded events, with every queue, buffer,
+and deadline set in `EngineConfig`. It reaches the network only through a
+`Transport` the host supplies; no HTTP client, application hosts, frontend
+packages, or runnable product builds exist yet.
 
 ## Repository structure
 

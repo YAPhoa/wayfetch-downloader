@@ -12,17 +12,39 @@ use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Generation;
 use wayfetch_protocol::event::{EventCursor, EventKind};
-use wayfetch_protocol::query::{FailureSummary, JobSummary, Page, Query, QueryResult};
+use wayfetch_protocol::query::{
+    ArtifactSummary, FailureSummary, JobSummary, Page, Query, QueryResult,
+};
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
 use super::{Store, StoreError, key, outbox, sql};
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
-/// the job's newest partial.
+/// the job's newest partial; the last three describe its published file.
 const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.generation, \
      j.revision, j.bytes_total, j.failure_code, j.failure_retry_at, j.failure_message, \
      COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
-               ORDER BY p.generation DESC LIMIT 1), 0)";
+               ORDER BY p.generation DESC LIMIT 1), 0), \
+     a.root_id, a.target_path, a.size_bytes";
+
+/// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file.
+const JOB_FROM: &str =
+    "jobs j LEFT JOIN publications a ON a.job_id = j.id AND a.state = 'published'";
+
+/// A job the coordinator can start work on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Admission {
+    /// The job.
+    pub job: JobId,
+    /// Queued or recovering.
+    pub stage: JobStage,
+    /// Its generation.
+    pub generation: Generation,
+    /// What the user asked for.
+    pub desired: DesiredState,
+    /// The submitted input.
+    pub url: String,
+}
 
 /// Stages that are parked with a failure explaining why.
 fn parked(stage: JobStage) -> bool {
@@ -40,6 +62,7 @@ pub(super) struct StoredJob {
     bytes_total: Option<u64>,
     bytes_done: u64,
     pub(super) failure: Option<FailureSummary>,
+    artifact: Option<ArtifactSummary>,
 }
 
 impl StoredJob {
@@ -55,6 +78,7 @@ impl StoredJob {
             bytes_done: self.bytes_done,
             bytes_total: self.bytes_total,
             failure: self.failure.clone(),
+            artifact: self.artifact.clone(),
         }
     }
 }
@@ -72,6 +96,7 @@ struct RawJob {
     failure_retry_at: Option<i64>,
     failure_message: Option<String>,
     bytes_done: i64,
+    artifact: Option<(i64, String, i64)>,
 }
 
 impl RawJob {
@@ -88,6 +113,10 @@ impl RawJob {
             failure_retry_at: row.get(8)?,
             failure_message: row.get(9)?,
             bytes_done: row.get(10)?,
+            artifact: match row.get::<_, Option<i64>>(11)? {
+                Some(root) => Some((root, row.get(12)?, row.get(13)?)),
+                None => None,
+            },
         })
     }
 
@@ -115,6 +144,16 @@ impl RawJob {
                     })
                 })
                 .transpose()?,
+            artifact: self
+                .artifact
+                .map(|(root, path, size)| {
+                    Ok::<_, StoreError>(ArtifactSummary {
+                        root: key(root)?,
+                        path,
+                        size: bytes(size)?,
+                    })
+                })
+                .transpose()?,
         })
     }
 }
@@ -126,7 +165,7 @@ pub(super) fn load(tx: &Transaction<'_>, id: JobId) -> Result<StoredJob, StoreEr
         return Err(StoreError::NotFound("job"));
     };
     tx.query_row(
-        &format!("SELECT {JOB_COLUMNS} FROM jobs j WHERE j.id = ?1"),
+        &format!("SELECT {JOB_COLUMNS} FROM {JOB_FROM} WHERE j.id = ?1"),
         [id],
         RawJob::read,
     )
@@ -175,6 +214,18 @@ pub(super) fn save(
         return Err(StoreError::Corrupt("job revision"));
     }
     job.failure = failure;
+    outbox::append(tx, &EventKind::JobChanged { job: job.summary() }, now)?;
+    Ok(())
+}
+
+/// Appends `job_changed` for a change outside the job's state, such as its
+/// expected size.
+pub(super) fn announce(
+    tx: &Transaction<'_>,
+    id: JobId,
+    now: UtcTimestamp,
+) -> Result<(), StoreError> {
+    let job = load(tx, id)?;
     outbox::append(tx, &EventKind::JobChanged { job: job.summary() }, now)?;
     Ok(())
 }
@@ -229,19 +280,30 @@ impl Store {
     /// cancelled, reset, or pre-restart run cannot change the job (T17,
     /// T27). Parked stages (waiting, blocked, input needed, failed) need the
     /// failure that explains them.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "called by the transfer coordinator, which arrives with the first acceptance slice"
-        )
-    )]
     pub fn advance_job(
         &mut self,
         id: JobId,
         to: JobStage,
         presented: Generation,
         failure: Option<Failure>,
+        now: UtcTimestamp,
+    ) -> Result<Outcome, StoreError> {
+        let failure = failure.map(|f| FailureSummary {
+            code: f.code(),
+            retry_at: f.earliest_retry(),
+            message: f.context().cloned(),
+        });
+        self.record_stage(id, to, presented, failure, now)
+    }
+
+    /// [`Store::advance_job`] with a failure whose scope has no durable
+    /// record yet, such as a transfer attempt. Only the summary is stored.
+    pub(crate) fn record_stage(
+        &mut self,
+        id: JobId,
+        to: JobStage,
+        presented: Generation,
+        failure: Option<FailureSummary>,
         now: UtcTimestamp,
     ) -> Result<Outcome, StoreError> {
         if parked(to) && failure.is_none() {
@@ -252,15 +314,62 @@ impl Store {
         let previous = job.state;
         let outcome = job.state.advance(to, presented)?;
         if outcome == Outcome::Changed {
-            let failure = failure.map(|f| FailureSummary {
-                code: f.code(),
-                retry_at: f.earliest_retry(),
-                message: f.context().cloned(),
-            });
             save(&tx, &mut job, &previous, failure, now)?;
         }
         tx.commit()?;
         Ok(outcome)
+    }
+
+    /// Up to `limit` jobs ready for the coordinator to pick up, skipping
+    /// `running`: recovering jobs first, then queued ones, oldest first.
+    /// The scheduler reads only as many as it has free slots, so waiting
+    /// jobs stay in the database rather than in memory.
+    pub fn admissible(
+        &mut self,
+        limit: usize,
+        running: &[JobId],
+    ) -> Result<Vec<Admission>, StoreError> {
+        let tx = self.read()?;
+        let fetch = i64::try_from(limit.saturating_add(running.len())).unwrap_or(i64::MAX);
+        let rows: Vec<(i64, String, i64, String, String)> = tx
+            .prepare(
+                "SELECT j.id, j.stage, j.generation, j.desired_state, s.input_url \
+                 FROM jobs j JOIN source_links s ON s.id = j.source_link_id \
+                 WHERE j.stage IN ('queued', 'recovering') \
+                 ORDER BY j.stage = 'recovering' DESC, j.id LIMIT ?1",
+            )?
+            .query_map([fetch], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        let mut ready = Vec::with_capacity(limit);
+        for (id, stage, generation, desired, url) in rows {
+            let id: JobId = key(id)?;
+            if running.contains(&id) || ready.len() == limit {
+                continue;
+            }
+            ready.push(Admission {
+                job: id,
+                stage: JobStage::from_str(&stage).map_err(|_| StoreError::Corrupt("stage"))?,
+                generation: key(generation)?,
+                desired: DesiredState::from_str(&desired)
+                    .map_err(|_| StoreError::Corrupt("desired state"))?,
+                url,
+            });
+        }
+        Ok(ready)
+    }
+
+    /// The job's stage, desired state, and generation.
+    pub fn job_state(&mut self, id: JobId) -> Result<JobState, StoreError> {
+        let tx = self.read()?;
+        Ok(load(&tx, id)?.state)
     }
 
     /// Runs once at startup, before any work. Every job left in an active
@@ -314,7 +423,7 @@ impl Store {
                 page_size,
             } => {
                 let stages: Vec<&'static str> = filter.stages.iter().map(|s| s.as_str()).collect();
-                let mut sql_text = format!("SELECT {JOB_COLUMNS} FROM jobs j WHERE j.id > ?1");
+                let mut sql_text = format!("SELECT {JOB_COLUMNS} FROM {JOB_FROM} WHERE j.id > ?1");
                 if filter.package.is_some() {
                     sql_text.push_str(" AND j.package_id = ?2");
                 }

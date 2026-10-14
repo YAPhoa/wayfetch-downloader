@@ -938,6 +938,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "cap-std",
+ "percent-encoding",
  "rangemap",
  "rusqlite",
  "rusqlite_migration",
@@ -948,6 +949,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "url",
  "wayfetch-domain",
  "wayfetch-protocol",
 ]

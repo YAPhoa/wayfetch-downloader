@@ -19,6 +19,7 @@ wayfetch-domain = { path = "crates/domain" }
 wayfetch-protocol = { path = "crates/protocol" }
 bytes = "1.12.1"
 cap-std = "4.0.3"
+percent-encoding = "2.3.2"
 rangemap = "1.8.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rusqlite_migration = "2.6.0"
