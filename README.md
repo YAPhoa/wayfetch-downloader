@@ -196,6 +196,7 @@ through the environment and standard input, never as an argument:
 ORIGIN=https://wayfetch.example.lan          # the --browser-origin
 SECRET=$(sudo cat /srv/wayfetch/auth/setup-secret)
 read -rsp 'Owner password: ' PASSWORD; echo
+(umask 077 && : > cookies.txt) && chmod 600 cookies.txt   # the session: owner-only
 SECRET=$SECRET PASSWORD=$PASSWORD \
     jq -n '{setup_secret: env.SECRET, username: "owner", password: env.PASSWORD}' |
     curl -sS --fail-with-body -c cookies.txt -H "Origin: $ORIGIN" \
@@ -209,7 +210,8 @@ against the daemon itself, naming the origin's host:
 
 A successful setup creates the local owner account, answers
 `{"authenticated":true,...,"csrf_token":...}`, and stores the session cookie
-in `cookies.txt`; the secret is then deleted. A wrong secret creates
+in `cookies.txt`, which is created owner-only first because the cookie is
+the session; the secret is then deleted. Delete `cookies.txt` when done. A wrong secret creates
 nothing; an expired one is refused and removed, and a restart writes a new
 one. Once an owner exists, further setups are refused (`409`), even
 concurrent ones or from a second process. The account file stores an
@@ -227,6 +229,7 @@ setup is pending and, when signed in, the owner's name and the CSRF token.
 
 ```sh
 read -rsp 'Owner password: ' PASSWORD; echo
+(umask 077 && : > cookies.txt) && chmod 600 cookies.txt
 CSRF=$(PASSWORD=$PASSWORD jq -n '{username: "owner", password: env.PASSWORD}' |
     curl -sS --fail-with-body -c cookies.txt -H "Origin: $ORIGIN" \
         -H 'Content-Type: application/json' --data-binary @- "$ORIGIN/v1/auth/login" |
