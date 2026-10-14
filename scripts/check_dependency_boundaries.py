@@ -26,11 +26,17 @@ DESKTOP = [
     "wayfetch-desktop",
 ]
 
+# Host composition pieces the engine-side crates must not pull in either.
+HOST_SIDE = HOST_AND_UI + ["wayfetch-host"]
+
 RULES = {
-    "wayfetch-domain": HOST_AND_UI + ["wayfetch-protocol", "wayfetch-engine"],
-    "wayfetch-protocol": HOST_AND_UI + ["wayfetch-engine"],
-    "wayfetch-engine": HOST_AND_UI + ["wayfetch-net"],
-    "wayfetch-net": HOST_AND_UI,
+    "wayfetch-domain": HOST_SIDE + ["wayfetch-protocol", "wayfetch-engine"],
+    "wayfetch-protocol": HOST_SIDE + ["wayfetch-engine"],
+    "wayfetch-engine": HOST_SIDE + ["wayfetch-net"],
+    "wayfetch-net": HOST_SIDE,
+    # The HTTP adapter serves an engine; it does not compose a host.
+    "wayfetch-api": DESKTOP + ["wayfetchd", "wayfetch-cli", "wayfetch-host"],
+    "wayfetch-host": HOST_AND_UI,
     "wayfetchd": DESKTOP,
     "wayfetch-cli": HOST_AND_UI,
 }
