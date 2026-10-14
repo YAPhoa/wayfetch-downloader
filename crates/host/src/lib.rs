@@ -97,9 +97,19 @@ impl Started {
     /// blocks jobs on an unusable root by itself; this only tells the
     /// operator early, and never initializes anything.
     pub fn root_problem(&self) -> Option<String> {
-        Root::open(&self.root, DOWNLOAD_ROOT, self.owner.identity().instance)
-            .err()
-            .map(|e| e.to_string())
+        self.root_check()().err()
+    }
+
+    /// A reusable check of the download root: `Err` with the reason while
+    /// it cannot be used, for example after its mount disappeared.
+    /// Blocking; it touches the filesystem.
+    pub fn root_check(&self) -> impl Fn() -> Result<(), String> + Send + Sync + 'static {
+        let (root, instance) = (self.root.clone(), self.owner.identity().instance);
+        move || {
+            Root::open(&root, DOWNLOAD_ROOT, instance)
+                .map(drop)
+                .map_err(|e| e.to_string())
+        }
     }
 }
 

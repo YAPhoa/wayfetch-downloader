@@ -34,6 +34,13 @@ use wayfetch_engine::EngineHandle;
 pub use auth::{TokenFileError, Tokens};
 pub use routes::cursor_id;
 
+/// A host's own readiness condition, beyond the engine's: for example,
+/// whether the download root is usable. It runs on a blocking thread for
+/// each readiness request and returns a short, fixed reason when not
+/// ready. The reason is served without authentication, so it must not
+/// carry paths, tokens, or other details.
+pub type ReadinessCheck = Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>;
+
 /// Bounds on what clients can make the server hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiLimits {
@@ -83,25 +90,55 @@ impl Default for ApiLimits {
 }
 
 /// The HTTP API of one engine.
-#[derive(Debug)]
 pub struct Api {
-    router: Router,
+    engine: EngineHandle,
+    tokens: Tokens,
     limits: ApiLimits,
+    readiness_check: Option<ReadinessCheck>,
     shutdown: CancellationToken,
+}
+
+impl std::fmt::Debug for Api {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Api")
+            .field("limits", &self.limits)
+            .field("readiness_check", &self.readiness_check.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Api {
     /// The API for `engine`, admitting `tokens`.
     pub fn new(engine: EngineHandle, tokens: Tokens, limits: ApiLimits) -> Self {
-        let shutdown = CancellationToken::new();
-        let state = routes::AppState {
+        Self {
             engine,
-            streams: Arc::new(Semaphore::new(limits.max_event_streams.get())),
-            shutdown: shutdown.clone(),
-            keep_alive: limits.keep_alive,
-            body_timeout: limits.body_read_timeout,
+            tokens,
+            limits,
+            readiness_check: None,
+            shutdown: CancellationToken::new(),
+        }
+    }
+
+    /// Adds `check` to what `GET /v1/ready` requires.
+    #[must_use]
+    pub fn readiness_check(mut self, check: ReadinessCheck) -> Self {
+        self.readiness_check = Some(check);
+        self
+    }
+
+    /// The routes. Every route but `/v1/ready` requires a bearer token;
+    /// readiness answers anyone, so a container health check needs no
+    /// credential, and it reveals only whether the instance is ready.
+    fn router(&self) -> Router {
+        let state = routes::AppState {
+            engine: self.engine.clone(),
+            streams: Arc::new(Semaphore::new(self.limits.max_event_streams.get())),
+            shutdown: self.shutdown.clone(),
+            keep_alive: self.limits.keep_alive,
+            body_timeout: self.limits.body_read_timeout,
+            readiness_check: self.readiness_check.clone(),
         };
-        let router = Router::new()
+        Router::new()
             .route("/v1/capabilities", get(routes::capabilities))
             .route("/v1/inputs", post(routes::submit))
             .route("/v1/jobs", get(routes::list_jobs))
@@ -109,16 +146,12 @@ impl Api {
             .route("/v1/jobs/{id}/commands", post(routes::job_command))
             .route("/v1/events", get(routes::events))
             .route_layer(middleware::from_fn_with_state(
-                Arc::new(tokens),
+                Arc::new(self.tokens.clone()),
                 auth::authenticate,
             ))
-            .layer(DefaultBodyLimit::max(limits.max_body_bytes))
-            .with_state(state);
-        Self {
-            router,
-            limits,
-            shutdown,
-        }
+            .route("/v1/ready", get(routes::ready))
+            .layer(DefaultBodyLimit::max(self.limits.max_body_bytes))
+            .with_state(state)
     }
 
     /// Serves `listener` until `stop` completes, then ends event streams,
@@ -127,8 +160,9 @@ impl Api {
     /// closed in time. Engine shutdown is the host's next step.
     pub async fn serve(self, listener: TcpListener, stop: impl Future<Output = ()>) -> bool {
         let shutdown = self.shutdown.clone();
+        let router = self.router();
         let (drained, ()) = tokio::join!(
-            server::serve(listener, self.router, &self.limits, self.shutdown),
+            server::serve(listener, router, &self.limits, self.shutdown),
             async move {
                 stop.await;
                 shutdown.cancel();

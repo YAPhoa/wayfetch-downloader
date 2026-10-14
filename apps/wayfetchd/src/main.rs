@@ -8,13 +8,19 @@
 //! never reads its event stream changes nothing about downloads. `SIGINT`
 //! or `SIGTERM` drains the API and shuts the engine down gracefully,
 //! keeping unfinished jobs for the next start.
+//!
+//! `wayfetchd ready` asks a running daemon whether it is ready, for a
+//! container health check: it starts no engine and reads no token.
 
-use std::net::SocketAddr;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wayfetch_api::{Api, ApiLimits, Tokens};
 use wayfetch_engine::protocol::InstanceId;
 use wayfetch_engine::{ShutdownReport, ShutdownRequest};
@@ -23,6 +29,11 @@ use wayfetch_host::{EngineArgs, InitRootArgs, Message, Printer, Signals, Termina
 /// Loopback only, so nothing beyond this machine reaches the API unless
 /// the operator says so.
 const DEFAULT_LISTEN: &str = "127.0.0.1:7878";
+
+/// How long `ready` waits to connect, and then for each read or write.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Largest readiness response `ready` reads.
+const MAX_PROBE_BYTES: u64 = 16 * 1024;
 
 /// The Wayfetch Downloader daemon.
 #[derive(Debug, Parser)]
@@ -42,6 +53,18 @@ enum Command {
     InitRoot(InitRootArgs),
     /// Run the engine and serve its HTTP API until SIGINT or SIGTERM.
     Run(RunArgs),
+    /// Ask a running daemon whether it is ready; exit 0 only if it is.
+    ///
+    /// For health checks: it starts no engine, takes no lock, and needs no
+    /// token.
+    Ready(ReadyArgs),
+}
+
+#[derive(Debug, Args)]
+struct ReadyArgs {
+    /// Address the daemon serves on.
+    #[arg(long, value_name = "ADDR", default_value = DEFAULT_LISTEN)]
+    address: SocketAddr,
 }
 
 #[derive(Debug, Args)]
@@ -151,6 +174,10 @@ fn main() -> ExitCode {
             terminal.line(format!("initialized download root {}", root.display()));
             ExitCode::SUCCESS
         }),
+        Command::Ready(args) => probe(&args).map(|()| {
+            terminal.line("ready".to_owned());
+            ExitCode::SUCCESS
+        }),
         Command::Run(args) => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -192,13 +219,17 @@ async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
     if let Some(reason) = started.root_problem() {
         print(&Notice::RootUnavailable { reason });
     }
+    let root_check = started.root_check();
     if !address.ip().is_loopback() {
         print(&Notice::NotLoopback { address });
     }
     print(&Notice::Listening { address, instance });
 
     let owner = started.owner;
-    let api = Api::new(owner.handle(), tokens, ApiLimits::DEFAULT);
+    let api =
+        Api::new(owner.handle(), tokens, ApiLimits::DEFAULT).readiness_check(Arc::new(move || {
+            root_check().map_err(|_| "download_root_unavailable")
+        }));
     let connections_closed = api
         .serve(listener, async {
             signals.recv().await;
@@ -220,6 +251,51 @@ fn stopped(connections_closed: bool, report: &ShutdownReport) -> Notice {
         connections_closed,
         unfinished_tasks: report.unfinished_tasks,
         state_dir_released: report.state_dir_released,
+    }
+}
+
+/// What `GET /v1/ready` answers.
+#[derive(Debug, Deserialize)]
+struct ReadyStatus {
+    ready: bool,
+    reason: Option<String>,
+}
+
+/// Asks the daemon at `args.address` whether it is ready. `Err` says why
+/// not, or why it could not be asked.
+fn probe(args: &ReadyArgs) -> Result<(), String> {
+    let fail = |e: &dyn std::fmt::Display| format!("cannot ask {}: {e}", args.address);
+    let mut stream =
+        TcpStream::connect_timeout(&args.address, PROBE_TIMEOUT).map_err(|e| fail(&e))?;
+    stream
+        .set_read_timeout(Some(PROBE_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(PROBE_TIMEOUT)))
+        .and_then(|()| {
+            write!(
+                stream,
+                "GET /v1/ready HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                args.address
+            )
+        })
+        .map_err(|e| fail(&e))?;
+    let mut response = Vec::new();
+    stream
+        .take(MAX_PROBE_BYTES)
+        .read_to_end(&mut response)
+        .map_err(|e| fail(&e))?;
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut head = httparse::Response::new(&mut headers);
+    let Ok(httparse::Status::Complete(body)) = head.parse(&response) else {
+        return Err(fail(&"malformed response"));
+    };
+    let status: ReadyStatus =
+        serde_json::from_slice(&response[body..]).map_err(|_| fail(&"unexpected response"))?;
+    match (head.code, status) {
+        (Some(200), ReadyStatus { ready: true, .. }) => Ok(()),
+        (_, status) => Err(format!(
+            "not ready: {}",
+            status.reason.as_deref().unwrap_or("unknown")
+        )),
     }
 }
 
