@@ -47,6 +47,9 @@ const READER_TOKEN: &str = "reader-0123456789abcdef0123456789abcdef";
 /// The API's default bounds.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_STREAMS: usize = 16;
+const MAX_CONNECTIONS: usize = 64;
+/// The API's deadlines for request headers and for a body after them.
+const READ_DEADLINE: Duration = Duration::from_secs(10);
 
 /// A state directory, a download root, a token file, and the fixture's CA.
 struct Dirs {
@@ -911,5 +914,61 @@ async fn sigterm_keeps_jobs_for_the_next_start_and_one_daemon_owns_the_state() {
         panic!("{ranges:?}")
     };
     assert!((settled..=STALL as u64).contains(&from), "{from}");
+    daemon.stop("TERM").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clients_that_stop_sending_cannot_hold_connections() {
+    let server = Server::https().await;
+    let dirs = Dirs::ready(&server);
+    let daemon = Daemon::start(&dirs).await;
+    let address = daemon.base.trim_start_matches("http://").to_owned();
+
+    // Take every connection with a read-only request whose body stalls
+    // after its headers.
+    let stalled_post = format!(
+        "POST /v1/inputs HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {READER_TOKEN}\r\n\
+         Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{{"
+    );
+    let mut held = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        let mut tcp = tokio::net::TcpStream::connect(&address).await.unwrap();
+        tcp.write_all(stalled_post.as_bytes()).await.unwrap();
+        held.push(tcp);
+    }
+    let owner = daemon.owner();
+    let blocked = tokio::time::timeout(Duration::from_secs(2), owner.get("/v1/capabilities"));
+    assert!(blocked.await.is_err(), "every connection should be taken");
+
+    // The body deadline frees them, and the owner gets through.
+    let (status, _) = tokio::time::timeout(
+        READ_DEADLINE + Duration::from_secs(10),
+        owner.get("/v1/capabilities"),
+    )
+    .await
+    .expect("served once the stalled connections expire");
+    assert_eq!(status, StatusCode::OK);
+    for tcp in &mut held {
+        let mut response = Vec::new();
+        tokio::time::timeout(DEADLINE, tcp.read_to_end(&mut response))
+            .await
+            .expect("the daemon closes the connection")
+            .unwrap();
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+    }
+
+    // A connection that never sends anything is closed by the header
+    // deadline.
+    let mut idle = tokio::net::TcpStream::connect(&address).await.unwrap();
+    let mut nothing = Vec::new();
+    tokio::time::timeout(
+        READ_DEADLINE + Duration::from_secs(10),
+        idle.read_to_end(&mut nothing),
+    )
+    .await
+    .expect("the daemon closes an idle connection")
+    .unwrap();
+    assert!(owner.jobs().await.is_empty());
     daemon.stop("TERM").await;
 }

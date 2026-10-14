@@ -18,6 +18,8 @@ pub struct ApiError {
     /// The request carried no valid credentials, as opposed to valid
     /// credentials without the needed permission.
     unauthenticated: bool,
+    /// The request body did not arrive in time.
+    timed_out: bool,
 }
 
 impl ApiError {
@@ -33,6 +35,18 @@ impl ApiError {
             ..Self::new(
                 ErrorCode::PermissionDenied,
                 "a valid bearer token is required",
+            )
+        }
+    }
+
+    /// A request body that did not arrive before the deadline. The
+    /// connection is closed, since the rest of the body is never read.
+    pub fn body_timeout() -> Self {
+        Self {
+            timed_out: true,
+            ..Self::new(
+                ErrorCode::InvalidRequest,
+                "request body not received in time",
             )
         }
     }
@@ -58,6 +72,9 @@ impl ApiError {
         if self.unauthenticated {
             return StatusCode::UNAUTHORIZED;
         }
+        if self.timed_out {
+            return StatusCode::REQUEST_TIMEOUT;
+        }
         match self.error.code {
             ErrorCode::InvalidRequest | ErrorCode::IncompatibleProtocol => StatusCode::BAD_REQUEST,
             ErrorCode::LimitExceeded => StatusCode::PAYLOAD_TOO_LARGE,
@@ -80,6 +97,7 @@ impl From<ProtocolError> for ApiError {
         Self {
             error,
             unauthenticated: false,
+            timed_out: false,
         }
     }
 }
@@ -101,6 +119,8 @@ impl IntoResponse for ApiError {
         let headers = response.headers_mut();
         if self.unauthenticated {
             headers.insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        } else if self.timed_out {
+            headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
         } else if status == StatusCode::SERVICE_UNAVAILABLE {
             headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
         }

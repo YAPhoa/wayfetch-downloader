@@ -49,6 +49,10 @@ pub struct ApiLimits {
     pub max_body_bytes: usize,
     /// Time a client has to send a request's headers.
     pub header_read_timeout: Duration,
+    /// Time a client has to send a request's body after its headers.
+    /// Together with `header_read_timeout`, this bounds how long a client
+    /// that stops sending can hold a connection.
+    pub body_read_timeout: Duration,
     /// Interval of keep-alive comments on idle event streams, which also
     /// notice clients that went away.
     pub keep_alive: Duration,
@@ -66,6 +70,7 @@ impl ApiLimits {
         // batches in parts.
         max_body_bytes: 1024 * 1024,
         header_read_timeout: Duration::from_secs(10),
+        body_read_timeout: Duration::from_secs(10),
         keep_alive: Duration::from_secs(15),
         drain_timeout: Duration::from_secs(5),
     };
@@ -94,6 +99,7 @@ impl Api {
             streams: Arc::new(Semaphore::new(limits.max_event_streams.get())),
             shutdown: shutdown.clone(),
             keep_alive: limits.keep_alive,
+            body_timeout: limits.body_read_timeout,
         };
         let router = Router::new()
             .route("/v1/capabilities", get(routes::capabilities))

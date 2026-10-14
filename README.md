@@ -148,8 +148,9 @@ reconnecting with `Last-Event-ID` (or `?after=`) replays exactly what was
 missed, and a `resync` event ends the stream when that is impossible, after
 which the client re-reads `/v1/jobs` and subscribes from its `as_of` cursor.
 
-Request bodies are capped at 1 MiB, connections at 64, event streams at 16, and
-request headers must arrive within 10 seconds. Closing a connection or stream
+Request bodies are capped at 1 MiB, connections at 64, and event streams at 16.
+A request's headers must arrive within 10 seconds, and its body within 10
+seconds after them, so a client that stops sending cannot hold a connection. Closing a connection or stream
 never affects a download. `SIGINT` or `SIGTERM` ends event streams, lets
 requests in progress finish for up to 5 seconds, and shuts the engine down
 gracefully; unfinished jobs continue on the next start.

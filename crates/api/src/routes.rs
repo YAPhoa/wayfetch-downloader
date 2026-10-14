@@ -22,8 +22,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::rejection::BytesRejection;
-use axum::extract::{Extension, Path, Query as UrlQuery, State};
+use axum::extract::{Extension, FromRequest, Path, Query as UrlQuery, Request, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::{Stream, StreamExt};
@@ -54,6 +53,8 @@ pub struct AppState {
     /// Ends every event stream when the server shuts down.
     pub shutdown: CancellationToken,
     pub keep_alive: Duration,
+    /// Time a client has to send a request body once its headers arrived.
+    pub body_timeout: Duration,
 }
 
 type ApiResult<T> = Result<Json<T>, ApiError>;
@@ -66,7 +67,7 @@ pub async fn capabilities(State(app): State<AppState>) -> ApiResult<Hello> {
 /// The body of `POST /v1/inputs`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SubmitRequest {
+pub struct SubmitRequest {
     idempotency_key: IdempotencyKey,
     target: InstanceId,
     /// Raw, so each URL is validated with its own error code and position.
@@ -79,9 +80,8 @@ struct SubmitRequest {
 pub async fn submit(
     State(app): State<AppState>,
     Extension(grant): Extension<Grant>,
-    body: Result<Bytes, BytesRejection>,
+    JsonBody(request): JsonBody<SubmitRequest>,
 ) -> ApiResult<CommandResult> {
-    let request: SubmitRequest = json(body)?;
     let items = request
         .items
         .iter()
@@ -109,7 +109,7 @@ pub async fn submit(
 /// A job command's action.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Action {
+pub enum Action {
     Pause,
     Resume,
     Cancel,
@@ -118,7 +118,7 @@ enum Action {
 /// The body of `POST /v1/jobs/{id}/commands`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct JobCommandRequest {
+pub struct JobCommandRequest {
     idempotency_key: IdempotencyKey,
     target: InstanceId,
     action: Action,
@@ -130,10 +130,9 @@ pub async fn job_command(
     State(app): State<AppState>,
     Extension(grant): Extension<Grant>,
     Path(id): Path<String>,
-    body: Result<Bytes, BytesRejection>,
+    JsonBody(request): JsonBody<JobCommandRequest>,
 ) -> ApiResult<CommandResult> {
     let job = job_id(&id)?;
-    let request: JobCommandRequest = json(body)?;
     let expected_revision = request.expected_revision;
     let command = match request.action {
         Action::Pause => Command::Pause {
@@ -323,9 +322,22 @@ fn job_id(text: &str) -> Result<JobId, ApiError> {
     JobId::from_str(text).map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid job ID"))
 }
 
-/// Decodes a JSON body read within the body limit.
-fn json<T: DeserializeOwned>(body: Result<Bytes, BytesRejection>) -> Result<T, ApiError> {
-    serde_json::from_slice(&body?).map_err(|e| ApiError::bad_json(&e))
+/// A JSON request body, read within the body size limit and the body
+/// deadline. Without the deadline, a client that sends headers and then
+/// stalls its body would hold a connection for as long as it likes.
+pub struct JsonBody<T>(T);
+
+impl<T: DeserializeOwned> FromRequest<AppState> for JsonBody<T> {
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, app: &AppState) -> Result<Self, ApiError> {
+        let bytes = tokio::time::timeout(app.body_timeout, Bytes::from_request(request, app))
+            .await
+            .map_err(|_| ApiError::body_timeout())??;
+        serde_json::from_slice(&bytes)
+            .map(Self)
+            .map_err(|e| ApiError::bad_json(&e))
+    }
 }
 
 #[cfg(test)]

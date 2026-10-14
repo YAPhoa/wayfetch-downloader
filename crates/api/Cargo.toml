@@ -14,7 +14,7 @@ axum = { version = "0.8.9", default-features = false, features = ["json", "query
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 getrandom = "0.4"
 hyper = { version = "1.12", features = ["http1", "server"] }
-hyper-util = { version = "0.1.21", features = ["server", "server-graceful", "service", "tokio"] }
+hyper-util = { version = "0.1.21", features = ["http1", "server", "server-graceful", "service", "tokio"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
