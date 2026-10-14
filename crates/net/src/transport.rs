@@ -12,8 +12,9 @@
 //! * Redirects are followed here, one hop at a time, within a hop budget.
 //!   Every target passes the [`EgressPolicy`]; a hop to another origin drops
 //!   credentials and never carries a request body; HTTPS never downgrades
-//!   to HTTP; a hop that would resend a body or an unsafe method is
-//!   followed only for a request that may be repeated.
+//!   to HTTP; a hop that would resend a body or an unsafe method, or
+//!   request a URL already requested, is followed only for a request that
+//!   may be repeated.
 //! * Names resolve through the policy, so the connector only ever sees
 //!   permitted addresses.
 //!
@@ -506,6 +507,8 @@ impl HttpTransport {
         let client = self.client(out.connect_timeout)?;
         let mut headers = caller_headers(std::mem::take(&mut out.headers));
         let mut hops = 0;
+        // URLs sent so far, without fragments, which are never sent.
+        let mut sent: Vec<Url> = Vec::new();
         loop {
             self.policy.check(&out.url).map_err(refused)?;
             let mut request = client
@@ -521,6 +524,9 @@ impl HttpTransport {
             if let Some(body) = &out.body {
                 request = request.body(body.clone());
             }
+            let mut target = out.url.clone();
+            target.set_fragment(None);
+            sent.push(target);
             let response = request
                 .send()
                 .await
@@ -565,11 +571,16 @@ impl HttpTransport {
                 }
                 headers = without_credentials(headers);
             }
-            // Following the redirect sends the request again. A body or an
-            // unsafe method is sent again only if the request may be
-            // repeated: the first one reached the server, so for any other
-            // the outcome is unknown and is never resent (section 6.5, T12).
-            if !out.replay_safe && (out.body.is_some() || !out.method.is_safe()) {
+            // Following the redirect may send the request again. A body, an
+            // unsafe method, or any method to a URL already requested in
+            // this chain is sent only if the request may be repeated: the
+            // first one reached the server, so for any other the outcome is
+            // unknown and it is never resent (section 6.5, T11, T12).
+            let mut target = next.clone();
+            target.set_fragment(None);
+            if !out.replay_safe
+                && (out.body.is_some() || !out.method.is_safe() || sent.contains(&target))
+            {
                 return Err(error(
                     FailureCode::OperationAmbiguous,
                     format!("HTTP {status} would send a non-replayable request again"),

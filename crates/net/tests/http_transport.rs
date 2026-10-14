@@ -360,6 +360,40 @@ async fn redirects_never_resend_a_non_replayable_request() {
     }
     assert_eq!(server.hits("/charge"), 2);
 
+    // T11: a one-use GET redirected back to itself, directly or through
+    // another URL, is not requested again either; one redirected onward to
+    // a new URL, as a one-use link to its CDN, is followed.
+    server.route("/once", Route::Redirect(307, "/once#again".into()));
+    server.route("/a", Route::Redirect(302, "/b".into()));
+    server.route("/b", Route::Redirect(301, "/a".into()));
+    server.route("/link", Route::Redirect(302, "/cdn.bin".into()));
+    server.put("/cdn.bin", Resource::new(body(KIB)));
+    let get = async |path| {
+        let request = PreparedRequest {
+            method: Method::GET,
+            url: Url::parse(&server.url(path)).unwrap(),
+            headers: HeaderMap::new(),
+            body: None,
+        };
+        let reference = transport
+            .prepare(request, ReplayPolicy::NeverAutomaticallyReplay)
+            .unwrap();
+        transport
+            .submit(reference, Duration::from_secs(5), READ_BUFFER)
+            .await
+    };
+    for path in ["/once", "/a"] {
+        let err = get(path).await.unwrap_err();
+        assert!(
+            matches!(&err, BrokerError::Transport(e) if e.code == FailureCode::OperationAmbiguous),
+            "{path}: {err:?}"
+        );
+    }
+    get("/link").await.unwrap();
+    for path in ["/once", "/a", "/b", "/link", "/cdn.bin"] {
+        assert_eq!(server.hits(path), 1, "{path}");
+    }
+
     // A 303 answers the POST with another resource to GET, which repeats
     // nothing.
     submit("/see-other", ReplayPolicy::NeverAutomaticallyReplay)
