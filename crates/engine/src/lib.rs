@@ -8,6 +8,16 @@
 //! keeps the [`EngineOwner`], hands [`EngineHandle`]s to its adapters, and
 //! awaits [`EngineOwner::shutdown`] before exiting.
 
+/// Marks a named crash-injection boundary (architecture brief section 13.2).
+/// With the `failpoints` feature a test can stop the process here through
+/// the `fail` crate and kill it; otherwise it compiles to nothing.
+macro_rules! crash_point {
+    ($name:literal) => {
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!($name);
+    };
+}
+
 pub mod config;
 mod download;
 pub mod fs;
@@ -18,6 +28,8 @@ pub mod subscription;
 pub mod transfer;
 
 pub use config::{ConfigError, EngineConfig, Limits, RootConfig, Timeouts};
+#[cfg(feature = "failpoints")]
+pub use fail;
 pub use lifecycle::{
     EngineBuilder, EngineHandle, EngineOwner, Readiness, ShutdownReport, ShutdownRequest,
     StartError,

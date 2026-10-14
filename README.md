@@ -105,7 +105,10 @@ also runs a repository hygiene check that rejects tracked agent-output
 directories.
 
 The HTTP tests start their own HTTP and HTTPS servers on `127.0.0.1`, with a
-certificate generated per test; they need no network access.
+certificate generated per test; they need no network access. The crash tests
+(`crates/net/tests/process_recovery.rs`, Unix only) run the engine in a child
+process, a rerun of their own test binary, and kill it with `SIGKILL` at named
+boundaries from the engine's test-only `failpoints` feature.
 
 Use `cargo fmt --all` to apply formatting.
 

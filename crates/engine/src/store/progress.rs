@@ -102,7 +102,9 @@ impl Store {
             ])?;
         }
         drop(insert);
+        crash_point!("checkpoint-before-commit");
         tx.commit()?;
+        crash_point!("checkpoint-after-commit");
         Ok(durable)
     }
 }

@@ -26,6 +26,12 @@ url.workspace = true
 # The host supplies the runtime; the engine only spawns onto its handle.
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
+fail = { version = "0.5.1", optional = true }
+
+[features]
+# Named crash-injection boundaries for process-kill tests (architecture brief
+# section 13.2). Test-only: no host enables it.
+failpoints = ["dep:fail", "fail/failpoints"]
 
 [dev-dependencies]
 tempfile.workspace = true
