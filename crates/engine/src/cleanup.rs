@@ -10,22 +10,20 @@
 //! Each abandoned file is removed only if its name still holds the recorded
 //! file, and the record is deleted only after the removal is durable. A
 //! name holding anything else is left in place and its record kept, marked
-//! so the name is never taken for the engine's own again. Every step can
+//! so later passes leave it alone. Every step can
 //! be interrupted: a pass after a crash finds the record with or without
 //! its file and finishes the job, so cleanup is safe to repeat.
 //!
-//! A crash between creating a staging file and registering it, or a
-//! registration refused because the job moved on meanwhile, leaves a file
-//! no record names. With `unrecorded`, a pass also removes such a file if
-//! it has the exact name the engine gives the file of an older generation
-//! of an existing job, no record or publication names it, and it is a
-//! regular file with no other name. Everything else in the staging
-//! directory, and everything outside it, is left alone.
+//! Only a recorded identity proves the engine created a file, so a file no
+//! record names is never removed, whatever its name. A crash between
+//! creating a staging file and registering it leaves such a file in place;
+//! a download whose registration is refused removes its own file, whose
+//! identity it still holds.
 
 use crate::fs::{FsError, Removal, Root};
 use crate::store::{Store, StoreError};
 
-/// How many records or names a pass handles per store query.
+/// How many records a pass handles per store query.
 const BATCH: usize = 64;
 
 /// What a cleanup pass did.
@@ -49,23 +47,13 @@ pub(crate) enum CleanupError {
     Store(#[from] StoreError),
 }
 
-/// Removes the abandoned staging files of `root` and, with `unrecorded`,
-/// the files the engine left in it without a record. Blocking.
-///
-/// A file of an older generation than its job's current one can no longer
-/// be registered (the store rejects the stale generation), so removing an
-/// unrecorded one never races a registration. Listing the staging directory
-/// is a pass over every entry, so the engine does that part only at startup.
-pub(crate) fn sweep(
-    store: &mut Store,
-    root: &Root,
-    unrecorded: bool,
-) -> Result<Swept, CleanupError> {
+/// Removes the abandoned staging files of `root`. Blocking.
+pub(crate) fn sweep(store: &mut Store, root: &Root) -> Result<Swept, CleanupError> {
     let mut swept = Swept::default();
     loop {
         let batch = store.abandoned_staging(root.id(), BATCH)?;
         if batch.is_empty() {
-            break;
+            return Ok(swept);
         }
         for record in batch {
             let found = root.remove_staging(&record)?;
@@ -80,16 +68,4 @@ pub(crate) fn sweep(
             store.finish_staging_cleanup(&record, found)?;
         }
     }
-    if unrecorded {
-        let mut names = root.staging_names()?.peekable();
-        while names.peek().is_some() {
-            let batch = names.by_ref().take(BATCH).collect();
-            for name in store.unrecorded_staging(root.id(), batch)? {
-                if root.remove_unrecorded_staging(&name)? == Removal::Removed {
-                    swept.removed += 1;
-                }
-            }
-        }
-    }
-    Ok(swept)
 }

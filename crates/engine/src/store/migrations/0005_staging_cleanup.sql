@@ -9,8 +9,7 @@
 -- the job went back to the queue to start from zero. The file is then
 -- removed after its identity is checked, and the record after the file.
 -- 'foreign' if the name was found holding another file, which cleanup
--- leaves in place; the record stays so the name is never mistaken for an
--- unrecorded file of the engine's own.
+-- leaves in place, as it does every file no record names.
 ALTER TABLE staging_files ADD COLUMN cleanup TEXT
     CHECK (cleanup IN ('pending', 'foreign'));
 

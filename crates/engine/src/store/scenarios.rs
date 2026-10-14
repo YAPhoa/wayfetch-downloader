@@ -861,8 +861,8 @@ fn cleanup_state(f: &mut Fixture, job: JobId, generation: Generation) -> Option<
     .unwrap()
 }
 
-fn sweep(f: &mut Fixture, unrecorded: bool) -> crate::cleanup::Swept {
-    crate::cleanup::sweep(&mut f.store, &f.root, unrecorded).unwrap()
+fn sweep(f: &mut Fixture) -> crate::cleanup::Swept {
+    crate::cleanup::sweep(&mut f.store, &f.root).unwrap()
 }
 
 fn staged(f: &Fixture, job: JobId, generation: Generation) -> std::path::PathBuf {
@@ -898,7 +898,7 @@ fn only_files_no_generation_can_reopen_are_removed() {
 
     let mut f = f.reopen();
     f.store.recover_after_restart(NOW).unwrap();
-    let swept = sweep(&mut f, true);
+    let swept = sweep(&mut f);
     assert_eq!((swept.removed, swept.foreign), (2, 0));
     for (job, generation) in [(zero, zero_gen), (newer, old_gen)] {
         assert!(!staged(&f, job, generation).exists());
@@ -917,7 +917,7 @@ fn only_files_no_generation_can_reopen_are_removed() {
         assert_eq!(latest.record.generation, generation);
     }
     // Repeating finds nothing more.
-    assert_eq!(sweep(&mut f, true), crate::cleanup::Swept::default());
+    assert_eq!(sweep(&mut f), crate::cleanup::Swept::default());
 }
 
 #[test]
@@ -954,7 +954,7 @@ fn cleanup_resumes_after_an_interruption_at_any_step() {
     assert_eq!(f.root.remove_staging(&record).unwrap(), Removal::Removed);
 
     let mut f = f.reopen();
-    let swept = sweep(&mut f, false);
+    let swept = sweep(&mut f);
     assert_eq!(swept.removed, 1);
     assert!(!staged(&f, before_unlink, first).exists());
     assert_eq!(cleanup_state(&mut f, before_unlink, first), None);
@@ -977,41 +977,38 @@ fn a_replaced_abandoned_file_is_left_in_place_for_good() {
 
     let mut f = f.reopen();
     f.store.recover_after_restart(NOW).unwrap();
-    let swept = sweep(&mut f, true);
+    let swept = sweep(&mut f);
     assert_eq!((swept.removed, swept.foreign), (0, 1));
     assert_eq!(
         cleanup_state(&mut f, job, generation),
         Some(Some("foreign".into()))
     );
-    // The kept record stops later passes from taking the name for an
-    // unrecorded file of the engine's.
-    assert_eq!(sweep(&mut f, true), crate::cleanup::Swept::default());
+    // Later passes leave it alone.
+    assert_eq!(sweep(&mut f), crate::cleanup::Swept::default());
     assert_eq!(std::fs::read(&path).unwrap(), b"theirs");
 }
 
 #[test]
-fn unrecorded_files_of_past_generations_are_removed_and_nothing_else() {
+fn files_no_record_names_are_never_removed() {
     let mut f = Fixture::new();
-    // Created, then the engine stopped before registering it.
+    // Created, then the engine stopped before registering it, and the file
+    // was replaced before the next start: only a record could tell.
     let crashed = f.job();
     f.advance(crashed, JobStage::Resolving).unwrap();
     f.advance(crashed, JobStage::Transferring).unwrap();
     let crashed_gen = f.summary(crashed).generation;
     f.file(crashed, crashed_gen);
-    // A queued job's current generation may still create its file.
+    let replaced = staged(&f, crashed, crashed_gen);
+    std::fs::write(replaced.with_extension("swap"), b"theirs").unwrap();
+    std::fs::rename(replaced.with_extension("swap"), &replaced).unwrap();
+    // Unregistered as created.
     let queued = f.job();
     let queued_gen = f.summary(queued).generation;
     f.file(queued, queued_gen);
-    // The name of a past generation, but a directory, and one with a
-    // second name.
-    let (linked, linked_gen) = transferring(&mut f, BootEpoch::INITIAL);
-    restart_from_zero(&mut f, linked);
-    let dir_job = f.job();
-    restart_from_zero(&mut f, dir_job);
-    let dir_path = staged(&f, dir_job, Generation::INITIAL);
-    std::fs::create_dir(&dir_path).unwrap();
-    let outside = f.root_dir.path().join("published.bin");
-    std::fs::write(&outside, b"published").unwrap();
+    // An abandoned file is removed; another file later given its name is
+    // not.
+    let (reused, reused_gen) = transferring(&mut f, BootEpoch::INITIAL);
+    restart_from_zero(&mut f, reused);
     let unknown = crate::fs::staging_path(f.root_dir.path(), "job-999.g1.part");
     std::fs::write(&unknown, b"").unwrap();
     let other = crate::fs::staging_path(f.root_dir.path(), "notes.txt");
@@ -1019,25 +1016,17 @@ fn unrecorded_files_of_past_generations_are_removed_and_nothing_else() {
 
     let mut f = f.reopen();
     f.store.recover_after_restart(NOW).unwrap();
-    // The abandoned file goes first; then put a second name in its place.
-    assert_eq!(sweep(&mut f, false).removed, 1);
-    let linked_path = staged(&f, linked, linked_gen);
-    std::fs::hard_link(&outside, &linked_path).unwrap();
-    // Recorded files are left to their records.
-    assert!(staged(&f, crashed, crashed_gen).is_file());
+    assert_eq!(sweep(&mut f).removed, 1);
+    let reused_path = staged(&f, reused, reused_gen);
+    assert!(!reused_path.exists());
+    std::fs::write(&reused_path, b"later").unwrap();
 
-    assert_eq!(sweep(&mut f, true).removed, 1);
-    assert!(!staged(&f, crashed, crashed_gen).exists());
-    for kept in [
-        &staged(&f, queued, queued_gen),
-        &unknown,
-        &other,
-        &linked_path,
-    ] {
+    assert_eq!(sweep(&mut f), crate::cleanup::Swept::default());
+    assert_eq!(std::fs::read(&replaced).unwrap(), b"theirs");
+    for kept in [&staged(&f, queued, queued_gen), &unknown, &other] {
         assert!(kept.is_file(), "{kept:?}");
     }
-    assert!(dir_path.is_dir());
-    assert_eq!(std::fs::read(&outside).unwrap(), b"published");
+    assert_eq!(std::fs::read(&reused_path).unwrap(), b"later");
 }
 
 #[test]
@@ -1054,6 +1043,6 @@ fn a_file_an_unfinished_publication_names_is_never_cleaned_up() {
         .unwrap();
     tx.commit().unwrap();
     let mut f = f.reopen();
-    assert_eq!(sweep(&mut f, true), crate::cleanup::Swept::default());
+    assert_eq!(sweep(&mut f), crate::cleanup::Swept::default());
     assert!(staged(&f, job, generation).is_file());
 }

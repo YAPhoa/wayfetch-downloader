@@ -454,3 +454,33 @@ async fn cleanup_of_an_abandoned_partial_survives_repeated_kills() {
     assert_published(&env, &done, "r.bin", &data);
     shutdown(owner).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_left_unregistered_by_a_kill_is_never_removed() {
+    let env = env().await;
+    let data = body(16 * KIB);
+    env.server.put("/u.bin", Resource::new(data.clone()));
+    let mut child = Child::spawn(&env, Some("/u.bin"), Some(("staging-before-register", 1)));
+    child.until(|c| c.stopped.is_some()).await;
+    child.kill(&env.state).await;
+    // The file the killed engine created but never recorded is replaced
+    // before the next start; only a record could prove it the engine's.
+    let staging = env.root.join(".wayfetch/staging");
+    let [left] = &std::fs::read_dir(&staging)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one staging file")
+    };
+    let swap = staging.join("swap");
+    std::fs::write(&swap, b"someone else's file").unwrap();
+    std::fs::rename(&swap, left).unwrap();
+
+    let (owner, done) = restart(&env).await;
+    assert_eq!(done.artifact.as_ref().unwrap().path, "u.bin");
+    assert_eq!(env.published("u.bin"), data);
+    assert_eq!(std::fs::read(left).unwrap(), b"someone else's file");
+    assert_eq!(staging_files(&env.root), 1);
+    shutdown(owner).await;
+}

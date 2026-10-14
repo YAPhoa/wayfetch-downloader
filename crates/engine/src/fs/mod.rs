@@ -64,7 +64,7 @@ pub use publish::PublicationCheck;
 pub use root::Root;
 #[cfg(test)]
 pub(crate) use staging::tests::{root as test_root, staging_path};
-pub use staging::{Removal, StagingFile, StagingName, StagingRecord, SyncedRanges};
+pub use staging::{Removal, StagingFile, StagingRecord, SyncedRanges};
 use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::id::RootId;
 

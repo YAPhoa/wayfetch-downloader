@@ -12,7 +12,7 @@ use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{BootEpoch, Generation};
 
 use super::{Store, StoreError, jobs, key, progress, sql};
-use crate::fs::{FileIdentity, RelativePath, Removal, StagingName, StagingRecord};
+use crate::fs::{FileIdentity, RelativePath, Removal, StagingRecord};
 use crate::transfer::lease::Representation;
 use crate::transfer::range::is_complete;
 
@@ -582,37 +582,5 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
-    }
-
-    /// Of `names` found in the staging directory of `root`, those the
-    /// engine left behind without a record: the job exists and is past the
-    /// name's generation, so no running work can still register the file,
-    /// and no record or unfinished publication names it or that
-    /// generation's file.
-    pub fn unrecorded_staging(
-        &mut self,
-        root: RootId,
-        names: Vec<StagingName>,
-    ) -> Result<Vec<StagingName>, StoreError> {
-        let tx = self.read()?;
-        let mut statement = tx.prepare(
-            "SELECT EXISTS (SELECT 1 FROM jobs WHERE id = ?1 AND generation > ?2) \
-             AND NOT EXISTS (SELECT 1 FROM staging_files \
-                 WHERE (job_id = ?1 AND generation = ?2) OR (root_id = ?3 AND name = ?4)) \
-             AND NOT EXISTS (SELECT 1 FROM publications \
-                 WHERE state = 'intended' AND root_id = ?3 AND staging_name = ?4)",
-        )?;
-        let root = sql(root)?;
-        let mut unrecorded = Vec::new();
-        for name in names {
-            let orphan: bool = statement.query_row(
-                params![sql(name.job)?, sql(name.generation)?, root, name.name],
-                |row| row.get(0),
-            )?;
-            if orphan {
-                unrecorded.push(name);
-            }
-        }
-        Ok(unrecorded)
     }
 }

@@ -638,8 +638,8 @@ struct Coordinator {
 
 impl Coordinator {
     async fn run(mut self) {
-        // Nothing runs yet, so files no record names can be told apart.
-        self.clean_staging(true).await;
+        // A pass a crash interrupted is finished before work starts.
+        self.clean_staging().await;
         self.changed().await;
         loop {
             tokio::select! {
@@ -736,22 +736,21 @@ impl Coordinator {
                 }
                 // The download may have replaced its partial, or the job
                 // may have been queued to start from zero.
-                self.clean_staging(false).await;
+                self.clean_staging().await;
             }
         }
         self.changed().await;
     }
 
     /// Removes staging files no job generation can reopen from every root
-    /// that opens, and with `unrecorded` the files left without a record
-    /// (see [`cleanup`]). A root that does not open is skipped, and a pass
-    /// that stops early is continued by the next one.
-    async fn clean_staging(&mut self, unrecorded: bool) {
+    /// that opens (see [`cleanup`]). A root that does not open is skipped,
+    /// and a pass that stops early is continued by the next one.
+    async fn clean_staging(&mut self) {
         let (roots, instance) = (self.config.roots.clone(), self.identity.instance);
         self.with_store(move |store| {
             for root in roots {
                 if let Ok(root) = Root::open(&root.path, root.id, instance) {
-                    let _ = cleanup::sweep(store, &root, unrecorded);
+                    let _ = cleanup::sweep(store, &root);
                 }
             }
         })
