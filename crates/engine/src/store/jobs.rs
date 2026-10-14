@@ -3,33 +3,36 @@
 
 use std::str::FromStr;
 
+use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Transaction, params, params_from_iter};
 use strum::VariantArray;
 use wayfetch_domain::failure::{Failure, FailureCode};
 use wayfetch_domain::id::{JobId, PackageId};
 use wayfetch_domain::job::{DesiredState, JobStage, JobState, Outcome};
-use wayfetch_domain::name::DiagnosticText;
+use wayfetch_domain::name::{DiagnosticText, HostName};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Generation;
 use wayfetch_protocol::event::{EventCursor, EventKind};
 use wayfetch_protocol::query::{
-    ArtifactSummary, FailureSummary, JobSummary, Page, Query, QueryResult,
+    ArtifactSummary, FailureSummary, JobCounts, JobFilter, JobSummary, Page, Query, QueryResult,
 };
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
 use super::{Store, StoreError, files, key, outbox, sql};
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
-/// the job's newest partial; the last three describe its published file.
+/// the job's newest partial; the next three describe its published file,
+/// and the last is the submitted link.
 const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.generation, \
      j.revision, j.bytes_total, j.failure_code, j.failure_retry_at, j.failure_message, \
      COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
                ORDER BY p.generation DESC LIMIT 1), 0), \
-     a.root_id, a.target_path, a.size_bytes";
+     a.root_id, a.target_path, a.size_bytes, s.input_url";
 
-/// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file.
-const JOB_FROM: &str =
-    "jobs j LEFT JOIN publications a ON a.job_id = j.id AND a.state = 'published'";
+/// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
+/// has exactly one source link.
+const JOB_FROM: &str = "jobs j JOIN source_links s ON s.id = j.source_link_id \
+     LEFT JOIN publications a ON a.job_id = j.id AND a.state = 'published'";
 
 /// A job the coordinator can start work on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +66,7 @@ pub(super) struct StoredJob {
     bytes_done: u64,
     pub(super) failure: Option<FailureSummary>,
     artifact: Option<ArtifactSummary>,
+    original_host: HostName,
 }
 
 impl StoredJob {
@@ -79,6 +83,7 @@ impl StoredJob {
             bytes_total: self.bytes_total,
             failure: self.failure.clone(),
             artifact: self.artifact.clone(),
+            original_host: Some(self.original_host.clone()),
         }
     }
 }
@@ -97,6 +102,7 @@ struct RawJob {
     failure_message: Option<String>,
     bytes_done: i64,
     artifact: Option<(i64, String, i64)>,
+    input_url: String,
 }
 
 impl RawJob {
@@ -117,6 +123,7 @@ impl RawJob {
                 Some(root) => Some((root, row.get(12)?, row.get(13)?)),
                 None => None,
             },
+            input_url: row.get(14)?,
         })
     }
 
@@ -127,6 +134,11 @@ impl RawJob {
         let state = JobState::restore(desired, stage, key(self.generation)?, key(self.revision)?)
             .map_err(|_| StoreError::Corrupt("job state"))?;
         let bytes = |v: i64| u64::try_from(v).map_err(|_| StoreError::Corrupt("byte count"));
+        // Stored links were validated on submission, so each has a host.
+        let original_host = url::Url::parse(&self.input_url)
+            .ok()
+            .and_then(|url| HostName::new(url.host_str()?).ok())
+            .ok_or(StoreError::Corrupt("source link"))?;
         Ok(StoredJob {
             id: key(self.id)?,
             state,
@@ -154,6 +166,7 @@ impl RawJob {
                     })
                 })
                 .transpose()?,
+            original_host,
         })
     }
 }
@@ -427,32 +440,20 @@ impl Store {
                 after,
                 page_size,
             } => {
-                let stages: Vec<&'static str> = filter.stages.iter().map(|s| s.as_str()).collect();
-                let mut sql_text = format!("SELECT {JOB_COLUMNS} FROM {JOB_FROM} WHERE j.id > ?1");
-                if filter.package.is_some() {
-                    sql_text.push_str(" AND j.package_id = ?2");
-                }
-                if !stages.is_empty() {
-                    sql_text.push_str(&format!(
-                        " AND j.stage IN ({})",
-                        numbered_placeholders(3, stages.len())
-                    ));
-                }
-                sql_text.push_str(" ORDER BY j.id LIMIT ?3");
+                let (conditions, mut values) = filter_clause(filter);
                 let after = match after {
                     // Past the stored range: nothing follows.
                     Some(id) => sql(*id).unwrap_or(i64::MAX),
                     None => 0,
                 };
-                // A package beyond the stored range matches nothing.
-                let package = filter.package.map_or(0, |p| sql(p).unwrap_or(-1));
+                values.insert(0, after.into());
                 // One extra row tells whether another page follows.
-                let limit = i64::from(page_size.get()) + 1;
-                let mut values: Vec<rusqlite::types::Value> =
-                    vec![after.into(), package.into(), limit.into()];
-                values.extend(stages.iter().map(|s| (*s).to_owned().into()));
+                values.push((i64::from(page_size.get()) + 1).into());
                 let mut items = tx
-                    .prepare(&sql_text)
+                    .prepare(&format!(
+                        "SELECT {JOB_COLUMNS} FROM {JOB_FROM} WHERE j.id > ?{conditions} \
+                         ORDER BY j.id LIMIT ?"
+                    ))
                     .map_err(StoreError::from)?
                     .query_map(params_from_iter(values), RawJob::read)
                     .map_err(StoreError::from)?
@@ -470,6 +471,27 @@ impl Store {
                     as_of,
                 })
             }
+            Query::CountJobs { filter } => {
+                let (conditions, values) = filter_clause(filter);
+                let stages = tx
+                    .prepare(&format!(
+                        "SELECT j.stage, COUNT(*) FROM jobs j WHERE 1{conditions} GROUP BY j.stage"
+                    ))
+                    .map_err(StoreError::from)?
+                    .query_map(params_from_iter(values), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })
+                    .map_err(StoreError::from)?
+                    .map(|row| {
+                        let (stage, count) = row?;
+                        Ok((
+                            JobStage::from_str(&stage).map_err(|_| StoreError::Corrupt("stage"))?,
+                            u64::try_from(count).map_err(|_| StoreError::Corrupt("count"))?,
+                        ))
+                    })
+                    .collect::<Result<_, StoreError>>()?;
+                QueryResult::JobCounts(JobCounts { stages, as_of })
+            }
         };
         Ok(result)
     }
@@ -480,10 +502,22 @@ fn placeholders(n: usize) -> String {
     vec!["?"; n].join(", ")
 }
 
-/// `?start, ?start+1, ...` with `n` entries.
-fn numbered_placeholders(start: usize, n: usize) -> String {
-    (start + 1..=start + n)
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(", ")
+/// ` AND ...` conditions on `jobs j` selecting the jobs `filter` names,
+/// and their values in order.
+fn filter_clause(filter: &JobFilter) -> (String, Vec<Value>) {
+    let mut conditions = String::new();
+    let mut values = Vec::new();
+    if let Some(package) = filter.package {
+        conditions.push_str(" AND j.package_id = ?");
+        // A package beyond the stored range matches nothing.
+        values.push(sql(package).unwrap_or(-1).into());
+    }
+    if !filter.stages.is_empty() {
+        conditions.push_str(&format!(
+            " AND j.stage IN ({})",
+            placeholders(filter.stages.len())
+        ));
+        values.extend(filter.stages.iter().map(|s| s.as_str().to_owned().into()));
+    }
+    (conditions, values)
 }

@@ -1,9 +1,12 @@
-# Only what `cargo build -p wayfetchd` reads is sent to the image build.
+# Only what `cargo build -p wayfetchd` reads is sent to the image build,
+# including the web UI it embeds.
 *
 !Cargo.toml
 !Cargo.lock
 !rust-toolchain.toml
 !apps/
 !crates/
+# The web UI's source is served as it is; no JavaScript tooling is needed.
+!ui/src/
 **/tests/
 **/target/

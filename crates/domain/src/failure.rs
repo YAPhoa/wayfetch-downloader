@@ -32,6 +32,7 @@ use crate::version::Generation;
     derive(serde::Serialize, serde::Deserialize),
     serde(rename_all = "snake_case")
 )]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum FailureCode {
     /// Connection or response timed out on a replay-safe request.
     RequestTimeout,

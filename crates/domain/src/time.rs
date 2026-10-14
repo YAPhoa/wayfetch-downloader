@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
     derive(serde::Serialize, serde::Deserialize),
     serde(transparent)
 )]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct UtcTimestamp(i64);
 
 impl UtcTimestamp {

@@ -24,6 +24,8 @@ macro_rules! define_id {
             derive(serde::Serialize, serde::Deserialize),
             serde(try_from = "String", into = "String")
         )]
+        // Serialized as its text form, such as `job-1`.
+        #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(type = "string"))]
         pub struct $name(NonZeroU64);
 
         impl $name {

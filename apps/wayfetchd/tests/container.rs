@@ -1,7 +1,8 @@
 //! The `wayfetchd` image run through `deploy/compose.yaml`, with every
 //! restriction it documents: a configured non-root UID/GID, a read-only
 //! root filesystem, no capabilities, and separate state, download, and
-//! token mounts. A fixture download survives the container's removal and
+//! token mounts. The image serves its bundled web UI. A fixture download
+//! survives the container's removal and
 //! recreation and resumes from its durable bytes; `docker compose stop`
 //! shuts down gracefully; a second container cannot take a state directory
 //! in use; and a root that was never initialized, or a host path that does
@@ -369,6 +370,7 @@ async fn a_recreated_container_resumes_and_publishes() {
     stack.init_root();
     let client = stack.up().await;
     stack.assert_restricted();
+    client.serves_the_ui().await;
     let id = client.submit(&server.url("/r.bin")).await;
     let settled = client.settled(&id).await;
     assert!(settled >= SETTLED);
