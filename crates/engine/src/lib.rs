@@ -11,11 +11,13 @@
 pub mod config;
 pub mod lifecycle;
 pub mod state_dir;
+mod store;
 
 pub use config::{ConfigError, EngineConfig};
 pub use lifecycle::{
     EngineBuilder, EngineHandle, EngineOwner, Readiness, ShutdownReport, ShutdownRequest,
     StartError,
 };
+pub use store::{StoreError, StoreInfo};
 pub use wayfetch_domain as domain;
 pub use wayfetch_protocol as protocol;
