@@ -233,7 +233,7 @@ impl Store {
         not(test),
         expect(
             dead_code,
-            reason = "called by transfer workers, which arrive with the transfer interfaces"
+            reason = "called by the transfer coordinator, which arrives with the first acceptance slice"
         )
     )]
     pub fn advance_job(
