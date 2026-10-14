@@ -67,11 +67,11 @@ pub async fn session(
     let browser = checked(&app, &method, &headers)?;
     let tokens = browser.cookie_tokens(&headers);
     let status = match (browser.live_session(&tokens), browser.owner()) {
-        (Some((_, csrf)), Some(owner)) => SessionStatus {
+        (Some(live), Some(owner)) => SessionStatus {
             setup_required: false,
             authenticated: true,
             username: Some(owner.username.clone()),
-            csrf_token: Some(csrf),
+            csrf_token: Some(live.csrf),
         },
         (_, owner) => SessionStatus {
             setup_required: owner.is_none(),

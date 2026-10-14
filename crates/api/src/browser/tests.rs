@@ -75,7 +75,7 @@ async fn the_setup_secret_creates_the_owner_once() {
     assert_eq!(username, "owner");
     assert!(!auth.setup_required());
     assert!(!issued.path.exists(), "the secret is single-use");
-    let grant = auth
+    let (grant, _) = auth
         .authenticate(&Method::GET, &headers(&auth, Some(&session), None))
         .unwrap();
     assert_eq!(&*grant.0, Permission::ALL);

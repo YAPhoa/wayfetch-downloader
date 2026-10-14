@@ -187,10 +187,29 @@ and optional port only, and must be `https://`.
 
 **Setup.** On a start with no owner account, the daemon writes a single-use
 setup secret to `AUTH_DIR/setup-secret` (mode `600`) and logs only the file's
-path. Within 15 minutes, open the origin, read the secret on the server
-(`sudo cat /srv/wayfetch/auth/setup-secret`), and enter it with the owner name
-and a password of at least 12 characters. That creates the local owner
-account and signs you in; the secret is then deleted. A wrong secret creates
+path. Within 15 minutes, send it with the owner name and a password of at
+least 12 characters to `POST /v1/auth/setup`. Until the bundled UI exists,
+do that with `curl` and `jq`; the password is read without echo and passed
+through the environment and standard input, never as an argument:
+
+```sh
+ORIGIN=https://wayfetch.example.lan          # the --browser-origin
+SECRET=$(sudo cat /srv/wayfetch/auth/setup-secret)
+read -rsp 'Owner password: ' PASSWORD; echo
+SECRET=$SECRET PASSWORD=$PASSWORD \
+    jq -n '{setup_secret: env.SECRET, username: "owner", password: env.PASSWORD}' |
+    curl -sS --fail-with-body -c cookies.txt -H "Origin: $ORIGIN" \
+        -H 'Content-Type: application/json' --data-binary @- "$ORIGIN/v1/auth/setup"
+unset SECRET PASSWORD
+```
+
+Before the reverse proxy is in place, run the same `curl` on the server
+against the daemon itself, naming the origin's host:
+`... -H 'Host: wayfetch.example.lan' --data-binary @- http://127.0.0.1:7878/v1/auth/setup`.
+
+A successful setup creates the local owner account, answers
+`{"authenticated":true,...,"csrf_token":...}`, and stores the session cookie
+in `cookies.txt`; the secret is then deleted. A wrong secret creates
 nothing; an expired one is refused and removed, and a restart writes a new
 one. Once an owner exists, further setups are refused (`409`), even
 concurrent ones or from a second process. The account file stores an
@@ -204,10 +223,23 @@ limit of five a minute for the whole server, so excess attempts get `429`
 with `Retry-After` even with the right password; existing sessions and API
 tokens keep working meanwhile. `GET /v1/auth/session` tells a page whether
 setup is pending and, when signed in, the owner's name and the CSRF token.
-`POST /v1/auth/logout` ends the session.
+`POST /v1/auth/logout` ends the session. With `curl`:
+
+```sh
+read -rsp 'Owner password: ' PASSWORD; echo
+CSRF=$(PASSWORD=$PASSWORD jq -n '{username: "owner", password: env.PASSWORD}' |
+    curl -sS --fail-with-body -c cookies.txt -H "Origin: $ORIGIN" \
+        -H 'Content-Type: application/json' --data-binary @- "$ORIGIN/v1/auth/login" |
+    jq -r .csrf_token)
+unset PASSWORD
+curl -sS -b cookies.txt -H "Origin: $ORIGIN" "$ORIGIN/v1/jobs"
+curl -sS -b cookies.txt -H "Origin: $ORIGIN" -H "X-CSRF-Token: $CSRF" -X POST \
+    "$ORIGIN/v1/auth/logout"
+```
 
 A signed-in browser can use every route above, including `/v1/events`, with
-all permissions. State-changing requests must send the session's CSRF token
+all permissions. Signing out, expiry, or replacement of a session also ends
+the event streams opened with it. State-changing requests must send the session's CSRF token
 in `X-CSRF-Token`. Every cookie-authenticated request must carry a `Host`
 of a configured origin (which stops DNS rebinding), and an `Origin` header
 equal to one where one is sent, which every `POST` must; requests a browser

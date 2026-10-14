@@ -44,7 +44,7 @@ use wayfetch_engine::{EngineHandle, Readiness};
 
 use crate::ReadinessCheck;
 use crate::auth::{Grant, Tokens};
-use crate::browser::BrowserAuth;
+use crate::browser::{BrowserAuth, SessionEnd};
 use crate::error::ApiError;
 
 /// What every handler shares.
@@ -329,12 +329,16 @@ pub struct EventParams {
 /// `Last-Event-ID` and gets only what it missed. A `resync` event ends the
 /// stream: the client re-queries and subscribes from the new snapshot.
 ///
+/// A stream opened with a browser session ends when the session does:
+/// on sign-out, expiry, or replacement.
+///
 /// The stream is pulled only as fast as the client reads, and the engine's
 /// bounded ring decides when a slow client must resynchronize, so no
 /// client grows memory. Closing the stream affects nothing but the stream.
 pub async fn events(
     State(app): State<AppState>,
     Extension(grant): Extension<Grant>,
+    session: Option<Extension<SessionEnd>>,
     headers: HeaderMap,
     params: Result<UrlQuery<EventParams>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
@@ -365,7 +369,15 @@ pub async fn events(
             Some((Ok(sse_event(&item)), (subscription, permit)))
         },
     )
-    .take_until(app.shutdown.cancelled_owned());
+    .take_until(futures_util::future::select(
+        Box::pin(app.shutdown.cancelled_owned()),
+        Box::pin(async move {
+            match session {
+                Some(Extension(end)) => end.ended().await,
+                None => std::future::pending().await,
+            }
+        }),
+    ));
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(app.keep_alive)))
 }
 

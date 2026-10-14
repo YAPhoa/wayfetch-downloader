@@ -29,6 +29,8 @@ mod session;
 
 pub(crate) mod routes;
 
+pub(crate) use self::session::SessionEnd;
+
 use std::fs::{File, TryLockError};
 use std::io;
 use std::net::SocketAddr;
@@ -213,26 +215,27 @@ impl BrowserAuth {
         self.origins.origins()
     }
 
-    /// The grant of a browser request's session: refused unless the
-    /// request has a live session, addresses and comes from an allowed
-    /// origin, and, if it changes state, repeats the session's CSRF token.
+    /// The grant of a browser request's session, and when what the request
+    /// opens must end with the session: refused unless the request has a
+    /// live session, addresses and comes from an allowed origin, and, if it
+    /// changes state, repeats the session's CSRF token.
     pub(crate) fn authenticate(
         &self,
         method: &Method,
         headers: &HeaderMap,
-    ) -> Result<Grant, ApiError> {
+    ) -> Result<(Grant, SessionEnd), ApiError> {
         let tokens = self.cookie_tokens(headers);
         if tokens.is_empty() {
             return Err(ApiError::unauthenticated());
         }
         self.origins.check(method, headers)?;
-        let (_, csrf) = self
+        let live = self
             .live_session(&tokens)
             .ok_or_else(ApiError::unauthenticated)?;
         if !method.is_safe() {
-            check_csrf(headers, &csrf)?;
+            check_csrf(headers, &live.csrf)?;
         }
-        Ok(Grant(Arc::from(Permission::ALL)))
+        Ok((Grant(Arc::from(Permission::ALL)), live.end))
     }
 
     /// Whether setup is still to be done.
@@ -321,9 +324,9 @@ impl BrowserAuth {
     /// its CSRF token.
     fn logout(&self, headers: &HeaderMap) -> Result<(), ApiError> {
         let tokens = self.cookie_tokens(headers);
-        if let Some((token, csrf)) = self.live_session(&tokens) {
-            check_csrf(headers, &csrf)?;
-            self.sessions().revoke(&token);
+        if let Some(live) = self.live_session(&tokens) {
+            check_csrf(headers, &live.csrf)?;
+            self.sessions().revoke(&live.token);
         }
         Ok(())
     }
@@ -357,13 +360,17 @@ impl BrowserAuth {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The token and CSRF token of the first live session among `tokens`.
-    fn live_session(&self, tokens: &[String]) -> Option<(String, String)> {
+    /// The first live session among `tokens`.
+    fn live_session(&self, tokens: &[String]) -> Option<Live> {
         let mut sessions = self.sessions();
         let now = Instant::now();
         tokens.iter().find_map(|token| {
             let session = sessions.get(token, now)?;
-            Some((token.clone(), session.csrf.clone()))
+            Some(Live {
+                token: token.clone(),
+                csrf: session.csrf.clone(),
+                end: session.end(now),
+            })
         })
     }
 
@@ -405,6 +412,13 @@ impl BrowserAuth {
         };
         HeaderValue::from_str(&cookie.build().to_string()).expect("tokens are hex")
     }
+}
+
+/// A live session a request presented.
+struct Live {
+    token: String,
+    csrf: String,
+    end: SessionEnd,
 }
 
 /// Removes the owner account in `auth_dir` and any setup secret, so the

@@ -203,7 +203,7 @@ enum ParseError {
 
 /// Middleware: admits a request with a known bearer token or, when
 /// browser access is configured, an owner session, and attaches its
-/// [`Grant`]. A request that sends an `Authorization` header is judged by
+/// [`Grant`], and for a session its [`SessionEnd`](crate::browser::SessionEnd). A request that sends an `Authorization` header is judged by
 /// that header alone.
 pub async fn authenticate(
     State(app): State<AppState>,
@@ -218,7 +218,11 @@ pub async fn authenticate(
             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
             .and_then(|(_, token)| app.tokens.grant(token.trim()))
             .ok_or_else(ApiError::unauthenticated)?,
-        (None, Some(browser)) => browser.authenticate(request.method(), request.headers())?,
+        (None, Some(browser)) => {
+            let (grant, end) = browser.authenticate(request.method(), request.headers())?;
+            request.extensions_mut().insert(end);
+            grant
+        }
         (None, None) => return Err(ApiError::unauthenticated()),
     };
     request.extensions_mut().insert(grant);

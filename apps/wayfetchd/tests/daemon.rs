@@ -1051,10 +1051,18 @@ async fn browsers_set_up_the_owner_sign_in_and_use_the_api() {
         .json(&submit);
     assert_eq!(browser.client.send(reader).await.0, StatusCode::FORBIDDEN);
 
-    // Sign-out ends the session; failures say only that sign-in failed.
+    // Sign-out ends the session and the streams opened with it, before
+    // anything submitted afterwards reaches them; failures say only that
+    // sign-in failed.
     let (status, _) = browser.post("/v1/auth/logout", &json!({})).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(browser.get("/v1/jobs").await.0, StatusCode::UNAUTHORIZED);
+    server.put("/b.bin", Resource::new(body(1024)));
+    let after = owner.submit(&server.url("/b.bin")).await;
+    owner.stage(&after, "complete").await;
+    while let Some(event) = events.next().await {
+        assert!(!event.data.contains(&after), "{}", event.data);
+    }
     let mut other = Browser::new(&daemon);
     let (status, wrong_password) = other
         .sign_in(

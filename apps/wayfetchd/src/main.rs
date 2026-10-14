@@ -184,7 +184,7 @@ impl Message for Notice {
                 path,
                 valid_for_secs,
             } => format!(
-                "no owner account yet: complete setup in the browser within {} minutes with \
+                "no owner account yet: complete setup (POST /v1/auth/setup) within {} minutes with \
                  the setup secret in {}; restart for a new one",
                 valid_for_secs / 60,
                 path.display()
