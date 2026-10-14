@@ -5,6 +5,8 @@
 //! it. Messages never repeat request input, so a rejected signed URL or
 //! token cannot reach a client log through an error.
 
+use std::time::Duration;
+
 use axum::Json;
 use axum::extract::rejection::BytesRejection;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -15,11 +17,21 @@ use wayfetch_engine::protocol::{ErrorCode, ProtocolError};
 #[derive(Debug)]
 pub struct ApiError {
     error: ProtocolError,
+    kind: Kind,
+}
+
+/// Failures whose HTTP status is not just their code's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Status from the code alone.
+    Plain,
     /// The request carried no valid credentials, as opposed to valid
     /// credentials without the needed permission.
-    unauthenticated: bool,
+    Unauthenticated,
     /// The request body did not arrive in time.
-    timed_out: bool,
+    TimedOut,
+    /// Too many attempts; try again after this many seconds.
+    RateLimited(u64),
 }
 
 impl ApiError {
@@ -28,14 +40,27 @@ impl ApiError {
         ProtocolError::new(code, message).into()
     }
 
-    /// Missing or unknown credentials.
+    /// Missing or unknown credentials: a bearer token or a live session.
     pub fn unauthenticated() -> Self {
+        Self::unauthenticated_because("valid credentials are required")
+    }
+
+    /// Credentials that did not authenticate, saying no more than
+    /// `message` about why, so a guesser learns nothing from it.
+    pub fn unauthenticated_because(message: &str) -> Self {
         Self {
-            unauthenticated: true,
-            ..Self::new(
-                ErrorCode::PermissionDenied,
-                "a valid bearer token is required",
-            )
+            kind: Kind::Unauthenticated,
+            ..Self::new(ErrorCode::PermissionDenied, message)
+        }
+    }
+
+    /// Too many attempts; another may follow after `retry_after`.
+    pub fn rate_limited(retry_after: Duration) -> Self {
+        // Whole seconds, rounded up, so a client that waits is admitted.
+        let seconds = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+        Self {
+            kind: Kind::RateLimited(seconds.max(1)),
+            ..Self::new(ErrorCode::Overloaded, "too many attempts; try again later")
         }
     }
 
@@ -43,7 +68,7 @@ impl ApiError {
     /// connection is closed, since the rest of the body is never read.
     pub fn body_timeout() -> Self {
         Self {
-            timed_out: true,
+            kind: Kind::TimedOut,
             ..Self::new(
                 ErrorCode::InvalidRequest,
                 "request body not received in time",
@@ -69,11 +94,11 @@ impl ApiError {
     }
 
     fn status(&self) -> StatusCode {
-        if self.unauthenticated {
-            return StatusCode::UNAUTHORIZED;
-        }
-        if self.timed_out {
-            return StatusCode::REQUEST_TIMEOUT;
+        match self.kind {
+            Kind::Plain => {}
+            Kind::Unauthenticated => return StatusCode::UNAUTHORIZED,
+            Kind::TimedOut => return StatusCode::REQUEST_TIMEOUT,
+            Kind::RateLimited(_) => return StatusCode::TOO_MANY_REQUESTS,
         }
         match self.error.code {
             ErrorCode::InvalidRequest | ErrorCode::IncompatibleProtocol => StatusCode::BAD_REQUEST,
@@ -96,8 +121,7 @@ impl From<ProtocolError> for ApiError {
     fn from(error: ProtocolError) -> Self {
         Self {
             error,
-            unauthenticated: false,
-            timed_out: false,
+            kind: Kind::Plain,
         }
     }
 }
@@ -117,12 +141,20 @@ impl IntoResponse for ApiError {
         let status = self.status();
         let mut response = (status, Json(self.error)).into_response();
         let headers = response.headers_mut();
-        if self.unauthenticated {
-            headers.insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-        } else if self.timed_out {
-            headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
-        } else if status == StatusCode::SERVICE_UNAVAILABLE {
-            headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        match self.kind {
+            Kind::Unauthenticated => {
+                headers.insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+            }
+            Kind::TimedOut => {
+                headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
+            }
+            Kind::RateLimited(seconds) => {
+                headers.insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+            }
+            Kind::Plain if status == StatusCode::SERVICE_UNAVAILABLE => {
+                headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            }
+            Kind::Plain => {}
         }
         response
     }
@@ -148,6 +180,12 @@ mod tests {
         let denied = ApiError::unauthenticated().into_response();
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(denied.headers()[header::WWW_AUTHENTICATE], "Bearer");
+
+        let limited = ApiError::rate_limited(Duration::from_millis(11_500)).into_response();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(limited.headers()[header::RETRY_AFTER], "12");
+        let soon = ApiError::rate_limited(Duration::ZERO).into_response();
+        assert_eq!(soon.headers()[header::RETRY_AFTER], "1");
     }
 
     #[test]
