@@ -30,7 +30,7 @@
 //! still write.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -183,6 +183,7 @@ impl EngineBuilder {
             config: self.config,
             transport: self.transport,
             running: HashMap::new(),
+            held: HashSet::new(),
             events,
             published: head,
             pruned_at: Instant::now(),
@@ -509,9 +510,10 @@ fn prune(store: &mut Store, limits: &crate::config::Limits) -> Result<(), StoreE
     Ok(())
 }
 
-/// Picks up to `free` jobs to run, moving queued ones to resolving.
-fn admit(store: &mut Store, free: usize, running: &[JobId]) -> Vec<Admission> {
-    let Ok(ready) = store.admissible(free, running) else {
+/// Picks up to `free` jobs to run, other than `excluded`, moving queued
+/// ones to resolving.
+fn admit(store: &mut Store, free: usize, excluded: &[JobId]) -> Vec<Admission> {
+    let Ok(ready) = store.admissible(free, excluded) else {
         return Vec::new();
     };
     ready
@@ -532,19 +534,23 @@ fn admit(store: &mut Store, free: usize, running: &[JobId]) -> Vec<Admission> {
 /// pause or cancel is completed, and an interrupted job that should run
 /// again (resumed before its download stopped) is queued under a new
 /// generation. A download that gave up for any other reason leaves the job
-/// to restart recovery rather than retrying it at once.
-fn settle(store: &mut Store, job: JobId, interrupted: bool) -> Result<(), StoreError> {
+/// to restart recovery rather than retrying it at once. Returns whether the
+/// job was left that way.
+fn settle(store: &mut Store, job: JobId, interrupted: bool) -> Result<bool, StoreError> {
     let state = store.job_state(job)?;
     let (stage, generation) = (state.stage(), state.generation());
+    if !stage.is_active() {
+        return Ok(false);
+    }
     // Publication is never interrupted; one left unfinished is reconciled
     // by restart recovery.
-    if !stage.is_active() || stage == JobStage::Publishing {
-        return Ok(());
+    if stage == JobStage::Publishing {
+        return Ok(true);
     }
     let to = match state.desired() {
         DesiredState::Paused => JobStage::Paused,
         DesiredState::Cancelled => JobStage::Cancelled,
-        DesiredState::Running if !interrupted => return Ok(()),
+        DesiredState::Running if !interrupted => return Ok(true),
         DesiredState::Running => {
             if stage == JobStage::Transferring {
                 store.advance_job(job, JobStage::Resolving, generation, None, now())?;
@@ -553,7 +559,7 @@ fn settle(store: &mut Store, job: JobId, interrupted: bool) -> Result<(), StoreE
         }
     };
     store.advance_job(job, to, generation, None, now())?;
-    Ok(())
+    Ok(false)
 }
 
 type StoreWork = Box<dyn FnOnce(&mut Store) + Send>;
@@ -615,6 +621,10 @@ struct Coordinator {
     transport: Option<Arc<dyn Transport>>,
     /// Running downloads and what stops each.
     running: HashMap<JobId, CancellationToken>,
+    /// Active jobs whose download gave up, left for restart recovery
+    /// instead of being admitted again by this run. At most one entry per
+    /// job.
+    held: HashSet<JobId>,
     /// Live durable events for subscribers.
     events: broadcast::Sender<DurableEvent>,
     /// Position of the last event broadcast.
@@ -670,8 +680,17 @@ impl Coordinator {
                         (result, interrupt)
                     })
                     .await;
-                if let Some(token) = interrupt.and_then(|job| self.running.get(&job)) {
-                    token.cancel();
+                if let Some(job) = interrupt {
+                    if let Some(token) = self.running.get(&job) {
+                        token.cancel();
+                    } else if self.held.remove(&job) {
+                        // Nothing runs to stop, so the pause or cancel is
+                        // settled here.
+                        let settled = self.with_store(move |store| settle(store, job, true)).await;
+                        if settled.unwrap_or(true) {
+                            self.held.insert(job);
+                        }
+                    }
                 }
                 let _ = reply.send(result);
                 self.changed().await;
@@ -701,9 +720,14 @@ impl Coordinator {
             Internal::Finished(job, interrupted) => {
                 self.running.remove(&job);
                 // A failure leaves the job for restart recovery.
-                let _ = self
+                let settled = self
                     .with_store(move |store| settle(store, job, interrupted))
                     .await;
+                // A job that cannot be settled is held too: retrying a
+                // storage fault at once would only repeat it.
+                if settled.unwrap_or(true) {
+                    self.held.insert(job);
+                }
             }
         }
         self.changed().await;
@@ -742,9 +766,9 @@ impl Coordinator {
         if free == 0 {
             return;
         }
-        let running: Vec<JobId> = self.running.keys().copied().collect();
+        let excluded: Vec<JobId> = self.running.keys().chain(&self.held).copied().collect();
         let admitted = self
-            .with_store(move |store| admit(store, free, &running))
+            .with_store(move |store| admit(store, free, &excluded))
             .await;
         for job in admitted {
             let id = job.job;

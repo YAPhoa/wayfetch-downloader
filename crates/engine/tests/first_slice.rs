@@ -872,3 +872,57 @@ async fn a_replayed_pause_does_not_interrupt_a_resumed_transfer() {
     assert_eq!(env.server.requests.lock().unwrap().len(), 2);
     shutdown(owner).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_storage_failure_during_recovery_waits_for_the_next_start() {
+    let env = Env::new();
+    let data = body(32 * KIB);
+    let id = interrupt_at(&env, "/held.bin", &data, 8 * KIB).await;
+    // Adopting the partial fails in the database, as a full disk would.
+    let db = rusqlite::Connection::open(env.state.join("state.sqlite3")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse BEFORE UPDATE ON staging_files \
+         BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+    )
+    .unwrap();
+
+    let owner = env.start().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The fault clears, but the job is not retried in this run: a retry
+    // loop would have picked it up again by now.
+    db.execute_batch("DROP TRIGGER refuse").unwrap();
+    drop(db);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let summary = job(&owner, id).await;
+    assert_eq!(summary.stage, JobStage::Recovering);
+    assert_eq!(env.server.requests.lock().unwrap().len(), 1);
+    // A held job can still be paused.
+    let pause = Command::Pause {
+        job: id,
+        expected_revision: summary.revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, pause), ALL)
+        .await
+        .unwrap();
+    wait_for(&owner, id, |j| j.stage == JobStage::Paused).await;
+    shutdown(owner).await;
+
+    // After the next start it resumes and completes.
+    let owner = env.start().await;
+    let summary = job(&owner, id).await;
+    let resume = Command::Resume {
+        job: id,
+        expected_revision: summary.revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, resume), ALL)
+        .await
+        .unwrap();
+    complete(&owner, id).await;
+    assert_eq!(env.published("held.bin"), data);
+    shutdown(owner).await;
+}
