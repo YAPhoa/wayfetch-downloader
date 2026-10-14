@@ -2,10 +2,10 @@
 //!
 //! The engine decides what to request and whether a response may be
 //! written; a [`Transport`] only sends the request and parses the response
-//! into [`Framing`] and a [`Representation`]. The HTTP client, redirects,
-//! TLS, and status classification live behind it, so tests run the whole
-//! engine against an in-process transport and the server host supplies a
-//! real one.
+//! into [`Framing`] and a [`Representation`], including the resource that
+//! finally served it. The HTTP client, redirects, TLS, and status
+//! classification live behind it, so tests run the whole engine against an
+//! in-process transport and the host supplies a real one (`wayfetch-net`).
 
 use std::time::Duration;
 

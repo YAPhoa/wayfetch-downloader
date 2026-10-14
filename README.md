@@ -4,16 +4,19 @@ A planned Rust download manager with a reusable engine, a self-hosted server UI,
 and a desktop application sharing the same engine and UI.
 
 This repository currently contains the design guidance and a bootstrapped Cargo
-workspace with minimal `wayfetch-domain`, `wayfetch-protocol`, and
-`wayfetch-engine` library crates. The domain crate defines typed IDs, job states,
+workspace with minimal `wayfetch-domain`, `wayfetch-protocol`,
+`wayfetch-engine`, and `wayfetch-net` library crates. The domain crate defines typed IDs, job states,
 source identity, and failure scopes; the protocol crate defines commands, queries,
 errors, and events; the engine owns a locked state directory and a SQLite store
 that commits commands durably and recovers jobs after a restart. The engine can
 download a direct link into private staging, resume it after a restart, publish
 it into a configured root, and stream bounded events, with every queue, buffer,
 and deadline set in `EngineConfig`. It reaches the network only through a
-`Transport` the host supplies; no HTTP client, application hosts, frontend
-packages, or runnable product builds exist yet.
+`Transport` the host supplies; `wayfetch-net` provides one over HTTP(S), with
+TLS verification, an egress policy checked on every redirect, no
+decompression, and a broker that never repeats a request its transfer lease
+does not allow. No application hosts, frontend packages, or runnable product
+builds exist yet.
 
 ## Repository structure
 
@@ -93,12 +96,16 @@ python3 scripts/check_dependency_boundaries.py               # crate boundaries
 python3 -m unittest discover -s scripts                       # tests for the check
 ```
 
-`scripts/check_dependency_boundaries.py` fails if the domain, protocol, or engine
-crates gain a server, desktop, or UI-toolkit dependency (for example Axum, Tauri,
-or GTK), or if the domain and protocol crates depend on the engine. It checks
+`scripts/check_dependency_boundaries.py` fails if the domain, protocol, engine,
+or net crates gain a server, desktop, or UI-toolkit dependency (for example Axum,
+Tauri, or GTK), if the domain and protocol crates depend on the engine, or if the
+engine depends on the net crate. It checks
 every target with all features enabled, so optional dependencies count too. CI
 also runs a repository hygiene check that rejects tracked agent-output
 directories.
+
+The HTTP tests start their own HTTP and HTTPS servers on `127.0.0.1`, with a
+certificate generated per test; they need no network access.
 
 Use `cargo fmt --all` to apply formatting.
 
