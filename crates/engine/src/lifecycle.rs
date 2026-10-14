@@ -13,7 +13,9 @@
 //!
 //! Startup opens the store, retires work authorized by the previous run
 //! (moving active jobs to recovery), stages submitted inputs, and prunes
-//! history past retention before the engine reports ready.
+//! history past retention before the engine reports ready. Before admitting
+//! work, and after each download ends, the coordinator removes staging
+//! files no job generation can reopen (see the cleanup module).
 //!
 //! The coordinator serializes every state change. It admits recovering,
 //! then queued jobs while fewer than `limits.active_files` downloads run,
@@ -52,8 +54,10 @@ use wayfetch_protocol::{
     ProtocolError, ProtocolVersion, Query, QueryResult, Subscribe, TransportLimits,
 };
 
+use crate::cleanup;
 use crate::config::{ConfigError, EngineConfig};
 use crate::download::Download;
+use crate::fs::Root;
 use crate::state_dir::{Identity, StateDir, StateDirError};
 use crate::store::{Admission, Store, StoreError, StoreInfo};
 use crate::subscription::Subscription;
@@ -634,6 +638,8 @@ struct Coordinator {
 
 impl Coordinator {
     async fn run(mut self) {
+        // A pass a crash interrupted is finished before work starts.
+        self.clean_staging().await;
         self.changed().await;
         loop {
             tokio::select! {
@@ -728,9 +734,27 @@ impl Coordinator {
                 if settled.unwrap_or(true) {
                     self.held.insert(job);
                 }
+                // The download may have replaced its partial, or the job
+                // may have been queued to start from zero.
+                self.clean_staging().await;
             }
         }
         self.changed().await;
+    }
+
+    /// Removes staging files no job generation can reopen from every root
+    /// that opens (see [`cleanup`]). A root that does not open is skipped,
+    /// and a pass that stops early is continued by the next one.
+    async fn clean_staging(&mut self) {
+        let (roots, instance) = (self.config.roots.clone(), self.identity.instance);
+        self.with_store(move |store| {
+            for root in roots {
+                if let Ok(root) = Root::open(&root.path, root.id, instance) {
+                    let _ = cleanup::sweep(store, &root);
+                }
+            }
+        })
+        .await;
     }
 
     /// After a state change: start downloads for free slots, broadcast new

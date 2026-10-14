@@ -17,7 +17,7 @@ use wayfetch_protocol::query::{
 };
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
-use super::{Store, StoreError, key, outbox, sql};
+use super::{Store, StoreError, files, key, outbox, sql};
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
 /// the job's newest partial; the last three describe its published file.
@@ -214,6 +214,11 @@ pub(super) fn save(
         return Err(StoreError::Corrupt("job revision"));
     }
     job.failure = failure;
+    // Queued again under a new generation, the job starts from zero: no
+    // generation will reopen its earlier files.
+    if job.state.stage() == JobStage::Queued && job.state.generation() != previous.generation() {
+        files::abandon_staging(tx, job.id, job.state.generation())?;
+    }
     outbox::append(tx, &EventKind::JobChanged { job: job.summary() }, now)?;
     Ok(())
 }
