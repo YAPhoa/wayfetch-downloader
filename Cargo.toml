@@ -5,9 +5,12 @@ members = [
     "crates/protocol",
     "crates/engine",
     "crates/net",
+    "crates/host",
     "crates/cli",
+    "crates/api",
+    "apps/wayfetchd",
 ]
-# Server and desktop hosts are added as members later; default members leave
+# The desktop host is added as a member later; default members leave
 # out any host that needs a desktop or frontend toolchain, so a plain
 # `cargo build` never pulls one in.
 default-members = [
@@ -15,7 +18,10 @@ default-members = [
     "crates/protocol",
     "crates/engine",
     "crates/net",
+    "crates/host",
     "crates/cli",
+    "crates/api",
+    "apps/wayfetchd",
 ]
 
 [workspace.package]
@@ -31,8 +37,11 @@ wayfetch-domain = { path = "crates/domain" }
 wayfetch-protocol = { path = "crates/protocol" }
 wayfetch-engine = { path = "crates/engine" }
 wayfetch-net = { path = "crates/net" }
+wayfetch-host = { path = "crates/host" }
+wayfetch-api = { path = "crates/api" }
 bytes = "1.12.1"
 cap-std = "4.0.3"
+clap = { version = "4.5", features = ["derive"] }
 httparse = "1"
 percent-encoding = "2.3.2"
 rangemap = "1.8.0"

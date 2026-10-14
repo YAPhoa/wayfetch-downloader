@@ -55,7 +55,19 @@ impl IdempotencyKey {
 }
 
 /// What a principal must be allowed to do to run a command or query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::Display)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::Display,
+    strum::EnumString,
+    strum::VariantArray,
+)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Permission {
@@ -206,6 +218,11 @@ pub enum Command {
         /// The job revision the client last saw.
         expected_revision: Revision,
     },
+}
+
+impl Permission {
+    /// Every permission: what the local owner holds.
+    pub const ALL: &'static [Self] = <Self as strum::VariantArray>::VARIANTS;
 }
 
 impl Command {

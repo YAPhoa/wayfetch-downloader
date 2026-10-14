@@ -23,7 +23,7 @@ use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::query::{JobFilter, JobSummary, PageSize};
 use wayfetch_protocol::{Command, CommandEnvelope, IdempotencyKey, Permission, Query, QueryResult};
 
-pub const ALL: &[Permission] = &[Permission::Read, Permission::Submit, Permission::Control];
+pub const ALL: &[Permission] = Permission::ALL;
 pub const ROOT: RootId = RootId::from_u64(1).unwrap();
 pub const KIB: usize = 1024;
 /// The checkpoint interval engines in an [`Env`] use.
