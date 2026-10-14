@@ -460,7 +460,7 @@ impl Store {
         now: UtcTimestamp,
     ) -> Result<(), StoreError> {
         let tx = self.write()?;
-        let mut stored = job_at(
+        job_at(
             &tx,
             job,
             generation,
@@ -486,6 +486,9 @@ impl Store {
             "DELETE FROM staging_files WHERE root_id = ?1 AND name = ?2",
             params![root, name],
         )?;
+        // Loaded after the publication is recorded, so the completion event
+        // carries the published file.
+        let mut stored = jobs::load(&tx, job)?;
         let previous = stored.state;
         if stored.state.advance(JobStage::Complete, generation)? == Outcome::Changed {
             jobs::save(&tx, &mut stored, &previous, None, now)?;
