@@ -1,10 +1,15 @@
-/* Minimal styling; visual polish comes later. System fonts only. */
+/* Minimal styling; visual polish comes later. System fonts only. Text
+   tokens meet WCAG AA contrast (4.5:1) on both backgrounds, and
+   --control-line meets 3:1 for input boundaries; --line is decorative. */
 
 :root {
   color-scheme: light dark;
   --accent: #2457a6;
-  --muted: #6b7280;
+  --on-accent: #ffffff;
+  --muted: #4b5563;
   --line: #d1d5db;
+  --control-line: #6b7280;
+  --ok: #15803d;
   --surface: #ffffff;
   --background: #f3f4f6;
   --error: #b91c1c;
@@ -16,8 +21,11 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --accent: #7aa7f0;
+    --on-accent: #111827;
     --muted: #9ca3af;
     --line: #374151;
+    --control-line: #737b88;
+    --ok: #4ade80;
     --surface: #1f2937;
     --background: #111827;
     --error: #f87171;
@@ -61,7 +69,7 @@ label { display: grid; gap: 0.25rem; }
 input, textarea {
   font: inherit;
   padding: 0.4rem;
-  border: 1px solid var(--line);
+  border: 1px solid var(--control-line);
   border-radius: 4px;
   background: transparent;
   color: inherit;
@@ -75,7 +83,7 @@ button {
   border: 1px solid var(--accent);
   border-radius: 4px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   cursor: pointer;
 }
 
@@ -105,7 +113,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .banner { padding: 0.6rem 1rem; margin-bottom: 1rem; border: 1px solid var(--warn); color: var(--warn); border-radius: 6px; }
 
 .status { color: var(--muted); }
-.status[data-status='live'] { color: green; }
+.status[data-status='live'] { color: var(--ok); }
 .status[data-status='reconnecting'], .status[data-status='incompatible'] { color: var(--warn); }
 
 .pager { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
