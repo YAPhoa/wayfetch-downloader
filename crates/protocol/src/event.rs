@@ -32,6 +32,7 @@ use crate::query::JobSummary;
 /// A position in one instance's durable event sequence. Position 0 is
 /// before the first event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct EventCursor {
     /// The instance the position belongs to.
     pub instance: InstanceId,
@@ -42,6 +43,7 @@ pub struct EventCursor {
 /// A change recorded in the outbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum EventKind {
     /// A batch was accepted for ingestion.
     BatchAccepted {
@@ -64,6 +66,7 @@ pub enum EventKind {
 
 /// A durable event with its position.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct DurableEvent {
     /// Where this event sits in the sequence.
     pub cursor: EventCursor,
@@ -73,6 +76,7 @@ pub struct DurableEvent {
 
 /// Ephemeral transfer progress for one job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProgressSample {
     /// Engine run that produced the sample.
     pub boot_epoch: BootEpoch,
@@ -101,6 +105,7 @@ impl ProgressSample {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ResyncReason {
     /// The cursor belongs to another instance.
     UnknownInstance,
@@ -126,6 +131,7 @@ pub struct Subscribe {
 /// One item on a subscription stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum StreamItem {
     /// Always first: the instance, boot epoch, and current head.
     Hello(Hello),

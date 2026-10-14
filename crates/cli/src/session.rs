@@ -288,7 +288,7 @@ impl Session<'_> {
             };
             let page = match self.engine.query(query, OPERATOR).await {
                 Ok(QueryResult::Jobs(page)) => page,
-                Ok(QueryResult::Job { .. }) => return self.print(&unexpected().into()),
+                Ok(_) => return self.print(&unexpected().into()),
                 Err(e) => return self.print(&e.into()),
             };
             for job in &page.items {
@@ -309,7 +309,7 @@ impl Session<'_> {
             .await?
         {
             QueryResult::Job { job, .. } => Ok(job),
-            QueryResult::Jobs(_) => Err(unexpected()),
+            _ => Err(unexpected()),
         }
     }
 

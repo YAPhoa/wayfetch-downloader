@@ -12,12 +12,16 @@ publish.workspace = true
 serde = { workspace = true, optional = true }
 strum.workspace = true
 thiserror.workspace = true
+ts-rs = { workspace = true, optional = true }
 url.workspace = true
 
 [features]
 # Serialization for the transport-neutral protocol. Off by default so
 # engine-internal users do not pay for it.
 serde = ["dep:serde"]
+# TypeScript declarations of the serialized types, for the UI. `cargo test
+# --features ts` writes them (see .cargo/config.toml).
+ts = ["serde", "dep:ts-rs"]
 
 [dev-dependencies]
 serde_json.workspace = true

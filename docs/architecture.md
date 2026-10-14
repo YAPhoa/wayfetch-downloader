@@ -110,7 +110,7 @@ In the transfer/extraction sections, “daemon” denotes the **engine-owning pr
 
 This document is a forward-looking specification. Its requirements come from the problem domain: HTTP semantics, provider and account behavior, crash-safe storage, archive handling, NAS deployment, and the operator workflow in section 1. Section 3 states the behavioral requirements that shaped the architecture.
 
-No third-party application source, translated code, fixtures, constants, artwork, or native binaries are incorporated in this repository. Nothing has been compiled, executed, profiled, or exercised against a live provider, and no comparative benchmark exists.
+No third-party application source, translated code, fixtures, constants, or native binaries are incorporated in this repository. The only third-party artwork is the web UI's typeface: IBM Plex Sans, Latin subset, weights 400, 500 and 600 as WOFF2 (`ui/src/fonts/`), taken unmodified from the `@fontsource/ibm-plex-sans` 5.3.0 npm package. It is Copyright 2019 IBM Corp. under the SIL Open Font License 1.1, reproduced in `ui/src/fonts/OFL.txt`, which ships with it in `wayfetchd`. Nothing has been compiled, executed, profiled, or exercised against a live provider, and no comparative benchmark exists.
 
 ### 2.2 Licensing boundary
 
@@ -1206,6 +1206,7 @@ A comparison with another download manager requires an independently recorded ru
 | `GET /v1/inputs/{id}` | Paginated discovery/checking results and mixed-status summary |
 | `POST /v1/staging/commit` | Confirm selected staged items; duplicates/conflicts reported |
 | `GET /v1/jobs` | Keyset pagination, stable filters/order, summary fields only |
+| `GET /v1/job-counts` | Jobs per stage under the same filters, with the `as_of` cursor; no job rows |
 | `POST /v1/jobs/{id}/commands` | Version-checked start/pause/cancel/retry/destination changes |
 | `GET /v1/packages` | Package summaries without loading all children |
 | `GET /v1/accounts` | Redacted capability/status data, no credential echo |
