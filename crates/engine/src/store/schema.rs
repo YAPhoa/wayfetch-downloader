@@ -23,6 +23,7 @@ use super::StoreError;
 const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0001_initial.sql")),
     M::up(include_str!("migrations/0002_staging_publication.sql")),
+    M::up(include_str!("migrations/0003_transfer_retention.sql")),
 ];
 
 /// Newest schema version this engine knows.

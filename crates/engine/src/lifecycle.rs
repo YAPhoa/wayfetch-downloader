@@ -1,5 +1,5 @@
-//! Engine startup, readiness, handles, and bounded shutdown (architecture
-//! brief section 4.6, ADR-31 and ADR-34).
+//! Engine startup, readiness, handles, scheduling, and bounded shutdown
+//! (architecture brief sections 4.6 and 10, ADR-31 and ADR-34).
 //!
 //! * [`EngineBuilder`] starts an engine on a runtime the host supplies. The
 //!   engine never creates a runtime, installs signal handlers, opens a
@@ -12,8 +12,16 @@
 //!   outlives the engine gets `ShuttingDown` errors.
 //!
 //! Startup opens the store, retires work authorized by the previous run
-//! (moving active jobs to recovery), and stages submitted inputs before the
-//! engine reports ready.
+//! (moving active jobs to recovery), stages submitted inputs, and prunes
+//! history past retention before the engine reports ready.
+//!
+//! The coordinator serializes every state change. It admits recovering,
+//! then queued jobs while fewer than `limits.active_files` downloads run,
+//! reading only as many from the database as it has free slots; each runs
+//! as a download task whose store calls come back to the coordinator.
+//! A pause or cancel stops the job's task, and the coordinator settles the
+//! job once it has. After each change it broadcasts the new durable events
+//! to subscribers through a ring of `limits.event_buffer` events.
 //!
 //! Shutdown stops admitting requests, cancels engine tasks, and waits up to a
 //! deadline. Every engine task holds a reference to the state-directory lock,
@@ -21,26 +29,38 @@
 //! the report says so; another engine cannot take over while old work may
 //! still write.
 
+use std::any::Any;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use wayfetch_domain::id::JobId;
+use wayfetch_domain::job::{DesiredState, JobStage};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_protocol::command::MAX_SUBMIT_ITEMS;
-use wayfetch_protocol::event::EventCursor;
+use wayfetch_protocol::event::{
+    DurableEvent, EventCursor, ResyncReason, Retained, SubscriptionStart,
+};
 use wayfetch_protocol::{
-    CommandEnvelope, CommandResult, ErrorCode, Hello, InstanceId, Permission, ProtocolError,
-    ProtocolVersion, Query, QueryResult, TransportLimits,
+    Command, CommandEnvelope, CommandResult, ErrorCode, Hello, InstanceId, Permission,
+    ProtocolError, ProtocolVersion, Query, QueryResult, Subscribe, TransportLimits,
 };
 
 use crate::config::{ConfigError, EngineConfig};
+use crate::download::Download;
 use crate::state_dir::{Identity, StateDir, StateDirError};
-use crate::store::{Store, StoreError, StoreInfo};
+use crate::store::{Admission, Store, StoreError, StoreInfo};
+use crate::subscription::Subscription;
+use crate::transfer::transport::Transport;
+
+/// How often history past retention is pruned while running.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Engine lifecycle phase, observable through [`EngineHandle::readiness`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,16 +96,35 @@ pub enum StartError {
 }
 
 /// Builds and starts an engine.
-#[derive(Debug)]
 pub struct EngineBuilder {
     config: EngineConfig,
     runtime: Handle,
+    transport: Option<Arc<dyn Transport>>,
+}
+
+impl std::fmt::Debug for EngineBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineBuilder")
+            .field("config", &self.config)
+            .field("transport", &self.transport.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl EngineBuilder {
     /// An engine that will run on `runtime`, which the host owns.
     pub fn new(config: EngineConfig, runtime: Handle) -> Self {
-        Self { config, runtime }
+        Self {
+            config,
+            runtime,
+            transport: None,
+        }
+    }
+
+    /// The transport downloads use. Without one, jobs stay queued.
+    pub fn transport(mut self, transport: Arc<dyn Transport>) -> Self {
+        self.transport = Some(transport);
+        self
     }
 
     /// Validates the configuration, takes ownership of the state directory,
@@ -94,21 +133,35 @@ impl EngineBuilder {
     pub async fn start(self) -> Result<EngineOwner, StartError> {
         self.config.validate()?;
         let path = self.config.state_dir.clone();
-        let (state_dir, store) = self
+        let limits = self.config.limits.clone();
+        let (state_dir, store, head) = self
             .runtime
             .spawn_blocking(move || -> Result<_, StartError> {
                 let state_dir = StateDir::open(&path)?;
                 let mut store = Store::open(state_dir.path())?;
                 store.recover_after_restart(now())?;
                 stage_all(&mut store)?;
-                Ok((state_dir, store))
+                prune(&mut store, &limits)?;
+                let head = store.event_head()?;
+                Ok((state_dir, store, head))
             })
             .await??;
         let identity = state_dir.identity();
         let store_info = store.info().clone();
-        let state_dir = Arc::new(state_dir);
         let (readiness_tx, readiness_rx) = watch::channel(Readiness::Starting);
         let (requests, inbox) = mpsc::channel(self.config.request_queue.get());
+        // Each download waits for its one store call, so this never fills
+        // beyond the number of downloads plus their completions.
+        let (internal_tx, internal) = mpsc::channel(self.config.limits.active_files.get() * 2);
+        let (events, _) = broadcast::channel(self.config.limits.event_buffer.get());
+        let supervisor = Supervisor {
+            runtime: self.runtime,
+            cancel: CancellationToken::new(),
+            tasks: TaskTracker::new(),
+            failed_tasks: Arc::default(),
+            readiness: readiness_tx,
+            lock: Some(Arc::new(state_dir)),
+        };
         let owner = EngineOwner {
             handle: EngineHandle {
                 requests,
@@ -117,24 +170,27 @@ impl EngineBuilder {
             },
             identity,
             store_info,
-            config: self.config,
-            runtime: self.runtime,
-            cancel: CancellationToken::new(),
-            tasks: TaskTracker::new(),
-            failed_tasks: Arc::default(),
-            readiness: readiness_tx,
-            state_dir: Some(state_dir),
+            shutdown_timeout: self.config.shutdown_timeout,
+            supervisor: supervisor.clone(),
         };
         let coordinator = Coordinator {
             identity,
             inbox,
-            cancel: owner.cancel.clone(),
+            internal,
+            client: StoreClient(internal_tx),
             store: Some(store),
-            lock: owner.state_dir.clone(),
+            supervisor,
+            config: self.config,
+            transport: self.transport,
+            running: HashMap::new(),
+            held: HashSet::new(),
+            events,
+            published: head,
+            pruned_at: Instant::now(),
         };
-        owner.spawn(coordinator.run());
+        owner.supervisor.spawn(coordinator.run());
         // Unless a task already failed.
-        owner.readiness.send_if_modified(|r| {
+        owner.supervisor.readiness.send_if_modified(|r| {
             let starting = *r == Readiness::Starting;
             if starting {
                 *r = Readiness::Ready;
@@ -169,46 +225,28 @@ pub struct ShutdownReport {
     pub elapsed: Duration,
 }
 
-/// The running engine. Held by the application host.
-#[derive(Debug)]
-pub struct EngineOwner {
-    handle: EngineHandle,
-    identity: Identity,
-    store_info: StoreInfo,
-    config: EngineConfig,
+/// Runs and tracks engine tasks.
+#[derive(Debug, Clone)]
+struct Supervisor {
     runtime: Handle,
     cancel: CancellationToken,
     tasks: TaskTracker,
     failed_tasks: Arc<AtomicUsize>,
     readiness: watch::Sender<Readiness>,
-    state_dir: Option<Arc<StateDir>>,
+    /// The state-directory lock, held by every engine task.
+    lock: Option<Arc<StateDir>>,
 }
 
-impl EngineOwner {
-    /// A new handle for a UI, adapter, or test.
-    pub fn handle(&self) -> EngineHandle {
-        self.handle.clone()
-    }
-
-    /// The instance identity and this start's boot epoch.
-    pub fn identity(&self) -> Identity {
-        self.identity
-    }
-
-    /// The database settings in effect, for startup reporting.
-    pub fn store_info(&self) -> &StoreInfo {
-        &self.store_info
-    }
-
+impl Supervisor {
     /// Spawns an engine task. The task keeps the state directory locked
     /// until it ends, and must stop promptly once the engine's cancellation
     /// token fires. Engine tasks are critical: a panic is counted, marks the
     /// engine [`Readiness::Failed`], and cancels the remaining work.
-    pub(crate) fn spawn<F>(&self, task: F)
+    fn spawn<F>(&self, task: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let guard = self.state_dir.clone();
+        let guard = self.lock.clone();
         let work = self.runtime.spawn(async move {
             let _guard = guard;
             task.await;
@@ -234,33 +272,77 @@ impl EngineOwner {
         );
     }
 
+    /// What blocking work holds so the lock outlives it.
+    fn guard(&self) -> Arc<dyn Any + Send + Sync> {
+        match &self.lock {
+            Some(lock) => lock.clone(),
+            None => Arc::new(()),
+        }
+    }
+}
+
+/// The running engine. Held by the application host.
+#[derive(Debug)]
+pub struct EngineOwner {
+    handle: EngineHandle,
+    identity: Identity,
+    store_info: StoreInfo,
+    shutdown_timeout: Duration,
+    supervisor: Supervisor,
+}
+
+impl EngineOwner {
+    /// A new handle for a UI, adapter, or test.
+    pub fn handle(&self) -> EngineHandle {
+        self.handle.clone()
+    }
+
+    /// The instance identity and this start's boot epoch.
+    pub fn identity(&self) -> Identity {
+        self.identity
+    }
+
+    /// The database settings in effect, for startup reporting.
+    pub fn store_info(&self) -> &StoreInfo {
+        &self.store_info
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawn<F>(&self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.supervisor.spawn(task);
+    }
+
     /// Stops admitting requests, cancels engine tasks, and waits for them up
     /// to the deadline. Awaiting this is the only durability guarantee;
     /// dropping the owner cancels tasks without waiting.
     pub async fn shutdown(mut self, request: ShutdownRequest) -> ShutdownReport {
         let started = Instant::now();
-        let timeout = request.timeout.unwrap_or(self.config.shutdown_timeout);
-        let failed = *self.readiness.borrow() == Readiness::Failed;
+        let timeout = request.timeout.unwrap_or(self.shutdown_timeout);
+        let supervisor = &mut self.supervisor;
+        let failed = *supervisor.readiness.borrow() == Readiness::Failed;
         if !failed {
-            self.readiness.send_replace(Readiness::ShuttingDown);
+            supervisor.readiness.send_replace(Readiness::ShuttingDown);
         }
-        self.cancel.cancel();
-        self.tasks.close();
-        let finished = tokio::time::timeout(timeout, self.tasks.wait())
+        supervisor.cancel.cancel();
+        supervisor.tasks.close();
+        let finished = tokio::time::timeout(timeout, supervisor.tasks.wait())
             .await
             .is_ok();
-        let state_dir_released = self
-            .state_dir
+        let state_dir_released = supervisor
+            .lock
             .take()
             .is_some_and(|dir| Arc::try_unwrap(dir).is_ok());
         // A failed engine stays failed, so the host can still see why.
-        if finished && *self.readiness.borrow() != Readiness::Failed {
-            self.readiness.send_replace(Readiness::Stopped);
+        if finished && *supervisor.readiness.borrow() != Readiness::Failed {
+            supervisor.readiness.send_replace(Readiness::Stopped);
         }
-        let failed_tasks = self.failed_tasks.load(Ordering::Relaxed);
+        let failed_tasks = supervisor.failed_tasks.load(Ordering::Relaxed);
         ShutdownReport {
             clean: finished && failed_tasks == 0,
-            unfinished_tasks: self.tasks.len(),
+            unfinished_tasks: supervisor.tasks.len(),
             failed_tasks,
             state_dir_released,
             elapsed: started.elapsed(),
@@ -271,14 +353,14 @@ impl EngineOwner {
 impl Drop for EngineOwner {
     fn drop(&mut self) {
         // Best effort only: a destructor cannot await durability.
-        self.readiness.send_if_modified(|r| {
+        self.supervisor.readiness.send_if_modified(|r| {
             let changed = *r == Readiness::Ready || *r == Readiness::Starting;
             if changed {
                 *r = Readiness::ShuttingDown;
             }
             changed
         });
-        self.cancel.cancel();
+        self.supervisor.cancel.cancel();
     }
 }
 
@@ -289,6 +371,10 @@ enum Request {
         oneshot::Sender<Result<CommandResult, ProtocolError>>,
     ),
     Query(Query, oneshot::Sender<Result<QueryResult, ProtocolError>>),
+    Subscribe(
+        Subscribe,
+        oneshot::Sender<Result<Subscription, ProtocolError>>,
+    ),
     /// Runs arbitrary store work, for fault-injection tests.
     #[cfg(test)]
     Run(Box<dyn FnOnce(&mut Store) + Send>, oneshot::Sender<()>),
@@ -332,8 +418,9 @@ impl EngineHandle {
     }
 
     /// Runs a command durably. Success is returned only after the command
-    /// committed; a retry with the same idempotency key replays the result.
-    /// `granted` is what the host authenticated the caller for.
+    /// committed; a retry with the same idempotency key replays the result
+    /// while its record is retained (`limits.command_retention`). `granted`
+    /// is what the host authenticated the caller for.
     pub async fn execute(
         &self,
         envelope: CommandEnvelope,
@@ -354,6 +441,21 @@ impl EngineHandle {
         authorize(query.required_permission(), granted)?;
         let (reply, response) = oneshot::channel();
         self.send(Request::Query(query, reply))?;
+        response.await.map_err(|_| shutting_down())?
+    }
+
+    /// Subscribes to durable events after `request.after`. A cursor from
+    /// another instance, ahead of the head, pruned, or more than
+    /// `limits.event_buffer` events behind yields a stream that only says
+    /// to resynchronize.
+    pub async fn subscribe(
+        &self,
+        request: Subscribe,
+        granted: &[Permission],
+    ) -> Result<Subscription, ProtocolError> {
+        authorize(Permission::Read, granted)?;
+        let (reply, response) = oneshot::channel();
+        self.send(Request::Subscribe(request, reply))?;
         response.await.map_err(|_| shutting_down())?
     }
 
@@ -396,22 +498,148 @@ fn stage_all(store: &mut Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Removes events and idempotency records past retention.
+fn prune(store: &mut Store, limits: &crate::config::Limits) -> Result<(), StoreError> {
+    let since = now()
+        .unix_millis()
+        .saturating_sub(i64::try_from(limits.command_retention.as_millis()).unwrap_or(i64::MAX));
+    store.prune(
+        limits.event_retention.get(),
+        UtcTimestamp::from_unix_millis(since),
+    )?;
+    Ok(())
+}
+
+/// Picks up to `free` jobs to run, other than `excluded`, moving queued
+/// ones to resolving.
+fn admit(store: &mut Store, free: usize, excluded: &[JobId]) -> Vec<Admission> {
+    let Ok(ready) = store.admissible(free, excluded) else {
+        return Vec::new();
+    };
+    ready
+        .into_iter()
+        .filter_map(|mut job| {
+            if job.stage == JobStage::Queued {
+                store
+                    .advance_job(job.job, JobStage::Resolving, job.generation, None, now())
+                    .ok()?;
+                job.stage = JobStage::Resolving;
+            }
+            Some(job)
+        })
+        .collect()
+}
+
+/// Settles a job whose download task ended while it was still active: a
+/// pause or cancel is completed, and an interrupted job that should run
+/// again (resumed before its download stopped) is queued under a new
+/// generation. A download that gave up for any other reason leaves the job
+/// to restart recovery rather than retrying it at once. Returns whether the
+/// job was left that way.
+fn settle(store: &mut Store, job: JobId, interrupted: bool) -> Result<bool, StoreError> {
+    let state = store.job_state(job)?;
+    let (stage, generation) = (state.stage(), state.generation());
+    if !stage.is_active() {
+        return Ok(false);
+    }
+    // Publication is never interrupted; one left unfinished is reconciled
+    // by restart recovery.
+    if stage == JobStage::Publishing {
+        return Ok(true);
+    }
+    let to = match state.desired() {
+        DesiredState::Paused => JobStage::Paused,
+        DesiredState::Cancelled => JobStage::Cancelled,
+        DesiredState::Running if !interrupted => return Ok(true),
+        DesiredState::Running => {
+            if stage == JobStage::Transferring {
+                store.advance_job(job, JobStage::Resolving, generation, None, now())?;
+            }
+            JobStage::Queued
+        }
+    };
+    store.advance_job(job, to, generation, None, now())?;
+    Ok(false)
+}
+
+type StoreWork = Box<dyn FnOnce(&mut Store) + Send>;
+
+/// Work for the coordinator from its own tasks.
+enum Internal {
+    /// Store work from a download.
+    Store(StoreWork),
+    /// A download task ended, and whether it was interrupted.
+    Finished(JobId, bool),
+}
+
+/// A download's way to the store: each call is queued to the coordinator
+/// and runs between client requests.
+#[derive(Clone)]
+pub(crate) struct StoreClient(mpsc::Sender<Internal>);
+
+impl StoreClient {
+    /// Runs `work` on the store. `None` if the engine stopped first.
+    pub(crate) async fn call<R: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut Store) -> R + Send + 'static,
+    ) -> Option<R> {
+        let (reply, result) = oneshot::channel();
+        let work: StoreWork = Box::new(move |store| {
+            let _ = reply.send(work(store));
+        });
+        self.0.send(Internal::Store(work)).await.ok()?;
+        result.await.ok()
+    }
+}
+
+#[cfg(test)]
+impl StoreClient {
+    /// A client served by a plain loop over `store`, to drive one download
+    /// without an engine.
+    pub(crate) fn serve(mut store: Store) -> Self {
+        let (requests, mut inbox) = mpsc::channel(1);
+        tokio::spawn(async move {
+            while let Some(internal) = inbox.recv().await {
+                if let Internal::Store(work) = internal {
+                    work(&mut store);
+                }
+            }
+        });
+        Self(requests)
+    }
+}
+
 /// Serializes requests against engine state. The only owner of the store.
 struct Coordinator {
     identity: Identity,
     inbox: mpsc::Receiver<Request>,
-    cancel: CancellationToken,
+    internal: mpsc::Receiver<Internal>,
+    client: StoreClient,
     store: Option<Store>,
-    /// The state-directory lock, held by blocking database work too.
-    lock: Option<Arc<StateDir>>,
+    supervisor: Supervisor,
+    config: EngineConfig,
+    transport: Option<Arc<dyn Transport>>,
+    /// Running downloads and what stops each.
+    running: HashMap<JobId, CancellationToken>,
+    /// Active jobs whose download gave up, left for restart recovery
+    /// instead of being admitted again by this run. At most one entry per
+    /// job.
+    held: HashSet<JobId>,
+    /// Live durable events for subscribers.
+    events: broadcast::Sender<DurableEvent>,
+    /// Position of the last event broadcast.
+    published: u64,
+    pruned_at: Instant,
 }
 
 impl Coordinator {
     async fn run(mut self) {
+        self.changed().await;
         loop {
             tokio::select! {
                 biased;
-                () = self.cancel.cancelled() => break,
+                () = self.supervisor.cancel.cancelled() => break,
+                Some(internal) = self.internal.recv() => self.handle_internal(internal).await,
                 request = self.inbox.recv() => match request {
                     Some(request) => self.handle(request).await,
                     None => break,
@@ -425,18 +653,15 @@ impl Coordinator {
         let instance = self.identity.instance;
         match request {
             Request::Hello(reply) => {
-                let boot_epoch = self.identity.boot_epoch;
                 let head = self.with_store(Store::event_head).await;
-                let _ = reply.send(head.map_err(ProtocolError::from).map(|position| Hello {
-                    instance,
-                    boot_epoch,
-                    protocol: ProtocolVersion::CURRENT,
-                    head: EventCursor { instance, position },
-                    limits: TransportLimits::DEFAULT,
-                }));
+                let _ = reply.send(head.map_err(ProtocolError::from).map(|h| self.hello(h)));
             }
             Request::Execute(envelope, reply) => {
-                let result = self
+                let target = match envelope.command {
+                    Command::Pause { job, .. } | Command::Cancel { job, .. } => Some(job),
+                    Command::Submit { .. } | Command::Resume { .. } => None,
+                };
+                let (result, interrupt) = self
                     .with_store(move |store| {
                         let result = store.execute(&envelope, instance, now());
                         if let Ok(CommandResult::Submitted { .. }) = result {
@@ -444,10 +669,31 @@ impl Coordinator {
                             // links left unstaged are staged at the next start.
                             let _ = stage_all(store);
                         }
-                        result
+                        // Interrupt only a job that should now stop: a
+                        // replayed pause from before a resume changes nothing.
+                        let interrupt = target.filter(|&job| {
+                            result.is_ok()
+                                && store
+                                    .job_state(job)
+                                    .is_ok_and(|s| s.desired() != DesiredState::Running)
+                        });
+                        (result, interrupt)
                     })
                     .await;
+                if let Some(job) = interrupt {
+                    if let Some(token) = self.running.get(&job) {
+                        token.cancel();
+                    } else if self.held.remove(&job) {
+                        // Nothing runs to stop, so the pause or cancel is
+                        // settled here.
+                        let settled = self.with_store(move |store| settle(store, job, true)).await;
+                        if settled.unwrap_or(true) {
+                            self.held.insert(job);
+                        }
+                    }
+                }
                 let _ = reply.send(result);
+                self.changed().await;
             }
             Request::Query(query, reply) => {
                 let result = self
@@ -455,11 +701,175 @@ impl Coordinator {
                     .await;
                 let _ = reply.send(result);
             }
+            Request::Subscribe(request, reply) => {
+                let subscription = self.subscribe(request).await;
+                let _ = reply.send(subscription.map_err(ProtocolError::from));
+            }
             #[cfg(test)]
             Request::Run(work, reply) => {
                 self.with_store(work).await;
                 let _ = reply.send(());
+                self.changed().await;
             }
+        }
+    }
+
+    async fn handle_internal(&mut self, internal: Internal) {
+        match internal {
+            Internal::Store(work) => self.with_store(work).await,
+            Internal::Finished(job, interrupted) => {
+                self.running.remove(&job);
+                // A failure leaves the job for restart recovery.
+                let settled = self
+                    .with_store(move |store| settle(store, job, interrupted))
+                    .await;
+                // A job that cannot be settled is held too: retrying a
+                // storage fault at once would only repeat it.
+                if settled.unwrap_or(true) {
+                    self.held.insert(job);
+                }
+            }
+        }
+        self.changed().await;
+    }
+
+    /// After a state change: start downloads for free slots, broadcast new
+    /// events, and prune history when due.
+    async fn changed(&mut self) {
+        self.admit().await;
+        self.publish_events().await;
+        if self.pruned_at.elapsed() >= PRUNE_INTERVAL {
+            self.pruned_at = Instant::now();
+            let limits = self.config.limits.clone();
+            let _ = self.with_store(move |store| prune(store, &limits)).await;
+        }
+    }
+
+    async fn admit(&mut self) {
+        let Some(transport) = self.transport.clone() else {
+            return;
+        };
+        let Some(root) = self
+            .config
+            .download_root
+            .and_then(|id| self.config.root(id))
+            .cloned()
+        else {
+            return;
+        };
+        let free = self
+            .config
+            .limits
+            .active_files
+            .get()
+            .saturating_sub(self.running.len());
+        if free == 0 {
+            return;
+        }
+        let excluded: Vec<JobId> = self.running.keys().chain(&self.held).copied().collect();
+        let admitted = self
+            .with_store(move |store| admit(store, free, &excluded))
+            .await;
+        for job in admitted {
+            let id = job.job;
+            let cancel = self.supervisor.cancel.child_token();
+            self.running.insert(id, cancel.clone());
+            let download = Download {
+                store: self.client.clone(),
+                transport: transport.clone(),
+                root: root.clone(),
+                instance: self.identity.instance,
+                boot_epoch: self.identity.boot_epoch,
+                limits: self.config.limits.clone(),
+                timeouts: self.config.timeouts,
+                cancel,
+                guard: self.supervisor.guard(),
+                job,
+            };
+            let finished = self.client.0.clone();
+            self.supervisor.spawn(async move {
+                let interrupted = download.run().await;
+                let _ = finished.send(Internal::Finished(id, interrupted)).await;
+            });
+        }
+    }
+
+    /// Broadcasts committed events not yet sent, a ring's worth at a time.
+    async fn publish_events(&mut self) {
+        let page = self.config.limits.event_buffer.get();
+        loop {
+            let after = self.published;
+            let Ok(events) = self
+                .with_store(move |store| store.events_after(after, page))
+                .await
+            else {
+                return;
+            };
+            if events.is_empty() {
+                return;
+            }
+            for (position, kind) in events {
+                self.published = position;
+                // No receivers is not an error.
+                let _ = self.events.send(DurableEvent {
+                    cursor: EventCursor {
+                        instance: self.identity.instance,
+                        position,
+                    },
+                    kind,
+                });
+            }
+        }
+    }
+
+    async fn subscribe(&mut self, request: Subscribe) -> Result<Subscription, StoreError> {
+        let (pruned_through, head) = self.with_store(Store::retained_events).await?;
+        let hello = self.hello(head);
+        let retained = Retained {
+            instance: self.identity.instance,
+            pruned_through,
+            head,
+        };
+        let after = match retained.plan(request) {
+            SubscriptionStart::Resync(reason) => return Ok(Subscription::resync(hello, reason)),
+            SubscriptionStart::ReplayAfter(after) => after,
+        };
+        let limit = self.config.limits.event_buffer.get();
+        if head - after > limit as u64 {
+            return Ok(Subscription::resync(hello, ResyncReason::Lagged));
+        }
+        let events = self
+            .with_store(move |store| store.events_after(after, limit))
+            .await?;
+        let instance = self.identity.instance;
+        let events = events
+            .into_iter()
+            .map(|(position, kind)| DurableEvent {
+                cursor: EventCursor { instance, position },
+                kind,
+            })
+            .collect();
+        // Every committed event was broadcast before this request was
+        // handled, so newer ones reach this receiver.
+        Ok(Subscription::replay(
+            hello,
+            after,
+            events,
+            self.events.subscribe(),
+        ))
+    }
+
+    fn hello(&self, head: u64) -> Hello {
+        let instance = self.identity.instance;
+        Hello {
+            instance,
+            boot_epoch: self.identity.boot_epoch,
+            protocol: ProtocolVersion::CURRENT,
+            head: EventCursor {
+                instance,
+                position: head,
+            },
+            limits: TransportLimits::DEFAULT,
         }
     }
 
@@ -476,7 +886,7 @@ impl Coordinator {
         work: impl FnOnce(&mut Store) -> R + Send + 'static,
     ) -> R {
         let store = self.store.take().expect("the coordinator owns the store");
-        let lock = self.lock.clone();
+        let lock = self.supervisor.lock.clone();
         let joined = tokio::task::spawn_blocking(move || {
             // Declared first so that, on success or unwind, the connection
             // is dropped before the lock.
@@ -668,7 +1078,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                StartError::Config(ConfigError::RequestQueueTooLarge(usize::MAX))
+                StartError::Config(ConfigError::OutOfRange {
+                    setting: "request_queue",
+                    ..
+                })
             ),
             "{err:?}"
         );

@@ -36,13 +36,6 @@ use crate::fs::SyncedRanges;
 impl Store {
     /// Commits a checkpoint and returns the partial's total durable bytes.
     /// Only now may that progress be reported as surviving a restart.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "called by the transfer coordinator, which arrives with the first acceptance slice"
-        )
-    )]
     pub fn commit_checkpoint(&mut self, synced: SyncedRanges) -> Result<u64, StoreError> {
         let tx = self.write()?;
         let (job_id, generation) = (synced.file.job, synced.file.generation);
