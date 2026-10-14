@@ -361,8 +361,9 @@ impl Download {
         };
         let own = partial.record.generation == generation;
         if !own && self.job.stage != JobStage::Recovering {
-            // An older generation's file was abandoned by a cancel or a
-            // restart from zero; it is left for cleanup.
+            // An older generation's file left by a cancel or a restart
+            // from zero is not continued; the file this generation
+            // registers instead abandons it to cleanup.
             return Ok(None);
         }
         let trusted = partial
@@ -509,8 +510,24 @@ impl Download {
             .await?
             .map_err(|e| park_fs(&e))?;
         let record = file.record().clone();
+        let registering = record.clone();
+        crash_point!("staging-before-register");
+        if let Err(e) = self
+            .call(move |s| s.register_staging(&registering, epoch, now()))
+            .await?
+        {
+            // A refused registration (the job moved on meanwhile) leaves a
+            // file no record names, which cleanup never removes; this
+            // download still knows its identity. A database fault may have
+            // committed it, so that file is left to its record.
+            if !matches!(e, StoreError::Sqlite(_)) {
+                drop(file);
+                let r = root.clone();
+                let _ = self.blocking(move || r.remove_staging(&record)).await;
+            }
+            return Err(e.into());
+        }
         self.call(move |s| {
-            s.register_staging(&record, epoch, now())?;
             s.record_response(
                 job,
                 generation,
