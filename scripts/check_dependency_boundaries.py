@@ -29,7 +29,8 @@ DESKTOP = [
 RULES = {
     "wayfetch-domain": HOST_AND_UI + ["wayfetch-protocol", "wayfetch-engine"],
     "wayfetch-protocol": HOST_AND_UI + ["wayfetch-engine"],
-    "wayfetch-engine": HOST_AND_UI,
+    "wayfetch-engine": HOST_AND_UI + ["wayfetch-net"],
+    "wayfetch-net": HOST_AND_UI,
     "wayfetchd": DESKTOP,
 }
 

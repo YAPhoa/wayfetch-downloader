@@ -3,43 +3,35 @@
 //! into owned staging, verify, publish, restart the engine, and list the
 //! completed artifact.
 //!
-//! Bytes come from an in-process [`Transport`]; requests over a real
-//! socket arrive with the HTTP client. Brief tests exercised here at the
+//! Bytes come from an in-process [`Transport`]; `wayfetch-net` runs the
+//! same path over real sockets. Brief tests exercised here at the
 //! engine level: T01 (sequential file), T02 and T23 (resume from durable
 //! checkpoints after a restart), T03 (`200` to a range request), T05
 //! (representation changed during resume), T09 (stalled headers and body),
 //! T27 (cancelled generation), and T47 (bounded subscriber replay).
 
+mod support;
+
 use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::runtime::Handle;
-use wayfetch_engine::fs::Root;
+use support::{ALL, KIB, ROOT, body, complete, envelope, job, jobs, shutdown, wait_for};
+use wayfetch_engine::EngineOwner;
+use wayfetch_engine::Timeouts;
 use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
-use wayfetch_engine::{
-    EngineBuilder, EngineConfig, EngineOwner, Limits, RootConfig, ShutdownRequest, Timeouts,
-};
-use wayfetch_protocol::command::{InputUrl, SubmitItems};
 use wayfetch_protocol::domain::failure::FailureCode;
-use wayfetch_protocol::domain::id::{JobId, RootId};
+use wayfetch_protocol::domain::id::JobId;
 use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::event::{EventKind, ResyncReason};
-use wayfetch_protocol::query::{JobFilter, JobSummary, PageSize};
-use wayfetch_protocol::{
-    Command, CommandEnvelope, IdempotencyKey, Permission, Query, QueryResult, StreamItem, Subscribe,
-};
-
-const ALL: &[Permission] = &[Permission::Read, Permission::Submit, Permission::Control];
-const ROOT: RootId = RootId::from_u64(1).unwrap();
-const KIB: usize = 1024;
+use wayfetch_protocol::query::{JobFilter, PageSize};
+use wayfetch_protocol::{Command, Query, QueryResult, StreamItem, Subscribe};
 
 /// A file the fake server holds.
 #[derive(Debug, Clone)]
@@ -76,6 +68,7 @@ impl Resource {
             length: Some(self.body.len() as u64),
             strong_etag: self.etag.clone(),
             last_modified: None,
+            origin: None,
         }
     }
 }
@@ -221,159 +214,26 @@ impl Transport for Fake {
     }
 }
 
-/// A state directory and an initialized download root.
-struct Env {
-    _tmp: tempfile::TempDir,
-    state: PathBuf,
-    root: PathBuf,
-    server: Arc<Server>,
-    limits: Limits,
-    timeouts: Timeouts,
-}
+type Env = support::Env<Arc<Server>>;
 
-impl Env {
-    fn new() -> Self {
-        let tmp = tempfile::tempdir().unwrap();
-        let (state, root) = (tmp.path().join("state"), tmp.path().join("downloads"));
-        std::fs::create_dir(&root).unwrap();
-        Self {
-            _tmp: tmp,
-            state,
-            root,
-            server: Arc::default(),
-            limits: Limits {
-                read_buffer_bytes: NonZeroUsize::new(4 * KIB).unwrap(),
-                checkpoint_bytes: NonZeroU64::new(4 * KIB as u64).unwrap(),
-                ..Limits::DEFAULT
-            },
-            timeouts: Timeouts::DEFAULT,
-        }
-    }
-
-    async fn start(&self) -> EngineOwner {
-        let mut config = EngineConfig::new(&self.state);
-        config.roots.push(RootConfig {
-            id: ROOT,
-            path: self.root.clone(),
-        });
-        config.download_root = Some(ROOT);
-        config.limits = self.limits.clone();
-        config.timeouts = self.timeouts;
-        let owner = EngineBuilder::new(config, Handle::current())
-            .transport(Arc::new(Fake(self.server.clone())))
-            .start()
-            .await
-            .unwrap();
-        // An operator action, once per root and instance.
-        Root::initialize(&self.root, ROOT, owner.identity().instance).unwrap();
-        owner
-    }
-
-    fn published(&self, path: &str) -> Vec<u8> {
-        std::fs::read(self.root.join(path)).unwrap()
-    }
-}
-
-fn body(len: usize) -> Bytes {
-    (0..len).map(|i| (i % 251) as u8).collect()
-}
-
-fn envelope(owner: &EngineOwner, command: Command) -> CommandEnvelope {
-    CommandEnvelope {
-        idempotency_key: IdempotencyKey::generate(),
-        target: owner.identity().instance,
-        command,
-    }
+/// An environment whose engines download from a fresh fake server.
+fn env() -> Env {
+    let server = Arc::<Server>::default();
+    Env::new(server.clone(), Arc::new(Fake(server)))
 }
 
 /// Submits `paths` on the fake server and returns the new jobs.
 async fn submit(owner: &EngineOwner, paths: &[&str]) -> Vec<JobId> {
-    let before = jobs(owner).await.len();
-    let items = paths
-        .iter()
-        .map(|p| InputUrl::parse(&format!("https://files.example{p}")).unwrap())
-        .collect::<Vec<_>>();
-    let command = Command::Submit {
-        items: SubmitItems::try_from(items).unwrap(),
-        package: None,
-    };
-    owner
-        .handle()
-        .execute(envelope(owner, command), ALL)
-        .await
-        .unwrap();
-    jobs(owner).await[before..].iter().map(|j| j.id).collect()
-}
-
-async fn jobs(owner: &EngineOwner) -> Vec<JobSummary> {
-    let query = Query::ListJobs {
-        filter: JobFilter::default(),
-        after: None,
-        page_size: PageSize::DEFAULT,
-    };
-    match owner.handle().query(query, ALL).await.unwrap() {
-        QueryResult::Jobs(page) => page.items,
-        other => panic!("{other:?}"),
-    }
-}
-
-async fn job(owner: &EngineOwner, job: JobId) -> JobSummary {
-    match owner
-        .handle()
-        .query(Query::InspectJob { job }, ALL)
-        .await
-        .unwrap()
-    {
-        QueryResult::Job { job, .. } => job,
-        other => panic!("{other:?}"),
-    }
-}
-
-/// Polls `job` until `done` holds.
-async fn wait_for(
-    owner: &EngineOwner,
-    id: JobId,
-    done: impl Fn(&JobSummary) -> bool,
-) -> JobSummary {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let summary = job(owner, id).await;
-        if done(&summary) {
-            return summary;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out: {summary:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-}
-
-async fn complete(owner: &EngineOwner, id: JobId) -> JobSummary {
-    wait_for(owner, id, |j| {
-        assert!(
-            !matches!(j.stage, JobStage::Failed | JobStage::Blocked),
-            "{j:?}"
-        );
-        j.stage == JobStage::Complete
-    })
+    support::submit(
+        owner,
+        paths.iter().map(|p| format!("https://files.example{p}")),
+    )
     .await
-}
-
-async fn shutdown(owner: EngineOwner) {
-    let report = owner.shutdown(ShutdownRequest::default()).await;
-    assert!(report.clean, "{report:?}");
-}
-
-fn staging_files(root: &Path) -> usize {
-    std::fs::read_dir(root.join(".wayfetch/staging"))
-        .unwrap()
-        .count()
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_direct_download_is_published_and_listed_after_restart() {
-    let env = Env::new();
+    let env = env();
     let data = body(50 * KIB + 7);
     env.server
         .put("/games/My%20Game.rar", Resource::new(data.clone()));
@@ -391,7 +251,7 @@ async fn a_direct_download_is_published_and_listed_after_restart() {
     );
     assert_eq!(env.published("My Game.rar"), data);
     // Published by linking: no staging name is left behind.
-    assert_eq!(staging_files(&env.root), 0);
+    assert_eq!(env.staging_files(), 0);
     assert_eq!(env.server.ranges_requested(), vec![None]);
     shutdown(owner).await;
 
@@ -418,7 +278,7 @@ async fn a_direct_download_is_published_and_listed_after_restart() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_valid_empty_file_and_a_taken_name_publish() {
-    let env = Env::new();
+    let env = env();
     std::fs::write(env.root.join("empty.bin"), b"someone else's").unwrap();
     env.server.put("/empty.bin", Resource::new(Bytes::new()));
     let owner = env.start().await;
@@ -452,7 +312,7 @@ async fn interrupt_at(env: &Env, path: &str, data: &Bytes, at: usize) -> JobId {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interrupted_download_resumes_from_durable_bytes_after_restart() {
-    let env = Env::new();
+    let env = env();
     let data = body(100 * KIB);
     let id = interrupt_at(&env, "/big.bin", &data, 40 * KIB).await;
 
@@ -471,7 +331,7 @@ async fn an_interrupted_download_resumes_from_durable_bytes_after_restart() {
         Some("\"v1\"")
     );
     assert_eq!(env.published("big.bin"), data);
-    assert_eq!(staging_files(&env.root), 0);
+    assert_eq!(env.staging_files(), 0);
     shutdown(owner).await;
 }
 
@@ -491,7 +351,7 @@ async fn a_resume_the_server_does_not_honor_restarts_from_zero() {
         }),
     ];
     for (name, change) in cases {
-        let env = Env::new();
+        let env = env();
         let path = format!("/{name}.bin");
         let data = body(64 * KIB);
         let id = interrupt_at(&env, &path, &data, 20 * KIB).await;
@@ -514,7 +374,7 @@ async fn a_resume_the_server_does_not_honor_restarts_from_zero() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stalled_headers_and_bodies_fail_at_their_deadlines() {
-    let mut env = Env::new();
+    let mut env = env();
     env.timeouts = Timeouts {
         connect: Duration::from_millis(50),
         response: Duration::from_millis(100),
@@ -541,7 +401,7 @@ async fn stalled_headers_and_bodies_fail_at_their_deadlines() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pause_keeps_durable_bytes_and_cancel_retires_the_generation() {
-    let env = Env::new();
+    let env = env();
     let data = body(32 * KIB);
     for path in ["/paused.bin", "/cancelled.bin"] {
         let mut resource = Resource::new(data.clone());
@@ -598,7 +458,7 @@ async fn pause_keeps_durable_bytes_and_cancel_retires_the_generation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn active_files_bounds_concurrent_transfers() {
-    let mut env = Env::new();
+    let mut env = env();
     env.limits.active_files = NonZeroUsize::new(2).unwrap();
     let paths = ["/a.bin", "/b.bin", "/c.bin", "/d.bin", "/e.bin"];
     for path in paths {
@@ -627,7 +487,7 @@ async fn active_files_bounds_concurrent_transfers() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn subscribers_replay_within_bounds_and_resync_beyond_them() {
-    let mut env = Env::new();
+    let mut env = env();
     env.limits.event_buffer = NonZeroUsize::new(16).unwrap();
     env.server.put("/one.bin", Resource::new(body(KIB)));
     let owner = env.start().await;
@@ -701,7 +561,7 @@ async fn subscribers_replay_within_bounds_and_resync_beyond_them() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pruned_events_and_old_instances_resync_after_restart() {
-    let mut env = Env::new();
+    let mut env = env();
     env.limits.event_retention = NonZeroU64::new(2).unwrap();
     env.server.put("/one.bin", Resource::new(body(KIB)));
     let owner = env.start().await;
@@ -752,7 +612,7 @@ async fn pruned_events_and_old_instances_resync_after_restart() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejected_checkpoint_fails_the_job_and_frees_its_slot() {
-    let mut env = Env::new();
+    let mut env = env();
     env.limits.active_files = NonZeroUsize::new(1).unwrap();
     let mut first = Resource::new(body(32 * KIB));
     first.stall_at = Some(8 * KIB);
@@ -781,7 +641,7 @@ async fn a_rejected_checkpoint_fails_the_job_and_frees_its_slot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unusable_response_metadata_never_loops() {
-    let env = Env::new();
+    let env = env();
     let cases = [
         // Longer than a stored suggestion may be.
         (
@@ -820,13 +680,13 @@ async fn unusable_response_metadata_never_loops() {
     }
     // One request and one staging file each.
     assert_eq!(env.server.requests.lock().unwrap().len(), cases.len());
-    assert_eq!(staging_files(&env.root), 0);
+    assert_eq!(env.staging_files(), 0);
     shutdown(owner).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_replayed_pause_does_not_interrupt_a_resumed_transfer() {
-    let env = Env::new();
+    let env = env();
     let data = body(32 * KIB);
     let mut resource = Resource::new(data.clone());
     resource.stall_at = Some(8 * KIB);
@@ -875,7 +735,7 @@ async fn a_replayed_pause_does_not_interrupt_a_resumed_transfer() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_storage_failure_during_recovery_waits_for_the_next_start() {
-    let env = Env::new();
+    let env = env();
     let data = body(32 * KIB);
     let id = interrupt_at(&env, "/held.bin", &data, 8 * KIB).await;
     // Adopting the partial fails in the database, as a full disk would.

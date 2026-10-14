@@ -707,6 +707,7 @@ fn a_response_is_recorded_once_and_survives_restart() {
         length: Some(10),
         strong_etag: Some("\"v1\"".into()),
         last_modified: Some(NOW),
+        origin: Some("https://cdn.example".into()),
     };
     f.store
         .record_response(job, generation, &seen, Some("game.rar"), NOW)
