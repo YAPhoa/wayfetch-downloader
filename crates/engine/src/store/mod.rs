@@ -26,6 +26,9 @@
 //! * [`Store::recover_after_restart`]: every active job moved to recovery,
 //!   with their events.
 //! * [`Store::commit_checkpoint`]: synchronized byte ranges for one partial.
+//! * [`Store::record_response`]: what the first response reported about a
+//!   staging file's bytes, and the job's expected size.
+//! * [`Store::prune`]: events and idempotency records past retention.
 //! * [`Store::register_staging`] and [`Store::adopt_staging`]: which job
 //!   generation owns a staging file.
 //! * [`Store::begin_publication`], [`Store::complete_publication`] (with
@@ -48,6 +51,9 @@ mod progress;
 #[cfg(test)]
 mod scenarios;
 pub mod schema;
+
+pub use files::Partial;
+pub use jobs::Admission;
 
 use std::path::Path;
 

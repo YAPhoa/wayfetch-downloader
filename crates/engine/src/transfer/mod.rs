@@ -25,8 +25,10 @@
 //!
 //! The HTTP client itself, redirects, sessions, and the broker that holds
 //! requests and responses are later work; they plug in through
-//! [`writer::ChunkSource`] and [`range::Framing`].
+//! [`transport::Transport`], which yields a [`range::Framing`] and a
+//! [`writer::ChunkSource`].
 
 pub mod lease;
 pub mod range;
+pub mod transport;
 pub mod writer;

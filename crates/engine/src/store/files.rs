@@ -5,14 +5,6 @@
 //! creates, validates, links, and reconciles them; these records say which
 //! job generation owns which file, and what was intended when.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by the transfer coordinator, which arrives with the first acceptance slice"
-    )
-)]
-
 use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::id::JobId;
 use wayfetch_domain::job::{JobError, JobStage, Outcome};
@@ -21,7 +13,32 @@ use wayfetch_domain::version::{BootEpoch, Generation};
 
 use super::{Store, StoreError, jobs, key, progress, sql};
 use crate::fs::{FileIdentity, RelativePath, StagingRecord};
+use crate::transfer::lease::Representation;
 use crate::transfer::range::is_complete;
+
+/// A job's newest staging file and what is durable in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Partial {
+    /// The file.
+    pub record: StagingRecord,
+    /// End of the durable coverage, 0 if none.
+    pub durable_end: u64,
+    /// Whether the coverage is exactly `0..durable_end`, so a sequential
+    /// transfer can continue from its end.
+    pub contiguous: bool,
+    /// What the response that started the file reported, if recorded.
+    pub representation: Option<Representation>,
+    /// The file name that response suggested, if any.
+    pub suggested_name: Option<String>,
+}
+
+impl Partial {
+    /// Whether every byte of a representation of known length is durable.
+    pub fn is_complete(&self) -> bool {
+        self.contiguous
+            && self.representation.as_ref().and_then(|r| r.length) == Some(self.durable_end)
+    }
+}
 
 /// A recorded publication that has not completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,31 +171,113 @@ impl Store {
         Ok(())
     }
 
-    /// The newest staging record of `job` and the end of its durable
-    /// coverage (0 if none), which is what a restart reopens it with.
-    pub fn latest_staging(
-        &mut self,
-        job: JobId,
-    ) -> Result<Option<(StagingRecord, u64)>, StoreError> {
+    /// The newest staging file of `job`, which is what a restart or a
+    /// resumed job reopens.
+    pub fn latest_staging(&mut self, job: JobId) -> Result<Option<Partial>, StoreError> {
         let tx = self.read()?;
-        let Some(record) = tx
+        let Some((record, representation, suggested_name)) = tx
             .query_row(
                 &format!(
-                    "SELECT {STAGING_COLUMNS} FROM staging_files WHERE job_id = ?1 \
-                     ORDER BY generation DESC LIMIT 1"
+                    "SELECT {STAGING_COLUMNS}, representation_known, representation_length, \
+                     representation_etag, representation_modified, suggested_name \
+                     FROM staging_files WHERE job_id = ?1 ORDER BY generation DESC LIMIT 1"
                 ),
                 [sql(job)?],
-                read_staging,
+                |row| {
+                    let known: bool = row.get(7)?;
+                    let representation = known.then(|| -> rusqlite::Result<_> {
+                        Ok((
+                            row.get::<_, Option<i64>>(8)?,
+                            row.get::<_, Option<String>>(9)?,
+                            row.get::<_, Option<i64>>(10)?,
+                        ))
+                    });
+                    Ok((
+                        read_staging(row)?,
+                        representation.transpose()?,
+                        row.get::<_, Option<String>>(11)?,
+                    ))
+                },
             )
             .optional()?
-            .map(RawStaging::decode)
-            .transpose()?
         else {
             return Ok(None);
         };
+        let record = record.decode()?;
+        let representation = representation
+            .map(|(length, etag, modified)| {
+                Ok::<_, StoreError>(Representation {
+                    length: length
+                        .map(u64::try_from)
+                        .transpose()
+                        .map_err(|_| StoreError::Corrupt("representation length"))?,
+                    strong_etag: etag,
+                    last_modified: modified.map(UtcTimestamp::from_unix_millis),
+                })
+            })
+            .transpose()?;
         let (_, coverage) = progress::load_coverage(&tx, job, record.generation)?;
-        let end = coverage.iter().next_back().map_or(0, |r| r.end);
-        Ok(Some((record, end)))
+        let durable_end = coverage.iter().next_back().map_or(0, |r| r.end);
+        Ok(Some(Partial {
+            contiguous: is_complete(coverage.iter(), durable_end),
+            record,
+            durable_end,
+            representation,
+            suggested_name,
+        }))
+    }
+
+    /// Records what the response that started the job generation's staging
+    /// file reported (its representation and suggested file name), and the
+    /// job's expected size. Once recorded it does not change: a later
+    /// response must report the same representation for its bytes to join
+    /// the file.
+    pub fn record_response(
+        &mut self,
+        job: JobId,
+        generation: Generation,
+        representation: &Representation,
+        suggested_name: Option<&str>,
+        now: UtcTimestamp,
+    ) -> Result<(), StoreError> {
+        let tx = self.write()?;
+        job_at(
+            &tx,
+            job,
+            generation,
+            &[JobStage::Transferring],
+            "recording a response needs a transferring job",
+        )?;
+        let length = representation
+            .length
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| StoreError::Corrupt("representation length"))?;
+        let updated = tx.execute(
+            "UPDATE staging_files SET representation_known = 1, representation_length = ?1, \
+             representation_etag = ?2, representation_modified = ?3, suggested_name = ?6 \
+             WHERE job_id = ?4 AND generation = ?5 AND representation_known = 0",
+            params![
+                length,
+                representation.strong_etag,
+                representation.last_modified.map(UtcTimestamp::unix_millis),
+                sql(job)?,
+                sql(generation)?,
+                suggested_name,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(StoreError::Staging(
+                "no staging file without a recorded representation",
+            ));
+        }
+        tx.execute(
+            "UPDATE jobs SET bytes_total = ?1, updated_at = ?2 WHERE id = ?3",
+            params![length, now.unix_millis(), sql(job)?],
+        )?;
+        jobs::announce(&tx, job, now)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Hands the newest staging file of a recovering job, with its durable

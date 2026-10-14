@@ -6,10 +6,16 @@
 //! so a slow disk slows the network read instead of filling memory: at most
 //! one chunk per writer is resident, plus whatever the HTTP client buffers.
 //! Writes run on the blocking pool and never stall the runtime.
+//!
+//! A body that stops sending fails after the idle-read deadline instead of
+//! holding its transfer slot forever (T09).
 
+use std::any::Any;
 use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -17,11 +23,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::fs::{StagingFile, SyncedRanges};
 
+/// A boxed, sendable future.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 /// A response body, read chunk by chunk. The HTTP layer adapts its client's
-/// body stream to this.
+/// body stream to this. Chunks are at most the read buffer size the
+/// transport was given.
 pub trait ChunkSource: Send {
     /// The next chunk, or `None` at the end of the body.
-    fn next_chunk(&mut self) -> impl Future<Output = io::Result<Option<Bytes>>> + Send;
+    fn next_chunk(&mut self) -> BoxFuture<'_, io::Result<Option<Bytes>>>;
 }
 
 /// Why streaming stopped with an error.
@@ -30,6 +40,9 @@ pub enum WriteError {
     /// Reading the body failed.
     #[error("reading the body: {0}")]
     Source(#[source] io::Error),
+    /// No chunk arrived within the idle-read deadline.
+    #[error("no data for {0:?}")]
+    Stalled(Duration),
     /// Writing or synchronizing the staging file failed. Never progress
     /// (section 7.6).
     #[error("writing the staging file: {0}")]
@@ -68,12 +81,23 @@ pub enum StreamEnd {
 
 /// Writes one interval of a staging file, sequentially from its start.
 /// Each writer owns its interval and cannot write outside it (rule 7.5.9).
-#[derive(Debug)]
 pub struct IntervalWriter {
     file: Arc<StagingFile>,
     end: Option<u64>,
     position: u64,
     certified: u64,
+    hold: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for IntervalWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IntervalWriter")
+            .field("file", &self.file)
+            .field("end", &self.end)
+            .field("position", &self.position)
+            .field("certified", &self.certified)
+            .finish_non_exhaustive()
+    }
 }
 
 impl IntervalWriter {
@@ -85,12 +109,27 @@ impl IntervalWriter {
             end,
             position: start,
             certified: start,
+            hold: None,
         }
+    }
+
+    /// Keeps `guard` alive until every write or sync this writer started has
+    /// finished, even one left running on the blocking pool after its task
+    /// was dropped. The engine passes its state-directory lock, so no other
+    /// engine can adopt the file while an abandoned write may still land.
+    pub fn holding(mut self, guard: Arc<dyn Any + Send + Sync>) -> Self {
+        self.hold = Some(guard);
+        self
     }
 
     /// The next byte to write.
     pub fn position(&self) -> u64 {
         self.position
+    }
+
+    /// The file, once writing is done.
+    pub fn into_file(self) -> Arc<StagingFile> {
+        self.file
     }
 
     /// Writes `chunk` at the current position. A chunk that would cross the
@@ -110,7 +149,8 @@ impl IntervalWriter {
             return Ok(());
         }
         let (file, offset) = (self.file.clone(), self.position);
-        blocking(move || file.write_all_at(&chunk, offset)).await?;
+        self.blocking(move || file.write_all_at(&chunk, offset))
+            .await?;
         self.position = next;
         Ok(())
     }
@@ -131,7 +171,7 @@ impl IntervalWriter {
             return Ok(None);
         }
         let (file, range) = (self.file.clone(), self.certified..self.position);
-        blocking(move || file.sync_ranges(vec![range]))
+        self.blocking(move || file.sync_ranges(vec![range]))
             .await
             .map(Some)
     }
@@ -161,7 +201,8 @@ impl IntervalWriter {
 
     /// Streams `source` into the interval until the body ends or `cancel`
     /// fires, sending a checkpoint to `checkpoints` whenever `every` bytes
-    /// are uncertified and once at the end. Sending waits for room in the
+    /// are uncertified and once at the end. A wait of more than `idle` for
+    /// the next chunk fails with [`WriteError::Stalled`]. Sending waits for room in the
     /// channel, so a coordinator that commits slowly slows the transfer
     /// instead of queueing certificates.
     ///
@@ -170,16 +211,19 @@ impl IntervalWriter {
     /// must have filled the interval exactly when its end is known.
     pub async fn stream(
         &mut self,
-        source: &mut impl ChunkSource,
+        source: &mut dyn ChunkSource,
         cancel: &CancellationToken,
         checkpoints: &mpsc::Sender<SyncedRanges>,
         every: u64,
+        idle: Duration,
     ) -> Result<StreamEnd, WriteError> {
         loop {
             let chunk = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Ok(StreamEnd::Cancelled),
-                chunk = source.next_chunk() => chunk.map_err(WriteError::Source)?,
+                chunk = tokio::time::timeout(idle, source.next_chunk()) => chunk
+                    .map_err(|_| WriteError::Stalled(idle))?
+                    .map_err(WriteError::Source)?,
             };
             let Some(chunk) = chunk else { break };
             self.write(chunk).await?;
@@ -201,28 +245,36 @@ impl IntervalWriter {
         }
         Ok(StreamEnd::Finished)
     }
-}
 
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> io::Result<T> + Send + 'static,
-) -> Result<T, WriteError> {
-    tokio::task::spawn_blocking(work)
+    /// Runs file work on the blocking pool, holding the writer's guard.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> io::Result<T> + Send + 'static,
+    ) -> Result<T, WriteError> {
+        let hold = self.hold.clone();
+        tokio::task::spawn_blocking(move || {
+            let _hold = hold;
+            work()
+        })
         .await
         .map_err(|e| WriteError::File(io::Error::other(e)))?
         .map_err(WriteError::File)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     use wayfetch_domain::id::JobId;
     use wayfetch_domain::version::Generation;
 
     use super::*;
     use crate::fs::Root;
+
+    /// Long enough never to fire unless a test stalls on purpose.
+    const IDLE: Duration = Duration::from_secs(60);
 
     struct Chunks(VecDeque<io::Result<Bytes>>);
 
@@ -233,8 +285,8 @@ mod tests {
     }
 
     impl ChunkSource for Chunks {
-        async fn next_chunk(&mut self) -> io::Result<Option<Bytes>> {
-            self.0.pop_front().transpose()
+        fn next_chunk(&mut self) -> BoxFuture<'_, io::Result<Option<Bytes>>> {
+            Box::pin(std::future::ready(self.0.pop_front().transpose()))
         }
     }
 
@@ -242,12 +294,14 @@ mod tests {
     struct Stalls(Chunks, Arc<AtomicUsize>);
 
     impl ChunkSource for Stalls {
-        async fn next_chunk(&mut self) -> io::Result<Option<Bytes>> {
-            self.1.fetch_add(1, Ordering::SeqCst);
-            match self.0.next_chunk().await? {
-                Some(chunk) => Ok(Some(chunk)),
-                None => std::future::pending().await,
-            }
+        fn next_chunk(&mut self) -> BoxFuture<'_, io::Result<Option<Bytes>>> {
+            Box::pin(async move {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                match self.0.next_chunk().await? {
+                    Some(chunk) => Ok(Some(chunk)),
+                    None => std::future::pending().await,
+                }
+            })
         }
     }
 
@@ -266,7 +320,7 @@ mod tests {
         let mut writer = IntervalWriter::new(file.clone(), 4, Some(10));
         let mut body = Chunks::of(&[b"ab", b"", b"cd", b"ef"]);
         let end = writer
-            .stream(&mut body, &CancellationToken::new(), &tx, 3)
+            .stream(&mut body, &CancellationToken::new(), &tx, 3, IDLE)
             .await
             .unwrap();
         assert_eq!(end, StreamEnd::Finished);
@@ -289,7 +343,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut writer = IntervalWriter::new(file.clone(), 0, Some(4));
         let err = writer
-            .stream(&mut Chunks::of(&[b"abc", b"de"]), &cancel, &tx, 100)
+            .stream(&mut Chunks::of(&[b"abc", b"de"]), &cancel, &tx, 100, IDLE)
             .await
             .unwrap_err();
         assert!(matches!(err, WriteError::Overflow { end: 4 }));
@@ -298,7 +352,7 @@ mod tests {
 
         let mut writer = IntervalWriter::new(file, 0, Some(4));
         let err = writer
-            .stream(&mut Chunks::of(&[b"abc"]), &cancel, &tx, 100)
+            .stream(&mut Chunks::of(&[b"abc"]), &cancel, &tx, 100, IDLE)
             .await
             .unwrap_err();
         assert!(matches!(err, WriteError::Truncated { at: 3, end: 4 }));
@@ -325,7 +379,7 @@ mod tests {
         let task = {
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                let end = writer.stream(&mut body, &cancel, &tx, 100).await;
+                let end = writer.stream(&mut body, &cancel, &tx, 100, IDLE).await;
                 (end, writer)
             })
         };
@@ -345,9 +399,9 @@ mod tests {
     struct Counted(Chunks, Arc<AtomicUsize>);
 
     impl ChunkSource for Counted {
-        async fn next_chunk(&mut self) -> io::Result<Option<Bytes>> {
+        fn next_chunk(&mut self) -> BoxFuture<'_, io::Result<Option<Bytes>>> {
             self.1.fetch_add(1, Ordering::SeqCst);
-            self.0.next_chunk().await
+            self.0.next_chunk()
         }
     }
 
@@ -360,7 +414,7 @@ mod tests {
         let mut writer = IntervalWriter::new(file, 0, None);
         let task = tokio::spawn(async move {
             writer
-                .stream(&mut body, &CancellationToken::new(), &tx, 1)
+                .stream(&mut body, &CancellationToken::new(), &tx, 1, IDLE)
                 .await
         });
         // The first certificate fills the channel; the second waits for
@@ -389,7 +443,7 @@ mod tests {
         let task = {
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                let end = writer.stream(&mut body, &cancel, &tx, 1).await;
+                let end = writer.stream(&mut body, &cancel, &tx, 1, IDLE).await;
                 (end, writer)
             })
         };
@@ -416,10 +470,66 @@ mod tests {
             Err(io::ErrorKind::ConnectionReset.into()),
         ]));
         let err = writer
-            .stream(&mut body, &CancellationToken::new(), &tx, 100)
+            .stream(&mut body, &CancellationToken::new(), &tx, 100, IDLE)
             .await
             .unwrap_err();
         assert!(matches!(err, WriteError::Source(_)));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_stalled_body_fails_after_the_idle_deadline() {
+        let (_tmp, _root, file) = staging();
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut writer = IntervalWriter::new(file, 0, None);
+        let mut body = Stalls(Chunks::of(&[b"abc"]), Arc::default());
+        let idle = Duration::from_millis(50);
+        let started = tokio::time::Instant::now();
+        let err = writer
+            .stream(&mut body, &CancellationToken::new(), &tx, 100, idle)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WriteError::Stalled(d) if d == idle),
+            "{err:?}"
+        );
+        assert!(started.elapsed() >= idle);
+        // The written bytes stay uncertified, as for any failure.
+        assert!(rx.try_recv().is_err());
+        assert_eq!(writer.position(), 3);
+    }
+
+    #[test]
+    fn blocking_work_holds_the_guard() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().build().unwrap();
+        let (_tmp, _root, file) = staging();
+        let guard: Arc<dyn Any + Send + Sync> = Arc::new(());
+        let weak = Arc::downgrade(&guard);
+        let writer = IntervalWriter::new(file, 0, None).holding(guard);
+        let (entered, inside) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let task = runtime.spawn(async move {
+            writer
+                .blocking(move || {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        inside.recv().unwrap();
+        // Dropping the task and the runtime leaves the blocked work holding
+        // the guard.
+        task.abort();
+        runtime.shutdown_background();
+        assert!(weak.upgrade().is_some());
+        release.send(()).unwrap();
+        for _ in 0..200 {
+            if weak.upgrade().is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the guard outlived its work");
     }
 }

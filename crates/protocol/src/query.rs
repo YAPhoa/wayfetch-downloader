@@ -11,7 +11,7 @@ use std::num::NonZeroU16;
 
 use serde::{Deserialize, Serialize};
 use wayfetch_domain::failure::FailureCode;
-use wayfetch_domain::id::{JobId, PackageId};
+use wayfetch_domain::id::{JobId, PackageId, RootId};
 use wayfetch_domain::job::{DesiredState, DisplayState, JobStage};
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
@@ -158,6 +158,20 @@ pub struct JobSummary {
     /// Most recent failure, if the job is waiting, blocked, or failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureSummary>,
+    /// The published file, once the job is complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<ArtifactSummary>,
+}
+
+/// A file a job published.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactSummary {
+    /// The destination root holding it.
+    pub root: RootId,
+    /// Its path inside the root, `/`-separated.
+    pub path: String,
+    /// Its size in bytes.
+    pub size: u64,
 }
 
 /// One page of a list.
