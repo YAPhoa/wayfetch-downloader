@@ -1,10 +1,22 @@
 [workspace]
 resolver = "3"
-members = ["crates/domain", "crates/protocol", "crates/engine", "crates/net"]
-# Server and desktop hosts are added as members later; default members stay
-# limited to engine-side crates so a plain `cargo build` never pulls in a
-# desktop or frontend toolchain.
-default-members = ["crates/domain", "crates/protocol", "crates/engine", "crates/net"]
+members = [
+    "crates/domain",
+    "crates/protocol",
+    "crates/engine",
+    "crates/net",
+    "crates/cli",
+]
+# Server and desktop hosts are added as members later; default members leave
+# out any host that needs a desktop or frontend toolchain, so a plain
+# `cargo build` never pulls one in.
+default-members = [
+    "crates/domain",
+    "crates/protocol",
+    "crates/engine",
+    "crates/net",
+    "crates/cli",
+]
 
 [workspace.package]
 version = "0.0.0"
@@ -18,10 +30,13 @@ publish = false
 wayfetch-domain = { path = "crates/domain" }
 wayfetch-protocol = { path = "crates/protocol" }
 wayfetch-engine = { path = "crates/engine" }
+wayfetch-net = { path = "crates/net" }
 bytes = "1.12.1"
 cap-std = "4.0.3"
+httparse = "1"
 percent-encoding = "2.3.2"
 rangemap = "1.8.0"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rusqlite_migration = "2.6.0"
 serde = { version = "1.0.228", default-features = false, features = ["std", "derive"] }
@@ -31,6 +46,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 tempfile = "3.27.0"
 thiserror = "2.0.17"
 tokio = { version = "1.53.2", default-features = false }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7.20", default-features = false }
 url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.28.0", features = ["serde", "v4"] }

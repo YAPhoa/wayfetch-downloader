@@ -32,6 +32,7 @@ RULES = {
     "wayfetch-engine": HOST_AND_UI + ["wayfetch-net"],
     "wayfetch-net": HOST_AND_UI,
     "wayfetchd": DESKTOP,
+    "wayfetch-cli": HOST_AND_UI,
 }
 
 
