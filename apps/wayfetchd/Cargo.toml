@@ -17,6 +17,7 @@ httparse.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+url.workspace = true
 
 [dev-dependencies]
 wayfetch-net.workspace = true

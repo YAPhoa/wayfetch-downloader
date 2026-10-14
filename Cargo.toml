@@ -60,6 +60,14 @@ tokio-util = { version = "0.7.20", default-features = false }
 url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.28.0", features = ["serde", "v4"] }
 
+# Password hashing is deliberately slow; unoptimized, it is slow enough to
+# make debug builds and tests crawl.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
