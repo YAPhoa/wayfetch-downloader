@@ -171,9 +171,12 @@ impl IntervalWriter {
             return Ok(None);
         }
         let (file, range) = (self.file.clone(), self.certified..self.position);
-        self.blocking(move || file.sync_ranges(vec![range]))
-            .await
-            .map(Some)
+        self.blocking(move || {
+            crash_point!("checkpoint-before-sync");
+            file.sync_ranges(vec![range])
+        })
+        .await
+        .map(Some)
     }
 
     /// Certifies and sends the bytes since the last delivered checkpoint.
