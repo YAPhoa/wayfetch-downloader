@@ -61,11 +61,9 @@ fn main() -> ExitCode {
             terminal.line(format!("initialized download root {}", root.display()));
             ExitCode::SUCCESS
         }),
-        Command::Run(args) => tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("cannot start the runtime: {e}"))
-            .and_then(|runtime| runtime.block_on(session::run(args, &terminal))),
+        Command::Run(args) => {
+            wayfetch_host::block_on(session::run(args, &terminal)).and_then(|result| result)
+        }
     };
     let code = result.unwrap_or_else(|message| {
         terminal.fatal(&message);
