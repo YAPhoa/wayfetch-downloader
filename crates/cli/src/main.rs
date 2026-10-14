@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
+use output::Terminal;
 use wayfetch_engine::domain::id::RootId;
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::state_dir::StateDir;
@@ -88,32 +89,33 @@ struct RunArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let terminal = Terminal::start();
     let result = match cli.command {
-        Command::InitRoot { state, root } => init_root(&state.state_dir, &root),
+        Command::InitRoot { state, root } => init_root(&state.state_dir, &root, &terminal),
         Command::Run(args) => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| format!("cannot start the runtime: {e}"))
-            .and_then(|runtime| runtime.block_on(session::run(args))),
+            .and_then(|runtime| runtime.block_on(session::run(args, &terminal))),
     };
-    match result {
-        Ok(code) => code,
-        Err(message) => {
-            output::report_fatal(&message);
-            ExitCode::FAILURE
-        }
-    }
+    let code = result.unwrap_or_else(|message| {
+        terminal.fatal(&message);
+        ExitCode::FAILURE
+    });
+    // A reader that stopped reading cannot hold up exit.
+    terminal.finish(output::DRAIN);
+    code
 }
 
 /// Initializes `root` for the instance in `state_dir`, creating the
 /// instance if the state directory is new. Takes the state directory's
 /// lock, so it is refused while an engine owns it.
-fn init_root(state_dir: &Path, root: &Path) -> Result<ExitCode, String> {
+fn init_root(state_dir: &Path, root: &Path, terminal: &Terminal) -> Result<ExitCode, String> {
     let state = StateDir::open(&absolute(state_dir)?).map_err(|e| e.to_string())?;
     let root = absolute(root)?;
     Root::initialize(&root, DOWNLOAD_ROOT, state.identity().instance)
         .map_err(|e| format!("cannot initialize {}: {e}", root.display()))?;
-    println!("initialized download root {}", root.display());
+    terminal.line(format!("initialized download root {}", root.display()));
     Ok(ExitCode::SUCCESS)
 }
 

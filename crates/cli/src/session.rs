@@ -28,7 +28,7 @@ use wayfetch_engine::{
 use wayfetch_net::{CertificateDer, HttpConfig, HttpTransport};
 
 use crate::input::{self, Line};
-use crate::output::{HELP, Output, Printer};
+use crate::output::{HELP, Output, Printer, Terminal};
 use crate::{DOWNLOAD_ROOT, RunArgs, absolute};
 
 /// The local operator may do everything.
@@ -39,8 +39,8 @@ const MAX_CA_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Runs a session until it ends; the exit code says whether the engine
 /// stopped cleanly.
-pub async fn run(args: RunArgs) -> Result<ExitCode, String> {
-    let printer = Printer::new(args.json);
+pub async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
+    let printer = Printer::new(args.json, terminal);
     // Registered before the engine starts, so a signal during startup
     // still leads to a graceful shutdown.
     let mut signals = Signals::new()?;
@@ -130,12 +130,12 @@ enum Next {
     Quit,
 }
 
-struct Session {
+struct Session<'a> {
     engine: EngineHandle,
-    printer: Printer,
+    printer: Printer<'a>,
 }
 
-impl Session {
+impl Session<'_> {
     /// Announces the session and subscribes to events.
     async fn prepare(&self, root: &std::path::Path) -> Result<Subscription, Stop> {
         let instance = self.engine.instance();

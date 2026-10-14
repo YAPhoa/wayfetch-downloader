@@ -98,7 +98,9 @@ engine down gracefully: nothing is cancelled, and unfinished jobs resume from
 their durable bytes on the next start. Pause and cancel keep partial data. One
 process owns a state directory at a time; a second `run` or `init-root` on it
 is refused, and controlling a running session from another process is future
-daemon work. `--json` prints one JSON object per line for scripts.
+daemon work. `--json` prints one JSON object per line for scripts. Output
+never holds up the session or its shutdown: if the reader stops reading, lines
+beyond a small queue are dropped and the count is reported once there is room.
 
 URLs are read only from standard input, so they never appear in process
 listings, and output never repeats a submitted URL or rejected input. Lines

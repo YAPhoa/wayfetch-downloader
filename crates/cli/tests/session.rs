@@ -140,22 +140,7 @@ impl Session {
     }
 
     fn spawn(dirs: &Dirs, args: &[String], json: bool) -> Self {
-        let mut command = Command::new(BIN);
-        command
-            .arg("run")
-            .arg("--state-dir")
-            .arg(&dirs.state)
-            .arg("--download-root")
-            .arg(&dirs.root)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if json {
-            command.arg("--json");
-        }
-        let mut process = command.spawn().unwrap();
+        let mut process = run_command(dirs, args, json).spawn().unwrap();
         let mut out = BufReader::new(process.stdout.take().unwrap()).lines();
         let (send, lines) = mpsc::unbounded_channel();
         tokio::spawn(async move {
@@ -273,6 +258,36 @@ impl Session {
             stderr: self.stderr.await.unwrap(),
         }
     }
+}
+
+/// `wayfetch run` on `dirs` with every standard stream piped.
+fn run_command(dirs: &Dirs, args: &[String], json: bool) -> Command {
+    let mut command = Command::new(BIN);
+    command
+        .arg("run")
+        .arg("--state-dir")
+        .arg(&dirs.state)
+        .arg("--download-root")
+        .arg(&dirs.root)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if json {
+        command.arg("--json");
+    }
+    command
+}
+
+/// Sends `signal` (as `kill` names it) to process `pid`.
+#[cfg(unix)]
+fn signal(pid: u32, signal: &str) {
+    let status = std::process::Command::new("kill")
+        .args([&format!("-{signal}"), &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
 
 /// The job in a `job_added` or `job_changed` event.
@@ -405,12 +420,7 @@ async fn ctrl_c_during_a_transfer_keeps_the_job_for_the_next_start() {
     let id = session.submit(&server.url("/r.bin")).await;
     let settled = session.settled(&id).await;
 
-    let pid = session.process.id().unwrap().to_string();
-    let kill = std::process::Command::new("kill")
-        .args(["-INT", &pid])
-        .status()
-        .unwrap();
-    assert!(kill.success());
+    signal(session.process.id().unwrap(), "INT");
     assert_clean_stop(&session.finish().await, "interrupted");
 
     // The next start takes the job over and asks only for the rest.
@@ -574,4 +584,42 @@ async fn a_session_never_initializes_its_download_root() {
 
 fn empty(dir: &Path) -> bool {
     std::fs::read_dir(dir).unwrap().next().is_none()
+}
+
+/// A reader that stopped reading must not keep the session from stopping:
+/// with standard output (JSON) or standard error (text errors) full and
+/// never drained, a signal still shuts the engine down and the process
+/// exits.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_reader_cannot_block_shutdown() {
+    // Each line answers with output on the stream under test: `help` on
+    // standard output, an unknown command's error on standard error.
+    let cases = [(true, "help", "INT"), (false, "frobnicate", "TERM")];
+    for (json, line, sig) in cases {
+        let dirs = Dirs::new();
+        assert!(dirs.init_root().status.success());
+        let mut process = run_command(&dirs, &[], json).spawn().unwrap();
+        // Held open and never read.
+        let (_stdout, _stderr) = (process.stdout.take(), process.stderr.take());
+        let mut stdin = process.stdin.take().unwrap();
+        // Far more output than a pipe and the output queue hold. Before
+        // the fix, the session stopped reading input once its write
+        // blocked, so these writes may stall too.
+        let input = format!("{line}\n").repeat(20_000);
+        let _ =
+            tokio::time::timeout(Duration::from_secs(5), stdin.write_all(input.as_bytes())).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        signal(process.id().unwrap(), sig);
+        let status = tokio::time::timeout(DEADLINE, process.wait())
+            .await
+            .unwrap_or_else(|_| panic!("{sig} with a stalled reader did not stop the session"))
+            .unwrap();
+        assert!(status.success(), "{sig}: {status:?}");
+        // The engine released its state directory: a new owner may start.
+        drop(stdin);
+        let next = Session::spawn(&dirs, &[], true).finish().await;
+        assert!(next.status.success(), "{}", next.stderr);
+    }
 }
