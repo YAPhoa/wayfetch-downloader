@@ -11,6 +11,10 @@
 //!   adapters. Dropping handles never stops the engine; a handle that
 //!   outlives the engine gets `ShuttingDown` errors.
 //!
+//! Startup opens the store, retires work authorized by the previous run
+//! (moving active jobs to recovery), and stages submitted inputs before the
+//! engine reports ready.
+//!
 //! Shutdown stops admitting requests, cancels engine tasks, and waits up to a
 //! deadline. Every engine task holds a reference to the state-directory lock,
 //! so a task still running after the deadline keeps the directory locked and
@@ -20,19 +24,23 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use wayfetch_domain::time::UtcTimestamp;
+use wayfetch_protocol::command::MAX_SUBMIT_ITEMS;
 use wayfetch_protocol::event::EventCursor;
 use wayfetch_protocol::{
-    ErrorCode, Hello, InstanceId, ProtocolError, ProtocolVersion, TransportLimits,
+    CommandEnvelope, CommandResult, ErrorCode, Hello, InstanceId, Permission, ProtocolError,
+    ProtocolVersion, Query, QueryResult, TransportLimits,
 };
 
 use crate::config::{ConfigError, EngineConfig};
 use crate::state_dir::{Identity, StateDir, StateDirError};
+use crate::store::{Store, StoreError, StoreInfo};
 
 /// Engine lifecycle phase, observable through [`EngineHandle::readiness`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,6 +64,9 @@ pub enum StartError {
     /// The state directory is locked, missing, or unreadable.
     #[error(transparent)]
     StateDir(#[from] StateDirError),
+    /// The database could not be opened, migrated, or recovered.
+    #[error(transparent)]
+    Store(#[from] StoreError),
     /// The supplied runtime is shutting down.
     #[error("runtime unavailable: {0}")]
     Runtime(#[from] tokio::task::JoinError),
@@ -80,11 +91,18 @@ impl EngineBuilder {
     pub async fn start(self) -> Result<EngineOwner, StartError> {
         self.config.validate()?;
         let path = self.config.state_dir.clone();
-        let state_dir = self
+        let (state_dir, store) = self
             .runtime
-            .spawn_blocking(move || StateDir::open(&path))
+            .spawn_blocking(move || -> Result<_, StartError> {
+                let state_dir = StateDir::open(&path)?;
+                let mut store = Store::open(state_dir.path())?;
+                store.recover_after_restart(now())?;
+                stage_all(&mut store)?;
+                Ok((state_dir, store))
+            })
             .await??;
         let identity = state_dir.identity();
+        let store_info = store.info().clone();
         let state_dir = Arc::new(state_dir);
         let (readiness_tx, readiness_rx) = watch::channel(Readiness::Starting);
         let (requests, inbox) = mpsc::channel(self.config.request_queue.get());
@@ -95,6 +113,7 @@ impl EngineBuilder {
                 instance: identity.instance,
             },
             identity,
+            store_info,
             config: self.config,
             runtime: self.runtime,
             cancel: CancellationToken::new(),
@@ -107,6 +126,7 @@ impl EngineBuilder {
             identity,
             inbox,
             cancel: owner.cancel.clone(),
+            store: Some(store),
         };
         owner.spawn(coordinator.run());
         owner.readiness.send_replace(Readiness::Ready);
@@ -143,6 +163,7 @@ pub struct ShutdownReport {
 pub struct EngineOwner {
     handle: EngineHandle,
     identity: Identity,
+    store_info: StoreInfo,
     config: EngineConfig,
     runtime: Handle,
     cancel: CancellationToken,
@@ -161,6 +182,11 @@ impl EngineOwner {
     /// The instance identity and this start's boot epoch.
     pub fn identity(&self) -> Identity {
         self.identity
+    }
+
+    /// The database settings in effect, for startup reporting.
+    pub fn store_info(&self) -> &StoreInfo {
+        &self.store_info
     }
 
     /// Spawns an engine task. The task keeps the state directory locked
@@ -231,7 +257,12 @@ impl Drop for EngineOwner {
 }
 
 enum Request {
-    Hello(oneshot::Sender<Hello>),
+    Hello(oneshot::Sender<Result<Hello, ProtocolError>>),
+    Execute(
+        Box<CommandEnvelope>,
+        oneshot::Sender<Result<CommandResult, ProtocolError>>,
+    ),
+    Query(Query, oneshot::Sender<Result<QueryResult, ProtocolError>>),
 }
 
 /// Cloneable, bounded request facade. Carries no database or filesystem
@@ -268,7 +299,33 @@ impl EngineHandle {
     pub async fn hello(&self) -> Result<Hello, ProtocolError> {
         let (reply, response) = oneshot::channel();
         self.send(Request::Hello(reply))?;
-        response.await.map_err(|_| shutting_down())
+        response.await.map_err(|_| shutting_down())?
+    }
+
+    /// Runs a command durably. Success is returned only after the command
+    /// committed; a retry with the same idempotency key replays the result.
+    /// `granted` is what the host authenticated the caller for.
+    pub async fn execute(
+        &self,
+        envelope: CommandEnvelope,
+        granted: &[Permission],
+    ) -> Result<CommandResult, ProtocolError> {
+        authorize(envelope.command.required_permission(), granted)?;
+        let (reply, response) = oneshot::channel();
+        self.send(Request::Execute(Box::new(envelope), reply))?;
+        response.await.map_err(|_| shutting_down())?
+    }
+
+    /// Answers a read query.
+    pub async fn query(
+        &self,
+        query: Query,
+        granted: &[Permission],
+    ) -> Result<QueryResult, ProtocolError> {
+        authorize(query.required_permission(), granted)?;
+        let (reply, response) = oneshot::channel();
+        self.send(Request::Query(query, reply))?;
+        response.await.map_err(|_| shutting_down())?
     }
 
     fn send(&self, request: Request) -> Result<(), ProtocolError> {
@@ -288,11 +345,34 @@ fn shutting_down() -> ProtocolError {
     ProtocolError::new(ErrorCode::ShuttingDown, "engine is not running")
 }
 
-/// Serializes requests against engine state.
+fn authorize(required: Permission, granted: &[Permission]) -> Result<(), ProtocolError> {
+    if granted.contains(&required) {
+        Ok(())
+    } else {
+        Err(ProtocolError::new(
+            ErrorCode::PermissionDenied,
+            &format!("requires {required} permission"),
+        ))
+    }
+}
+
+fn now() -> UtcTimestamp {
+    UtcTimestamp::from_system_time(SystemTime::now())
+}
+
+/// Stages every submitted input that has no job yet.
+fn stage_all(store: &mut Store) -> Result<(), StoreError> {
+    let batch = u32::try_from(MAX_SUBMIT_ITEMS).unwrap_or(u32::MAX);
+    while !store.stage_pending(batch, now())?.is_empty() {}
+    Ok(())
+}
+
+/// Serializes requests against engine state. The only owner of the store.
 struct Coordinator {
     identity: Identity,
     inbox: mpsc::Receiver<Request>,
     cancel: CancellationToken,
+    store: Option<Store>,
 }
 
 impl Coordinator {
@@ -302,30 +382,74 @@ impl Coordinator {
                 biased;
                 () = self.cancel.cancelled() => break,
                 request = self.inbox.recv() => match request {
-                    Some(request) => self.handle(request),
+                    Some(request) => self.handle(request).await,
                     None => break,
                 },
             }
         }
     }
 
-    fn handle(&mut self, request: Request) {
+    // A dropped receiver means the caller gave up; there is nothing to do.
+    async fn handle(&mut self, request: Request) {
+        let instance = self.identity.instance;
         match request {
             Request::Hello(reply) => {
-                // A dropped receiver means the caller gave up; nothing to do.
-                let _ = reply.send(Hello {
-                    instance: self.identity.instance,
-                    boot_epoch: self.identity.boot_epoch,
+                let boot_epoch = self.identity.boot_epoch;
+                let head = self.with_store(Store::event_head).await;
+                let _ = reply.send(head.map_err(ProtocolError::from).map(|position| Hello {
+                    instance,
+                    boot_epoch,
                     protocol: ProtocolVersion::CURRENT,
-                    // The durable outbox arrives with the store; until then
-                    // the event sequence is empty.
-                    head: EventCursor {
-                        instance: self.identity.instance,
-                        position: 0,
-                    },
+                    head: EventCursor { instance, position },
                     limits: TransportLimits::DEFAULT,
-                });
+                }));
             }
+            Request::Execute(envelope, reply) => {
+                let result = self
+                    .with_store(move |store| {
+                        let result = store.execute(&envelope, instance, now());
+                        if let Ok(CommandResult::Submitted { .. }) = result {
+                            // The batch is durable whatever happens here;
+                            // links left unstaged are staged at the next start.
+                            let _ = stage_all(store);
+                        }
+                        result
+                    })
+                    .await;
+                let _ = reply.send(result);
+            }
+            Request::Query(query, reply) => {
+                let result = self
+                    .with_store(move |store| store.query(&query, instance))
+                    .await;
+                let _ = reply.send(result);
+            }
+        }
+    }
+
+    /// Runs blocking database work off the async workers. Requests are
+    /// handled one at a time, so the store is never shared.
+    async fn with_store<R: Send + 'static>(
+        &mut self,
+        work: impl FnOnce(&mut Store) -> R + Send + 'static,
+    ) -> R {
+        let mut store = self.store.take().expect("the coordinator owns the store");
+        let joined = tokio::task::spawn_blocking(move || {
+            let out = work(&mut store);
+            (store, out)
+        })
+        .await;
+        match joined {
+            Ok((store, out)) => {
+                self.store = Some(store);
+                out
+            }
+            // A panic in storage code fails the engine task.
+            Err(e) => match e.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                // Only a runtime shutdown cancels blocking work.
+                Err(_) => std::future::pending().await,
+            },
         }
     }
 }
