@@ -9,9 +9,11 @@
 //! awaits [`EngineOwner::shutdown`] before exiting.
 
 pub mod config;
+pub mod fs;
 pub mod lifecycle;
 pub mod state_dir;
 mod store;
+pub mod transfer;
 
 pub use config::{ConfigError, EngineConfig};
 pub use lifecycle::{
