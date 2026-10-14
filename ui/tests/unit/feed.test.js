@@ -324,3 +324,96 @@ test('an inspected job follows events and can be missing', async () => {
   assert.equal(feed.watchedState, 'missing');
   assert.equal(feed.watchedJob, null);
 });
+
+/**
+ * Makes the client's next page read wait until the returned function is
+ * called, answering as the client stood when the read was made.
+ * @param {FakeClient} client
+ */
+function delayNextPageRead(client) {
+  const list = client.listJobs.bind(client);
+  /** @type {() => void} */
+  let release = () => {};
+  client.listJobs = async (request) => {
+    client.listJobs = list;
+    const page = await list(request);
+    await new Promise((resolve) => {
+      release = () => resolve(undefined);
+    });
+    return page;
+  };
+  return () => release();
+}
+
+test('another instance with reused job IDs replaces everything held', async () => {
+  const client = new FakeClient();
+  client.change('job_added', job(1));
+  for (let revision = 2; revision <= 5; revision += 1) {
+    client.change('job_changed', job(1, { stage: 'transferring', revision }));
+  }
+  const feed = await started(client);
+  assert.equal(feed.jobs[0].stage, 'transferring');
+  // A new state directory at the same address, whose job-1 is at a lower
+  // event position.
+  client.live[0].closed = true;
+  client.instance = 'instance-b';
+  client.jobs.clear();
+  client.head = 0;
+  client.change('job_added', job(1, { package: 'pkg-9' }));
+  client.subscriptions[0].sink.end();
+  await settle();
+  assert.equal(feed.status, 'live');
+  assert.deepEqual(feed.jobs, [job(1, { package: 'pkg-9' })]);
+  assert.deepEqual(client.live[0].after, { instance: 'instance-b', position: 1 });
+});
+
+test('a read answered by the previous instance is dropped', async () => {
+  const client = new FakeClient();
+  client.change('job_added', job(1, { stage: 'transferring' }));
+  const feed = await started(client);
+  const release = delayNextPageRead(client);
+  const stale = feed.showPage(null);
+  await settle();
+  client.live[0].closed = true;
+  client.instance = 'instance-b';
+  client.jobs.clear();
+  client.head = 0;
+  client.change('job_added', job(1));
+  client.subscriptions[0].sink.end();
+  await settle();
+  assert.equal(feed.jobs[0].stage, 'queued');
+  release();
+  await stale;
+  assert.equal(feed.jobs[0].stage, 'queued');
+});
+
+test('an older page read never replaces the page chosen after it', async () => {
+  const client = new FakeClient();
+  for (let n = 1; n <= 3; n += 1) client.change('job_added', job(n));
+  const feed = await started(client);
+  const release = delayNextPageRead(client);
+  const second = feed.showPage('job-2');
+  await settle();
+  await feed.showPage(null);
+  release();
+  await second;
+  assert.deepEqual(feed.jobs.map((j) => j.id), ['job-1', 'job-2']);
+  assert.equal(feed.nextAfter, 'job-2');
+
+});
+
+test('of two reads of the same page, the later one stands', async () => {
+  const client = new FakeClient();
+  client.change('job_added', job(1));
+  const feed = await started(client);
+  client.live[0].closed = true;
+  const release = delayNextPageRead(client);
+  const first = feed.showPage(null);
+  await settle();
+  // Added after the first read, and not delivered by the stream.
+  client.change('job_added', job(2));
+  await feed.showPage(null);
+  release();
+  await first;
+  assert.deepEqual(feed.jobs.map((j) => j.id), ['job-1', 'job-2']);
+});

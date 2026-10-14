@@ -113,6 +113,13 @@ export class JobFeed {
     this.subscription = null;
     /** Increases on every start and stop, so stale work gives up. */
     this.run = 0;
+    /** Increases when held state is forgotten, so reads issued before it
+     * are dropped. */
+    this.view = 0;
+    /** Numbers page reads, so an older answer never replaces a newer one. */
+    this.pageRequests = 0;
+    /** The number of the page read last shown. */
+    this.pageShown = 0;
     this.attempt = 0;
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     this.timer = undefined;
@@ -190,7 +197,9 @@ export class JobFeed {
    * @param {JobId} job
    */
   async refresh(job) {
+    const view = this.view;
     const snapshot = await this.client.inspectJob(job);
+    if (!this.answers(view, snapshot.as_of)) return;
     this.hold(snapshot.job, snapshot.as_of.position);
     this.changed();
   }
@@ -218,7 +227,7 @@ export class JobFeed {
         this.setStatus('incompatible');
         return;
       }
-      if (this.hello?.instance !== hello.instance) this.cursor = null;
+      if (this.hello?.instance !== hello.instance) this.forget();
       this.acceptHello(hello);
       if (this.cursor === null) {
         await this.snapshot(run);
@@ -263,6 +272,34 @@ export class JobFeed {
   }
 
   /**
+   * Drops everything held from another engine instance: its event
+   * positions and job IDs mean nothing to the new one. Reads still in
+   * flight are ignored when they answer.
+   */
+  forget() {
+    this.view += 1;
+    this.cursor = null;
+    this.page = new Map();
+    this.pageIds = [];
+    this.pageAfter = null;
+    this.nextAfter = null;
+    this.detail = null;
+    this.watchedState = 'loading';
+    this.samples.clear();
+    this.changed();
+  }
+
+  /**
+   * Whether a read issued while `view` was current, and answered as of
+   * `asOf`, still describes what the feed follows.
+   * @param {number} view
+   * @param {EventCursor} asOf
+   */
+  answers(view, asOf) {
+    return view === this.view && asOf.instance === this.hello?.instance;
+  }
+
+  /**
    * Takes a consistent snapshot of the page and the inspected job, and
    * sets the cursor to the older of their positions; each copy ignores
    * events it already reflects.
@@ -270,7 +307,16 @@ export class JobFeed {
    */
   async snapshot(run) {
     this.cursor = null;
-    const page = await this.loadPage(run);
+    let page;
+    for (let attempt = 1; page === undefined; attempt += 1) {
+      // Undefined if the read is no longer wanted, such as when a newer
+      // page read answered first; read again.
+      page = await this.loadPage(run);
+      if (run !== this.run) return;
+      if (page === undefined && attempt >= SNAPSHOT_ATTEMPTS) {
+        throw new WayfetchError('unavailable', 'no consistent snapshot');
+      }
+    }
     const detail = await this.loadDetail(run);
     if (run !== this.run || page === undefined) return;
     const instance = /** @type {Hello} */ (this.hello).instance;
@@ -278,14 +324,21 @@ export class JobFeed {
   }
 
   /**
-   * Loads the current page; returns the position it reflects.
+   * Loads the current page; returns the position it reflects, or nothing
+   * if the answer is no longer wanted: another page was chosen meanwhile,
+   * a later read of it answered first, or the instance changed.
    * @param {number} run
    */
   async loadPage(run) {
+    const request = ++this.pageRequests;
+    const after = this.pageAfter;
+    const view = this.view;
     for (let attempt = 1; ; attempt += 1) {
-      const page = await this.client.listJobs({ after: this.pageAfter, pageSize: this.pageSize });
-      if (run !== this.run) return undefined;
+      const page = await this.client.listJobs({ after, pageSize: this.pageSize });
+      if (run !== this.run || !this.answers(view, page.as_of)) return undefined;
+      if (after !== this.pageAfter || request < this.pageShown) return undefined;
       if (this.isBehind(page.as_of) && attempt < SNAPSHOT_ATTEMPTS) continue;
+      this.pageShown = request;
       const position = page.as_of.position;
       this.page = new Map(
         page.items.map((job) => [job.id, newer(this.page.get(job.id), job, position)]),
@@ -305,6 +358,7 @@ export class JobFeed {
    */
   async loadDetail(run) {
     const job = this.watched;
+    const view = this.view;
     if (job === null) return undefined;
     for (let attempt = 1; ; attempt += 1) {
       let snapshot;
@@ -312,12 +366,14 @@ export class JobFeed {
         snapshot = await this.client.inspectJob(job);
       } catch (error) {
         if (/** @type {WayfetchError} */ (error).code !== 'not_found') throw error;
-        if (run !== this.run || job !== this.watched) return undefined;
+        if (run !== this.run || view !== this.view || job !== this.watched) return undefined;
         this.watchedState = 'missing';
         this.changed();
         return undefined;
       }
-      if (run !== this.run || job !== this.watched) return undefined;
+      if (run !== this.run || !this.answers(view, snapshot.as_of) || job !== this.watched) {
+        return undefined;
+      }
       if (this.isBehind(snapshot.as_of) && attempt < SNAPSHOT_ATTEMPTS) continue;
       this.detail = newer(this.detail, snapshot.job, snapshot.as_of.position);
       this.watchedState = 'ready';
@@ -425,6 +481,7 @@ export class JobFeed {
     this.subscription?.close();
     this.subscription = null;
     this.cursor = null;
+    clearInterval(this.refresher);
     void this.connect(run);
   }
 

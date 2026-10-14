@@ -91,15 +91,30 @@ class BrowserShell {
     this.downloads?.stop();
     const downloads = new Downloads(this.client, { onSignedOut: () => this.signedOut() });
     this.downloads = downloads;
+    const signOutError = h('span', { class: 'message error', role: 'alert' });
     const signOut = h(
       'button',
       {
         type: 'button',
         class: 'secondary',
-        onclick: async () => {
-          downloads.stop();
-          this.downloads = null;
-          await this.client.logout().catch(() => {});
+        onclick: async (/** @type {MouseEvent} */ event) => {
+          const button = /** @type {HTMLButtonElement} */ (event.currentTarget);
+          button.disabled = true;
+          signOutError.textContent = '';
+          try {
+            await this.client.logout();
+          } catch (error) {
+            // The session may still be live, so do not claim otherwise.
+            button.disabled = false;
+            signOutError.textContent =
+              `Signing out failed: ${/** @type {Error} */ (error).message} ` +
+              'You may still be signed in. Try again.';
+            return;
+          }
+          if (this.downloads === downloads) {
+            downloads.stop();
+            this.downloads = null;
+          }
           this.login('You are signed out. Downloads keep running on the server.');
         },
       },
@@ -113,6 +128,7 @@ class BrowserShell {
         h('strong', { class: 'brand' }, 'Wayfetch'),
         downloads.status,
         h('span', { class: 'user' }, status.username ?? ''),
+        signOutError,
         signOut,
       ),
       downloads.element,

@@ -69,12 +69,10 @@ export class HttpClient {
     return this.signedIn(await this.request('POST', '/v1/auth/login', { body, auth: false }));
   }
 
+  /** Ends the session. If this fails, the session may still be live. */
   async logout() {
-    try {
-      await this.request('POST', '/v1/auth/logout', { auth: false });
-    } finally {
-      this.csrf = null;
-    }
+    await this.request('POST', '/v1/auth/logout', { auth: false });
+    this.csrf = null;
   }
 
   /**

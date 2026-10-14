@@ -110,7 +110,7 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   // memory, asks to sign in again; the download carries on.
   await daemon.stop();
   await expect(page.locator('header .status')).toHaveText('Reconnecting…');
-  await expect(page.getByRole('alert')).toContainText('Downloads continue on the server');
+  await expect(page.getByRole('alert').filter({ hasText: 'Downloads continue on the server' })).toBeVisible();
   await daemon.start();
   await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
   await expect(page.getByText('Your session ended')).toBeVisible();
@@ -157,6 +157,14 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await page.getByLabel('Password').fill(PASSWORD);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expectState(page, 'job-2', 'cancelled');
+
+  // A sign-out that fails says so, keeps the session, and can be retried.
+  await page.route('**/v1/auth/logout', (route) => route.abort());
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Signing out failed' })).toBeVisible();
+  await page.reload();
+  await expectState(page, 'job-2', 'cancelled');
+  await page.unroute('**/v1/auth/logout');
 
   // Signing out ends the session; the jobs stay.
   await page.getByRole('button', { name: 'Sign out' }).click();
