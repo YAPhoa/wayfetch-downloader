@@ -5,16 +5,19 @@
 //! queries, and subscriptions and nothing more: validation, idempotency,
 //! revision checks, authorization of each operation, and event replay all
 //! happen in the engine, exactly as for every other host. The adapter owns
-//! what is specific to HTTP: bearer-token authentication, request and
-//! connection bounds, server-sent events, and a graceful drain.
+//! what is specific to HTTP: bearer-token authentication, browser sign-in
+//! and sessions with their origin and CSRF checks, request and connection
+//! bounds, server-sent events, and a graceful drain.
 //!
 //! Nothing a client does with a connection reaches job execution. A closed
 //! connection or event stream ends only that connection; accepted jobs
 //! keep running until a command says otherwise.
 
 mod auth;
+mod browser;
 mod error;
 mod routes;
+mod secret;
 mod server;
 
 use std::future::Future;
@@ -32,6 +35,9 @@ use tokio_util::sync::CancellationToken;
 use wayfetch_engine::EngineHandle;
 
 pub use auth::{TokenFileError, Tokens};
+pub use browser::{
+    BrowserAuth, BrowserAuthError, BrowserConfig, CSRF_HEADER, SetupIssued, reset_owner,
+};
 pub use routes::cursor_id;
 
 /// A host's own readiness condition, beyond the engine's: for example,
@@ -99,6 +105,7 @@ impl Default for ApiLimits {
 pub struct Api {
     engine: EngineHandle,
     tokens: Tokens,
+    browser: Option<Arc<BrowserAuth>>,
     limits: ApiLimits,
     readiness_check: Option<ReadinessCheck>,
     shutdown: CancellationToken,
@@ -108,6 +115,7 @@ impl std::fmt::Debug for Api {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Api")
             .field("limits", &self.limits)
+            .field("browser", &self.browser.is_some())
             .field("readiness_check", &self.readiness_check.is_some())
             .finish_non_exhaustive()
     }
@@ -119,6 +127,7 @@ impl Api {
         Self {
             engine,
             tokens,
+            browser: None,
             limits,
             readiness_check: None,
             shutdown: CancellationToken::new(),
@@ -132,12 +141,23 @@ impl Api {
         self
     }
 
-    /// The routes. Every route but `/v1/ready` requires a bearer token;
-    /// readiness answers anyone, so a container health check needs no
-    /// credential, and it reveals only whether the instance is ready.
+    /// Also admits browsers signed in as the owner through `browser`.
+    #[must_use]
+    pub fn browser_access(mut self, browser: BrowserAuth) -> Self {
+        self.browser = Some(Arc::new(browser));
+        self
+    }
+
+    /// The routes. Every route but `/v1/ready` and `/v1/auth/*` requires a
+    /// bearer token or an owner session. Readiness answers anyone, so a
+    /// container health check needs no credential, and it reveals only
+    /// whether the instance is ready. The auth routes are how a browser
+    /// gets a session.
     fn router(&self) -> Router {
         let state = routes::AppState {
             engine: self.engine.clone(),
+            tokens: Arc::new(self.tokens.clone()),
+            browser: self.browser.clone(),
             streams: Arc::new(Semaphore::new(self.limits.max_event_streams.get())),
             shutdown: self.shutdown.clone(),
             keep_alive: self.limits.keep_alive,
@@ -154,10 +174,18 @@ impl Api {
             .route("/v1/jobs/{id}/commands", post(routes::job_command))
             .route("/v1/events", get(routes::events))
             .route_layer(middleware::from_fn_with_state(
-                Arc::new(self.tokens.clone()),
+                state.clone(),
                 auth::authenticate,
             ))
             .route("/v1/ready", get(routes::ready))
+            .merge(
+                Router::new()
+                    .route("/v1/auth/session", get(browser::routes::session))
+                    .route("/v1/auth/setup", post(browser::routes::setup))
+                    .route("/v1/auth/login", post(browser::routes::login))
+                    .route("/v1/auth/logout", post(browser::routes::logout))
+                    .layer(middleware::map_response(browser::routes::no_store)),
+            )
             .layer(DefaultBodyLimit::max(self.limits.max_body_bytes))
             .with_state(state)
     }
