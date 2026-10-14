@@ -143,12 +143,14 @@ async fn checks(app: &AppState) -> Option<&'static str> {
 /// The body of `POST /v1/inputs`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SubmitRequest {
     idempotency_key: IdempotencyKey,
     target: InstanceId,
     /// Raw, so each URL is validated with its own error code and position.
     items: Vec<String>,
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
     package: Option<PackageId>,
 }
 
@@ -185,6 +187,7 @@ pub async fn submit(
 /// A job command's action.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Action {
     Pause,
     Resume,
@@ -194,6 +197,7 @@ pub enum Action {
 /// The body of `POST /v1/jobs/{id}/commands`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct JobCommandRequest {
     idempotency_key: IdempotencyKey,
     target: InstanceId,

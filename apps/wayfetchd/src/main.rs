@@ -49,10 +49,12 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_PROBE_BYTES: u64 = 16 * 1024;
 
 /// The web UI's source files, served as they are: the UI has no build
-/// step, so building the daemon needs no JavaScript tooling.
+/// step, so building the daemon needs no JavaScript tooling. TypeScript
+/// declarations are only for type checking.
 #[derive(Embed)]
 #[folder = "../../ui/src"]
 #[exclude = "**/.gitkeep"]
+#[exclude = "**/*.ts"]
 struct UiFiles;
 
 /// The embedded web UI.
@@ -476,7 +478,7 @@ mod tests {
         let ui = ui_assets().expect("ui/src has an index.html");
         assert_eq!(ui.version().len(), 16);
         assert!(UiFiles::get("main.js").is_some());
-        assert!(UiFiles::iter().all(|path| !path.ends_with(".gitkeep")));
+        assert!(UiFiles::iter().all(|path| !path.ends_with(".gitkeep") && !path.ends_with(".ts")));
     }
 
     #[test]

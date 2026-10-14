@@ -465,7 +465,7 @@ every push and pull request:
 ```sh
 cargo fmt --all -- --check                                   # formatting
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-features
+cargo test --locked --workspace --all-features               # also writes UI types
 cargo build --locked -p wayfetch-engine                      # engine alone
 python3 scripts/check_dependency_boundaries.py               # crate boundaries
 python3 -m unittest discover -s scripts                       # tests for the check
@@ -485,6 +485,13 @@ cargo build --locked -p wayfetchd && npm run e2e  # real browser
 ```
 
 `npx playwright install chromium` fetches the browser if Playwright has none.
+
+The UI's types for the API's JSON are generated from the Rust definitions by
+[ts-rs](https://github.com/Aleph-Alpha/ts-rs), behind each wire crate's `ts`
+feature. Tests with that feature (as in `--all-features` above) write them to
+`ui/src/client/generated`, where `npm run check` reads them; commit them
+with the Rust change. CI regenerates them from scratch and fails if they
+differ from the committed files.
 
 The container tests need Docker with the Compose plugin, so they are ignored
 by default. They build `wayfetch:local` with `docker build` first, or test

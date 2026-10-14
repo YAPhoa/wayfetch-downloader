@@ -27,6 +27,7 @@ macro_rules! define_counter {
             derive(serde::Serialize, serde::Deserialize),
             serde(try_from = "u64", into = "u64")
         )]
+        #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
         pub struct $name(NonZeroU64);
 
         impl $name {

@@ -3,9 +3,9 @@
 // never `fetch` or desktop IPC, so the browser and the desktop shell run
 // the same views over different transports.
 //
-// The data types mirror `wayfetch-protocol`'s JSON. A transport passes
-// engine JSON through unchanged and reports failures as `WayfetchError`
-// with the protocol's error code.
+// The data types are `wayfetch-protocol`'s JSON. A transport passes engine
+// JSON through unchanged and reports failures as `WayfetchError` with the
+// protocol's error code.
 
 /**
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
@@ -14,57 +14,23 @@
 export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
 
 /**
- * @typedef {`job-${number}`} JobId
- * @typedef {{ major: number, minor: number }} ProtocolVersion
- * @typedef {{ instance: string, position: number }} EventCursor
- * @typedef {{ max_page_size: number, max_submit_items: number, max_url_bytes: number }} TransportLimits
- * @typedef {{
- *   instance: string,
- *   boot_epoch: number,
- *   protocol: ProtocolVersion,
- *   head: EventCursor,
- *   limits: TransportLimits,
- * }} Hello
- * @typedef {'queued' | 'resolving' | 'transferring' | 'verifying' | 'publishing' | 'recovering'
- *   | 'waiting' | 'needs_input' | 'paused' | 'blocked' | 'complete' | 'failed' | 'cancelled'} JobStage
- * @typedef {'running' | 'paused' | 'cancelled'} DesiredState
- * @typedef {JobStage | 'pausing' | 'stopping'} DisplayState
- * @typedef {{ code: string, retry_at?: number, message?: string }} FailureSummary
- * @typedef {{ root: string, path: string, size: number }} ArtifactSummary
- * @typedef {{
- *   id: JobId,
- *   package: string,
- *   stage: JobStage,
- *   desired: DesiredState,
- *   display: DisplayState,
- *   revision: number,
- *   generation: number,
- *   bytes_done: number,
- *   bytes_total?: number,
- *   failure?: FailureSummary,
- *   artifact?: ArtifactSummary,
- * }} JobSummary
- * @typedef {{ items: JobSummary[], next_after?: JobId, as_of: EventCursor }} JobPage
- * @typedef {{ job: JobSummary, as_of: EventCursor }} JobSnapshot
- * @typedef {{ type: 'submitted', batch: string, accepted: number }
- *   | { type: 'job_updated', job: JobId, revision: number, changed: boolean }} CommandResult
- * @typedef {{ type: 'batch_accepted', batch: string, accepted: number }
- *   | { type: 'job_added', job: JobSummary }
- *   | { type: 'job_changed', job: JobSummary }} EventKind
- * @typedef {{
- *   boot_epoch: number,
- *   job: JobId,
- *   generation: number,
- *   bytes_received: number,
- *   bytes_total?: number,
- *   bytes_per_second: number,
- * }} ProgressSample
- * @typedef {'unknown_instance' | 'cursor_expired' | 'cursor_ahead' | 'lagged'} ResyncReason
- * @typedef {({ type: 'hello' } & Hello)
- *   | { type: 'event', cursor: EventCursor, kind: EventKind }
- *   | ({ type: 'progress' } & ProgressSample)
- *   | { type: 'resync', reason: ResyncReason }} StreamItem
- * @typedef {'pause' | 'resume' | 'cancel'} JobAction
+ * The wire types, generated from their Rust definitions by ts-rs into
+ * `./generated` (see the README's web UI section).
+ * @typedef {import('./generated/JobId.js').JobId} JobId
+ * @typedef {import('./generated/ProtocolVersion.js').ProtocolVersion} ProtocolVersion
+ * @typedef {import('./generated/EventCursor.js').EventCursor} EventCursor
+ * @typedef {import('./generated/Hello.js').Hello} Hello
+ * @typedef {import('./generated/JobStage.js').JobStage} JobStage
+ * @typedef {import('./generated/DisplayState.js').DisplayState} DisplayState
+ * @typedef {import('./generated/JobSummary.js').JobSummary} JobSummary
+ * @typedef {import('./generated/Page.js').Page<JobSummary>} JobPage
+ * @typedef {import('./generated/QueryResult.js').QueryResult} QueryResult
+ * @typedef {Omit<Extract<QueryResult, { type: 'job' }>, 'type'>} JobSnapshot
+ * @typedef {import('./generated/CommandResult.js').CommandResult} CommandResult
+ * @typedef {import('./generated/ProgressSample.js').ProgressSample} ProgressSample
+ * @typedef {import('./generated/StreamItem.js').StreamItem} StreamItem
+ * @typedef {import('./generated/ErrorCode.js').ErrorCode} ErrorCode
+ * @typedef {import('./generated/Action.js').Action} JobAction
  */
 
 /**
@@ -94,6 +60,10 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
  */
 
 /**
+ * @typedef {ErrorCode | 'unauthenticated' | 'unavailable' | 'incompatible_client'} WayfetchErrorCode
+ */
+
+/**
  * A failed request. `code` is the protocol's `ErrorCode`, or one of the
  * client-side codes:
  *
@@ -104,7 +74,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
  */
 export class WayfetchError extends Error {
   /**
-   * @param {string} code
+   * @param {WayfetchErrorCode} code
    * @param {string} message
    * @param {{ currentRevision?: number, retryAfter?: number }} [details]
    */

@@ -13,14 +13,12 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/contract.js').EventCursor} EventCursor
  * @typedef {import('../client/contract.js').StreamSink} StreamSink
  * @typedef {import('../client/contract.js').JobId} JobId
- *
- * What the server says about a browser's session.
- * @typedef {{
- *   setup_required: boolean,
- *   authenticated: boolean,
- *   username?: string,
- *   csrf_token?: string,
- * }} SessionStatus
+ * @typedef {import('../client/contract.js').JobAction} JobAction
+ * @typedef {import('../client/generated/SessionStatus.js').SessionStatus} SessionStatus
+ * @typedef {import('../client/generated/SetupRequest.js').SetupRequest} SetupRequest
+ * @typedef {import('../client/generated/LoginRequest.js').LoginRequest} LoginRequest
+ * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
+ * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
  */
 
 /** Server-sent event types, as `wayfetch-api` names them. */
@@ -57,6 +55,7 @@ export class HttpClient {
    * @param {{ setupSecret: string, username: string, password: string }} request
    */
   async setup({ setupSecret, username, password }) {
+    /** @type {SetupRequest} */
     const body = { setup_secret: setupSecret, username, password };
     return this.signedIn(await this.request('POST', '/v1/auth/setup', { body, auth: false }));
   }
@@ -65,6 +64,7 @@ export class HttpClient {
    * @param {{ username: string, password: string }} request
    */
   async login({ username, password }) {
+    /** @type {LoginRequest} */
     const body = { username, password };
     return this.signedIn(await this.request('POST', '/v1/auth/login', { body, auth: false }));
   }
@@ -106,15 +106,17 @@ export class HttpClient {
 
   /** @param {{ idempotencyKey: string, target: string, items: string[] }} request */
   submit({ idempotencyKey, target, items }) {
+    /** @type {SubmitRequest} */
     const body = { idempotency_key: idempotencyKey, target, items };
     return this.request('POST', '/v1/inputs', { body });
   }
 
   /**
    * @param {JobId} job
-   * @param {{ idempotencyKey: string, target: string, action: string, expectedRevision: number }} request
+   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number }} request
    */
   jobCommand(job, { idempotencyKey, target, action, expectedRevision }) {
+    /** @type {JobCommandRequest} */
     const body = {
       idempotency_key: idempotencyKey,
       target,

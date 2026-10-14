@@ -25,7 +25,13 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 tokio-util.workspace = true
+ts-rs = { workspace = true, optional = true }
 url.workspace = true
+
+[features]
+# TypeScript declarations of the request and session types, for the UI.
+# `cargo test --features ts` writes them (see .cargo/config.toml).
+ts = ["dep:ts-rs", "wayfetch-engine/ts"]
 
 [dev-dependencies]
 tempfile.workspace = true

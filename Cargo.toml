@@ -57,6 +57,11 @@ thiserror = "2.0.17"
 tokio = { version = "1.53.2", default-features = false }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7.20", default-features = false }
+# TypeScript declarations for the UI. ts-rs cannot follow serde's
+# `try_from`/`from`/`into`; every type using them either has the same shape
+# as its conversion target or names its TypeScript type with `#[ts(type)]`,
+# so its warnings about them are silenced.
+ts-rs = { version = "12.0.1", default-features = false, features = ["serde-compat", "no-serde-warnings"] }
 url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.28.0", features = ["serde", "v4"] }
 

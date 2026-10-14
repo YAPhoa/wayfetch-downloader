@@ -17,6 +17,7 @@ use crate::event::EventCursor;
 /// directory and never reused; it survives restarts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct InstanceId(Uuid);
 
 impl InstanceId {
@@ -51,6 +52,7 @@ impl std::fmt::Display for InstanceId {
 /// major version, because an older client cannot decode it. Extending those
 /// vocabularies within a major version needs capability negotiation first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProtocolVersion {
     /// Incompatible changes.
     pub major: u16,
@@ -73,6 +75,7 @@ impl ProtocolVersion {
 /// Size limits a client must respect. Requests over a limit are rejected
 /// with [`crate::ErrorCode::LimitExceeded`], never truncated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct TransportLimits {
     /// Maximum items per page.
     pub max_page_size: u16,
@@ -93,6 +96,7 @@ impl TransportLimits {
 
 /// The first message on every connection and subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Hello {
     /// The instance the client is connected to.
     pub instance: InstanceId,

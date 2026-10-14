@@ -54,7 +54,15 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --locked --workspace --all-features
+        # Also writes the web UI's TypeScript declarations of the wire types,
+        # from scratch so a removed type leaves no stale file.
+        run: |
+          rm -r ui/src/client/generated
+          cargo test --locked --workspace --all-features
+      - name: Web UI wire types match the Rust definitions
+        run: |
+          git add --intent-to-add ui/src/client/generated
+          git diff --exit-code -- ui/src/client/generated
       - name: Engine-only build
         run: cargo build --locked -p wayfetch-engine
       - name: Dependency boundaries

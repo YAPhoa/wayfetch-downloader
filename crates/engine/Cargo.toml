@@ -32,6 +32,8 @@ fail = { version = "0.5.1", optional = true }
 # Named crash-injection boundaries for process-kill tests (architecture brief
 # section 13.2). Test-only: no host enables it.
 failpoints = ["dep:fail", "fail/failpoints"]
+# TypeScript declarations of the protocol's wire types, for the UI.
+ts = ["wayfetch-protocol/ts"]
 
 [dev-dependencies]
 tempfile.workspace = true

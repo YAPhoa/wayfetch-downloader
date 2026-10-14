@@ -121,6 +121,7 @@ impl Query {
 
 /// The most recent failure of a job, as shown to clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct FailureSummary {
     /// Stable code.
     pub code: FailureCode,
@@ -135,6 +136,7 @@ pub struct FailureSummary {
 /// A job's client-visible state. Durable fields only; live transfer rate is
 /// in progress samples.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct JobSummary {
     /// The job.
     pub id: JobId,
@@ -165,6 +167,7 @@ pub struct JobSummary {
 
 /// A file a job published.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ArtifactSummary {
     /// The destination root holding it.
     pub root: RootId,
@@ -176,6 +179,7 @@ pub struct ArtifactSummary {
 
 /// One page of a list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Page<T> {
     /// The items, at most the requested page size.
     pub items: Vec<T>,
@@ -190,6 +194,7 @@ pub struct Page<T> {
 /// A query's answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum QueryResult {
     /// Answer to [`Query::InspectJob`].
     Job {

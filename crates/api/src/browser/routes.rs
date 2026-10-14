@@ -27,6 +27,7 @@ use crate::routes::{AppState, JsonBody};
 
 /// What a browser learns about its session.
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SessionStatus {
     /// No owner account exists yet.
     setup_required: bool,
@@ -34,16 +35,19 @@ pub struct SessionStatus {
     authenticated: bool,
     /// The owner's name, when authenticated.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     username: Option<String>,
     /// The value state-changing requests repeat in `X-CSRF-Token`, when
     /// authenticated.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     csrf_token: Option<String>,
 }
 
 /// The body of `POST /v1/auth/setup`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SetupRequest {
     setup_secret: String,
     username: String,
@@ -53,6 +57,7 @@ pub struct SetupRequest {
 /// The body of `POST /v1/auth/login`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct LoginRequest {
     username: String,
     password: String,
