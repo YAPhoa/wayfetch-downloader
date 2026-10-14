@@ -623,3 +623,33 @@ async fn a_stalled_reader_cannot_block_shutdown() {
         assert!(next.status.success(), "{}", next.stderr);
     }
 }
+
+/// A reader that closes standard output ends the session as soon as a
+/// write fails, without waiting for more input; standard input stays open.
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_standard_output_ends_the_session() {
+    let dirs = Dirs::new();
+    assert!(dirs.init_root().status.success());
+    let mut process = run_command(&dirs, &[], true).spawn().unwrap();
+    let mut stdout = BufReader::new(process.stdout.take().unwrap()).lines();
+    let ready = tokio::time::timeout(DEADLINE, stdout.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(ready.contains(r#""type":"ready""#), "{ready}");
+    drop(stdout);
+    // One command whose answer can no longer be written.
+    let mut stdin = process.stdin.take().unwrap();
+    stdin.write_all(b"help\n").await.unwrap();
+    stdin.flush().await.unwrap();
+
+    tokio::time::timeout(DEADLINE, process.wait())
+        .await
+        .expect("the session exits with standard input still open")
+        .unwrap();
+    // The engine released its state directory.
+    let next = Session::spawn(&dirs, &[], true).finish().await;
+    assert!(next.status.success(), "{}", next.stderr);
+    drop(stdin);
+}

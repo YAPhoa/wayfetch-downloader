@@ -11,6 +11,8 @@ use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::Duration;
 
+use tokio::sync::watch;
+
 use serde::Serialize;
 use wayfetch_engine::ShutdownReport;
 use wayfetch_engine::domain::id::{BatchId, JobId};
@@ -262,6 +264,8 @@ pub struct Terminal {
     queue: SyncSender<(Stream, String)>,
     /// Disconnects when the writer thread ends.
     done: Receiver<()>,
+    /// Closes when the writer thread ends, waking async waiters.
+    ended: watch::Receiver<()>,
     /// Lines dropped since the last one queued.
     dropped: Cell<u64>,
 }
@@ -276,18 +280,31 @@ impl Terminal {
     pub fn start() -> Self {
         let (queue, lines) = mpsc::sync_channel(QUEUE_LINES);
         let (alive, done) = mpsc::sync_channel(0);
+        let (running, ended) = watch::channel(());
         std::thread::Builder::new()
             .name("wayfetch-output".into())
             .spawn(move || {
-                let _alive = alive;
+                // Dropped when the thread ends, however it ends.
+                let _alive = (alive, running);
                 write_lines(&lines);
             })
             .expect("spawn the output thread");
         Self {
             queue,
             done,
+            ended,
             dropped: Cell::new(0),
         }
+    }
+
+    /// Completes once the writer thread has ended, which before
+    /// [`Terminal::finish`] means standard output failed, for example
+    /// because its reader closed it.
+    pub async fn closed(&self) {
+        let mut ended = self.ended.clone();
+        // Nothing is ever sent, so this returns only once the sender is
+        // gone.
+        let _ = ended.changed().await;
     }
 
     /// Queues `text` as a line on `stream`. Returns whether it was queued
@@ -349,6 +366,11 @@ impl<'a> Printer<'a> {
         Self { json, terminal }
     }
 
+    /// See [`Terminal::closed`].
+    pub async fn closed(&self) {
+        self.terminal.closed().await;
+    }
+
     /// Queues `output` without waiting. In text mode, problems go to
     /// standard error. Output that does not fit is dropped and reported
     /// once there is room again. Fails only once standard output is closed.
@@ -395,9 +417,11 @@ mod tests {
     fn a_full_queue_drops_output_and_reports_it_when_there_is_room() {
         let (queue, lines) = mpsc::sync_channel(2);
         let (_alive, done) = mpsc::sync_channel(0);
+        let (_running, ended) = watch::channel(());
         let terminal = Terminal {
             queue,
             done,
+            ended,
             dropped: Cell::new(0),
         };
         let printer = Printer::new(true, &terminal);

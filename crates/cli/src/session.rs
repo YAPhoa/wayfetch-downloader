@@ -163,6 +163,7 @@ impl Session<'_> {
                     // Input first, so `quit` wins over a stream of events.
                     biased;
                     () = signals.recv() => return Err(Stop("interrupted")),
+                    () = self.printer.closed() => return Err(Stop("output closed")),
                     line = lines.recv() => match line {
                         None => return Err(Stop("end of input")),
                         Some(line) => {
