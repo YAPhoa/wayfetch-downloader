@@ -59,8 +59,9 @@ pub enum WriteError {
 pub enum StreamEnd {
     /// The body ended and every written byte was certified.
     Finished,
-    /// Cancellation was requested. Bytes written since the last checkpoint
-    /// are not certified; the caller may still [`IntervalWriter::checkpoint`]
+    /// Cancellation was requested. Bytes written since the last delivered
+    /// checkpoint, including one dropped while waiting to send, are not
+    /// certified; the caller may still [`IntervalWriter::checkpoint`] them
     /// for a pause, which keeps the generation.
     Cancelled,
 }
@@ -118,13 +119,44 @@ impl IntervalWriter {
     /// checkpoint, or returns `None` if there are none. The store commits
     /// them; only then are they restart-durable.
     pub async fn checkpoint(&mut self) -> Result<Option<SyncedRanges>, WriteError> {
+        let synced = self.certify().await?;
+        self.certified = self.position;
+        Ok(synced)
+    }
+
+    /// Synchronizes the file and certifies the bytes since the last
+    /// delivered checkpoint, without marking them delivered.
+    async fn certify(&self) -> Result<Option<SyncedRanges>, WriteError> {
         if self.position == self.certified {
             return Ok(None);
         }
         let (file, range) = (self.file.clone(), self.certified..self.position);
-        let synced = blocking(move || file.sync_ranges(vec![range])).await?;
-        self.certified = self.position;
-        Ok(Some(synced))
+        blocking(move || file.sync_ranges(vec![range]))
+            .await
+            .map(Some)
+    }
+
+    /// Certifies and sends the bytes since the last delivered checkpoint.
+    /// They count as delivered only once the channel accepted them, so a
+    /// certificate dropped by cancellation is certified again by the next
+    /// [`IntervalWriter::checkpoint`]. Returns `false` if cancelled.
+    async fn deliver(
+        &mut self,
+        checkpoints: &mpsc::Sender<SyncedRanges>,
+        cancel: &CancellationToken,
+    ) -> Result<bool, WriteError> {
+        let position = self.position;
+        let Some(synced) = self.certify().await? else {
+            return Ok(true);
+        };
+        let sent = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Ok(false),
+            sent = checkpoints.send(synced) => sent,
+        };
+        sent.map_err(|_| WriteError::CheckpointsClosed)?;
+        self.certified = position;
+        Ok(true)
     }
 
     /// Streams `source` into the interval until the body ends or `cancel`
@@ -151,9 +183,7 @@ impl IntervalWriter {
             };
             let Some(chunk) = chunk else { break };
             self.write(chunk).await?;
-            if self.position - self.certified >= every
-                && let Some(synced) = self.checkpoint().await?
-                && !send(checkpoints, synced, cancel).await?
+            if self.position - self.certified >= every && !self.deliver(checkpoints, cancel).await?
             {
                 return Ok(StreamEnd::Cancelled);
             }
@@ -166,25 +196,10 @@ impl IntervalWriter {
                 end,
             });
         }
-        if let Some(synced) = self.checkpoint().await?
-            && !send(checkpoints, synced, cancel).await?
-        {
+        if !self.deliver(checkpoints, cancel).await? {
             return Ok(StreamEnd::Cancelled);
         }
         Ok(StreamEnd::Finished)
-    }
-}
-
-/// Sends a checkpoint, or returns `false` if cancelled while waiting.
-async fn send(
-    checkpoints: &mpsc::Sender<SyncedRanges>,
-    synced: SyncedRanges,
-    cancel: &CancellationToken,
-) -> Result<bool, WriteError> {
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => Ok(false),
-        sent = checkpoints.send(synced) => sent.map(|()| true).map_err(|_| WriteError::CheckpointsClosed),
     }
 }
 
@@ -360,6 +375,35 @@ mod tests {
         }
         assert_eq!(task.await.unwrap().unwrap(), StreamEnd::Finished);
         assert_eq!(certified, vec![0..1, 1..2, 2..3]);
+    }
+
+    #[tokio::test]
+    #[expect(clippy::single_range_in_vec_init, reason = "lists of one byte range")]
+    async fn a_checkpoint_dropped_by_cancellation_is_certified_again() {
+        let (_tmp, _root, file) = staging();
+        let (tx, mut rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let mut body = Stalls(Chunks::of(&[b"a", b"b"]), pulled.clone());
+        let mut writer = IntervalWriter::new(file, 0, None);
+        let task = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let end = writer.stream(&mut body, &cancel, &tx, 1).await;
+                (end, writer)
+            })
+        };
+        // The first certificate fills the channel; the second waits to be
+        // sent when cancellation arrives.
+        reaches(&pulled, 2).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+        let (end, mut writer) = task.await.unwrap();
+        assert_eq!(end.unwrap(), StreamEnd::Cancelled);
+        assert_eq!(rx.recv().await.unwrap().ranges(), &[0..1]);
+        // The dropped certificate's bytes are certified by the pause.
+        let synced = writer.checkpoint().await.unwrap().unwrap();
+        assert_eq!(synced.ranges(), &[1..2]);
     }
 
     #[tokio::test]

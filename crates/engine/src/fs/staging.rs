@@ -52,6 +52,12 @@ impl StagingFile {
         sys::write_all_at(&self.file, buf, offset)
     }
 
+    /// Cuts the file to `len` bytes. Only for publication, while the file is
+    /// still private. Blocking.
+    pub(super) fn set_len(&self, len: u64) -> io::Result<()> {
+        self.file.set_len(len)
+    }
+
     /// Synchronizes the file's data to stable storage. Blocking.
     pub fn sync_data(&self) -> io::Result<()> {
         self.file.sync_data()

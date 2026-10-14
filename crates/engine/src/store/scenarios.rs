@@ -537,7 +537,7 @@ fn publication_reserves_its_target_and_completes_the_job() {
         .unwrap();
 
     let file = f.files.remove(&(job, generation)).unwrap();
-    f.root.publish(file, &intent.target).unwrap();
+    f.root.publish(file, &intent.target, intent.size).unwrap();
     f.store.complete_publication(job, generation, NOW).unwrap();
     assert_eq!(f.summary(job).stage, JobStage::Complete);
     assert_eq!(f.store.pending_publication(job).unwrap(), None);
@@ -564,7 +564,7 @@ fn a_valid_empty_file_publishes_without_coverage() {
         .begin_publication(job, generation, &path("empty.txt"), 0, NOW)
         .unwrap();
     let file = f.files.remove(&(job, generation)).unwrap();
-    f.root.publish(file, &path("empty.txt")).unwrap();
+    f.root.publish(file, &path("empty.txt"), 0).unwrap();
     f.store.complete_publication(job, generation, NOW).unwrap();
     assert_eq!(
         std::fs::metadata(f.root_dir.path().join("empty.txt"))
@@ -591,17 +591,17 @@ fn restart_during_publication_reconciles_from_the_intent() {
     let intent = f.store.pending_publication(job).unwrap().unwrap();
     assert_eq!(
         f.root
-            .reconcile_publication(&intent.staging, &intent.target)
+            .reconcile_publication(&intent.staging, &intent.target, intent.size)
             .unwrap(),
         PublicationCheck::NotPublished
     );
     // The old generation can no longer complete it.
     assert!(f.store.complete_publication(job, generation, NOW).is_err());
     let file = f.root.reopen_staging(&intent.staging, intent.size).unwrap();
-    f.root.publish(file, &intent.target).unwrap();
+    f.root.publish(file, &intent.target, intent.size).unwrap();
     assert_eq!(
         f.root
-            .reconcile_publication(&intent.staging, &intent.target)
+            .reconcile_publication(&intent.staging, &intent.target, intent.size)
             .unwrap(),
         PublicationCheck::Published
     );
@@ -619,11 +619,11 @@ fn a_conflicting_target_releases_the_reservation() {
         .begin_publication(job, generation, &path("a.bin"), 4, NOW)
         .unwrap();
     let file = f.files.remove(&(job, generation)).unwrap();
-    assert!(f.root.publish(file, &path("a.bin")).is_err());
+    assert!(f.root.publish(file, &path("a.bin"), 4).is_err());
     let intent = f.store.pending_publication(job).unwrap().unwrap();
     assert_eq!(
         f.root
-            .reconcile_publication(&intent.staging, &intent.target)
+            .reconcile_publication(&intent.staging, &intent.target, intent.size)
             .unwrap(),
         PublicationCheck::Conflict
     );
@@ -632,7 +632,7 @@ fn a_conflicting_target_releases_the_reservation() {
         .begin_publication(job, generation, &path("a (1).bin"), 4, NOW)
         .unwrap();
     let file = f.root.reopen_staging(&intent.staging, 4).unwrap();
-    f.root.publish(file, &path("a (1).bin")).unwrap();
+    f.root.publish(file, &path("a (1).bin"), 4).unwrap();
     f.store.complete_publication(job, generation, NOW).unwrap();
     assert_eq!(
         std::fs::read(f.root_dir.path().join("a.bin")).unwrap(),

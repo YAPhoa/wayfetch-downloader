@@ -93,7 +93,8 @@ pub enum RangeViolation {
 }
 
 /// Decides what a response to `requested` allows, given the complete
-/// length already `known` for this representation. `requested` is `None`
+/// length already `known` for this representation. A known length is kept
+/// and enforced when the response omits its own. `requested` is `None`
 /// for a request without a `Range` header, else the half-open byte
 /// interval asked for, with an open end for `bytes=start-`.
 pub fn plan(
@@ -101,25 +102,27 @@ pub fn plan(
     framing: Framing,
     known: Option<u64>,
 ) -> Result<Plan, RangeViolation> {
-    let check_length = |found: Option<u64>| match (known, found) {
+    // The complete length: the response's, which must agree with a known
+    // one, or else the known one.
+    let length = |found: Option<u64>| match (known, found) {
         (Some(expected), Some(found)) if expected != found => {
             Err(RangeViolation::LengthChanged { expected, found })
         }
-        _ => Ok(()),
+        _ => Ok(found.or(known)),
     };
     match (requested, framing) {
-        (None, Framing::Full { length }) | (Some((0, None)), Framing::Full { length }) => {
-            check_length(length)?;
+        (None, Framing::Full { length: found })
+        | (Some((0, None)), Framing::Full { length: found }) => {
+            let length = length(found)?;
             Ok(Plan::Write {
                 start: 0,
                 end: length,
                 complete: length,
             })
         }
-        (Some(_), Framing::Full { length }) => {
-            check_length(length)?;
-            Ok(Plan::RestartFromZero { length })
-        }
+        (Some(_), Framing::Full { length: found }) => Ok(Plan::RestartFromZero {
+            length: length(found)?,
+        }),
         (None, Framing::Partial { .. } | Framing::Unsatisfiable { .. }) => {
             Err(RangeViolation::Unrequested)
         }
@@ -131,6 +134,7 @@ pub fn plan(
                 complete,
             },
         ) => {
+            let complete = length(complete)?;
             let stop = last.checked_add(1).ok_or(RangeViolation::Invalid)?;
             if last < first || complete.is_some_and(|c| stop > c) {
                 return Err(RangeViolation::Invalid);
@@ -144,17 +148,15 @@ pub fn plan(
             if end.is_some_and(|end| stop > end) {
                 return Err(RangeViolation::BeyondRequest);
             }
-            check_length(complete)?;
             Ok(Plan::Write {
                 start: first,
                 end: Some(stop),
                 complete,
             })
         }
-        (Some(_), Framing::Unsatisfiable { complete }) => {
-            check_length(complete)?;
-            Ok(Plan::Reconcile { complete })
-        }
+        (Some(_), Framing::Unsatisfiable { complete }) => Ok(Plan::Reconcile {
+            complete: length(complete)?,
+        }),
     }
 }
 
@@ -306,6 +308,59 @@ mod tests {
                 "{framing:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_known_length_holds_when_headers_omit_it() {
+        // `206 bytes 90-199/*` cannot run past a known length of 100.
+        let unknown_total = Framing::Partial {
+            first: 90,
+            last: 199,
+            complete: None,
+        };
+        assert_eq!(
+            plan(Some((90, None)), unknown_total, Some(100)),
+            Err(RangeViolation::Invalid)
+        );
+        assert_eq!(
+            plan(
+                Some((90, None)),
+                Framing::Partial {
+                    first: 90,
+                    last: 99,
+                    complete: None
+                },
+                Some(100)
+            ),
+            Ok(Plan::Write {
+                start: 90,
+                end: Some(100),
+                complete: Some(100)
+            })
+        );
+        // A full body without `Content-Length` is bounded by the known length.
+        assert_eq!(
+            plan(None, Framing::Full { length: None }, Some(100)),
+            Ok(Plan::Write {
+                start: 0,
+                end: Some(100),
+                complete: Some(100)
+            })
+        );
+        assert_eq!(
+            plan(Some((50, None)), Framing::Full { length: None }, Some(100)),
+            Ok(Plan::RestartFromZero { length: Some(100) })
+        );
+        assert_eq!(
+            plan(
+                Some((100, None)),
+                Framing::Unsatisfiable { complete: None },
+                Some(100)
+            ),
+            Ok(Plan::Reconcile {
+                complete: Some(100)
+            })
+        );
     }
 
     #[test]

@@ -34,7 +34,10 @@ pub(super) fn sync_dir(dir: &Dir) -> io::Result<()> {
     // `Dir` handles may be path-only descriptors, which cannot be synced;
     // a read-only handle to the same directory can.
     dir.open_with(".", cap_std::fs::OpenOptions::new().read(true))?
-        .sync_all()
+        .sync_all()?;
+    #[cfg(test)]
+    tests::record_sync(dir);
+    Ok(())
 }
 
 /// Windows has no portable directory flush; NTFS journals metadata.
@@ -63,4 +66,25 @@ pub(super) fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    thread_local! {
+        static SYNCED: RefCell<Vec<FileIdentity>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record_sync(dir: &Dir) {
+        let identity = identity(&dir.dir_metadata().unwrap()).unwrap();
+        SYNCED.with(|s| s.borrow_mut().push(identity));
+    }
+
+    /// Takes the identities of the directories this thread synced.
+    pub(crate) fn take_synced() -> Vec<FileIdentity> {
+        SYNCED.with(|s| s.take())
+    }
 }

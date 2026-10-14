@@ -326,8 +326,10 @@ impl Store {
         .transpose()
     }
 
-    /// Completes the job's pending publication after its file reached the
-    /// target, and completes the job, in one transaction. The job is
+    /// Completes the job's pending publication, and the job, in one
+    /// transaction. Call it only after [`crate::fs::Root::publish`] or
+    /// [`crate::fs::Root::reconcile_publication`] confirmed the intent's
+    /// file at its target with the intent's size. The job is
     /// publishing, or recovering if a restart interrupted publication.
     pub fn complete_publication(
         &mut self,
