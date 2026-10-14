@@ -11,6 +11,17 @@ publish.workspace = true
 [dependencies]
 wayfetch-domain.workspace = true
 wayfetch-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+# The host supplies the runtime; the engine only spawns onto its handle.
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true
