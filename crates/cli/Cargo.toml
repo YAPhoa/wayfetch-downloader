@@ -14,19 +14,19 @@ path = "src/main.rs"
 
 [dependencies]
 wayfetch-engine.workspace = true
-wayfetch-net.workspace = true
+wayfetch-host.workspace = true
 bytes.workspace = true
-clap = { version = "4.5", features = ["derive"] }
-rustls-pki-types = { version = "1.15", features = ["std"] }
+clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync"] }
 tokio-util = { workspace = true, features = ["codec"] }
 
 [dev-dependencies]
+wayfetch-net.workspace = true
 wayfetch-protocol.workspace = true
 httparse.workspace = true
-rcgen = { workspace = true, features = ["pem"] }
+rcgen.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-rustls.workspace = true

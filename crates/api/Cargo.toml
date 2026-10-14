@@ -1,0 +1,29 @@
+[package]
+name = "wayfetch-api"
+description = "Authenticated HTTP/SSE adapter for the Wayfetch Downloader engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+wayfetch-engine.workspace = true
+axum = { version = "0.8.9", default-features = false, features = ["json", "query", "tokio"] }
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+getrandom = "0.4"
+hyper = { version = "1.12", features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", features = ["server", "server-graceful", "service", "tokio"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "sync", "time"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

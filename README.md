@@ -16,7 +16,9 @@ and deadline set in `EngineConfig`. It reaches the network only through a
 TLS verification, an egress policy checked on every redirect, no
 decompression, and a broker that never repeats a request its transfer lease
 does not allow. The `wayfetch` command-line host (`crates/cli`) runs the engine
-in a foreground session; no server, desktop host, or frontend package exists
+in a foreground session, and the `wayfetchd` daemon (`apps/wayfetchd`) serves it
+through an authenticated HTTP/SSE API (`crates/api`); both compose the engine
+the same way through `crates/host`. No desktop host or frontend package exists
 yet.
 
 ## Repository structure
@@ -39,6 +41,7 @@ wayfetch-downloader/
 │   ├── engine/             # Reusable engine and lifecycle
 │   ├── store/              # Persistence and migrations
 │   ├── net/                # HTTP, sessions, streaming transfers
+│   ├── host/               # What the CLI and daemon hosts share
 │   ├── cli/                # Foreground `wayfetch` host
 │   ├── fs/                 # Safe paths, checkpoints, publication
 │   ├── adapters/           # Adapter SDK and provider integrations
@@ -97,8 +100,7 @@ In a session, a line holding URLs downloads them, and `list`, `inspect JOB`,
 engine down gracefully: nothing is cancelled, and unfinished jobs resume from
 their durable bytes on the next start. Pause and cancel keep partial data. One
 process owns a state directory at a time; a second `run` or `init-root` on it
-is refused, and controlling a running session from another process is future
-daemon work. `--json` prints one JSON object per line for scripts. Output
+is refused; use `wayfetchd` to control downloads from other processes. `--json` prints one JSON object per line for scripts. Output
 never holds up the session or its shutdown: if the reader stops reading, lines
 beyond a small queue are dropped and the count is reported once there is room.
 
@@ -109,6 +111,48 @@ always verified against the platform's roots; `--allow-network CIDR` and
 `--ca-cert FILE` (PEM or DER) add explicit exceptions, for example a local
 server with its own CA. Live transfer rates are not reported yet; `inspect`
 and `list` show durable progress, which advances at each 8 MiB checkpoint.
+
+## Running the `wayfetchd` daemon
+
+`wayfetchd` runs the engine headless and serves it over HTTP. Build it with
+`cargo build --locked -p wayfetchd` (`target/debug/wayfetchd`).
+
+```sh
+wayfetchd init-root --state-dir /srv/wayfetch/state /srv/downloads
+wayfetchd run --state-dir /srv/wayfetch/state --download-root /srv/downloads \
+    --token-file /srv/wayfetch/api-tokens
+```
+
+It listens on `127.0.0.1:7878` unless `--listen` says otherwise; anything
+beyond loopback has no TLS of its own and belongs behind an authenticated TLS
+reverse proxy. Every request needs `Authorization: Bearer TOKEN`. The token file
+holds one `TOKEN PERMISSION[,PERMISSION...]` per line, with permissions `read`,
+`submit`, and `control`, and must be readable only by its owner. If it does not
+exist, `wayfetchd` creates it with one token holding every permission; the token
+is never printed.
+
+| Route | Purpose |
+|---|---|
+| `GET /v1/capabilities` | Instance ID, boot epoch, protocol version, newest event, limits |
+| `POST /v1/inputs` | Submit `{"idempotency_key", "target", "items": [URL...]}` |
+| `GET /v1/jobs` | A page of jobs: `after`, `page_size`, `stage=a,b`, `package` |
+| `GET /v1/jobs/{id}` | One job |
+| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel", "expected_revision"}` |
+| `GET /v1/events` | Server-sent events: `hello`, `event`, `progress`, `resync` |
+
+`target` is the instance from `/v1/capabilities` and `idempotency_key` a fresh
+UUID per logical command; a retry with the same key returns the first result.
+Responses and errors are the engine's protocol types, so `code` values match
+every other client. Durable events carry `INSTANCE:POSITION` as their event ID:
+reconnecting with `Last-Event-ID` (or `?after=`) replays exactly what was
+missed, and a `resync` event ends the stream when that is impossible, after
+which the client re-reads `/v1/jobs` and subscribes from its `as_of` cursor.
+
+Request bodies are capped at 1 MiB, connections at 64, event streams at 16, and
+request headers must arrive within 10 seconds. Closing a connection or stream
+never affects a download. `SIGINT` or `SIGTERM` ends event streams, lets
+requests in progress finish for up to 5 seconds, and shuts the engine down
+gracefully; unfinished jobs continue on the next start.
 
 ## Working on the project
 
@@ -134,9 +178,11 @@ python3 -m unittest discover -s scripts                       # tests for the ch
 ```
 
 `scripts/check_dependency_boundaries.py` fails if the domain, protocol, engine,
-net, or CLI crates gain a server, desktop, or UI-toolkit dependency (for example Axum,
-Tauri, or GTK), if the domain and protocol crates depend on the engine, or if the
-engine depends on the net crate. It checks
+net, host, or CLI crates gain a server, desktop, or UI-toolkit dependency (for
+example Axum, Tauri, or GTK), if the engine-side crates depend on the host
+crate, if the HTTP adapter or daemon gain a desktop dependency, if the domain
+and protocol crates depend on the engine, or if the engine depends on the net
+crate. It checks
 every target with all features enabled, so optional dependencies count too. CI
 also runs a repository hygiene check that rejects tracked agent-output
 directories.
@@ -147,7 +193,8 @@ certificate generated per test; they need no network access. The crash tests
 process, a rerun of their own test binary, and kill it with `SIGKILL` at named
 boundaries from the engine's test-only `failpoints` feature. The CLI tests
 (`crates/cli/tests/session.rs`) drive the built `wayfetch` executable against
-the same fixture servers.
+the same fixture servers, and the daemon tests (`apps/wayfetchd/tests/daemon.rs`)
+drive the built `wayfetchd` over its HTTP API.
 
 Use `cargo fmt --all` to apply formatting.
 
