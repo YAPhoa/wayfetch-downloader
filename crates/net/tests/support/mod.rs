@@ -10,7 +10,7 @@
 #![allow(dead_code, reason = "each test file uses part of the fixture")]
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -139,21 +139,26 @@ const MAX_HEAD: usize = 64 * 1024;
 impl Server {
     /// A plain HTTP server.
     pub async fn http() -> Self {
-        Self::start(None).await
+        Self::start(Ipv4Addr::LOCALHOST.into(), None).await
     }
 
     /// An HTTPS server with a certificate for `127.0.0.1` and `localhost`
     /// from a fresh CA; [`Server::ca`] is the root to trust.
     pub async fn https() -> Self {
+        Self::https_on(Ipv4Addr::LOCALHOST.into()).await
+    }
+
+    /// An HTTPS server listening on `ip` instead, with a certificate for
+    /// `ip` and `localhost`: for a client in a container, which reaches the
+    /// host on its bridge address.
+    pub async fn https_on(ip: IpAddr) -> Self {
         let ca_key = KeyPair::generate().unwrap();
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
         let leaf_key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
-        params
-            .subject_alt_names
-            .push(SanType::IpAddress([127, 0, 0, 1].into()));
+        params.subject_alt_names.push(SanType::IpAddress(ip));
         let leaf = params.signed_by(&leaf_key, &ca).unwrap();
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
@@ -167,11 +172,11 @@ impl Server {
         )
         .unwrap();
         let ca_der = ca.as_ref().der().clone();
-        Self::start(Some((TlsAcceptor::from(Arc::new(config)), ca_der))).await
+        Self::start(ip, Some((TlsAcceptor::from(Arc::new(config)), ca_der))).await
     }
 
-    async fn start(tls: Option<(TlsAcceptor, CertificateDer<'static>)>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    async fn start(ip: IpAddr, tls: Option<(TlsAcceptor, CertificateDer<'static>)>) -> Self {
+        let listener = TcpListener::bind((ip, 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let state = Arc::new(State::default());
         let (acceptor, ca) = match tls {
@@ -219,9 +224,9 @@ impl Server {
         self.addr.port()
     }
 
-    /// The URL of `path` through host `127.0.0.1`.
+    /// The URL of `path` through the address the server listens on.
     pub fn url(&self, path: &str) -> String {
-        self.url_via("127.0.0.1", path)
+        self.url_via(&self.addr.ip().to_string(), path)
     }
 
     /// The URL of `path` through `host`, a different origin on the same

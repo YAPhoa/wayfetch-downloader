@@ -11,8 +11,10 @@
 mod signals;
 mod terminal;
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Args;
 use wayfetch_engine::domain::id::RootId;
@@ -27,6 +29,10 @@ pub use terminal::{Closed, DRAIN, Message, Printer, Terminal};
 
 /// The one destination root a host configures.
 pub const DOWNLOAD_ROOT: RootId = RootId::from_u64(1).unwrap();
+
+/// How long a host waits, after its work is done, for blocking threads it
+/// no longer needs before it exits anyway.
+pub const RUNTIME_RELEASE: Duration = Duration::from_secs(1);
 
 /// Largest CA certificate file accepted.
 const MAX_CA_FILE_BYTES: u64 = 1024 * 1024;
@@ -71,6 +77,23 @@ pub struct EngineArgs {
     pub ca_cert: Vec<PathBuf>,
 }
 
+/// Runs `future` to completion on a new multi-threaded runtime, then shuts
+/// the runtime down without waiting more than [`RUNTIME_RELEASE`] for
+/// blocking threads. Dropping a runtime waits for every blocking thread, so
+/// one stuck in a filesystem call, such as a read on a hung mount, would
+/// otherwise keep the process alive after a graceful shutdown finished.
+/// Whatever such a thread was doing is already reported unfinished by the
+/// engine's shutdown, and exiting ends it.
+pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("cannot start the runtime: {e}"))?;
+    let output = runtime.block_on(future);
+    runtime.shutdown_timeout(RUNTIME_RELEASE);
+    Ok(output)
+}
+
 /// Initializes the download root for the instance in the state directory,
 /// creating the instance if the state directory is new. Takes the state
 /// directory's lock, so it is refused while an engine owns it. Returns the
@@ -97,9 +120,19 @@ impl Started {
     /// blocks jobs on an unusable root by itself; this only tells the
     /// operator early, and never initializes anything.
     pub fn root_problem(&self) -> Option<String> {
-        Root::open(&self.root, DOWNLOAD_ROOT, self.owner.identity().instance)
-            .err()
-            .map(|e| e.to_string())
+        self.root_check()().err()
+    }
+
+    /// A reusable check of the download root: `Err` with the reason while
+    /// it cannot be used, for example after its mount disappeared.
+    /// Blocking; it touches the filesystem.
+    pub fn root_check(&self) -> impl Fn() -> Result<(), String> + Send + Sync + 'static {
+        let (root, instance) = (self.root.clone(), self.owner.identity().instance);
+        move || {
+            Root::open(&root, DOWNLOAD_ROOT, instance)
+                .map(drop)
+                .map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -172,6 +205,23 @@ pub fn absolute(path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stuck_blocking_thread_does_not_hold_up_exit() {
+        let (_release, stuck) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let output = block_on(async move {
+            tokio::task::spawn_blocking(move || stuck.recv());
+            7
+        })
+        .unwrap();
+        assert_eq!(output, 7);
+        assert!(
+            started.elapsed() < RUNTIME_RELEASE * 3,
+            "{:?}",
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn ca_files_may_be_pem_or_der() {
