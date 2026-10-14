@@ -65,6 +65,10 @@ pub struct ApiLimits {
     pub keep_alive: Duration,
     /// How long shutdown waits for open connections to finish.
     pub drain_timeout: Duration,
+    /// How long a readiness request waits for its checks before it answers
+    /// `check_timed_out`. Readiness checks run one at a time, so a check
+    /// stuck in the filesystem never occupies more than one thread.
+    pub readiness_timeout: Duration,
 }
 
 impl ApiLimits {
@@ -80,6 +84,8 @@ impl ApiLimits {
         body_read_timeout: Duration::from_secs(10),
         keep_alive: Duration::from_secs(15),
         drain_timeout: Duration::from_secs(5),
+        // Below the 3 s `wayfetchd ready` allows, so it gets an answer.
+        readiness_timeout: Duration::from_secs(2),
     };
 }
 
@@ -137,6 +143,8 @@ impl Api {
             keep_alive: self.limits.keep_alive,
             body_timeout: self.limits.body_read_timeout,
             readiness_check: self.readiness_check.clone(),
+            readiness_running: Arc::new(Semaphore::new(1)),
+            readiness_timeout: self.limits.readiness_timeout,
         };
         Router::new()
             .route("/v1/capabilities", get(routes::capabilities))

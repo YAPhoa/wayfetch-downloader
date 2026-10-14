@@ -14,7 +14,7 @@
 //! cargo test --locked -p wayfetchd --test container -- --ignored
 //! ```
 //!
-//! They build `wayfetch:local` with `docker compose build`, unless
+//! They build `wayfetch:local` with `docker build`, unless
 //! `WAYFETCH_IMAGE` names an image to test instead. The fixture server
 //! listens on the host's Docker bridge address, which containers reach.
 
@@ -48,11 +48,9 @@ fn image() -> &'static str {
         if let Ok(image) = std::env::var("WAYFETCH_IMAGE") {
             return image;
         }
+        // The README's build command.
         let out = Command::new("docker")
-            .args(["compose", "-f", &compose_file(), "build", "--quiet"])
-            .env("WAYFETCH_IMAGE", "wayfetch:local")
-            // Paths are required to read the file, not to build.
-            .envs(["WAYFETCH_STATE", "WAYFETCH_DOWNLOADS", "WAYFETCH_TOKENS"].map(|v| (v, "/")))
+            .args(["build", "--quiet", "--tag", "wayfetch:local", REPO])
             .output()
             .unwrap();
         assert!(out.status.success(), "{}", lossy(&out.stderr));

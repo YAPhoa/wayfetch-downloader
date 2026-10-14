@@ -160,8 +160,10 @@ gracefully; unfinished jobs continue on the next start.
 
 `GET /v1/ready` is the one route that needs no token, and it reveals only a
 fixed reason: `starting`, `shutting_down`, `engine_failed`,
-`engine_unavailable`, or `download_root_unavailable` (not initialized, or its
-mount is gone). `wayfetchd ready [--address ADDR]` asks a running daemon and
+`engine_unavailable`, `download_root_unavailable` (not initialized, or its
+mount is gone), or `check_timed_out` (the checks took over 2 seconds, for
+example on a hung mount; one check runs at a time, and a stuck one never
+holds up shutdown). `wayfetchd ready [--address ADDR]` asks a running daemon and
 exits 0 only if it is ready; it starts no engine and reads no token, so it
 serves as a health check.
 
@@ -176,7 +178,7 @@ process, and a 45 second stop grace period. Docker with the Compose plugin
 is all the host needs.
 
 ```sh
-docker compose -f deploy/compose.yaml build      # tags wayfetch:local
+docker build -t wayfetch:local .                 # from the repository root
 ```
 
 **Directories and permissions.** The container writes only to three host
@@ -283,8 +285,8 @@ python3 -m unittest discover -s scripts                       # tests for the ch
 ```
 
 The container tests need Docker with the Compose plugin, so they are ignored
-by default. They build `wayfetch:local` first, or test the image named by
-`WAYFETCH_IMAGE`:
+by default. They build `wayfetch:local` with `docker build` first, or test
+the image named by `WAYFETCH_IMAGE`:
 
 ```sh
 cargo test --locked -p wayfetchd --test container -- --ignored

@@ -808,3 +808,45 @@ async fn readiness_needs_no_token_and_requires_a_usable_root() {
     assert_eq!(status, StatusCode::OK);
     daemon.stop("TERM").await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stuck_readiness_check_neither_piles_up_nor_holds_up_exit() {
+    let server = Server::https().await;
+    let dirs = Dirs::ready(&server);
+    let daemon = Daemon::start(&dirs).await;
+    let anonymous = Client::new(&daemon.base, &daemon.instance, None);
+    let (status, _) = anonymous.get("/v1/ready").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The root's sentinel becomes a FIFO nobody writes to: opening it
+    // blocks, as a read on a hung mount would.
+    let sentinel = dirs.root.join(".wayfetch").join("root.json");
+    std::fs::remove_file(&sentinel).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(&sentinel)
+        .status()
+        .unwrap();
+    assert!(made.success());
+
+    // Every request is answered within the readiness deadline.
+    for _ in 0..3 {
+        let started = std::time::Instant::now();
+        let (status, ready) = anonymous.get("/v1/ready").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ready, json!({"ready": false, "reason": "check_timed_out"}));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    // The check is still stuck, yet SIGTERM ends the process promptly.
+    let started = std::time::Instant::now();
+    daemon.stop("TERM").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}

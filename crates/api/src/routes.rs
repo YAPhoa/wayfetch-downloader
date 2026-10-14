@@ -59,6 +59,10 @@ pub struct AppState {
     pub body_timeout: Duration,
     /// The host's own readiness condition.
     pub readiness_check: Option<ReadinessCheck>,
+    /// One permit, held by the readiness check running, if any.
+    pub readiness_running: Arc<Semaphore>,
+    /// How long a readiness request waits for its checks.
+    pub readiness_timeout: Duration,
 }
 
 type ApiResult<T> = Result<Json<T>, ApiError>;
@@ -101,15 +105,34 @@ async fn not_ready(app: &AppState) -> Option<&'static str> {
         Readiness::Failed => return Some("engine_failed"),
         Readiness::ShuttingDown | Readiness::Stopped => return Some("shutting_down"),
     }
+    tokio::time::timeout(app.readiness_timeout, checks(app))
+        .await
+        .unwrap_or(Some("check_timed_out"))
+}
+
+/// The checks that can take time: a handshake and the host's check.
+async fn checks(app: &AppState) -> Option<&'static str> {
     // The engine answers, rather than only saying it would.
     if app.engine.hello().await.is_err() {
         return Some("engine_unavailable");
     }
     let check = app.readiness_check.clone()?;
-    tokio::task::spawn_blocking(move || check())
+    // One check at a time. A check stuck in a filesystem call keeps its
+    // permit, so later requests time out waiting for it instead of each
+    // tying up another blocking thread.
+    let permit = app
+        .readiness_running
+        .clone()
+        .acquire_owned()
         .await
-        .unwrap_or(Err("check_failed"))
-        .err()
+        .expect("the semaphore is never closed");
+    tokio::task::spawn_blocking(move || {
+        let _running = permit;
+        check()
+    })
+    .await
+    .unwrap_or(Err("check_failed"))
+    .err()
 }
 
 /// The body of `POST /v1/inputs`.

@@ -15,7 +15,7 @@ clap.workspace = true
 rustls-pki-types = { version = "1.15", features = ["std"] }
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["signal", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync"] }
 
 [dev-dependencies]
 rcgen = { workspace = true, features = ["pem"] }
