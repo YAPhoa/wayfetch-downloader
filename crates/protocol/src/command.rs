@@ -252,6 +252,15 @@ pub enum Command {
         /// The job revision the client last saw.
         expected_revision: Revision,
     },
+    /// Stop offering a folder the user added as a destination. Its files
+    /// stay; a folder the operator configured, the current default, or one
+    /// that unfinished jobs save to is refused. Added in protocol 1.1.
+    RemoveRoot {
+        /// The settings revision the client last saw.
+        expected_revision: Revision,
+        /// The folder.
+        root: RootId,
+    },
 }
 
 impl Permission {
@@ -269,7 +278,8 @@ impl Command {
             | Self::Cancel { .. }
             | Self::UpdateSettings { .. }
             | Self::Rename { .. }
-            | Self::Remove { .. } => Permission::Control,
+            | Self::Remove { .. }
+            | Self::RemoveRoot { .. } => Permission::Control,
         }
     }
 
@@ -333,7 +343,8 @@ pub enum CommandResult {
         /// Whether the command changed anything.
         changed: bool,
     },
-    /// The settings were updated. Added in protocol 0.3.
+    /// The settings were updated, including the destinations offered.
+    /// Added in protocol 0.3.
     SettingsUpdated {
         /// The settings revision after the command; unchanged if they
         /// already said so.

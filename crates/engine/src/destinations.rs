@@ -3,9 +3,10 @@
 //! and 8.6, ADR-17 and ADR-29).
 //!
 //! * A root is permitted while the operator configures its path, or after
-//!   a host registered it on its user's explicit request, such as a folder
-//!   chosen in the desktop app's native picker. Nothing a client sends can
-//!   add one: clients choose among permitted roots by ID.
+//!   it was registered on its user's explicit request: a folder chosen in
+//!   the desktop app's native picker, or a server folder the owner chose in
+//!   the browser after listing folders ([`browse`]). Jobs and settings name
+//!   roots only by ID. A folder holding the state directory is refused.
 //! * Each root's ID is allocated by the store and written into its
 //!   sentinel ([`initialize_root`]). A configured path the store has not
 //!   seen is identified from its sentinel, so a root earlier versions
@@ -34,12 +35,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use wayfetch_domain::id::RootId;
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
-use wayfetch_protocol::query::{RootSummary, Settings};
+use wayfetch_protocol::query::{FolderListing, MAX_LISTED_FOLDERS, RootSummary, Settings};
 use wayfetch_protocol::{ErrorCode, InstanceId, ProtocolError};
 
 use crate::config::EngineConfig;
@@ -51,6 +53,12 @@ use crate::store::{Store, StoreError, path_text};
 /// How long an availability check may take before the root is reported as
 /// not responding.
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How many requests about folders the user names (browsing, adding) may
+/// have filesystem work running at once, finished or not. Such paths are
+/// unbounded, so each holding one thread on a hung mount could otherwise
+/// use up the blocking threads.
+pub(crate) const MAX_NAMED_FOLDER_WORK: usize = 8;
 
 /// A permitted root and where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,15 +203,18 @@ pub(crate) fn initialize(
 /// A filesystem step cannot be interrupted, so the registration waits for
 /// it, holding the state directory, and starts nothing after `cancel`
 /// fires: no other engine can open the directory while a step may still
-/// write to the folder.
+/// write to the folder. The state directory itself, or a folder inside
+/// it, is refused.
 pub(crate) async fn register(
     store: &StoreClient,
     probes: &Probes,
     cancel: &CancellationToken,
     path: PathBuf,
     instance: InstanceId,
+    state_dir: PathBuf,
 ) -> Result<RootId, ProtocolError> {
     check_path(&path)?;
+    let probes = &probes.bounded()?;
     let _slot = probes.claim(&path).ok_or_else(|| {
         ProtocolError::new(
             ErrorCode::Busy,
@@ -212,6 +223,16 @@ pub(crate) async fn register(
     })?;
     let stopped = || ProtocolError::new(ErrorCode::ShuttingDown, "engine is not running");
     let running = || (!cancel.is_cancelled()).then_some(()).ok_or_else(stopped);
+    let inside = {
+        let path = path.clone();
+        probes.blocking(move || within(&path, &state_dir)).await?
+    };
+    if inside {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidRequest,
+            "the folder holds Wayfetch's own state and cannot be a destination",
+        ));
+    }
     let known = {
         let path = path.clone();
         store
@@ -248,6 +269,99 @@ pub(crate) async fn register(
         .ok_or_else(stopped)??)
 }
 
+/// Whether `path` is `dir` or inside it, as written or once links are
+/// resolved. Blocking.
+fn within(path: &Path, dir: &Path) -> bool {
+    let resolved = |p: &Path| std::fs::canonicalize(p).ok();
+    path.starts_with(dir)
+        || matches!((resolved(path), resolved(dir)), (Some(path), Some(dir)) if path.starts_with(&dir))
+}
+
+/// The folders inside the folder at `path`, the top of the filesystem if
+/// `None`, for the owner to choose one to register. Read on a blocking
+/// thread with a deadline, like a root check ([`Probes`]), so a hung mount
+/// is reported as not responding.
+pub(crate) async fn browse(
+    probes: &Probes,
+    path: Option<PathBuf>,
+) -> Result<FolderListing, ProtocolError> {
+    let path = path.unwrap_or_else(|| PathBuf::from("/"));
+    if !path.is_absolute() {
+        return Err(RootError::Relative(path).into());
+    }
+    let owned = path.clone();
+    probes
+        .bounded()?
+        .timed(&path, move || list_folders(&owned))
+        .await
+        .unwrap_or_else(|| {
+            Err(ProtocolError::new(
+                ErrorCode::Busy,
+                "the folder is not responding",
+            ))
+        })
+}
+
+/// [`browse`]'s blocking part. Stops reading after
+/// [`MAX_LISTED_FOLDERS`], so a huge folder costs a bounded listing.
+fn list_folders(path: &Path) -> Result<FolderListing, ProtocolError> {
+    let path = std::fs::canonicalize(path).map_err(|e| unreadable(&e))?;
+    let text = |p: &Path| {
+        path_text(p).map(str::to_owned).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::NotApplicable,
+                "the folder's path is not valid UTF-8",
+            )
+        })
+    };
+    let mut folders = Vec::new();
+    let mut truncated = false;
+    for entry in std::fs::read_dir(&path).map_err(|e| unreadable(&e))? {
+        let Ok(entry) = entry else { continue };
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        // A link to a folder is listed as one.
+        let folder = entry
+            .file_type()
+            .is_ok_and(|kind| kind.is_dir() || (kind.is_symlink() && entry.path().is_dir()));
+        if name.starts_with('.') || !folder {
+            continue;
+        }
+        if folders.len() == MAX_LISTED_FOLDERS {
+            truncated = true;
+            break;
+        }
+        folders.push(name);
+    }
+    folders.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
+    Ok(FolderListing {
+        parent: path.parent().map(text).transpose()?,
+        path: text(&path)?,
+        folders,
+        truncated,
+    })
+}
+
+/// Why a folder could not be listed, in words for its owner.
+fn unreadable(err: &std::io::Error) -> ProtocolError {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => {
+            ProtocolError::new(ErrorCode::NotFound, "the folder does not exist")
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            ProtocolError::new(ErrorCode::NotApplicable, "Wayfetch may not read the folder")
+        }
+        std::io::ErrorKind::NotADirectory => {
+            ProtocolError::new(ErrorCode::NotApplicable, "that is not a folder")
+        }
+        _ => ProtocolError::new(
+            ErrorCode::NotApplicable,
+            &format!("the folder cannot be read: {err}"),
+        ),
+    }
+}
+
 /// The permitted roots and the default, kept by the coordinator.
 #[derive(Debug, Clone)]
 pub(crate) struct Destinations {
@@ -257,6 +371,9 @@ pub(crate) struct Destinations {
     known: BTreeMap<RootId, PathBuf>,
     /// Configured paths not identified yet, in configuration order.
     pending: Vec<PathBuf>,
+    /// Every path the operator configured, the download root included:
+    /// permitted while configured, so the user cannot remove them.
+    configured: Vec<PathBuf>,
     /// Settings revision.
     revision: Revision,
     /// The user's chosen default, which may no longer be permitted.
@@ -278,6 +395,12 @@ impl Destinations {
             fallback: config.download_root.clone(),
             known,
             pending: config.roots.clone(),
+            configured: config
+                .roots
+                .iter()
+                .chain(&config.download_root)
+                .cloned()
+                .collect(),
             revision,
             chosen,
         })
@@ -325,6 +448,19 @@ impl Destinations {
     /// Records a root the host registered.
     pub(crate) fn add(&mut self, id: RootId, path: PathBuf) {
         self.known.insert(id, path);
+    }
+
+    /// Whether permitted root `id` was added by the user rather than
+    /// configured, so they may remove it.
+    pub(crate) fn added(&self, id: RootId) -> bool {
+        self.known
+            .get(&id)
+            .is_some_and(|path| !self.configured.contains(path))
+    }
+
+    /// Forgets a root the user removed.
+    pub(crate) fn remove(&mut self, id: RootId) {
+        self.known.remove(&id);
     }
 
     /// Whether another root can be permitted while `registering` others
@@ -404,6 +540,7 @@ impl Destinations {
                     path: root.path.to_string_lossy().into_owned(),
                     available: available.is_ok(),
                     problem: available.err().map(|e| DiagnosticText::new(&e)),
+                    added: self.added(root.id),
                 })
                 .collect(),
         }
@@ -456,12 +593,17 @@ impl<K: Hash + Eq + Clone> Claims<K> {
 /// path: a check that is still running when another is asked for is not
 /// repeated, so a hung mount holds one thread, however often it is asked
 /// about.
+///
+/// Work on folders the user names is also bounded overall
+/// ([`Probes::bounded`]), since their paths are not.
 #[derive(Debug, Clone)]
 pub(crate) struct Probes {
     running: Claims<PathBuf>,
     /// Held by every check until it ends, so the state directory stays
     /// locked while one may still touch a folder.
     guard: Arc<dyn Any + Send + Sync>,
+    /// Permits for work on folders the user names.
+    named: Arc<Semaphore>,
 }
 
 impl Default for Probes {
@@ -476,7 +618,25 @@ impl Probes {
         Self {
             running: Claims::default(),
             guard,
+            named: Arc::new(Semaphore::new(MAX_NAMED_FOLDER_WORK)),
         }
+    }
+
+    /// Probes for one request about a folder the user named, holding one
+    /// of [`MAX_NAMED_FOLDER_WORK`] permits until every piece of work they
+    /// start has ended, even work whoever awaited it gave up on. Refused
+    /// as busy when none is free.
+    pub(crate) fn bounded(&self) -> Result<Self, ProtocolError> {
+        let permit = self.named.clone().try_acquire_owned().map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::Busy,
+                "too many folders are still being read or are not responding; try again later",
+            )
+        })?;
+        Ok(Self {
+            guard: Arc::new((self.guard.clone(), permit)),
+            ..self.clone()
+        })
     }
 
     /// Claims `path`, unless work on it is still running.
@@ -736,5 +896,43 @@ mod tests {
         assert_eq!(probes.identify(&path, f.instance).await, None);
         drop(slot);
         assert_eq!(probes.identify(&path, f.instance).await, Some(root.id));
+    }
+
+    #[tokio::test]
+    async fn work_on_named_folders_is_bounded_until_it_ends() {
+        let f = fixture();
+        let probes = Probes::default();
+        // Browsing a hung folder gives up at the deadline, but its work
+        // keeps a permit until it ends.
+        let (release, hung) = std::sync::mpsc::channel::<()>();
+        let hung = Arc::new(Mutex::new(hung));
+        let mut held = Vec::new();
+        for _ in 0..MAX_NAMED_FOLDER_WORK {
+            let bounded = probes.bounded().unwrap();
+            let hung = hung.clone();
+            held.push(bounded.blocking(move || {
+                let _ = hung.lock().unwrap().recv();
+            }));
+        }
+        let path = f.dir("browsed");
+        let err = browse(&probes, Some(path.clone())).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Busy);
+        // Giving up on the work does not free its permit.
+        drop(held);
+        assert_eq!(
+            browse(&probes, Some(path.clone())).await.unwrap_err().code,
+            ErrorCode::Busy
+        );
+        for _ in 0..MAX_NAMED_FOLDER_WORK {
+            release.send(()).unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while probes.named.available_permits() < MAX_NAMED_FOLDER_WORK {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        browse(&probes, Some(path)).await.unwrap();
     }
 }

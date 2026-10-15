@@ -60,6 +60,10 @@ impl Store {
                 job,
                 expected_revision,
             } => remove(&tx, *job, *expected_revision, now)?,
+            Command::RemoveRoot {
+                expected_revision,
+                root,
+            } => roots::remove_root(&tx, *expected_revision, *root, now)?,
             // The file is renamed between the store's two steps.
             Command::Rename { .. } => {
                 return Err(ProtocolError::new(
