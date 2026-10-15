@@ -186,6 +186,10 @@ impl Api {
             .route("/v1/jobs/{id}", get(routes::inspect_job))
             .route("/v1/job-counts", get(routes::count_jobs))
             .route("/v1/jobs/{id}/commands", post(routes::job_command))
+            .route(
+                "/v1/settings",
+                get(routes::settings).put(routes::update_settings),
+            )
             .route("/v1/events", get(routes::events))
             .route_layer(middleware::from_fn_with_state(
                 state.clone(),

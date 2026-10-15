@@ -3,6 +3,7 @@ import type { EventCursor } from "./EventCursor.js";
 import type { JobCounts } from "./JobCounts.js";
 import type { JobSummary } from "./JobSummary.js";
 import type { Page } from "./Page.js";
+import type { Settings } from "./Settings.js";
 
 /**
  * A query's answer.
@@ -15,4 +16,4 @@ job: JobSummary,
 /**
  * Snapshot cursor, as in [`Page::as_of`].
  */
-as_of: EventCursor, } | { "type": "jobs" } & Page<JobSummary> | { "type": "job_counts" } & JobCounts;
+as_of: EventCursor, } | { "type": "jobs" } & Page<JobSummary> | { "type": "job_counts" } & JobCounts | { "type": "settings" } & Settings;

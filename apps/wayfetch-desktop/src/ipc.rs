@@ -8,6 +8,8 @@
 //! | `query` | a [`Query`]: list, inspect, or count jobs |
 //! | `submit` | [`SubmitRequest`] as a submit command |
 //! | `job_command` | [`JobCommandRequest`]: pause, resume, or cancel |
+//! | `update_settings` | [`UpdateSettingsRequest`]: choose the default destination |
+//! | `choose_download_folder` | the native folder dialog; the chosen folder becomes a permitted destination |
 //! | `subscribe` | an event subscription, delivered on a channel |
 //! | `acknowledge` | the renderer has handled a subscription's items |
 //! | `unsubscribe` | ends a subscription |
@@ -15,7 +17,9 @@
 //! These are the only commands the renderer can call: the build declares
 //! them, and the window's capability grants them and no Tauri plugin, so
 //! the renderer has no filesystem, database, shell, or network access.
-//! Downloads go only to the engine's configured root.
+//! Downloads go only to roots the engine permits: configured ones, and
+//! folders the user picked in the host's native dialog. The renderer never
+//! sends a path; it chooses among roots by ID.
 //!
 //! Arguments and results are the protocol's own JSON, the same the HTTP
 //! API carries, and errors are [`ProtocolError`]s, so idempotency,
@@ -27,16 +31,18 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tauri::ipc::Channel;
-use tauri::{State, Webview};
+use tauri::{State, Webview, WebviewWindow};
 use wayfetch_engine::EngineHandle;
 use wayfetch_engine::domain::id::JobId;
 use wayfetch_engine::protocol::command::CommandResult;
-use wayfetch_engine::protocol::request::{JobCommandRequest, SubmitRequest};
+use wayfetch_engine::protocol::query::RootSummary;
+use wayfetch_engine::protocol::request::{JobCommandRequest, SubmitRequest, UpdateSettingsRequest};
 use wayfetch_engine::protocol::{
     ErrorCode, EventCursor, Hello, Permission, ProtocolError, Query, QueryResult, StreamItem,
     Subscribe,
 };
 
+use crate::picker::Picker;
 use crate::subscriptions::{SubscriptionId, Subscriptions};
 
 /// What the local owner may do.
@@ -48,6 +54,8 @@ pub struct Desktop {
     pub engine: EngineHandle,
     /// Open event subscriptions.
     pub subscriptions: Subscriptions,
+    /// The native folder dialog.
+    pub picker: Picker,
 }
 
 type IpcResult<T> = Result<T, ProtocolError>;
@@ -82,6 +90,36 @@ pub async fn job_command(
     let job: JobId = decode(job)?;
     let envelope = decode::<JobCommandRequest>(request)?.into_envelope(job);
     desktop.engine.execute(envelope, GRANTED).await
+}
+
+/// Chooses the default destination at the settings revision the renderer
+/// saw.
+#[tauri::command]
+pub async fn update_settings(
+    desktop: State<'_, Desktop>,
+    request: Value,
+) -> IpcResult<CommandResult> {
+    let envelope = decode::<UpdateSettingsRequest>(request)?.into_envelope();
+    desktop.engine.execute(envelope, GRANTED).await
+}
+
+/// Shows the native folder dialog and permits the folder the user chose as
+/// a destination, initializing it as a root. `null` if the dialog was
+/// cancelled, which changes nothing. Making the folder the default is a
+/// separate [`update_settings`].
+#[tauri::command]
+pub async fn choose_download_folder(
+    window: WebviewWindow,
+    desktop: State<'_, Desktop>,
+) -> IpcResult<Option<RootSummary>> {
+    let Some(folder) = desktop.picker.choose(window).await? else {
+        return Ok(None);
+    };
+    desktop
+        .engine
+        .register_root(folder, GRANTED)
+        .await
+        .map(Some)
 }
 
 /// Follows durable events after `after`, or from now. Items arrive on

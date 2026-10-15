@@ -75,7 +75,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Mark an existing directory as this state directory's download root.
+    /// Mark an existing directory as a destination of this state directory:
+    /// the download root, or a folder given with `--root`.
     ///
     /// An explicit operator action, done once per root: `run` never
     /// initializes a root, so a missing mount is never mistaken for an

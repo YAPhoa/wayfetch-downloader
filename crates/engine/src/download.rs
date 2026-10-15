@@ -40,7 +40,8 @@ use wayfetch_domain::version::BootEpoch;
 use wayfetch_protocol::InstanceId;
 use wayfetch_protocol::query::FailureSummary;
 
-use crate::config::{Limits, RootConfig, Timeouts};
+use crate::config::{Limits, Timeouts};
+use crate::destinations::Destination;
 use crate::fs::{FsError, PublicationCheck, RelativePath, Root, StagingFile, StagingRecord};
 use crate::lifecycle::StoreClient;
 use crate::store::{Admission, Partial, Store, StoreError};
@@ -142,7 +143,7 @@ enum Opened {
 pub(crate) struct Download {
     pub(crate) store: StoreClient,
     pub(crate) transport: Arc<dyn Transport>,
-    pub(crate) root: RootConfig,
+    pub(crate) root: Destination,
     pub(crate) instance: InstanceId,
     pub(crate) boot_epoch: BootEpoch,
     pub(crate) limits: Limits,
@@ -261,7 +262,8 @@ impl Download {
         self.finish(&root, file, size, name).await
     }
 
-    /// Opens the download root, blocking the job if it is unavailable.
+    /// Opens the job's destination root, blocking the job if it is
+    /// unavailable.
     async fn open_root(&self) -> Result<Root, Stop> {
         let (path, id, instance) = (self.root.path.clone(), self.root.id, self.instance);
         self.blocking(move || Root::open(&path, id, instance))
@@ -818,7 +820,7 @@ mod tests {
                 package: None,
             },
         };
-        store.execute(&submit, instance, now()).unwrap();
+        store.execute(&submit, instance, None, now()).unwrap();
         let job = store.stage_pending(1, now()).unwrap()[0];
         let generation = store.job_state(job).unwrap().generation();
         let advance = |store: &mut Store, stage| {
@@ -864,7 +866,7 @@ mod tests {
         let download = Download {
             store: client.clone(),
             transport: Arc::new(NoRequests),
-            root: RootConfig {
+            root: Destination {
                 id: root_id,
                 path: root_dir.path().to_owned(),
             },
@@ -880,6 +882,7 @@ mod tests {
                 generation: recovering.generation(),
                 desired: DesiredState::Running,
                 url: URL.into(),
+                root: Some(root_id),
             },
         };
         Crashed {

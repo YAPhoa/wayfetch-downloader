@@ -18,18 +18,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Args;
-use wayfetch_engine::domain::id::RootId;
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::state_dir::StateDir;
-use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner, RootConfig};
+use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner};
 use wayfetch_net::ipnet::IpNet;
 use wayfetch_net::{CertificateDer, HttpConfig, HttpTransport};
 
 pub use signals::Signals;
 pub use terminal::{Closed, DRAIN, Message, Printer, Terminal};
-
-/// The one destination root a host configures.
-pub const DOWNLOAD_ROOT: RootId = RootId::from_u64(1).unwrap();
 
 /// How long a host waits, after its work is done, for blocking threads it
 /// no longer needs before it exits anyway.
@@ -53,7 +49,8 @@ pub struct InitRootArgs {
     /// The state directory.
     #[command(flatten)]
     pub state: StateArgs,
-    /// The existing directory downloads are published in.
+    /// The existing directory to mark as a destination: the download root,
+    /// or another folder given with `--root`.
     pub root: PathBuf,
 }
 
@@ -63,9 +60,14 @@ pub struct EngineArgs {
     /// The state directory.
     #[command(flatten)]
     pub state: StateArgs,
-    /// The download root, initialized with `init-root`.
+    /// The download root, initialized with `init-root`: where downloads are
+    /// saved until the owner chooses another default.
     #[arg(long, value_name = "DIR")]
     pub download_root: PathBuf,
+    /// Another folder the owner may choose as the default destination,
+    /// initialized with `init-root`. Repeatable.
+    #[arg(long = "root", value_name = "DIR")]
+    pub roots: Vec<PathBuf>,
     /// Also allow downloads from this non-public network, for example
     /// `192.168.1.0/24` for a local server. Only public addresses are
     /// reachable by default. Repeatable.
@@ -104,14 +106,14 @@ pub fn release(runtime: tokio::runtime::Runtime) {
     runtime.shutdown_timeout(RUNTIME_RELEASE);
 }
 
-/// Initializes the download root for the instance in the state directory,
+/// Initializes a destination root for the instance in the state directory,
 /// creating the instance if the state directory is new. Takes the state
 /// directory's lock, so it is refused while an engine owns it. Returns the
 /// root's absolute path.
 pub fn init_root(args: &InitRootArgs) -> Result<PathBuf, String> {
     let state = StateDir::open(&absolute(&args.state.state_dir)?).map_err(|e| e.to_string())?;
     let root = absolute(&args.root)?;
-    Root::initialize(&root, DOWNLOAD_ROOT, state.identity().instance)
+    wayfetch_engine::initialize_root(&state, &root)
         .map_err(|e| format!("cannot initialize {}: {e}", root.display()))?;
     Ok(root)
 }
@@ -139,7 +141,10 @@ impl Started {
     pub fn root_check(&self) -> impl Fn() -> Result<(), String> + Send + Sync + 'static {
         let (root, instance) = (self.root.clone(), self.owner.identity().instance);
         move || {
-            Root::open(&root, DOWNLOAD_ROOT, instance)
+            let id = Root::identify(&root, instance)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "it is not initialized, or its drive is not mounted".to_owned())?;
+            Root::open(&root, id, instance)
                 .map(drop)
                 .map_err(|e| e.to_string())
         }
@@ -154,11 +159,14 @@ pub async fn start_engine(args: &EngineArgs) -> Result<Started, String> {
     let transport = HttpTransport::new(http_config(args)?)
         .map_err(|e| format!("cannot configure HTTP: {e}"))?;
     let mut config = EngineConfig::new(state_dir);
-    config.roots.push(RootConfig {
-        id: DOWNLOAD_ROOT,
-        path: root.clone(),
-    });
-    config.download_root = Some(DOWNLOAD_ROOT);
+    config.roots.push(root.clone());
+    for extra in &args.roots {
+        let extra = absolute(extra)?;
+        if !config.roots.contains(&extra) {
+            config.roots.push(extra);
+        }
+    }
+    config.download_root = Some(root.clone());
     let owner = EngineBuilder::new(config, tokio::runtime::Handle::current())
         .transport(Arc::new(transport))
         .start()
