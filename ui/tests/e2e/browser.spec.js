@@ -911,6 +911,8 @@ test('collected links wait on the Links page until chosen ones are started', asy
   // the toolbar still offers every view.
   await page.setViewportSize({ width: 420, height: 760 });
   await page.emulateMedia({ colorScheme: 'dark' });
+  // The theme follows the system's change once the page hears of it.
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(
     true,
   );
