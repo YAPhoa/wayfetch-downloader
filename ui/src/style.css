@@ -703,8 +703,10 @@ legend { padding: 0 0 4px; color: var(--muted); }
 .empty-state p { margin: 0; }
 .empty-state p + p { margin-top: 6px; }
 
-.saved-as { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
-.saved-as .path, dd[data-fact='saves-to'] { font-family: ui-monospace, monospace; }
+.location { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; max-width: 100%; }
+dd .path { font-family: ui-monospace, monospace; }
+dd button.link.path { padding: 0; text-align: left; overflow-wrap: anywhere; }
+dd .link-text { overflow-wrap: anywhere; }
 
 /* Narrow windows: the sidebar becomes a row of filters above the list. */
 
