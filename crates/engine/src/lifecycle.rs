@@ -182,6 +182,7 @@ impl EngineBuilder {
             shutdown_timeout: self.config.shutdown_timeout,
             supervisor: supervisor.clone(),
         };
+        let probes = Probes::new(supervisor.guard());
         let coordinator = Coordinator {
             identity,
             inbox,
@@ -194,7 +195,7 @@ impl EngineBuilder {
             running: HashMap::new(),
             held: HashSet::new(),
             destinations,
-            probes: Probes::default(),
+            probes,
             registering: 0,
             events,
             published: head,
@@ -967,14 +968,15 @@ impl Coordinator {
         self.registering += 1;
         let (store, probes) = (self.client.clone(), self.probes.clone());
         let (instance, cancel) = (self.identity.instance, self.supervisor.cancel.clone());
+        // Not abandoned on cancellation: it stops between steps instead,
+        // and a hung step keeps the engine from shutting down cleanly.
         self.supervisor.spawn(async move {
-            let result = tokio::select! {
-                result = destinations::register(&store, &probes, path.clone(), instance) => result,
-                () = cancel.cancelled() => {
-                    let _ = reply.send(Err(shutting_down()));
-                    return;
-                }
-            };
+            let result =
+                destinations::register(&store, &probes, &cancel, path.clone(), instance).await;
+            if cancel.is_cancelled() {
+                let _ = reply.send(Err(shutting_down()));
+                return;
+            }
             let _ = store
                 .0
                 .send(Internal::Registered {

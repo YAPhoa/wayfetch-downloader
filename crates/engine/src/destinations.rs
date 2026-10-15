@@ -24,13 +24,16 @@
 //!   time ([`Probes`]), so a hung mount costs one blocked thread and is
 //!   reported as not responding. Registering a folder runs as its own
 //!   task ([`register`]) that uses the store only between its filesystem
-//!   steps.
+//!   steps. Filesystem work cannot be interrupted, so it holds the state
+//!   directory until it ends, and shutdown waits for it or reports it.
 
+use std::any::Any;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use tokio_util::sync::CancellationToken;
 use wayfetch_domain::id::RootId;
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
@@ -187,9 +190,15 @@ pub(crate) fn initialize(
 /// and the store used only between them, so a hung folder delays only
 /// this registration. A folder still being checked or registered is
 /// refused as busy.
+///
+/// A filesystem step cannot be interrupted, so the registration waits for
+/// it, holding the state directory, and starts nothing after `cancel`
+/// fires: no other engine can open the directory while a step may still
+/// write to the folder.
 pub(crate) async fn register(
     store: &StoreClient,
     probes: &Probes,
+    cancel: &CancellationToken,
     path: PathBuf,
     instance: InstanceId,
 ) -> Result<RootId, ProtocolError> {
@@ -201,6 +210,7 @@ pub(crate) async fn register(
         )
     })?;
     let stopped = || ProtocolError::new(ErrorCode::ShuttingDown, "engine is not running");
+    let running = || (!cancel.is_cancelled()).then_some(()).ok_or_else(stopped);
     let known = {
         let path = path.clone();
         store
@@ -211,12 +221,15 @@ pub(crate) async fn register(
     let (id, allocated) = match known {
         Some(id) => (id, false),
         None => {
+            running()?;
             let identified = {
                 let path = path.clone();
-                blocking(move || Root::identify(&path, instance))
+                probes
+                    .blocking(move || Root::identify(&path, instance))
                     .await?
                     .map_err(RootError::from)?
             };
+            running()?;
             let path = path.clone();
             store
                 .call(move |store| claim(store, &path, identified, true))
@@ -224,20 +237,14 @@ pub(crate) async fn register(
                 .ok_or_else(stopped)??
         }
     };
-    let initialized = blocking(move || Root::initialize(&path, id, instance)).await?;
+    running()?;
+    let initialized = probes
+        .blocking(move || Root::initialize(&path, id, instance))
+        .await?;
     Ok(store
         .call(move |store| settle(store, id, allocated, true, initialized))
         .await
         .ok_or_else(stopped)??)
-}
-
-/// Runs filesystem work on a blocking thread.
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, ProtocolError> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|_| ProtocolError::new(ErrorCode::Internal, "the folder could not be checked"))
 }
 
 /// The permitted roots and the default, kept by the coordinator.
@@ -406,8 +413,19 @@ impl Destinations {
 /// path: a check that is still running when another is asked for is not
 /// repeated, so a hung mount holds one thread, however often it is asked
 /// about.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Probes(Arc<Mutex<HashSet<PathBuf>>>);
+#[derive(Debug, Clone)]
+pub(crate) struct Probes {
+    running: Arc<Mutex<HashSet<PathBuf>>>,
+    /// Held by every check until it ends, so the state directory stays
+    /// locked while one may still touch a folder.
+    guard: Arc<dyn Any + Send + Sync>,
+}
+
+impl Default for Probes {
+    fn default() -> Self {
+        Self::new(Arc::new(()))
+    }
+}
 
 /// A path claimed for filesystem work; dropping it releases the path.
 pub(crate) struct Slot(Arc<Mutex<HashSet<PathBuf>>>, PathBuf);
@@ -419,18 +437,48 @@ impl Drop for Slot {
 }
 
 impl Probes {
+    /// Checks that hold `guard` while they run.
+    pub(crate) fn new(guard: Arc<dyn Any + Send + Sync>) -> Self {
+        Self {
+            running: Arc::default(),
+            guard,
+        }
+    }
+
     /// Claims `path`, unless work on it is still running.
     pub(crate) fn claim(&self, path: &Path) -> Option<Slot> {
-        self.0
+        self.running
             .lock()
             .expect("probe set")
             .insert(path.to_owned())
-            .then(|| Slot(self.0.clone(), path.to_owned()))
+            .then(|| Slot(self.running.clone(), path.to_owned()))
     }
 
     /// Whether work on `path` is running.
     pub(crate) fn busy(&self, path: &Path) -> bool {
-        self.0.lock().expect("probe set").contains(path)
+        self.running.lock().expect("probe set").contains(path)
+    }
+
+    /// Runs filesystem work on a blocking thread, holding the guard until
+    /// it ends, even if whoever awaits it gives up.
+    pub(crate) fn blocking<T, F>(
+        &self,
+        work: F,
+    ) -> impl Future<Output = Result<T, ProtocolError>> + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let guard = self.guard.clone();
+        let running = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            work()
+        });
+        async {
+            running.await.map_err(|_| {
+                ProtocolError::new(ErrorCode::Internal, "the folder could not be checked")
+            })
+        }
     }
 
     /// Runs `work` on `path` on a blocking thread, waiting at most
@@ -442,7 +490,7 @@ impl Probes {
         work: impl FnOnce() -> T + Send + 'static,
     ) -> Option<T> {
         let slot = self.claim(path)?;
-        let check = tokio::task::spawn_blocking(move || {
+        let check = self.blocking(move || {
             let result = work();
             drop(slot);
             result
