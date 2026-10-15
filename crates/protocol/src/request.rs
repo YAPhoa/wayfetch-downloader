@@ -7,9 +7,11 @@
 //! test T62).
 
 use serde::Deserialize;
-use wayfetch_domain::id::{JobId, PackageId, RootId};
+use wayfetch_domain::id::{AccountId, JobId, PackageId, RootId};
+use wayfetch_domain::name::ProviderId;
 use wayfetch_domain::version::Revision;
 
+use crate::account::{AccountAlias, AccountRef};
 use crate::command::{
     CollectItems, Command, CommandEnvelope, IdempotencyKey, InputUrl, LinkRef, LinkRefs,
     SubmitItems,
@@ -311,6 +313,107 @@ pub struct AddRootRequest {
     pub path: String,
 }
 
+/// Signs in to a provider: adds an account, or replaces an account's
+/// credentials. Carries no credentials; the person approves Wayfetch on
+/// the provider's site. Added in protocol 1.3.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct AuthorizeAccountRequest {
+    /// Identifies the command across retries.
+    pub idempotency_key: IdempotencyKey,
+    /// The instance the client believes it is talking to.
+    pub target: InstanceId,
+    /// The service.
+    pub service: ProviderId,
+    /// The account to sign in again, at the revision the client saw;
+    /// absent to add one.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub account: Option<AccountRef>,
+    /// A name for a new account; blank for none.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub alias: Option<String>,
+}
+
+impl AuthorizeAccountRequest {
+    /// The command envelope. An alias names only a new account.
+    pub fn into_envelope(self) -> Result<CommandEnvelope, ProtocolError> {
+        let alias = match self.alias.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(_) if self.account.is_some() => {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidRequest,
+                    "only a new account takes an alias",
+                ));
+            }
+            Some(text) => Some(AccountAlias::new(text)?),
+        };
+        Ok(CommandEnvelope {
+            idempotency_key: self.idempotency_key,
+            target: self.target,
+            command: Command::AuthorizeAccount {
+                service: self.service,
+                account: self.account,
+                alias,
+            },
+        })
+    }
+}
+
+/// What to do with an account. Added in protocol 1.3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum AccountAction {
+    /// [`Command::SetAccountEnabled`], enabling it.
+    Enable,
+    /// [`Command::SetAccountEnabled`], disabling it.
+    Disable,
+    /// [`Command::RemoveAccount`].
+    Remove,
+}
+
+/// Enables, disables, or removes an account at the revision the client
+/// saw. Added in protocol 1.3.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct AccountCommandRequest {
+    /// Identifies the command across retries.
+    pub idempotency_key: IdempotencyKey,
+    /// The instance the client believes it is talking to.
+    pub target: InstanceId,
+    /// What to do.
+    pub action: AccountAction,
+    /// The account revision the client last saw.
+    pub expected_revision: Revision,
+}
+
+impl AccountCommandRequest {
+    /// The command envelope for `account`.
+    pub fn into_envelope(self, account: AccountId) -> CommandEnvelope {
+        let expected_revision = self.expected_revision;
+        let command = match self.action {
+            AccountAction::Enable | AccountAction::Disable => Command::SetAccountEnabled {
+                account,
+                expected_revision,
+                enabled: self.action == AccountAction::Enable,
+            },
+            AccountAction::Remove => Command::RemoveAccount {
+                account,
+                expected_revision,
+            },
+        };
+        CommandEnvelope {
+            idempotency_key: self.idempotency_key,
+            target: self.target,
+            command,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +604,60 @@ mod tests {
         assert_eq!(
             collect(json!([])).unwrap_err().code,
             ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn account_requests_build_their_commands() {
+        let authorize = |value: serde_json::Value| {
+            let mut body = json!({
+                "idempotency_key": IdempotencyKey::generate(),
+                "target": InstanceId::generate(),
+                "service": "real-debrid",
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(value.as_object().unwrap().clone());
+            serde_json::from_value::<AuthorizeAccountRequest>(body).map(|r| r.into_envelope())
+        };
+        let Command::AuthorizeAccount { alias, account, .. } =
+            authorize(json!({"alias": "  Home "}))
+                .unwrap()
+                .unwrap()
+                .command
+        else {
+            panic!()
+        };
+        assert_eq!(alias.unwrap().as_str(), "Home");
+        assert_eq!(account, None);
+        let blank = authorize(json!({"alias": " "})).unwrap().unwrap();
+        assert!(matches!(
+            blank.command,
+            Command::AuthorizeAccount { alias: None, .. }
+        ));
+        let again = json!({"account": {"account": "acct-2", "revision": 3}, "alias": "x"});
+        assert_eq!(
+            authorize(again).unwrap().unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        // Credentials have no field to arrive in.
+        assert!(authorize(json!({"password": "hunter2"})).is_err());
+
+        let remove: AccountCommandRequest = serde_json::from_value(json!({
+            "idempotency_key": IdempotencyKey::generate(),
+            "target": InstanceId::generate(),
+            "action": "disable",
+            "expected_revision": 2,
+        }))
+        .unwrap();
+        let account = AccountId::from_u64(2).unwrap();
+        assert_eq!(
+            remove.into_envelope(account).command,
+            Command::SetAccountEnabled {
+                account,
+                expected_revision: Revision::from_u64(2).unwrap(),
+                enabled: false,
+            }
         );
     }
 }

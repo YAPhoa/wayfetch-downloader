@@ -1,8 +1,8 @@
 //! What every Wayfetch Downloader application host composes the same way
 //! (architecture brief section 4.3, "application host"): the operator's
-//! state-directory, root, and network options, explicit root
-//! initialization, engine startup with the HTTP transport, process
-//! signals, and non-blocking terminal output.
+//! state-directory, root, network, and credential-key options, explicit
+//! root initialization, engine startup with the HTTP transport and the
+//! account integrations, process signals, and non-blocking terminal output.
 //!
 //! Hosts differ only in how they talk to people: `wayfetch` reads standard
 //! input, `wayfetchd` serves HTTP, and `wayfetch-desktop` shows the shared
@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Args;
+use wayfetch_adapters::real_debrid::{Endpoint, RealDebrid};
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::state_dir::StateDir;
 use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner};
@@ -78,6 +79,36 @@ pub struct EngineArgs {
     /// turned off. Repeatable.
     #[arg(long, value_name = "FILE")]
     pub ca_cert: Vec<PathBuf>,
+    /// The key file that encrypts provider account credentials: 64 hex
+    /// digits, readable by its owner only, outside the state directory.
+    /// Created when the first account is added if it does not exist then,
+    /// and never replaced afterwards. Without it, accounts cannot be added;
+    /// downloads work either way.
+    #[arg(long, value_name = "FILE")]
+    pub credential_key: Option<PathBuf>,
+    /// Another address serving Real-Debrid's API, for testing against a
+    /// local stand-in: HTTPS, or HTTP on a loopback address.
+    #[arg(long, value_name = "URL", hide = true)]
+    pub real_debrid_endpoint: Option<String>,
+}
+
+impl EngineArgs {
+    /// Uses a key file beside the state directory, named after it, unless
+    /// one was given: for a desktop, where one person owns both. A server
+    /// operator names the key file, so it can live on other storage than
+    /// the state.
+    pub fn default_credential_key(&mut self) -> Result<(), String> {
+        if self.credential_key.is_none() {
+            let state = absolute(&self.state.state_dir)?;
+            let name = state
+                .file_name()
+                .ok_or_else(|| format!("{}: not a directory name", state.display()))?;
+            let mut key = name.to_owned();
+            key.push(".credential-key");
+            self.credential_key = Some(state.with_file_name(key));
+        }
+        Ok(())
+    }
 }
 
 /// Runs `future` to completion on a new [`runtime`], then [`release`]s it.
@@ -156,8 +187,14 @@ impl Started {
 pub async fn start_engine(args: &EngineArgs) -> Result<Started, String> {
     let state_dir = absolute(&args.state.state_dir)?;
     let root = absolute(&args.download_root)?;
-    let transport = HttpTransport::new(http_config(args)?)
-        .map_err(|e| format!("cannot configure HTTP: {e}"))?;
+    let transport = Arc::new(
+        HttpTransport::new(http_config(args)?)
+            .map_err(|e| format!("cannot configure HTTP: {e}"))?,
+    );
+    let real_debrid = match &args.real_debrid_endpoint {
+        None => Endpoint::official(),
+        Some(url) => Endpoint::custom(url)?,
+    };
     let mut config = EngineConfig::new(state_dir);
     config.roots.push(root.clone());
     for extra in &args.roots {
@@ -167,8 +204,10 @@ pub async fn start_engine(args: &EngineArgs) -> Result<Started, String> {
         }
     }
     config.download_root = Some(root.clone());
+    config.credential_key = args.credential_key.as_deref().map(absolute).transpose()?;
     let owner = EngineBuilder::new(config, tokio::runtime::Handle::current())
-        .transport(Arc::new(transport))
+        .transport(transport.clone())
+        .account_provider(Arc::new(RealDebrid::new(transport, real_debrid)))
         .start()
         .await
         .map_err(|e| e.to_string())?;

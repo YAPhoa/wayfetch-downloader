@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+wayfetch-adapters.workspace = true
 wayfetch-engine.workspace = true
 wayfetch-net.workspace = true
 clap.workspace = true

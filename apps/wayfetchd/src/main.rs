@@ -83,7 +83,7 @@ enum Command {
     /// empty directory.
     InitRoot(InitRootArgs),
     /// Run the engine and serve its HTTP API until SIGINT or SIGTERM.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Ask a running daemon whether it is ready; exit 0 only if it is.
     ///
     /// For health checks: it starts no engine, takes no lock, and needs no
@@ -271,7 +271,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }),
         Command::Run(args) => {
-            wayfetch_host::block_on(run(args, &terminal)).and_then(|result| result)
+            wayfetch_host::block_on(run(*args, &terminal)).and_then(|result| result)
         }
         Command::ResetOwner(args) => wayfetch_api::reset_owner(&args.auth_dir)
             .map(|existed| {

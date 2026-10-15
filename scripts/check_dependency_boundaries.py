@@ -35,6 +35,9 @@ RULES = {
     "wayfetch-protocol": HOST_SIDE + ["wayfetch-engine"],
     "wayfetch-engine": HOST_SIDE + ["wayfetch-net"],
     "wayfetch-net": HOST_SIDE,
+    # Provider integrations speak through the engine's API client seam, so
+    # they hold no HTTP client of their own.
+    "wayfetch-adapters": HOST_SIDE + ["wayfetch-net", "reqwest", "hyper", "hyper-*"],
     # The HTTP adapter serves an engine; it does not compose a host.
     "wayfetch-api": DESKTOP + ["wayfetchd", "wayfetch-cli", "wayfetch-host"],
     "wayfetch-host": HOST_AND_UI,

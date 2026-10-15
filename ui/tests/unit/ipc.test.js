@@ -167,3 +167,45 @@ test('a refused subscription ends like a lost stream', async () => {
   const { seen } = await subscription(core);
   assert.deepEqual(seen, ['end']);
 });
+
+test('account commands carry no credentials, only the protocol JSON', async () => {
+  const core = new FakeCore({
+    query: () => ({ type: 'accounts' }),
+    authorize_account: () => ({ type: 'authorization_started' }),
+    cancel_authorization: () => ({}),
+    account_command: () => ({}),
+    refresh_account: () => ({}),
+  });
+  const client = new DesktopIpcClient(core);
+  assert.ok(client.permissions.includes('accounts'));
+  await client.accounts();
+  await client.authorization(/** @type {any} */ ('6f1c2c5e-6c1e-4b8a-9f57-3a8f9f0f6a11'));
+  await client.authorizeAccount({ idempotencyKey: 'k', target: 't', service: 'real-debrid', alias: 'Main' });
+  await client.authorizeAccount({
+    idempotencyKey: 'k2',
+    target: 't',
+    service: 'real-debrid',
+    account: { account: /** @type {any} */ ('acct-1'), revision: 3 },
+  });
+  await client.cancelAuthorization(/** @type {any} */ ('6f1c2c5e-6c1e-4b8a-9f57-3a8f9f0f6a11'));
+  await client.accountCommand(/** @type {any} */ ('acct-1'), {
+    idempotencyKey: 'k3',
+    target: 't',
+    action: 'disable',
+    expectedRevision: 3,
+  });
+  await client.refreshAccount(/** @type {any} */ ('acct-1'));
+  assert.deepEqual(core.calledWith('query'), [
+    { query: { type: 'accounts' } },
+    { query: { type: 'authorization', id: '6f1c2c5e-6c1e-4b8a-9f57-3a8f9f0f6a11' } },
+  ]);
+  assert.deepEqual(core.calledWith('authorize_account'), [
+    { request: { idempotency_key: 'k', target: 't', service: 'real-debrid', alias: 'Main' } },
+    { request: { idempotency_key: 'k2', target: 't', service: 'real-debrid', account: { account: 'acct-1', revision: 3 } } },
+  ]);
+  assert.deepEqual(core.calledWith('cancel_authorization'), [{ authorization: '6f1c2c5e-6c1e-4b8a-9f57-3a8f9f0f6a11' }]);
+  assert.deepEqual(core.calledWith('account_command'), [
+    { account: 'acct-1', request: { idempotency_key: 'k3', target: 't', action: 'disable', expected_revision: 3 } },
+  ]);
+  assert.deepEqual(core.calledWith('refresh_account'), [{ account: 'acct-1' }]);
+});

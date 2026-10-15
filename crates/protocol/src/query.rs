@@ -18,6 +18,7 @@ use wayfetch_domain::name::{DiagnosticText, HostName};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{Generation, Revision};
 
+use crate::account::{Accounts, Authorization, AuthorizationId};
 use crate::command::Permission;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::event::EventCursor;
@@ -154,6 +155,18 @@ pub enum Query {
         /// The link.
         link: SourceLinkId,
     },
+    /// The accounts the user added, redacted, and the services accounts
+    /// can be added for. Needs [`Permission::Accounts`]. Never contacts a
+    /// provider. Added in protocol 1.3.
+    Accounts {},
+    /// Where an authorization started by
+    /// [`crate::Command::AuthorizeAccount`] is. Needs
+    /// [`Permission::Accounts`]. Never contacts a provider. Added in
+    /// protocol 1.3.
+    Authorization {
+        /// The authorization.
+        id: AuthorizationId,
+    },
 }
 
 impl Query {
@@ -161,6 +174,7 @@ impl Query {
     pub const fn required_permission(&self) -> Permission {
         match self {
             Self::JobSource { .. } | Self::LinkSource { .. } => Permission::Sources,
+            Self::Accounts {} | Self::Authorization { .. } => Permission::Accounts,
             Self::InspectJob { .. }
             | Self::ListJobs { .. }
             | Self::CountJobs { .. }
@@ -435,6 +449,10 @@ pub enum QueryResult {
         /// any credentials it held.
         url: String,
     },
+    /// Answer to [`Query::Accounts`]. Added in protocol 1.3.
+    Accounts(Accounts),
+    /// Answer to [`Query::Authorization`]. Added in protocol 1.3.
+    Authorization(Authorization),
 }
 
 #[cfg(test)]
@@ -552,6 +570,18 @@ mod tests {
         let q: Query = from_value(json!({"type": "job_source", "job": "job-2"})).unwrap();
         assert_eq!(q.required_permission(), Permission::Sources);
         assert_eq!(Query::Settings {}.required_permission(), Permission::Read);
+    }
+
+    #[test]
+    fn accounts_need_their_own_permission() {
+        let q: Query = from_value(json!({"type": "accounts"})).unwrap();
+        assert_eq!(q.required_permission(), Permission::Accounts);
+        let q: Query = from_value(json!({
+            "type": "authorization",
+            "id": "6f1c2c5e-6c1e-4b8a-9f57-3a8f9f0f6a11",
+        }))
+        .unwrap();
+        assert_eq!(q.required_permission(), Permission::Accounts);
     }
 
     #[test]

@@ -18,6 +18,7 @@ macro_rules! crash_point {
     };
 }
 
+pub mod accounts;
 mod cleanup;
 pub mod config;
 mod destinations;

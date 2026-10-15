@@ -4,9 +4,10 @@
 // checked when it is read, with no change to the code.
 //
 // The catalogue only describes services. It never enables a download
-// route: whether Wayfetch can use a service is the engine's to say, once an
-// integration for it exists, and the section shows each entry as not
-// available until then. The domains listed are for finding a service by a
+// route: whether Wayfetch can sign in to a service is the engine's to say,
+// from the integrations it reports, and the section shows every other
+// entry as not available. Signing in and downloading are separate: an
+// integration may sign accounts in before downloads can go through them. The domains listed are for finding a service by a
 // link or its address; they are not the engine's link matching, and they
 // say nothing about which hosts a multi-host service covers, which comes
 // from the service itself once integrated.
@@ -178,8 +179,8 @@ export function searchServices(query, category, services) {
 }
 
 /**
- * Whether Wayfetch can use `service`, given the integrations the engine
- * reports. None exists yet, so every service is unavailable.
+ * Whether Wayfetch can sign in to `service`, given the services the engine
+ * reports integrations for.
  * @param {Service} service
  * @param {ReadonlySet<string>} integrations
  */
@@ -188,12 +189,30 @@ export function isAvailable(service, integrations) {
 }
 
 /**
+ * What the catalogue can do: the integrations the engine reports, by
+ * service ID; whether accounts can be added now, and if not why; and what
+ * to do with a service picked.
+ * @typedef {{
+ *   integrations: ReadonlyMap<string, ServiceSupport>,
+ *   blocked: string | null,
+ *   onPick: (service: Service, support: ServiceSupport) => void,
+ * }} Picking
+ * @typedef {import('../client/contract.js').ServiceSupport} ServiceSupport
+ */
+
+/**
  * The availability tags of `service`.
  * @param {Service} service
  * @param {ReadonlySet<string>} integrations
+ * @param {ServiceSupport | undefined} support
  */
-function availability(service, integrations) {
-  if (isAvailable(service, integrations)) return [h('span', { class: 'tag available' }, 'Available')];
+function availability(service, integrations, support) {
+  if (isAvailable(service, integrations)) {
+    return [
+      h('span', { class: 'tag available' }, 'Available'),
+      support?.downloads === false && h('span', { class: 'tag' }, 'Sign-in only'),
+    ];
+  }
   return [
     service.planned && h('span', { class: 'tag current' }, 'Planned'),
     h('span', { class: 'tag' }, 'Not available yet'),
@@ -204,11 +223,12 @@ function availability(service, integrations) {
  * Opens the catalogue to pick the service of an account to add: a search
  * field, category filters with how many services match each, and the
  * matching services, grouped by category until something is searched for.
- * Planned integrations lead. A service can be picked only once the engine
- * has an integration for it, and none has yet, so no account can be added.
- * @param {ReadonlySet<string>} integrations
+ * Planned integrations lead. Only a service the engine has an integration
+ * for can be picked, and only while accounts can be stored.
+ * @param {Picking} picking
  */
-export function pickService(integrations) {
+export function pickService(picking) {
+  const integrations = new Set(picking.integrations.keys());
   const field = h('input', {
     type: 'search',
     id: 'service-search',
@@ -289,7 +309,7 @@ export function pickService(integrations) {
     // Search results keep their order, best first; the whole catalogue is
     // grouped by category.
     if (query.trim() !== '') {
-      show(results, h('ul', { class: 'service-list' }, matches.map((match) => serviceItem(match, integrations))));
+      show(results, h('ul', { class: 'service-list' }, matches.map((match) => serviceItem(match, picking, pick))));
       return;
     }
     show(
@@ -301,7 +321,7 @@ export function pickService(integrations) {
           'section',
           { class: 'service-group', 'aria-labelledby': `service-group-${id}` },
           h('h3', { id: `service-group-${id}` }, label),
-          h('ul', { class: 'service-list' }, group.map((match) => serviceItem(match, integrations))),
+          h('ul', { class: 'service-list' }, group.map((match) => serviceItem(match, picking, pick))),
         );
       }),
     );
@@ -338,19 +358,39 @@ export function pickService(integrations) {
       filters,
       summary,
       results,
-      h('p', { class: 'hint' }, 'No account can be added yet: Wayfetch does not support accounts with these services so far.'),
+      h(
+        'p',
+        { class: 'hint' },
+        integrations.size === 0
+          ? 'No account can be added yet: Wayfetch does not support accounts with these services so far.'
+          : (picking.blocked ?? 'Accounts can be added for the services marked Available.'),
+      ),
     ),
   );
+
+  /**
+   * Closes the catalogue and hands on `service`.
+   * @param {Service} service
+   * @param {ServiceSupport} support
+   */
+  const pick = (service, support) => {
+    dialog.close();
+    picking.onPick(service, support);
+  };
   field.focus();
   void load();
 }
 
 /**
- * One service in the catalogue.
+ * One service in the catalogue; one with an integration can be picked
+ * while accounts can be added.
  * @param {Match} match
- * @param {ReadonlySet<string>} integrations
+ * @param {Picking} picking
+ * @param {(service: Service, support: ServiceSupport) => void} pick
  */
-function serviceItem({ service, alias }, integrations) {
+function serviceItem({ service, alias }, picking, pick) {
+  const integrations = new Set(picking.integrations.keys());
+  const support = picking.integrations.get(service.id);
   return h(
     'li',
     { class: service.planned ? 'service-card featured' : 'service-card', 'data-service': service.id },
@@ -359,10 +399,31 @@ function serviceItem({ service, alias }, integrations) {
       { class: 'service-title' },
       h('h4', null, service.name),
       h('span', { class: 'tag' }, categoryLabel(service.category)),
-      ...availability(service, integrations),
+      ...availability(service, integrations, support),
+      support &&
+        picking.blocked === null &&
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'pick-service',
+            'data-key': `pick-${service.id}`,
+            'aria-label': `Sign in to ${service.name}`,
+            onclick: () => pick(service, support),
+          },
+          'Sign in…',
+        ),
     ),
     h('p', null, service.about),
-    service.planned && h('p', { class: 'hint' }, 'The first account integration planned for Wayfetch.'),
+    support
+      ? h(
+          'p',
+          { class: 'hint' },
+          support.downloads
+            ? 'Sign in on the service’s own site; Wayfetch never asks for your password.'
+            : 'Sign in on the service’s own site; Wayfetch never asks for your password. Wayfetch can check the account, but cannot download through it yet.',
+        )
+      : service.planned && h('p', { class: 'hint' }, 'The first account integration planned for Wayfetch.'),
     h(
       'p',
       { class: 'domains' },

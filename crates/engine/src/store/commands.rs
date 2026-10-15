@@ -19,7 +19,7 @@ use wayfetch_protocol::{
 };
 
 use super::links::{self, Unusable};
-use super::{Store, StoreError, jobs, key, outbox, renames, roots, sql};
+use super::{Store, StoreError, accounts, jobs, key, outbox, renames, roots, sql};
 
 /// What the coordinator knows about destinations when a command runs.
 #[derive(Debug, Clone, Default)]
@@ -83,11 +83,27 @@ impl Store {
                 expected_revision,
                 root,
             } => roots::remove_root(&tx, *expected_revision, *root, now)?,
+            Command::SetAccountEnabled {
+                account,
+                expected_revision,
+                enabled,
+            } => accounts::set_enabled(&tx, *account, *expected_revision, *enabled)?,
+            Command::RemoveAccount {
+                account,
+                expected_revision,
+            } => accounts::remove(&tx, *account, *expected_revision)?,
             // The file is renamed between the store's two steps.
             Command::Rename { .. } => {
                 return Err(ProtocolError::new(
                     ErrorCode::Internal,
                     "a rename runs through Store::begin_rename",
+                ));
+            }
+            // The account is stored once the person approved it.
+            Command::AuthorizeAccount { .. } => {
+                return Err(ProtocolError::new(
+                    ErrorCode::Internal,
+                    "an authorization is stored through Store::add_account",
                 ));
             }
         };
