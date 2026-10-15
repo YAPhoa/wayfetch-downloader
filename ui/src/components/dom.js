@@ -35,12 +35,26 @@ export function h(tag, props, ...children) {
 }
 
 /**
- * Replaces `parent`'s children.
+ * Updates `parent`'s children, leaving retained nodes connected and in place.
+ * Detaching even an unchanged control can swallow an in-progress click.
  * @param {Element} parent
  * @param {...Children} children
  */
 export function show(parent, ...children) {
-  parent.replaceChildren(...nodes(children));
+  let at = parent.firstChild;
+  for (const child of nodes(children)) {
+    if (child === at || (typeof child === 'string' && at?.nodeType === Node.TEXT_NODE && at.textContent === child)) {
+      at = at.nextSibling;
+      continue;
+    }
+    const node = typeof child === 'string' ? document.createTextNode(child) : child;
+    parent.insertBefore(node, at);
+  }
+  while (at) {
+    const next = at.nextSibling;
+    parent.removeChild(at);
+    at = next;
+  }
 }
 
 /**
