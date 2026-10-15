@@ -13,7 +13,9 @@
 use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::id::{JobId, RootId};
 use wayfetch_domain::time::UtcTimestamp;
-use wayfetch_protocol::{Command, CommandEnvelope, CommandResult, InstanceId, ProtocolError};
+use wayfetch_protocol::{
+    Command, CommandEnvelope, CommandResult, ErrorCode, InstanceId, ProtocolError,
+};
 
 use super::commands::{record, record_as, replayed};
 use super::{Store, StoreError, jobs, key, sql};
@@ -130,9 +132,9 @@ fn renamed(path: &RelativePath, name: &str) -> Result<RelativePath, StoreError> 
 impl Store {
     /// Checks a rename command and records it, reserving the new name. The
     /// job must be listed, complete at the revision the client saw, and not
-    /// already being renamed; the name must pass the filename policy, and
-    /// no other publication or rename in the root may hold its case-folded
-    /// form.
+    /// already being renamed; the name must pass the filename policy, must
+    /// not differ from the old one only in case, and no other publication
+    /// or rename in the root may hold its case-folded form.
     pub fn begin_rename(
         &mut self,
         envelope: &CommandEnvelope,
@@ -171,6 +173,14 @@ impl Store {
             record(&tx, envelope, &result, now)?;
             tx.commit().map_err(StoreError::from)?;
             return Ok(RenameStart::Done(result));
+        }
+        // On a case-insensitive filesystem both names open one entry, which
+        // a rename would remove; changing only the case is refused.
+        if to.collision_key() == file.path.collision_key() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "a new name that differs only in letter case is not supported",
+            ));
         }
         let taken: bool = tx
             .query_row(

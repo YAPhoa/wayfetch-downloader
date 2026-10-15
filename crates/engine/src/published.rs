@@ -9,9 +9,14 @@
 //! busy to the ones after. A step is never abandoned once started; at
 //! shutdown the request stops before its next one.
 //!
-//! A rename recorded but unfinished was left by a crash or a filesystem
-//! error. It is reconciled at startup, and again before anything else is
-//! done with the job's file, judged by where the file is now.
+//! Requests about one job's file run one at a time, from the first look
+//! at the job to the last step ([`Files::jobs`]); another that arrives
+//! meanwhile is refused as busy.
+//!
+//! A rename recorded but unfinished, and no longer running, was left by a
+//! crash or a filesystem error. It is reconciled at startup, and again
+//! before anything else is done with the job's file, judged by where the
+//! file is now. One still running is never reconciled: its file is moving.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -23,7 +28,7 @@ use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, InstanceId, ProtocolError,
 };
 
-use crate::destinations::{Destinations, Probes};
+use crate::destinations::{Claims, Destinations, Probes, Slot};
 use crate::fs::{FsError, RenameCheck, Root};
 use crate::lifecycle::StoreClient;
 use crate::store::{RenameIntent, RenameStart, Store, StoreError};
@@ -80,6 +85,8 @@ impl From<Failure> for ProtocolError {
 pub(crate) struct Files {
     pub(crate) store: StoreClient,
     pub(crate) probes: Probes,
+    /// Jobs whose file a request is working on.
+    pub(crate) jobs: Claims<JobId>,
     pub(crate) roots: Destinations,
     pub(crate) instance: InstanceId,
     /// Once cancelled, no further step starts.
@@ -91,6 +98,16 @@ fn shutting_down() -> ProtocolError {
 }
 
 impl Files {
+    /// Claims `job` for the whole of a request about its file.
+    fn claim(&self, job: JobId) -> Result<Slot<JobId>, ProtocolError> {
+        self.jobs.claim(&job).ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::Busy,
+                "the file is being renamed or looked up; try again",
+            )
+        })
+    }
+
     /// Runs `work` on the store.
     async fn store<R: Send + 'static>(
         &self,
@@ -133,7 +150,11 @@ impl Files {
                 let _slot = slot;
                 let opened = Root::open(&root.path, root.id, instance)
                     .map_err(|e| Failure::Untouched(refusal(&e)))?;
-                work(&opened).map_err(|e| Failure::Touched(refusal(&e)))
+                work(&opened).map_err(|e| match e {
+                    // Refused before anything was changed.
+                    FsError::TargetExists(_) => Failure::Untouched(refusal(&e)),
+                    e => Failure::Touched(refusal(&e)),
+                })
             })
             .await;
         ran.unwrap_or_else(|_| {
@@ -165,21 +186,31 @@ impl Files {
     }
 
     /// Reconciles the job's unfinished rename, if it has one and its
-    /// folder answers.
+    /// folder answers. The caller has claimed the job.
     async fn reconcile_job(&self, job: JobId) {
         if let Ok(Ok(Some(intent))) = self.store(move |store| store.pending_rename(job)).await {
             let _ = self.settle(&intent).await;
         }
     }
 
-    /// Reconciles every unfinished rename. One that cannot be reconciled
-    /// now, because its folder is unavailable, stays for a later attempt.
+    /// Reconciles every unfinished rename that no request is working on.
+    /// One that cannot be reconciled now, because its folder is
+    /// unavailable or a request holds the job, stays for a later attempt.
     pub(crate) async fn reconcile(&self) {
         let Ok(Ok(pending)) = self.store(Store::pending_renames).await else {
             return;
         };
         for intent in pending {
-            let _ = self.settle(&intent).await;
+            let Ok(_slot) = self.claim(intent.job) else {
+                continue;
+            };
+            // Read again under the claim: a request may have finished it.
+            if let Ok(Ok(Some(current))) = self
+                .store(move |store| store.pending_rename(intent.job))
+                .await
+            {
+                let _ = self.settle(&current).await;
+            }
         }
     }
 
@@ -190,9 +221,14 @@ impl Files {
         &self,
         envelope: CommandEnvelope,
     ) -> Result<CommandResult, ProtocolError> {
-        if let Command::Rename { job, .. } = envelope.command {
-            self.reconcile_job(job).await;
-        }
+        let _slot = match envelope.command {
+            Command::Rename { job, .. } => {
+                let slot = self.claim(job)?;
+                self.reconcile_job(job).await;
+                Some(slot)
+            }
+            _ => None,
+        };
         let instance = self.instance;
         let intent = match self
             .store(move |store| store.begin_rename(&envelope, instance, now()))
@@ -201,6 +237,7 @@ impl Files {
             RenameStart::Done(result) => return Ok(result),
             RenameStart::Started(intent) => intent,
         };
+        self.recorded(&intent).await;
         let (job, file, to) = (intent.job, intent.file.clone(), intent.to.clone());
         match self
             .on_root(intent.root, move |root| root.rename_published(&file, &to))
@@ -224,6 +261,7 @@ impl Files {
     /// still hold the file Wayfetch published, for a host to open on its
     /// user's request.
     pub(crate) async fn locate(&self, job: JobId) -> Result<PathBuf, ProtocolError> {
+        let _slot = self.claim(job)?;
         self.reconcile_job(job).await;
         let (root, file) = self
             .store(move |store| store.published_file(job))
@@ -237,5 +275,19 @@ impl Files {
         Ok(self
             .on_root(root, move |root| root.published_path(&file))
             .await?)
+    }
+
+    /// A pause after a rename is recorded and before its file is touched,
+    /// for tests: configured to pause, a rename in a folder named
+    /// `stalled` waits there until the failpoint is removed.
+    async fn recorded(&self, _intent: &RenameIntent) {
+        #[cfg(feature = "failpoints")]
+        if let Some(root) = self.roots.get(_intent.root) {
+            let stalled = root.path.file_name() == Some(std::ffi::OsStr::new("stalled"));
+            let _ = tokio::task::spawn_blocking(move || {
+                fail::fail_point!("rename-recorded", stalled, |_| ());
+            })
+            .await;
+        }
     }
 }
