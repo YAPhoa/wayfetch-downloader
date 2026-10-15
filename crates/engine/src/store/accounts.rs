@@ -92,9 +92,12 @@ pub(crate) enum CheckResult {
         refreshed: Option<StoredCredential>,
     },
     /// The provider refused them, failed, or they could not be read.
+    /// `refreshed` still replaces them: a refresh before the failure may
+    /// have made the old ones unusable.
     Failed {
         status: AccountStatus,
         problem: String,
+        refreshed: Option<StoredCredential>,
     },
 }
 
@@ -182,6 +185,17 @@ fn from_text<T: serde::de::DeserializeOwned>(stored: &str) -> Option<T> {
 fn bounded(value: Option<&str>) -> Option<&str> {
     value.filter(|v| {
         !v.is_empty() && v.len() <= MAX_PROVIDER_TEXT && !v.chars().any(char::is_control)
+    })
+}
+
+/// The provider's ID for the account a sign-in reached, which must be
+/// known before any credentials are stored or replaced.
+fn confirmed(profile: &Profile) -> Result<&str, ProtocolError> {
+    bounded(profile.user_id.as_deref()).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::NotApplicable,
+            "the service did not confirm which account signed in; try again",
+        )
     })
 }
 
@@ -385,15 +399,14 @@ impl Store {
     /// Adds the account an authorization signed in, with its credentials
     /// and what the provider said, recording the authorization's command
     /// under its key. A retry of a command already recorded only replays
-    /// its result. `checked` says whether the provider was asked about the
-    /// account. Refused if the provider's user is already an account.
+    /// its result. Refused without the provider's ID for the account, or
+    /// if that user is already an account.
     pub(crate) fn add_account(
         &mut self,
         envelope: &CommandEnvelope,
         instance: InstanceId,
         credential: &StoredCredential,
         profile: &Profile,
-        checked: bool,
         now: UtcTimestamp,
     ) -> Result<CommandResult, ProtocolError> {
         let wayfetch_protocol::Command::AuthorizeAccount { service, alias, .. } = &envelope.command
@@ -416,7 +429,8 @@ impl Store {
                 "no more accounts can be added",
             ));
         }
-        if duplicate(&tx, service, profile.user_id.as_deref(), None)? {
+        let user = confirmed(profile)?;
+        if duplicate(&tx, service, Some(user), None)? {
             return Err(already_added());
         }
         tx.execute(
@@ -431,9 +445,7 @@ impl Store {
         .map_err(StoreError::from)?;
         let account: AccountId = key(tx.last_insert_rowid())?;
         write_credential(&tx, account, credential)?;
-        if checked {
-            write_profile(&tx, account, profile, now)?;
-        }
+        write_profile(&tx, account, profile, now)?;
         let result = CommandResult::AccountAuthorized {
             account,
             revision: Revision::INITIAL,
@@ -456,7 +468,6 @@ impl Store {
         generation: Generation,
         credential: &StoredCredential,
         profile: &Profile,
-        checked: bool,
         now: UtcTimestamp,
     ) -> Result<CommandResult, ProtocolError> {
         let tx = self.write()?;
@@ -466,28 +477,28 @@ impl Store {
         let row = load(&tx, account)?.ok_or_else(|| {
             ProtocolError::new(ErrorCode::NotFound, "the account was removed meanwhile")
         })?;
+        // Overtaken by another change to the account.
         if row.generation != generation {
             return Err(ProtocolError::new(
-                ErrorCode::NotApplicable,
+                ErrorCode::RevisionConflict,
                 "the account was signed in again meanwhile",
             ));
         }
         if !row.enabled {
             return Err(ProtocolError::new(
-                ErrorCode::NotApplicable,
+                ErrorCode::RevisionConflict,
                 "the account was disabled meanwhile",
             ));
         }
-        if let (Some(stored), Some(user)) =
-            (&row.provider_user, bounded(profile.user_id.as_deref()))
-            && stored != user
-        {
+        // Only the same user at the provider may replace the credentials.
+        let user = confirmed(profile)?;
+        if row.provider_user.as_deref() != Some(user) {
             return Err(ProtocolError::new(
                 ErrorCode::NotApplicable,
                 "that is a different account at the provider; add it as a new account instead",
             ));
         }
-        if duplicate(&tx, &row.service, profile.user_id.as_deref(), Some(account))? {
+        if duplicate(&tx, &row.service, Some(user), Some(account))? {
             return Err(already_added());
         }
         let revision = next(row.revision, Revision::next)?;
@@ -502,9 +513,7 @@ impl Store {
         )
         .map_err(StoreError::from)?;
         write_credential(&tx, account, credential)?;
-        if checked {
-            write_profile(&tx, account, profile, now)?;
-        }
+        write_profile(&tx, account, profile, now)?;
         let result = CommandResult::AccountAuthorized { account, revision };
         record(&tx, envelope, &result, now)?;
         tx.commit().map_err(StoreError::from)?;
@@ -528,18 +537,22 @@ impl Store {
         if row.generation != generation {
             return Ok(Some(row));
         }
+        let (CheckResult::Authenticated { refreshed, .. } | CheckResult::Failed { refreshed, .. }) =
+            result;
+        if let Some(credential) = refreshed {
+            tx.execute(
+                "UPDATE accounts SET credential_generation = ?2 WHERE id = ?1",
+                params![sql(account)?, sql(next(generation, Generation::next)?)?],
+            )?;
+            write_credential(&tx, account, credential)?;
+        }
         match result {
-            CheckResult::Authenticated { profile, refreshed } => {
-                if let Some(credential) = refreshed {
-                    tx.execute(
-                        "UPDATE accounts SET credential_generation = ?2 WHERE id = ?1",
-                        params![sql(account)?, sql(next(generation, Generation::next)?)?],
-                    )?;
-                    write_credential(&tx, account, credential)?;
-                }
+            CheckResult::Authenticated { profile, .. } => {
                 write_profile(&tx, account, profile, now)?;
             }
-            CheckResult::Failed { status, problem } => {
+            CheckResult::Failed {
+                status, problem, ..
+            } => {
                 tx.execute(
                     "UPDATE accounts SET status = ?2, problem = ?3, checked_at = ?4 WHERE id = ?1",
                     params![

@@ -49,8 +49,16 @@ async fn sign_in(rd: &RealDebrid) -> (Secret, Profile) {
     }
 }
 
-async fn check(rd: &RealDebrid, credential: &Secret) -> Result<Checked, ProviderError> {
-    AccountProvider::check(rd, credential).await
+/// A check that confirmed the account.
+#[derive(Debug)]
+struct Found {
+    profile: Profile,
+    refreshed: Option<Secret>,
+}
+
+async fn check(rd: &RealDebrid, credential: &Secret) -> Result<Found, ProviderError> {
+    let Checked { result, refreshed } = AccountProvider::check(rd, credential).await;
+    result.map(|profile| Found { profile, refreshed })
 }
 
 /// Text that must never be shown: everything Real-Debrid hands out that
@@ -219,6 +227,39 @@ async fn checks_and_refreshes_tokens() {
         "{err:?}"
     );
     assert_no_secret(&err.to_string());
+}
+
+#[tokio::test]
+async fn refreshed_tokens_survive_a_failed_account_check() {
+    let server = Server::start().await;
+    let rd = provider(&server);
+    let (credential, _) = sign_in(&rd).await;
+
+    // The token is refused, refreshed, and then Real-Debrid fails.
+    server.with(|s| {
+        s.once.insert(
+            USER_PATH,
+            vec![Answer::json(401, "{}"), Answer::json(503, "{}")],
+        )
+    });
+    let Checked { result, refreshed } = AccountProvider::check(&rd, &credential).await;
+    assert!(
+        matches!(result, Err(ProviderError::Unavailable(_))),
+        "{result:?}"
+    );
+    let refreshed = refreshed.expect("the new tokens are handed back");
+    let stored: serde_json::Value = serde_json::from_slice(refreshed.expose()).unwrap();
+    assert_eq!(stored["refresh_token"], "synthetic-refresh-2");
+
+    // Real-Debrid rotated the refresh token: only the new tokens work.
+    let found = check(&rd, &refreshed).await.unwrap();
+    assert_eq!(found.profile.username.as_deref(), Some("synthetic-user"));
+    server.with(|s| s.valid_access = Some("revoked".into()));
+    let err = check(&rd, &credential).await.unwrap_err();
+    assert!(
+        matches!(err, ProviderError::InvalidCredentials(_)),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

@@ -588,13 +588,20 @@ impl Coordinator {
                 return;
             }
         };
+        // Without the provider's ID for the account, the engine cannot tell
+        // a new account from one already added, or confirm a replacement.
+        if profile.user_id.is_none() {
+            self.accounts.end(
+                id,
+                AuthorizationState::Failed,
+                Some("the service did not confirm which account signed in; try again"),
+            );
+            return;
+        }
         let instance = self.identity.instance;
-        let checked = profile != Profile::default();
         let result = self
             .with_store(move |store| match target {
-                Target::New => {
-                    store.add_account(&envelope, instance, &stored, &profile, checked, now())
-                }
+                Target::New => store.add_account(&envelope, instance, &stored, &profile, now()),
                 Target::Replace {
                     account,
                     generation,
@@ -605,7 +612,6 @@ impl Coordinator {
                     generation,
                     &stored,
                     &profile,
-                    checked,
                     now(),
                 ),
             })
@@ -622,8 +628,9 @@ impl Coordinator {
             }
             Ok(_) => self.accounts.end(id, AuthorizationState::Failed, None),
             Err(e) => {
-                let overtaken = matches!(e.code, ErrorCode::NotFound)
-                    || (target != Target::New && e.code == ErrorCode::NotApplicable);
+                // Removed, signed in again, or disabled meanwhile; any other
+                // refusal, such as another user at the provider, failed.
+                let overtaken = matches!(e.code, ErrorCode::NotFound | ErrorCode::RevisionConflict);
                 let state = if overtaken {
                     AuthorizationState::Cancelled
                 } else {
@@ -702,6 +709,7 @@ impl Coordinator {
                 let failed = CheckResult::Failed {
                     status: AccountStatus::InvalidCredentials,
                     problem: format!("{e}; sign in again to replace them"),
+                    refreshed: None,
                 };
                 let row = self
                     .with_store(move |store| {
@@ -719,7 +727,9 @@ impl Coordinator {
             let result = tokio::select! {
                 () = cancel.cancelled() => return,
                 result = tokio::time::timeout(PROVIDER_DEADLINE, provider.check(&credential)) =>
-                    result.unwrap_or_else(|_| Err(ProviderError::Unavailable("no answer in time".into()))),
+                    result.unwrap_or_else(|_| {
+                        Checked::failed(ProviderError::Unavailable("no answer in time".into()))
+                    }),
             };
             let _ = client
                 .0
@@ -739,34 +749,41 @@ impl Coordinator {
         &mut self,
         account: AccountId,
         generation: Generation,
-        result: Result<Checked, ProviderError>,
+        checked: Checked,
     ) {
         let waiters = self.accounts.checks.remove(&account).unwrap_or_default();
-        let failed = |status, problem: String| CheckResult::Failed { status, problem };
-        let found = match result {
-            Ok(Checked { profile, refreshed }) => {
-                let row = self.with_store(move |store| store.account(account)).await;
-                let refreshed = match (refreshed, row) {
-                    (Some(credential), Ok(row)) => self
-                        .accounts
-                        .vault
-                        .keys()
-                        .and_then(|keys| seal(&keys, &row.service, &credential))
-                        .map(Some),
-                    (_, Err(e)) => Err(e.into()),
-                    (None, Ok(_)) => Ok(None),
-                };
-                match refreshed {
-                    Ok(refreshed) => CheckResult::Authenticated { profile, refreshed },
-                    Err(e) => failed(AccountStatus::Unavailable, e.message.into()),
-                }
-            }
-            Err(ProviderError::InvalidCredentials(why)) => {
-                failed(AccountStatus::InvalidCredentials, why)
-            }
-            Err(ProviderError::Unavailable(why) | ProviderError::Malformed(why)) => {
-                failed(AccountStatus::Unavailable, why)
-            }
+        // Refreshed credentials are kept whatever the check then found.
+        let refreshed = match checked.refreshed {
+            None => Ok(None),
+            Some(credential) => self
+                .with_store(move |store| store.account(account))
+                .await
+                .map_err(Into::into)
+                .and_then(|row| {
+                    let keys = self.accounts.vault.keys()?;
+                    seal(&keys, &row.service, &credential).map(Some)
+                }),
+        };
+        let found = match (refreshed, checked.result) {
+            (Err(e), _) => CheckResult::Failed {
+                status: AccountStatus::Unavailable,
+                problem: e.message.into(),
+                refreshed: None,
+            },
+            (Ok(refreshed), Ok(profile)) => CheckResult::Authenticated { profile, refreshed },
+            (Ok(refreshed), Err(ProviderError::InvalidCredentials(why))) => CheckResult::Failed {
+                status: AccountStatus::InvalidCredentials,
+                problem: why,
+                refreshed,
+            },
+            (
+                Ok(refreshed),
+                Err(ProviderError::Unavailable(why) | ProviderError::Malformed(why)),
+            ) => CheckResult::Failed {
+                status: AccountStatus::Unavailable,
+                problem: why,
+                refreshed,
+            },
         };
         let row = self
             .with_store(move |store| store.record_check(account, generation, &found, now()))

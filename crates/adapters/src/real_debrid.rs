@@ -343,32 +343,49 @@ impl RealDebrid {
         self.apply(stored, token, "the token refresh")
     }
 
-    async fn check(&self, credential: &Secret) -> Result<Checked, ProviderError> {
-        let mut stored: Stored = serde_json::from_slice(credential.expose())
+    async fn check(&self, credential: &Secret) -> Checked {
+        let stored = serde_json::from_slice(credential.expose())
             .ok()
-            .filter(|s: &Stored| s.format == FORMAT)
-            .ok_or_else(|| {
-                ProviderError::InvalidCredentials(
-                    "the stored sign-in is not in a known format; sign in again".into(),
-                )
-            })?;
+            .filter(|s: &Stored| s.format == FORMAT);
+        let Some(mut stored) = stored else {
+            return Checked::failed(ProviderError::InvalidCredentials(
+                "the stored sign-in is not in a known format; sign in again".into(),
+            ));
+        };
+        let mut refreshed = false;
+        let result = self.confirm(&mut stored, &mut refreshed).await;
+        // New tokens are kept even when the account could not be confirmed
+        // afterwards: Real-Debrid may no longer accept the old ones.
+        Checked {
+            result,
+            refreshed: refreshed.then(|| serialize(&stored)),
+        }
+    }
+
+    /// Reads the account, refreshing the access token first when it has
+    /// expired or Real-Debrid no longer accepts it. `refreshed` says
+    /// whether `stored` now holds new tokens.
+    async fn confirm(
+        &self,
+        stored: &mut Stored,
+        refreshed: &mut bool,
+    ) -> Result<Profile, ProviderError> {
         // Credentials only ever go back to the API that issued them.
         if stored.origin != self.api.endpoint().origin() {
             return Err(ProviderError::InvalidCredentials(
                 "the sign-in was issued by a different Real-Debrid address; sign in again".into(),
             ));
         }
-        let mut refreshed = false;
         if stored.expires_at <= now_millis().saturating_add(millis(EXPIRY_MARGIN)) {
-            self.refresh(&mut stored).await?;
-            refreshed = true;
+            self.refresh(stored).await?;
+            *refreshed = true;
         }
-        let profile = loop {
+        loop {
             match self.user(&stored.access_token).await {
-                Ok(profile) => break profile,
-                Err(UserError::Unauthorized) if !refreshed => {
-                    self.refresh(&mut stored).await?;
-                    refreshed = true;
+                Ok(profile) => return Ok(profile),
+                Err(UserError::Unauthorized) if !*refreshed => {
+                    self.refresh(stored).await?;
+                    *refreshed = true;
                 }
                 Err(UserError::Unauthorized) => {
                     return Err(ProviderError::InvalidCredentials(
@@ -382,19 +399,23 @@ impl RealDebrid {
                 }
                 Err(UserError::Other(e)) => return Err(e),
             }
-        };
-        Ok(Checked {
-            profile,
-            refreshed: refreshed.then(|| serialize(&stored)),
-        })
+        }
     }
 
-    /// Takes new tokens; a refresh token is kept unless a new one came.
+    /// Takes new tokens, all or none; a refresh token is kept unless a new
+    /// one came.
     fn apply(&self, stored: &mut Stored, token: Token, what: &str) -> Result<(), ProviderError> {
         let lifetime = Duration::from_secs(token.expires_in.min(365 * 24 * 3600));
-        stored.access_token = self.api.token(token.access_token, what)?;
-        if let Some(refresh) = token.refresh_token {
-            stored.refresh_token = self.api.token(refresh, what)?;
+        let access = self.api.token(token.access_token, what)?;
+        let refresh = token
+            .refresh_token
+            .map(|refresh| self.api.token(refresh, what))
+            .transpose()?;
+        stored.access_token.zeroize();
+        stored.access_token = access;
+        if let Some(refresh) = refresh {
+            stored.refresh_token.zeroize();
+            stored.refresh_token = refresh;
         }
         stored.expires_at = now_millis().saturating_add(millis(lifetime));
         Ok(())
@@ -425,10 +446,7 @@ impl AccountProvider for RealDebrid {
         Box::pin(self.poll(pending))
     }
 
-    fn check<'a>(
-        &'a self,
-        credential: &'a Secret,
-    ) -> BoxFuture<'a, Result<Checked, ProviderError>> {
+    fn check<'a>(&'a self, credential: &'a Secret) -> BoxFuture<'a, Checked> {
         Box::pin(self.check(credential))
     }
 }
