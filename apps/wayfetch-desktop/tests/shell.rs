@@ -993,6 +993,24 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
         .await;
     fits_window(&shell, ".settings-content").await;
 
+    // The shared appearance preference also survives a WebView reload.
+    shell.click("input[name=theme][value=dark]").await;
+    shell
+        .wait_for("getComputedStyle(document.documentElement).colorScheme === 'dark'")
+        .await;
+    shell.reload().await;
+    shell
+        .wait_for("getComputedStyle(document.documentElement).colorScheme === 'dark'")
+        .await;
+    shell.click("input[name=theme][value=light]").await;
+    shell
+        .wait_for("getComputedStyle(document.documentElement).colorScheme === 'light'")
+        .await;
+    shell.click("input[name=theme][value=system]").await;
+    shell
+        .wait_for("document.documentElement.dataset.theme === (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')")
+        .await;
+
     // A folder chosen in the host's dialog, then saved.
     let folder = dirs.tmp.path().join("chosen-from-page");
     std::fs::create_dir(&folder).unwrap();
