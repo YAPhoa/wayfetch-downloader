@@ -311,6 +311,7 @@ export class HttpClient {
     throw new WayfetchError(data.code, String(data.message ?? data.code), {
       currentRevision: data.current_revision,
       retryAfter,
+      retryAt: data.retry_at ?? undefined,
     });
   }
 }
