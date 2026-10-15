@@ -497,7 +497,9 @@ export class SettingsPage {
       const invalid = changed && parsed.error !== null;
       show(problem, invalid ? parsed.error : '');
       input.setAttribute('aria-invalid', String(invalid));
-      input.disabled = !editable;
+      // Typing is held while a save is under way, so its answer never
+      // replaces a newer edit.
+      input.disabled = !editable || saving;
       saveButton.hidden = !editable;
       cancel.hidden = !editable;
       saveButton.disabled = saving || !changed || invalid;
@@ -508,12 +510,18 @@ export class SettingsPage {
     };
 
     /**
-     * Shows `settings`, keeping a changed draft if `keep`.
+     * Shows `settings`, keeping a changed draft if `keep`. An answer older
+     * than the settings shown, which arrived late, only reports `said`.
      * @param {Settings} settings
      * @param {string} said
      * @param {boolean} [keep]
      */
     const apply = (settings, said, keep = false) => {
+      if (current !== null && settings.revision < current.revision) {
+        show(message, said);
+        update();
+        return;
+      }
       context.onSettings(settings);
       const kept = keep && current !== null && draft().changed;
       current = settings;
