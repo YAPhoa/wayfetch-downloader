@@ -12,7 +12,7 @@ use std::num::NonZeroU16;
 
 use serde::{Deserialize, Serialize};
 use wayfetch_domain::failure::FailureCode;
-use wayfetch_domain::id::{JobId, PackageId, RootId};
+use wayfetch_domain::id::{BatchId, JobId, PackageId, RootId, SourceLinkId};
 use wayfetch_domain::job::{DesiredState, DisplayState, JobStage};
 use wayfetch_domain::name::{DiagnosticText, HostName};
 use wayfetch_domain::time::UtcTimestamp;
@@ -135,17 +135,37 @@ pub enum Query {
         /// The job.
         job: JobId,
     },
+    /// A page of collected links in ascending ID order, which keeps each
+    /// batch's links together. Added in protocol 1.1.
+    ListLinks {
+        /// Continue after this link (from the previous page's
+        /// `next_after`).
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        after: Option<SourceLinkId>,
+        /// Items per page.
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(as = "Option<u16>", optional))]
+        page_size: PageSize,
+    },
+    /// A collected link exactly as it was entered. Needs
+    /// [`Permission::Sources`]. Added in protocol 1.1.
+    LinkSource {
+        /// The link.
+        link: SourceLinkId,
+    },
 }
 
 impl Query {
     /// The permission the caller needs.
     pub const fn required_permission(&self) -> Permission {
         match self {
-            Self::JobSource { .. } => Permission::Sources,
+            Self::JobSource { .. } | Self::LinkSource { .. } => Permission::Sources,
             Self::InspectJob { .. }
             | Self::ListJobs { .. }
             | Self::CountJobs { .. }
-            | Self::Settings {} => Permission::Read,
+            | Self::Settings {}
+            | Self::ListLinks { .. } => Permission::Read,
         }
     }
 }
@@ -301,6 +321,74 @@ pub struct Settings {
     pub roots: Vec<RootSummary>,
 }
 
+/// What is known about a collected link. Added in protocol 1.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum LinkCheck {
+    /// A valid `http` or `https` link that was not checked: whether it
+    /// serves a file is not known.
+    NotChecked,
+    /// Not a link Wayfetch can download; `problem` says why.
+    Invalid,
+}
+
+/// A link waiting in the collected list. Added in protocol 1.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct CollectedLink {
+    /// The link.
+    pub id: SourceLinkId,
+    /// The batch it was collected with.
+    pub batch: BatchId,
+    /// When that batch was collected.
+    pub collected_at: UtcTimestamp,
+    /// Revision to present with the next command for this link.
+    pub revision: Revision,
+    /// What is known about it.
+    pub check: LinkCheck,
+    /// Its host, for a valid link. Never the whole link, which can carry
+    /// a signed token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub host: Option<HostName>,
+    /// A file name taken from the link's path: only a hint, since the
+    /// server names the file when it is downloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub name_hint: Option<String>,
+    /// The entry as typed, for an invalid link, with any credentials,
+    /// query, and fragment left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub text: Option<String>,
+    /// Where it will be saved; absent for the operator's download folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub destination: Option<RootId>,
+    /// Why it is invalid, or why it was last refused when started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub problem: Option<DiagnosticText>,
+}
+
+/// One page of collected links. Added in protocol 1.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct LinkPage {
+    /// The links, at most the requested page size.
+    pub items: Vec<CollectedLink>,
+    /// Pass as `after` to get the next page; absent on the last page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub next_after: Option<SourceLinkId>,
+    /// How many links are collected in all.
+    pub total: u64,
+    /// The page reflects every durable event up to and including this
+    /// cursor.
+    pub as_of: EventCursor,
+}
+
 /// A query's answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -324,6 +412,16 @@ pub enum QueryResult {
         /// The job.
         job: JobId,
         /// The link exactly as it was submitted.
+        url: String,
+    },
+    /// Answer to [`Query::ListLinks`]. Added in protocol 1.1.
+    Links(LinkPage),
+    /// Answer to [`Query::LinkSource`]. Added in protocol 1.1.
+    LinkSource {
+        /// The link.
+        link: SourceLinkId,
+        /// The entry exactly as it was collected; for an invalid one, less
+        /// any credentials it held.
         url: String,
     },
 }

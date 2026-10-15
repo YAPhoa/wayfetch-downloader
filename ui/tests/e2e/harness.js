@@ -48,6 +48,8 @@ export class Fixture {
   constructor() {
     /** @type {Map<string, FixtureFile>} */
     this.files = new Map();
+    /** Names of the files requested so far, in order. @type {string[]} */
+    this.requested = [];
     this.server = createServer((request, response) => void this.serve(request, response));
   }
 
@@ -84,6 +86,7 @@ export class Fixture {
   async serve(request, response) {
     // A query, like a CDN's signed token, does not name the file.
     const name = decodeURIComponent(new URL(request.url ?? '/', this.base).pathname.replace(/^\/files\//, ''));
+    this.requested.push(name);
     const file = this.files.get(name);
     if (!file || request.method !== 'GET') {
       response.writeHead(404).end();

@@ -154,6 +154,10 @@ is never printed.
 | `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
 | `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"remove"\|"rename", "expected_revision"}`, plus `"name"` for a rename |
 | `GET /v1/jobs/{id}/source` | The link the job was submitted with (needs `sources`) |
+| `POST /v1/staging/links` | Collect links for review without downloading them: `{"idempotency_key", "target", "items": [text...], "destination"?: "root-N"}` |
+| `GET /v1/staging/links` | A page of collected links: `after`, `page_size` |
+| `POST /v1/staging/commands` | `{"idempotency_key", "target", "action": "start"\|"remove"\|"move", "links": [{"link", "revision"}...]}`, plus `"destination"` for a move |
+| `GET /v1/staging/links/{id}/source` | A collected link as entered (needs `sources`) |
 | `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem` |
 | `PUT /v1/settings` | Choose the default: `{"idempotency_key", "target", "expected_revision", "default_root": "root-N"}` (needs `control`) |
 | `GET /v1/folders` | The folders inside `path` (absolute; the top of the filesystem if absent), without hidden ones, at most 1,000 (needs `control`) |
@@ -166,6 +170,13 @@ is never printed.
 `rename` gives a completed job's file a new name in the same folder; it never
 replaces a file, and refuses one changed outside Wayfetch. `remove` takes a
 complete, failed, or cancelled job off lists and counts and keeps its files.
+
+`/v1/inputs` starts downloads at once. Collected links instead wait until
+started or removed, survive restarts, and are never fetched while they wait;
+an entry that is not a link is kept with its problem. A staging command
+reports each link it applied and each it refused, with a reason, so a link
+changed since its `revision` was read, or bound for an unavailable folder,
+stays collected. Each link starts at most one download.
 
 `target` is the instance from `/v1/capabilities` and `idempotency_key` a fresh
 UUID per logical command; a retry with the same key returns the first result.

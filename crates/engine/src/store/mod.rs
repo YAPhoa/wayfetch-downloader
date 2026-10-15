@@ -20,7 +20,8 @@
 //! * [`Store::execute`]: a client command, its outbox events, and its
 //!   idempotency record.
 //! * [`Store::stage_pending`]: jobs for submitted inputs, with `job_added`
-//!   events.
+//!   events. Collected links are held until a start command creates their
+//!   jobs, in the command's transaction.
 //! * [`Store::advance_job`]: one generation-checked stage transition and its
 //!   event.
 //! * [`Store::recover_after_restart`]: every active job moved to recovery,
@@ -52,6 +53,7 @@
 mod commands;
 mod files;
 mod jobs;
+mod links;
 mod outbox;
 mod progress;
 mod renames;
@@ -60,8 +62,10 @@ mod roots;
 mod scenarios;
 pub mod schema;
 
+pub use commands::CommandContext;
 pub use files::Partial;
 pub use jobs::Admission;
+pub use links::Unusable;
 pub use renames::{RenameIntent, RenameStart};
 pub(crate) use roots::path_text;
 

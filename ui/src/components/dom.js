@@ -90,3 +90,24 @@ export function refocus(root, key) {
   const target = root.querySelector(`[data-key="${CSS.escape(key)}"]`);
   if (target instanceof HTMLElement) target.focus({ preventScroll: true });
 }
+
+/**
+ * Copies `text` to the clipboard: through the Clipboard API where the page
+ * may use it, else through a selected, hidden field.
+ * @param {string} text
+ */
+export async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    // Not a secure context, or not allowed; fall back below.
+  }
+  const field = h('textarea', { class: 'visually-hidden', readonly: true, 'aria-hidden': 'true' });
+  field.value = text;
+  document.body.append(field);
+  field.select();
+  const copied = document.execCommand('copy');
+  field.remove();
+  if (!copied) throw new Error('The clipboard is not available.');
+}

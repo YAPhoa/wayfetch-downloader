@@ -718,17 +718,20 @@ impl Download {
 /// segment, else a name derived from the job. Only a single valid path
 /// component is accepted, so neither can choose a directory.
 fn target_name(job: JobId, suggested: Option<&str>, url: &Url) -> RelativePath {
-    let from_url = url
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .and_then(|segment| percent_decode_str(segment).decode_utf8().ok())
-        .map(|name| name.into_owned());
     suggested
         .and_then(file_name)
-        .or_else(|| from_url.as_deref().and_then(file_name))
+        .or_else(|| url_file_name(url))
         .unwrap_or_else(|| {
             RelativePath::new(&format!("download-{}", job.get())).expect("a valid file name")
         })
+}
+
+/// The URL's last path segment as a file name, if it is a valid one.
+pub(crate) fn url_file_name(url: &Url) -> Option<RelativePath> {
+    url.path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .and_then(|segment| percent_decode_str(segment).decode_utf8().ok())
+        .and_then(|name| file_name(&name))
 }
 
 /// `name` as a single valid path component, which cannot choose a
@@ -820,7 +823,9 @@ mod tests {
                 package: None,
             },
         };
-        store.execute(&submit, instance, None, now()).unwrap();
+        store
+            .execute(&submit, instance, &Default::default(), now())
+            .unwrap();
         let job = store.stage_pending(1, now()).unwrap()[0];
         let generation = store.job_state(job).unwrap().generation();
         let advance = |store: &mut Store, stage| {

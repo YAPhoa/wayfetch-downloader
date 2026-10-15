@@ -40,6 +40,7 @@ import { icon } from './icons.js';
  *   onSignedOut: () => void,
  *   navigate: (path: string) => void,
  *   back: () => void,
+ *   backLabel: () => string,
  *   brand: Node,
  * }} SettingsContext
  */
@@ -118,6 +119,13 @@ export class SettingsPage {
     this.section = SECTIONS[0].id;
     /** Whether the page is shown; each showing reads the settings afresh. */
     this.shown = false;
+    this.backLabel = h('span', null, 'Back');
+    this.back = h(
+      'button',
+      { type: 'button', class: 'tool back', 'data-key': 'settings-back', onclick: () => context.back() },
+      icon('back'),
+      this.backLabel,
+    );
     this.title = h('h1', { tabindex: -1, 'data-key': 'settings-title' }, 'Settings');
     this.links = SECTIONS.map(({ id, label, icon: name }) =>
       h(
@@ -160,12 +168,7 @@ export class SettingsPage {
         'header',
         { class: 'toolbar' },
         context.brand,
-        h(
-          'button',
-          { type: 'button', class: 'tool back', 'data-key': 'settings-back', onclick: () => context.back() },
-          icon('back'),
-          'Back to Downloads',
-        ),
+        this.back,
         this.title,
       ),
       h('div', { class: 'settings-body' }, this.nav, this.content),
@@ -181,7 +184,10 @@ export class SettingsPage {
     const arriving = !this.shown;
     this.shown = true;
     this.element.hidden = false;
-    if (arriving) this.build();
+    if (arriving) {
+      this.backLabel.textContent = this.context.backLabel();
+      this.build();
+    }
     this.section = section;
     for (const link of this.links) {
       if (link.dataset.section === section) link.setAttribute('aria-current', 'page');
