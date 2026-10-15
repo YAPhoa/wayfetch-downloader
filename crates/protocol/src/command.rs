@@ -83,7 +83,7 @@ pub enum Permission {
     Read,
     /// Submit new inputs.
     Submit,
-    /// Pause, resume, cancel, rename, remove, and otherwise control
+    /// Pause, resume, cancel, retry, rename, remove, and otherwise control
     /// existing jobs.
     Control,
     /// Read the links jobs were submitted with, which can carry signed
@@ -325,6 +325,17 @@ pub enum Command {
         /// The job revision the client last saw.
         expected_revision: Revision,
     },
+    /// Start a failed or cancelled job again as a new attempt of the same
+    /// job, keeping its source, destination, and collected link. The
+    /// attempt continues the job's verified saved data when it safely can,
+    /// and otherwise starts from zero and says why. A failure whose retry
+    /// deadline has not passed is refused. Added in protocol 1.2.
+    Retry {
+        /// The job.
+        job: JobId,
+        /// The job revision the client last saw.
+        expected_revision: Revision,
+    },
     /// Choose where jobs submitted from now on are saved. Jobs already
     /// submitted keep their destination. Added in protocol 0.3.
     UpdateSettings {
@@ -452,6 +463,7 @@ impl Command {
             | Self::Pause { .. }
             | Self::Resume { .. }
             | Self::Cancel { .. }
+            | Self::Retry { .. }
             | Self::UpdateSettings { .. }
             | Self::Rename { .. }
             | Self::Remove { .. }
@@ -744,6 +756,19 @@ mod tests {
     }
 
     #[test]
+    fn retry_fingerprint_is_its_canonical_form() {
+        let retry = Command::Retry {
+            job: JobId::from_u64(3).unwrap(),
+            expected_revision: Revision::from_u64(2).unwrap(),
+        };
+        let canonical = br#"{"type":"retry","job":"job-3","expected_revision":2}"#;
+        let digest: [u8; 32] = Sha256::digest(canonical).into();
+        assert_eq!(retry.fingerprint().as_bytes(), &digest);
+        // A retry never replays another command's record, or the reverse.
+        assert_ne!(retry.fingerprint(), pause(3, 2).fingerprint());
+    }
+
+    #[test]
     fn permissions() {
         assert_eq!(pause(1, 1).required_permission(), Permission::Control);
         let submit = Command::Submit {
@@ -756,6 +781,12 @@ mod tests {
             expected_revision: Revision::INITIAL,
         };
         assert_eq!(remove.required_permission(), Permission::Control);
+        // Starting a job again is control, not submission.
+        let retry = Command::Retry {
+            job: JobId::from_u64(1).unwrap(),
+            expected_revision: Revision::INITIAL,
+        };
+        assert_eq!(retry.required_permission(), Permission::Control);
         assert_eq!(
             "sources".parse::<Permission>().unwrap(),
             Permission::Sources

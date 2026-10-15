@@ -171,7 +171,7 @@ export class WayfetchError extends Error {
   /**
    * @param {WayfetchErrorCode} code
    * @param {string} message
-   * @param {{ currentRevision?: number, retryAfter?: number }} [details]
+   * @param {{ currentRevision?: number, retryAfter?: number, retryAt?: number }} [details]
    */
   constructor(code, message, details = {}) {
     super(message);
@@ -181,6 +181,11 @@ export class WayfetchError extends Error {
     this.currentRevision = details.currentRevision;
     /** Seconds to wait before trying again, when the server said so. */
     this.retryAfter = details.retryAfter;
+    /**
+     * When a refused retry may be asked for again (milliseconds since the
+     * epoch), for a failure with a deadline still ahead.
+     */
+    this.retryAt = details.retryAt;
   }
 }
 

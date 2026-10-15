@@ -29,7 +29,8 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0006_destinations.sql")),
     M::up(include_str!("migrations/0007_job_mutations.sql")),
     M::up(include_str!("migrations/0008_collected_links.sql")),
-    M::up(include_str!("migrations/0009_accounts.sql")),
+    M::up(include_str!("migrations/0009_manual_retry.sql")),
+    M::up(include_str!("migrations/0010_accounts.sql")),
 ];
 
 /// Newest schema version this engine knows.

@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use wayfetch_domain::job::JobError;
 use wayfetch_domain::name::DiagnosticText;
+use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
 
 /// Stable error codes. Transports map them to their own status codes (for
@@ -64,6 +65,11 @@ pub struct ProtocolError {
     /// The record's current revision, for [`ErrorCode::RevisionConflict`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_revision: Option<Revision>,
+    /// When a refused retry may be asked for again, for a job whose
+    /// failure has a retry deadline still in the future. Added in protocol
+    /// 1.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<UtcTimestamp>,
 }
 
 impl ProtocolError {
@@ -73,6 +79,7 @@ impl ProtocolError {
             code,
             message: DiagnosticText::new(message),
             current_revision: None,
+            retry_at: None,
         }
     }
 }

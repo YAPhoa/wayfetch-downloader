@@ -19,7 +19,7 @@ use wayfetch_protocol::{
 };
 
 use super::links::{self, Unusable};
-use super::{Store, StoreError, accounts, jobs, key, outbox, renames, roots, sql};
+use super::{Store, StoreError, accounts, files, jobs, key, outbox, renames, roots, sql};
 
 /// What the coordinator knows about destinations when a command runs.
 #[derive(Debug, Clone, Default)]
@@ -71,6 +71,10 @@ impl Store {
                 job,
                 expected_revision,
             } => request(&tx, *job, now, |s| s.request_cancel(*expected_revision))?,
+            Command::Retry {
+                job,
+                expected_revision,
+            } => retry(&tx, *job, *expected_revision, now)?,
             Command::UpdateSettings {
                 expected_revision,
                 default_root,
@@ -277,6 +281,46 @@ fn request(
         job: id,
         revision: job.state.revision(),
         changed: outcome == Outcome::Changed,
+    })
+}
+
+/// Starts a failed or fully stopped cancelled job again under a new
+/// generation, keeping its source, destination, and collected link. Its
+/// newest retained staging file is reserved for that generation in the same
+/// transaction, so the attempt can continue its verified saved data; the
+/// failure and any earlier restart reason are cleared. A failure whose
+/// retry deadline is still ahead is refused with that deadline, and left
+/// as it is.
+fn retry(
+    tx: &Transaction<'_>,
+    id: JobId,
+    expected: Revision,
+    now: UtcTimestamp,
+) -> Result<CommandResult, ProtocolError> {
+    let mut job = jobs::load_listed(tx, id)?;
+    let previous = job.state;
+    // Revision and stage first: a stale or inapplicable request says so.
+    let mut next = job.state;
+    next.request_retry(expected).map_err(StoreError::from)?;
+    if let Some(at) = job.failure.as_ref().and_then(|f| f.retry_at)
+        && at > now
+    {
+        return Err(ProtocolError {
+            retry_at: Some(at),
+            ..ProtocolError::new(
+                ErrorCode::NotApplicable,
+                "the source asked to wait before trying again; retry after its deadline",
+            )
+        });
+    }
+    job.state = next;
+    files::reserve_for_retry(tx, id, job.state.generation())?;
+    jobs::set_restart_reason(tx, &mut job, None)?;
+    jobs::save(tx, &mut job, &previous, None, now)?;
+    Ok(CommandResult::JobUpdated {
+        job: id,
+        revision: job.state.revision(),
+        changed: true,
     })
 }
 

@@ -37,7 +37,7 @@ export function content(start, end) {
 }
 
 /**
- * @typedef {{ size: number, stallAt: number | null, waiters: (() => void)[] }} FixtureFile
+ * @typedef {{ size: number, stallAt: number | null, etag: string, waiters: (() => void)[] }} FixtureFile
  */
 
 /**
@@ -51,6 +51,8 @@ export class Fixture {
     this.files = new Map();
     /** Names of the files requested so far, in order. @type {string[]} */
     this.requested = [];
+    /** Each request's Range header, or null, in order. @type {(string | null)[]} */
+    this.ranges = [];
     this.server = createServer((request, response) => void this.serve(request, response));
   }
 
@@ -69,7 +71,7 @@ export class Fixture {
    * @param {number | null} [stallAt]
    */
   put(name, size, stallAt = null) {
-    this.files.set(name, { size, stallAt, waiters: [] });
+    this.files.set(name, { size, stallAt, etag: '"v1"', waiters: [] });
     return `${this.base}/files/${encodeURIComponent(name)}`;
   }
 
@@ -81,6 +83,16 @@ export class Fixture {
   }
 
   /**
+   * Gives `name` a new validator, as a file replaced on the server would
+   * have, so a saved part of the old one cannot be continued.
+   * @param {string} name
+   */
+  replace(name) {
+    const file = /** @type {FixtureFile} */ (this.files.get(name));
+    file.etag = '"v2"';
+  }
+
+  /**
    * @param {import('node:http').IncomingMessage} request
    * @param {import('node:http').ServerResponse} response
    */
@@ -88,6 +100,7 @@ export class Fixture {
     // A query, like a CDN's signed token, does not name the file.
     const name = decodeURIComponent(new URL(request.url ?? '/', this.base).pathname.replace(/^\/files\//, ''));
     this.requested.push(name);
+    this.ranges.push(request.headers.range ?? null);
     const file = this.files.get(name);
     if (!file || request.method !== 'GET') {
       response.writeHead(404).end();
@@ -96,8 +109,8 @@ export class Fixture {
     let start = 0;
     const range = /^bytes=(\d+)-$/.exec(request.headers.range ?? '');
     const ifRange = request.headers['if-range'];
-    const headers = { ETag: '"v1"', 'Accept-Ranges': 'bytes', 'Content-Type': 'application/octet-stream' };
-    if (range && (ifRange === undefined || ifRange === '"v1"')) {
+    const headers = { ETag: file.etag, 'Accept-Ranges': 'bytes', 'Content-Type': 'application/octet-stream' };
+    if (range && (ifRange === undefined || ifRange === file.etag)) {
       start = Number(range[1]);
       response.writeHead(206, {
         ...headers,

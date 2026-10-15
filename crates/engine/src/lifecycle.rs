@@ -774,6 +774,38 @@ fn settle(store: &mut Store, job: JobId, interrupted: bool) -> Result<bool, Stor
     Ok(false)
 }
 
+/// Proof that the coordinator admitted a job while no earlier task of it
+/// ran in this process. Only [`Coordinator::admit`] creates one, for a job
+/// absent from `running`; a job leaves `running` only once its download
+/// task has returned, and a download awaits every file write and sync it
+/// starts and drops its files before it returns. So no writer of this
+/// process still holds a staging file the job's earlier generations wrote,
+/// which is what lets a retried attempt adopt one without the boot-epoch
+/// rule (section 7.6, [`Store::adopt_retained`]).
+#[derive(Debug, Clone)]
+pub(crate) struct SoleAttempt {
+    job: JobId,
+}
+
+impl SoleAttempt {
+    /// The proof for `job`, or `None` while a task of it still runs.
+    fn admitted(running: &HashMap<JobId, CancellationToken>, job: JobId) -> Option<Self> {
+        (!running.contains_key(&job)).then_some(Self { job })
+    }
+
+    /// The job admitted.
+    pub(crate) fn job(&self) -> JobId {
+        self.job
+    }
+
+    /// A proof for a test that drives one download without a coordinator,
+    /// and so runs no other task of the job.
+    #[cfg(test)]
+    pub(crate) fn assume(job: JobId) -> Self {
+        Self { job }
+    }
+}
+
 type StoreWork = Box<dyn FnOnce(&mut Store) + Send>;
 
 /// Work for the coordinator from its own tasks.
@@ -971,6 +1003,7 @@ impl Coordinator {
                     Command::Pause { job, .. } | Command::Cancel { job, .. } => Some(job),
                     Command::Submit { .. }
                     | Command::Resume { .. }
+                    | Command::Retry { .. }
                     | Command::UpdateSettings { .. }
                     | Command::Rename { .. }
                     | Command::Remove { .. }
@@ -1005,6 +1038,10 @@ impl Coordinator {
                 );
                 let removed = match envelope.command {
                     Command::RemoveRoot { root, .. } => Some(root),
+                    _ => None,
+                };
+                let retried = match envelope.command {
+                    Command::Retry { job, .. } => Some(job),
                     _ => None,
                 };
                 let (result, interrupt, current) = self
@@ -1043,6 +1080,11 @@ impl Coordinator {
                 }
                 if let Some(root) = gone {
                     self.destinations.remove(root);
+                }
+                // A retried job is queued, so one held for restart recovery
+                // after a storage fault may run again.
+                if let (Some(job), Ok(_)) = (retried, &result) {
+                    self.held.remove(&job);
                 }
                 if let Some(job) = interrupt {
                     if let Some(token) = self.running.get(&job) {
@@ -1257,8 +1299,9 @@ impl Coordinator {
                     ));
                 }
             }
-            // A job resumed may be waiting for its root to be found.
-            Command::Resume { .. } => self.identify_destinations(),
+            // A job resumed or retried may be waiting for its root to be
+            // found.
+            Command::Resume { .. } | Command::Retry { .. } => self.identify_destinations(),
             Command::Pause { .. }
             | Command::Cancel { .. }
             | Command::Rename { .. }
@@ -1500,6 +1543,10 @@ impl Coordinator {
         }
         for (job, root) in admitted {
             let id = job.job;
+            // Admission excluded running jobs, so this always holds.
+            let Some(attempt) = SoleAttempt::admitted(&self.running, id) else {
+                continue;
+            };
             let cancel = self.supervisor.cancel.child_token();
             self.running.insert(id, cancel.clone());
             let download = Download {
@@ -1513,6 +1560,7 @@ impl Coordinator {
                 cancel,
                 guard: self.supervisor.guard(),
                 job,
+                attempt,
             };
             let finished = self.client.0.clone();
             self.supervisor.spawn(async move {
