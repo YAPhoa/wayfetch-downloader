@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Args;
-use wayfetch_adapters::real_debrid::{Endpoint, RealDebrid};
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::state_dir::StateDir;
 use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner};
@@ -88,10 +87,22 @@ pub struct EngineArgs {
     /// Downloads work either way.
     #[arg(long, value_name = "FILE")]
     pub credential_key: Option<PathBuf>,
-    /// Another address serving Real-Debrid's API, for testing against a
-    /// local stand-in: HTTPS, or HTTP on a loopback address.
-    #[arg(long, value_name = "URL", hide = true)]
-    pub real_debrid_endpoint: Option<String>,
+    /// Another address serving a provider's API, for testing against a
+    /// local stand-in: HTTPS, or HTTP on a loopback address. Repeatable.
+    #[arg(
+        long = "provider-endpoint",
+        value_name = "SERVICE=URL",
+        value_parser = service_and_url,
+        hide = true
+    )]
+    pub provider_endpoints: Vec<(String, String)>,
+}
+
+fn service_and_url(value: &str) -> Result<(String, String), String> {
+    let (service, url) = value
+        .split_once('=')
+        .ok_or("expected SERVICE=URL, such as real-debrid=http://127.0.0.1:9000/")?;
+    Ok((service.to_owned(), url.to_owned()))
 }
 
 impl EngineArgs {
@@ -191,10 +202,7 @@ pub async fn start_engine(args: &EngineArgs) -> Result<Started, String> {
         HttpTransport::new(http_config(args)?)
             .map_err(|e| format!("cannot configure HTTP: {e}"))?,
     );
-    let real_debrid = match &args.real_debrid_endpoint {
-        None => Endpoint::official(),
-        Some(url) => Endpoint::custom(url)?,
-    };
+    let providers = wayfetch_adapters::providers(transport.clone(), &args.provider_endpoints)?;
     let mut config = EngineConfig::new(state_dir);
     config.roots.push(root.clone());
     for extra in &args.roots {
@@ -205,12 +213,12 @@ pub async fn start_engine(args: &EngineArgs) -> Result<Started, String> {
     }
     config.download_root = Some(root.clone());
     config.credential_key = args.credential_key.as_deref().map(absolute).transpose()?;
-    let owner = EngineBuilder::new(config, tokio::runtime::Handle::current())
-        .transport(transport.clone())
-        .account_provider(Arc::new(RealDebrid::new(transport, real_debrid)))
-        .start()
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut builder =
+        EngineBuilder::new(config, tokio::runtime::Handle::current()).transport(transport);
+    for provider in providers {
+        builder = builder.account_provider(provider);
+    }
+    let owner = builder.start().await.map_err(|e| e.to_string())?;
     Ok(Started { owner, root })
 }
 
