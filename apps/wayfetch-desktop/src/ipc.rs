@@ -7,7 +7,7 @@
 //! | `hello` | handshake: instance, boot epoch, protocol, head, limits |
 //! | `query` | a [`Query`]: list, inspect, or count jobs, settings, a job's link, collected links |
 //! | `submit` | [`SubmitRequest`] as a submit command |
-//! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, rename, or remove |
+//! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, retry, rename, or remove |
 //! | `collect_links` | [`CollectRequest`]: collect links for review |
 //! | `links_command` | [`LinksCommandRequest`]: start, remove, or move collected links |
 //! | `update_settings` | [`UpdateSettingsRequest`]: choose the default destination |

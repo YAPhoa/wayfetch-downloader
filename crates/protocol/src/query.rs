@@ -224,6 +224,11 @@ pub struct JobSummary {
     /// Absent until then. Added in protocol 0.3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<RootId>,
+    /// Why the job's latest attempt discarded its saved data and started
+    /// from zero, such as a file that changed on the server. Kept until the
+    /// job is retried again. Added in protocol 1.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_reason: Option<DiagnosticText>,
 }
 
 /// A file a job published.

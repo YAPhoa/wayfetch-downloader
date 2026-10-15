@@ -12,7 +12,10 @@
 //! until it died, and nothing had to clean its lock up), and T31 (a file
 //! that took the target name meanwhile is never overwritten). Repeated
 //! kills while recovery abandons a partial and while cleanup removes it
-//! show that cleanup is safe to interrupt and repeat (section 7.6).
+//! show that cleanup is safe to interrupt and repeat (section 7.6). Kills
+//! while a manual retry hands a failed job's partial to its next attempt,
+//! and while that attempt publishes, show the saved data is kept and the
+//! file published once.
 //!
 //! The child is this test binary running [`child_engine`]. It stops at a
 //! named boundary of the engine's `failpoints` feature and reports it, so
@@ -60,6 +63,8 @@ const CHILD_URL: &str = "WAYFETCH_CHILD_URL";
 const CHILD_STOP: &str = "WAYFETCH_CHILD_STOP";
 /// `<idempotency key> <name>`: once the job is complete, rename its file.
 const CHILD_RENAME: &str = "WAYFETCH_CHILD_RENAME";
+/// Set to retry the job at start, if it failed or was cancelled.
+const CHILD_RETRY: &str = "WAYFETCH_CHILD_RETRY";
 
 /// How long any one wait for the child may take.
 const DEADLINE: Duration = Duration::from_secs(20);
@@ -93,6 +98,18 @@ async fn child_engine() {
         Err(_) => jobs(&owner).await.iter().map(|j| j.id).collect(),
     };
     let [id] = ids[..] else { panic!("one job") };
+    if std::env::var_os(CHILD_RETRY).is_some() {
+        let job = engine_support::job(&owner, id).await;
+        let retry = Command::Retry {
+            job: id,
+            expected_revision: job.revision,
+        };
+        owner
+            .handle()
+            .execute(engine_support::envelope(&owner, retry), engine_support::ALL)
+            .await
+            .unwrap();
+    }
     let mut rename = std::env::var(CHILD_RENAME).ok();
     let mut reported = None;
     loop {
@@ -166,6 +183,12 @@ impl Child {
         Self::spawn_renaming(env, path, stop, None)
     }
 
+    /// [`Child::spawn`] on the state directory's failed or cancelled job,
+    /// which it retries first.
+    fn spawn_retrying(env: &Env, stop: (&str, usize)) -> Self {
+        Self::spawn_with(env, None, Some(stop), None, true)
+    }
+
     /// [`Child::spawn`], renaming the job's file once it is complete under
     /// an idempotency key to a name.
     fn spawn_renaming(
@@ -173,6 +196,16 @@ impl Child {
         path: Option<&str>,
         stop: Option<(&str, usize)>,
         rename: Option<(uuid::Uuid, &str)>,
+    ) -> Self {
+        Self::spawn_with(env, path, stop, rename, false)
+    }
+
+    fn spawn_with(
+        env: &Env,
+        path: Option<&str>,
+        stop: Option<(&str, usize)>,
+        rename: Option<(uuid::Uuid, &str)>,
+        retry: bool,
     ) -> Self {
         let ca = env.state.with_file_name("ca.der");
         std::fs::write(&ca, env.server.ca()).unwrap();
@@ -185,6 +218,7 @@ impl Child {
             .env_remove(CHILD_URL)
             .env_remove(CHILD_STOP)
             .env_remove(CHILD_RENAME)
+            .env_remove(CHILD_RETRY)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
@@ -196,6 +230,9 @@ impl Child {
         }
         if let Some((key, name)) = rename {
             command.env(CHILD_RENAME, format!("{key} {name}"));
+        }
+        if retry {
+            command.env(CHILD_RETRY, "1");
         }
         let mut process = command.spawn().unwrap();
         let mut lines = BufReader::new(process.stdout.take().unwrap()).lines();
@@ -602,4 +639,64 @@ async fn a_file_left_unregistered_by_a_kill_is_never_removed() {
     assert_eq!(std::fs::read(left).unwrap(), b"someone else's file");
     assert_eq!(staging_files(&env.root), 1);
     shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_killed_at_any_step_keeps_its_saved_data_and_publishes_once() {
+    for boundary in [
+        // The retry is accepted and its attempt admitted, but the partial
+        // was not handed over yet.
+        "retry-adopt-before-commit",
+        // Handed over, nothing requested yet.
+        "retry-adopt-after-commit",
+        // The retried attempt finished and is publishing.
+        "publish-before-unlink",
+        "publish-before-complete",
+    ] {
+        let mut env = env().await;
+        env.timeouts = wayfetch_engine::Timeouts {
+            idle_read: Duration::from_millis(100),
+            ..wayfetch_engine::Timeouts::DEFAULT
+        };
+        let data = body(64 * KIB + 9);
+        let at = 24 * KIB;
+        env.server.put(
+            "/r.bin",
+            Resource {
+                stall_at: Some(at),
+                ..Resource::new(data.clone())
+            },
+        );
+        // The first attempt fails with saved data, in an engine that
+        // then stops cleanly.
+        let owner = env.start().await;
+        let [id] = engine_support::submit(&owner, [env.server.url("/r.bin")]).await[..] else {
+            panic!()
+        };
+        let failed = engine_support::wait_for(&owner, id, |j| j.stage == JobStage::Failed).await;
+        assert!(settled(failed.bytes_done, at), "{failed:?}");
+        shutdown(owner).await;
+        env.server.update("/r.bin", |r| r.stall_at = None);
+
+        // Another start retries it and is killed at the boundary.
+        let mut child = Child::spawn_retrying(&env, (boundary, 1));
+        child.until(|c| c.stopped.is_some()).await;
+        child.kill(&env.state).await;
+
+        let (owner, done) = restart(&env).await;
+        // Only the rest was ever asked for again, at most once.
+        let ranges = env.server.ranges("/r.bin");
+        assert_eq!(ranges[0], None, "{boundary}");
+        assert!(
+            ranges[1..]
+                .iter()
+                .all(|r| *r == Some((failed.bytes_done, None))),
+            "{boundary}: {ranges:?}"
+        );
+        assert!(ranges.len() <= 3, "{boundary}: {ranges:?}");
+        assert_eq!(done.restart_reason, None, "{boundary}");
+        assert_published(&env, &done, "r.bin", &data);
+        assert!(!env.root.join("r (1).bin").exists(), "{boundary}");
+        shutdown(owner).await;
+    }
 }
