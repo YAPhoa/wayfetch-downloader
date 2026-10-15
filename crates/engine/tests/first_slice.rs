@@ -1155,7 +1155,7 @@ async fn only_an_idle_folder_the_user_added_can_be_removed() {
     env.server.update("/slow.bin", |r| r.stall_at = None);
     complete(&owner, job).await;
 
-    // So does a link collected to be saved there, until it is removed.
+    // A link collected to be saved there does not keep it.
     handle
         .execute(
             collect(&owner, &["https://files.example/later.bin"], Some(added.id)),
@@ -1163,22 +1163,6 @@ async fn only_an_idle_folder_the_user_added_can_be_removed() {
         )
         .await
         .unwrap();
-    let refused = handle
-        .execute(remove_root(&owner, revision, added.id), ALL)
-        .await;
-    assert_eq!(code(refused), ErrorCode::NotApplicable);
-    let page = links(&owner).await;
-    let (applied, _) = applied(
-        &owner,
-        envelope(
-            &owner,
-            Command::RemoveLinks {
-                links: refs(&page.items.iter().collect::<Vec<_>>()),
-            },
-        ),
-    )
-    .await;
-    assert_eq!(applied.len(), 1);
 
     // Then it goes, its files stay, and a retry replays.
     let removal = remove_root(&owner, revision, added.id);
@@ -1196,6 +1180,14 @@ async fn only_an_idle_folder_the_user_added_can_be_removed() {
             .any(|r| r.id == added.id)
     );
     assert!(chosen.join("slow.bin").exists());
+    // The link stays, and starting it is refused until it is given
+    // another folder.
+    let page = links(&owner).await;
+    let [link] = &page.items[..] else { panic!() };
+    let (started, refused) = applied(&owner, start_links(&owner, &[link])).await;
+    assert!(started.is_empty());
+    assert_eq!(refused.len(), 1);
+    assert_eq!(links(&owner).await.total, 1);
     let refused = handle
         .execute(
             remove_root(&owner, settings(&owner).await.revision, added.id),
