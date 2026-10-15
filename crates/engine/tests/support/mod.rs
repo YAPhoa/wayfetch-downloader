@@ -86,22 +86,28 @@ impl<S> Env<S> {
     }
 
     pub async fn start(&self) -> EngineOwner {
+        let owner = self.start_uninitialized().await;
+        // An operator action, once per root and instance. The engine
+        // identifies the root by its sentinel; ID 1 is the one roots of
+        // earlier versions carry.
+        Root::initialize(&self.root, ROOT, owner.identity().instance).unwrap();
+        owner
+    }
+
+    /// An engine whose download root is not initialized, as with a drive
+    /// not mounted yet.
+    pub async fn start_uninitialized(&self) -> EngineOwner {
         let mut config = EngineConfig::new(&self.state);
         config.roots.push(self.root.clone());
         config.roots.extend(self.roots.iter().cloned());
         config.download_root = Some(self.root.clone());
         config.limits = self.limits.clone();
         config.timeouts = self.timeouts;
-        let owner = EngineBuilder::new(config, Handle::current())
+        EngineBuilder::new(config, Handle::current())
             .transport(self.transport.clone())
             .start()
             .await
-            .unwrap();
-        // An operator action, once per root and instance. The engine
-        // identifies the root by its sentinel; ID 1 is the one roots of
-        // earlier versions carry.
-        Root::initialize(&self.root, ROOT, owner.identity().instance).unwrap();
-        owner
+            .unwrap()
     }
 
     /// Initializes `path` as a root of the instance, as `init-root` does,

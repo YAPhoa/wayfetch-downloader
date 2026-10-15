@@ -12,12 +12,19 @@
 //!   marked keeps its ID; one without a sentinel waits until the operator
 //!   initializes it, and is retried as work arrives.
 //! * Each job records its root when it is submitted, so changing the
-//!   default never moves a job. A job submitted before any root could be
-//!   chosen takes the default when it first starts. A job whose root is
-//!   no longer permitted is blocked rather than redirected.
-//! * Whether a root is available is checked off the coordinator with a
-//!   deadline, at most one check per root at a time, so a hung mount
-//!   costs one blocked thread and is reported as not responding.
+//!   default never moves a job. A job submitted while the operator's
+//!   download root is configured but not identified yet (an unmounted
+//!   drive) belongs to that root and waits for it, never taking a default
+//!   chosen later. A job whose root is no longer permitted is blocked
+//!   rather than redirected.
+//! * Identifying, probing, and registering roots never run on the
+//!   coordinator or while the store is held, since a hung mount would
+//!   stall every request. Checks
+//!   run on blocking threads with a deadline, at most one per path at a
+//!   time ([`Probes`]), so a hung mount costs one blocked thread and is
+//!   reported as not responding. Registering a folder runs as its own
+//!   task ([`register`]) that uses the store only between its filesystem
+//!   steps.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -33,6 +40,7 @@ use wayfetch_protocol::{ErrorCode, InstanceId, ProtocolError};
 
 use crate::config::EngineConfig;
 use crate::fs::{FsError, Root};
+use crate::lifecycle::StoreClient;
 use crate::state_dir::StateDir;
 use crate::store::{Store, StoreError, path_text};
 
@@ -95,44 +103,51 @@ pub fn initialize_root(state_dir: &StateDir, path: &Path) -> Result<RootId, Root
     initialize(&mut store, path, state_dir.identity().instance, false)
 }
 
-/// The ID of the root at `path`: recorded by path, or recorded now from its
-/// sentinel. `None` if the directory has no sentinel. Blocking.
-pub(crate) fn resolve(
-    store: &mut Store,
-    path: &Path,
-    instance: InstanceId,
-) -> Result<Option<RootId>, RootError> {
-    if let Some(row) = store.root_at(path)? {
-        return Ok(Some(row.id));
-    }
-    match Root::identify(path, instance)? {
-        Some(id) => {
-            store.adopt_root(id, path, now())?;
-            Ok(Some(id))
-        }
-        None => Ok(None),
-    }
-}
-
-/// Initializes the directory at `path` as a root, allocating its ID first
-/// so a crash leaves at most a recorded root without a sentinel, which
-/// initializing again completes. `registered` marks a root the user chose.
-/// Blocking.
-pub(crate) fn initialize(
-    store: &mut Store,
-    path: &Path,
-    instance: InstanceId,
-    registered: bool,
-) -> Result<RootId, RootError> {
+/// Refuses a path the store could not record.
+fn check_path(path: &Path) -> Result<(), RootError> {
     if !path.is_absolute() {
         return Err(RootError::Relative(path.to_owned()));
     }
     path_text(path)?;
-    let (id, allocated) = match resolve(store, path, instance)? {
-        Some(id) => (id, false),
-        None => (store.allocate_root(path, registered, now())?, true),
-    };
-    if let Err(e) = Root::initialize(path, id, instance) {
+    Ok(())
+}
+
+/// The root the store records at `path`. No filesystem access.
+fn recorded(store: &mut Store, path: &Path) -> Result<Option<RootId>, StoreError> {
+    Ok(store.root_at(path)?.map(|row| row.id))
+}
+
+/// Records the root at `path`, which the store does not know yet: the one
+/// its sentinel named (`identified`), or a new ID, allocated before the
+/// sentinel is written so a crash leaves at most a recorded root without
+/// one, which initializing again completes. Returns the ID and whether it
+/// is new. No filesystem access.
+fn claim(
+    store: &mut Store,
+    path: &Path,
+    identified: Option<RootId>,
+    registered: bool,
+) -> Result<(RootId, bool), RootError> {
+    match identified {
+        Some(id) => {
+            store.adopt_root(id, path, now())?;
+            Ok((id, false))
+        }
+        None => Ok((store.allocate_root(path, registered, now())?, true)),
+    }
+}
+
+/// Finishes initializing root `id` after its sentinel was written, or
+/// forgets a new one whose directory could not be initialized.
+/// `registered` marks a root the user chose. No filesystem access.
+fn settle(
+    store: &mut Store,
+    id: RootId,
+    allocated: bool,
+    registered: bool,
+    initialized: Result<(), FsError>,
+) -> Result<RootId, RootError> {
+    if let Err(e) = initialized {
         if allocated {
             let _ = store.forget_root(id);
         }
@@ -144,10 +159,90 @@ pub(crate) fn initialize(
     Ok(id)
 }
 
+/// Initializes the directory at `path` as a root (see [`claim`]).
+/// `registered` marks a root the user chose. Blocking, with the store
+/// held throughout: only for `init-root`, while no engine runs.
+pub(crate) fn initialize(
+    store: &mut Store,
+    path: &Path,
+    instance: InstanceId,
+    registered: bool,
+) -> Result<RootId, RootError> {
+    check_path(path)?;
+    let (id, allocated) = match recorded(store, path)? {
+        Some(id) => (id, false),
+        None => claim(store, path, Root::identify(path, instance)?, registered)?,
+    };
+    settle(
+        store,
+        id,
+        allocated,
+        registered,
+        Root::initialize(path, id, instance),
+    )
+}
+
+/// Registers the existing directory `path` as a root the user chose, as
+/// [`initialize`] does, but with each filesystem step on a blocking thread
+/// and the store used only between them, so a hung folder delays only
+/// this registration. A folder still being checked or registered is
+/// refused as busy.
+pub(crate) async fn register(
+    store: &StoreClient,
+    probes: &Probes,
+    path: PathBuf,
+    instance: InstanceId,
+) -> Result<RootId, ProtocolError> {
+    check_path(&path)?;
+    let _slot = probes.claim(&path).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::Busy,
+            "the folder is not responding: an earlier check of it has not finished",
+        )
+    })?;
+    let stopped = || ProtocolError::new(ErrorCode::ShuttingDown, "engine is not running");
+    let known = {
+        let path = path.clone();
+        store
+            .call(move |store| recorded(store, &path))
+            .await
+            .ok_or_else(stopped)??
+    };
+    let (id, allocated) = match known {
+        Some(id) => (id, false),
+        None => {
+            let identified = {
+                let path = path.clone();
+                blocking(move || Root::identify(&path, instance))
+                    .await?
+                    .map_err(RootError::from)?
+            };
+            let path = path.clone();
+            store
+                .call(move |store| claim(store, &path, identified, true))
+                .await
+                .ok_or_else(stopped)??
+        }
+    };
+    let initialized = blocking(move || Root::initialize(&path, id, instance)).await?;
+    Ok(store
+        .call(move |store| settle(store, id, allocated, true, initialized))
+        .await
+        .ok_or_else(stopped)??)
+}
+
+/// Runs filesystem work on a blocking thread.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ProtocolError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| ProtocolError::new(ErrorCode::Internal, "the folder could not be checked"))
+}
+
 /// The permitted roots and the default, kept by the coordinator.
 #[derive(Debug, Clone)]
 pub(crate) struct Destinations {
-    instance: InstanceId,
     /// The operator's download root.
     fallback: Option<PathBuf>,
     /// Permitted roots.
@@ -163,11 +258,7 @@ pub(crate) struct Destinations {
 impl Destinations {
     /// The registered roots and the settings, from the store. Configured
     /// paths are identified by [`Destinations::refresh`]. Blocking.
-    pub(crate) fn load(
-        store: &mut Store,
-        config: &EngineConfig,
-        instance: InstanceId,
-    ) -> Result<Self, StoreError> {
+    pub(crate) fn load(store: &mut Store, config: &EngineConfig) -> Result<Self, StoreError> {
         let (revision, chosen) = store.settings()?;
         let known = store
             .root_rows()?
@@ -176,7 +267,6 @@ impl Destinations {
             .map(|row| (row.id, row.path))
             .collect();
         Ok(Self {
-            instance,
             fallback: config.download_root.clone(),
             known,
             pending: config.roots.clone(),
@@ -190,20 +280,38 @@ impl Destinations {
         self.pending.is_empty()
     }
 
-    /// Identifies configured paths not identified yet. One that still
-    /// cannot be, for example a missing mount or a directory never
-    /// initialized, is tried again next time. Blocking: it reads
-    /// sentinels.
-    pub(crate) fn refresh(&mut self, store: &mut Store) {
+    /// Identifies configured paths the store already records. A path
+    /// being registered is left for later: its record may not have a
+    /// sentinel yet. No filesystem access.
+    pub(crate) fn recall(&mut self, store: &mut Store, probes: &Probes) {
         let pending = std::mem::take(&mut self.pending);
         for path in pending {
-            match resolve(store, &path, self.instance) {
-                Ok(Some(id)) => {
+            match recorded(store, &path) {
+                Ok(Some(id)) if !probes.busy(&path) => {
                     self.known.insert(id, path);
                 }
-                Ok(None) | Err(_) => self.pending.push(path),
+                _ => self.pending.push(path),
             }
         }
+    }
+
+    /// Configured paths not identified yet, to look for sentinels in.
+    pub(crate) fn unidentified(&self) -> Vec<PathBuf> {
+        self.pending.clone()
+    }
+
+    /// Records the root that the sentinel at the configured `path` names.
+    /// No filesystem access.
+    pub(crate) fn adopt(
+        &mut self,
+        store: &mut Store,
+        path: PathBuf,
+        id: RootId,
+    ) -> Result<(), StoreError> {
+        store.adopt_root(id, &path, now())?;
+        self.pending.retain(|p| *p != path);
+        self.known.insert(id, path);
+        Ok(())
     }
 
     /// Records a root the host registered.
@@ -211,10 +319,11 @@ impl Destinations {
         self.known.insert(id, path);
     }
 
-    /// Whether another root can be permitted.
-    pub(crate) fn has_room_for(&self, path: &Path) -> bool {
+    /// Whether another root can be permitted while `registering` others
+    /// are being registered.
+    pub(crate) fn has_room_for(&self, path: &Path, registering: usize) -> bool {
         self.known.values().any(|p| p == path)
-            || self.known.len() + self.pending.len() < EngineConfig::MAX_ROOTS
+            || self.known.len() + self.pending.len() + registering < EngineConfig::MAX_ROOTS
     }
 
     /// Records the settings after a change.
@@ -228,13 +337,22 @@ impl Destinations {
     pub(crate) fn default_root(&self) -> Option<RootId> {
         self.chosen
             .filter(|id| self.known.contains_key(id))
-            .or_else(|| {
-                let fallback = self.fallback.as_ref()?;
-                self.known
-                    .iter()
-                    .find(|(_, path)| *path == fallback)
-                    .map(|(id, _)| *id)
-            })
+            .or_else(|| self.download_root())
+    }
+
+    /// The operator's download root, once identified. A job submitted
+    /// without a destination belongs to it.
+    pub(crate) fn download_root(&self) -> Option<RootId> {
+        let fallback = self.fallback.as_ref()?;
+        self.known
+            .iter()
+            .find(|(_, path)| *path == fallback)
+            .map(|(id, _)| *id)
+    }
+
+    /// Whether the operator configured a download root.
+    pub(crate) fn has_download_root(&self) -> bool {
+        self.fallback.is_some()
     }
 
     /// Whether the operator's download root is configured but not
@@ -284,36 +402,78 @@ impl Destinations {
     }
 }
 
-/// Availability checks of roots, at most one running per root.
+/// Blocking filesystem checks of root folders, at most one running per
+/// path: a check that is still running when another is asked for is not
+/// repeated, so a hung mount holds one thread, however often it is asked
+/// about.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Probes(Arc<Mutex<HashSet<RootId>>>);
+pub(crate) struct Probes(Arc<Mutex<HashSet<PathBuf>>>);
+
+/// A path claimed for filesystem work; dropping it releases the path.
+pub(crate) struct Slot(Arc<Mutex<HashSet<PathBuf>>>, PathBuf);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.lock().expect("probe set").remove(&self.1);
+    }
+}
 
 impl Probes {
-    /// Whether `root` opens and carries its sentinel, within
-    /// [`PROBE_TIMEOUT`]. A check still running from an earlier request is
-    /// not repeated: the root is reported as not responding.
+    /// Claims `path`, unless work on it is still running.
+    pub(crate) fn claim(&self, path: &Path) -> Option<Slot> {
+        self.0
+            .lock()
+            .expect("probe set")
+            .insert(path.to_owned())
+            .then(|| Slot(self.0.clone(), path.to_owned()))
+    }
+
+    /// Whether work on `path` is running.
+    pub(crate) fn busy(&self, path: &Path) -> bool {
+        self.0.lock().expect("probe set").contains(path)
+    }
+
+    /// Runs `work` on `path` on a blocking thread, waiting at most
+    /// [`PROBE_TIMEOUT`]. `None` if work on the path was already running,
+    /// or this ran out of time; the path stays claimed until it finishes.
+    async fn timed<T: Send + 'static>(
+        &self,
+        path: &Path,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let slot = self.claim(path)?;
+        let check = tokio::task::spawn_blocking(move || {
+            let result = work();
+            drop(slot);
+            result
+        });
+        tokio::time::timeout(PROBE_TIMEOUT, check).await.ok()?.ok()
+    }
+
+    /// Whether `root` opens and carries its sentinel.
     pub(crate) async fn check(
         &self,
         root: Destination,
         instance: InstanceId,
     ) -> Result<(), String> {
-        let not_responding = || "the folder is not responding".to_owned();
-        if !self.0.lock().expect("probe set").insert(root.id) {
-            return Err(not_responding());
-        }
-        let running = self.0.clone();
-        let check = tokio::task::spawn_blocking(move || {
-            let result = Root::open(&root.path, root.id, instance)
+        let path = root.path.clone();
+        self.timed(&path, move || {
+            Root::open(&root.path, root.id, instance)
                 .map(drop)
-                .map_err(|e| unavailable(&e));
-            running.lock().expect("probe set").remove(&root.id);
-            result
-        });
-        match tokio::time::timeout(PROBE_TIMEOUT, check).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("the folder could not be checked".to_owned()),
-            Err(_) => Err(not_responding()),
-        }
+                .map_err(|e| unavailable(&e))
+        })
+        .await
+        .unwrap_or_else(|| Err("the folder is not responding".to_owned()))
+    }
+
+    /// The root the sentinel at `path` names, `None` if there is none or
+    /// the folder could not be read in time.
+    pub(crate) async fn identify(&self, path: &Path, instance: InstanceId) -> Option<RootId> {
+        let owned = path.to_owned();
+        self.timed(path, move || Root::identify(&owned, instance))
+            .await?
+            .ok()
+            .flatten()
     }
 }
 
@@ -353,6 +513,17 @@ mod tests {
             base: tmp.path().to_owned(),
             _tmp: tmp,
             instance: InstanceId::generate(),
+        }
+    }
+
+    /// What the coordinator does: recall recorded paths, then look for
+    /// sentinels in the rest.
+    fn refresh(destinations: &mut Destinations, f: &mut Fixture) {
+        destinations.recall(&mut f.store, &Probes::default());
+        for path in destinations.unidentified() {
+            if let Ok(Some(id)) = Root::identify(&path, f.instance) {
+                destinations.adopt(&mut f.store, path, id).unwrap();
+            }
         }
     }
 
@@ -418,9 +589,9 @@ mod tests {
         let legacy = RootId::from_u64(1).unwrap();
         Root::initialize(&path, legacy, f.instance).unwrap();
         let config = f.config(&[&path], Some(&path));
-        let mut destinations = Destinations::load(&mut f.store, &config, f.instance).unwrap();
+        let mut destinations = Destinations::load(&mut f.store, &config).unwrap();
         assert_eq!(destinations.default_root(), None);
-        destinations.refresh(&mut f.store);
+        refresh(&mut destinations, &mut f);
         assert!(destinations.complete());
         assert_eq!(destinations.default_root(), Some(legacy));
         assert_eq!(f.store.root_at(&path).unwrap().unwrap().id, legacy);
@@ -431,17 +602,17 @@ mod tests {
         let mut f = fixture();
         let (a, b) = (f.dir("a"), f.dir("b"));
         let config = f.config(&[&a, &b], Some(&a));
-        let mut destinations = Destinations::load(&mut f.store, &config, f.instance).unwrap();
-        destinations.refresh(&mut f.store);
+        let mut destinations = Destinations::load(&mut f.store, &config).unwrap();
+        refresh(&mut destinations, &mut f);
         assert!(!destinations.complete());
         assert!(destinations.all().is_empty());
         let id_b = initialize(&mut f.store, &b, f.instance, false).unwrap();
-        destinations.refresh(&mut f.store);
+        refresh(&mut destinations, &mut f);
         assert_eq!(destinations.all().len(), 1);
         // Only the download root is the default before one is chosen.
         assert_eq!(destinations.default_root(), None);
         let id_a = initialize(&mut f.store, &a, f.instance, false).unwrap();
-        destinations.refresh(&mut f.store);
+        refresh(&mut destinations, &mut f);
         assert!(destinations.complete());
         assert_eq!(destinations.default_root(), Some(id_a));
         destinations.set_settings(Revision::from_u64(2).unwrap(), Some(id_b));
@@ -456,8 +627,8 @@ mod tests {
         let id_chosen = initialize(&mut f.store, &chosen, f.instance, true).unwrap();
         initialize(&mut f.store, &a, f.instance, false).unwrap();
         let config = f.config(&[&a], Some(&a));
-        let mut destinations = Destinations::load(&mut f.store, &config, f.instance).unwrap();
-        destinations.refresh(&mut f.store);
+        let mut destinations = Destinations::load(&mut f.store, &config).unwrap();
+        refresh(&mut destinations, &mut f);
         // A root the operator stopped configuring is no longer permitted;
         // the one the user registered still is.
         assert!(destinations.get(id_old).is_none());
@@ -481,8 +652,11 @@ mod tests {
         Root::initialize(&path, root.id, f.instance).unwrap();
         probes.check(root.clone(), f.instance).await.unwrap();
         // A check still running is not repeated.
-        probes.0.lock().unwrap().insert(root.id);
-        let err = probes.check(root, f.instance).await.unwrap_err();
+        let slot = probes.claim(&path).unwrap();
+        let err = probes.check(root.clone(), f.instance).await.unwrap_err();
         assert!(err.contains("not responding"), "{err}");
+        assert_eq!(probes.identify(&path, f.instance).await, None);
+        drop(slot);
+        assert_eq!(probes.identify(&path, f.instance).await, Some(root.id));
     }
 }
