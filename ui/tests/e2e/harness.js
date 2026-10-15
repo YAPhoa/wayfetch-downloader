@@ -305,7 +305,7 @@ export class Daemon {
         '--auth-dir', /** @type {string} */ (this.auth),
         '--dev-insecure-loopback',
         '--allow-network', '127.0.0.1/32',
-        ...(this.realDebrid ? ['--real-debrid-endpoint', this.realDebrid] : []),
+        ...(this.realDebrid ? ['--provider-endpoint', `real-debrid=${this.realDebrid}`] : []),
         '--json',
       ],
       { stdio: ['ignore', 'pipe', 'pipe'] },
