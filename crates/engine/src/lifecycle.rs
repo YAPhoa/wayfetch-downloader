@@ -849,8 +849,7 @@ enum Internal {
     AccountChecked {
         account: AccountId,
         generation: wayfetch_domain::version::Generation,
-        result:
-            Result<crate::accounts::provider::Checked, crate::accounts::provider::ProviderError>,
+        result: crate::accounts::provider::Checked,
     },
 }
 

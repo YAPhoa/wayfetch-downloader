@@ -1092,6 +1092,31 @@ test('accounts are signed in on the service, checked, disabled, signed in again,
   await accounts.getByRole('button', { name: 'Add account…' }).click();
   await page.getByRole('dialog', { name: 'Add account' }).getByRole('button', { name: 'Sign in to Real-Debrid' }).click();
   const signIn = page.getByRole('dialog', { name: 'Sign in to Real-Debrid' });
+
+  // Closed while it asks for a code: the sign-in that started anyway is
+  // cancelled when the answer arrives, not left holding a slot.
+  /** @type {() => void} */
+  let release = () => {};
+  const held = new Promise((resolve) => (release = () => resolve(undefined)));
+  await page.route('**/v1/accounts/authorizations', async (route) => {
+    await held;
+    await route.continue();
+  });
+  await signIn.getByRole('button', { name: 'Continue' }).click();
+  await expect(signIn.getByRole('status')).toHaveText('Asking for a code…');
+  await page.keyboard.press('Escape');
+  await expect(signIn).toHaveCount(0);
+  const cancel = page.waitForRequest(
+    (request) => request.method() === 'POST' && /\/v1\/accounts\/authorizations\/[^/]+\/cancel$/.test(request.url()),
+  );
+  release();
+  const cancelled = await (await cancel).response();
+  expect(cancelled?.status()).toBe(200);
+  expect((await cancelled?.json()).state).toBe('cancelled');
+  await page.unroute('**/v1/accounts/authorizations');
+  await accounts.getByRole('button', { name: 'Add account…' }).click();
+  await page.getByRole('dialog', { name: 'Add account' }).getByRole('button', { name: 'Sign in to Real-Debrid' }).click();
+
   await expect(signIn.getByText('Wayfetch never asks for your password', { exact: false })).toBeVisible();
   await expect(signIn.getByText(/Downloading through Real-Debrid is not supported yet/)).toBeVisible();
   await expect(signIn.locator('input[type="password"]')).toHaveCount(0);

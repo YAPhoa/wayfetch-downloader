@@ -142,7 +142,9 @@ pub enum PollOutcome {
     /// Not approved yet, and the provider asks for slower polling.
     SlowDown,
     /// Approved: the credentials to store, and what the provider said
-    /// about the account if it could be asked.
+    /// about the account. Without the provider's ID for the account
+    /// (`profile.user_id`), the engine refuses the sign-in: it cannot tell
+    /// a new account from one already added, or confirm a replacement.
     Authorized {
         /// The account's credentials, in the provider's own format.
         credential: Secret,
@@ -158,10 +160,22 @@ pub enum PollOutcome {
 /// The result of checking stored credentials.
 #[derive(Debug)]
 pub struct Checked {
-    /// The account.
-    pub profile: Profile,
-    /// Credentials to store instead, when the check refreshed them.
+    /// The account, or why it could not be confirmed.
+    pub result: Result<Profile, ProviderError>,
+    /// Credentials to store instead, when the check refreshed them, whether
+    /// or not it then confirmed the account: a provider that rotates
+    /// refresh tokens may no longer accept the old ones.
     pub refreshed: Option<Secret>,
+}
+
+impl Checked {
+    /// A check that failed before any credentials changed.
+    pub fn failed(error: ProviderError) -> Self {
+        Self {
+            result: Err(error),
+            refreshed: None,
+        }
+    }
 }
 
 /// Why a provider call failed, in the categories the account's status
@@ -199,6 +213,5 @@ pub trait AccountProvider: Send + Sync + 'static {
 
     /// Checks stored credentials with the provider, refreshing them first
     /// if they have expired or the provider says they have.
-    fn check<'a>(&'a self, credential: &'a Secret)
-    -> BoxFuture<'a, Result<Checked, ProviderError>>;
+    fn check<'a>(&'a self, credential: &'a Secret) -> BoxFuture<'a, Checked>;
 }

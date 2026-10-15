@@ -59,7 +59,7 @@ struct Fake {
     /// Credentials issued so far, numbered.
     issued: AtomicUsize,
     /// What the next checks answer, in order; then success.
-    check_results: Mutex<VecDeque<Result<Checked, ProviderError>>>,
+    check_results: Mutex<VecDeque<Checked>>,
     /// The credentials checks were given.
     checked: Mutex<Vec<String>>,
     user: Mutex<Profile>,
@@ -152,10 +152,7 @@ impl AccountProvider for Fake {
         })
     }
 
-    fn check<'a>(
-        &'a self,
-        credential: &'a Secret,
-    ) -> BoxFuture<'a, Result<Checked, ProviderError>> {
+    fn check<'a>(&'a self, credential: &'a Secret) -> BoxFuture<'a, Checked> {
         Box::pin(async move {
             self.checks.fetch_add(1, Ordering::SeqCst);
             let text = credential.expose_text().unwrap().to_owned();
@@ -165,11 +162,9 @@ impl AccountProvider for Fake {
                 self.check_permits.acquire().await.unwrap().forget();
             }
             let next = self.check_results.lock().unwrap().pop_front();
-            next.unwrap_or_else(|| {
-                Ok(Checked {
-                    profile: self.user.lock().unwrap().clone(),
-                    refreshed: None,
-                })
+            next.unwrap_or_else(|| Checked {
+                result: Ok(self.user.lock().unwrap().clone()),
+                refreshed: None,
             })
         })
     }
@@ -703,10 +698,10 @@ async fn replacing_credentials_wins_over_a_late_check() {
     // A check that will report refreshed credentials, held at the
     // provider.
     fake.hold_checks(true);
-    fake.check_results.lock().unwrap().push_back(Ok(Checked {
-        profile: profile("4242", "stale-name"),
+    fake.check_results.lock().unwrap().push_back(Checked {
+        result: Ok(profile("4242", "stale-name")),
         refreshed: Some(Secret::from_text("obsolete-refreshed-credential")),
-    }));
+    });
     let late = {
         let handle = owner.handle();
         tokio::spawn(async move { handle.refresh_account(added.id, ALL).await })
@@ -827,8 +822,8 @@ async fn check_failures_are_told_apart() {
     let owner = env.start().await;
     let added = add(&owner, &fake).await;
     fake.check_results.lock().unwrap().extend([
-        Err(ProviderError::Unavailable("connection reset".into())),
-        Err(ProviderError::InvalidCredentials(
+        Checked::failed(ProviderError::Unavailable("connection reset".into())),
+        Checked::failed(ProviderError::InvalidCredentials(
             "the provider no longer accepts this sign-in".into(),
         )),
     ]);
@@ -839,6 +834,79 @@ async fn check_failures_are_told_apart() {
     let checked = refresh(&owner, added.id).await.unwrap();
     assert_eq!(checked.status, AccountStatus::Authenticated);
     assert_eq!(checked.problem, None);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refreshed_credentials_are_kept_when_the_check_then_fails() {
+    let env = env();
+    let fake = env.server.clone();
+    let owner = env.start().await;
+    let added = add(&owner, &fake).await;
+    const ROTATED: &str = "synthetic-rotated-credential";
+    fake.check_results.lock().unwrap().push_back(Checked {
+        result: Err(ProviderError::Unavailable("service unavailable".into())),
+        refreshed: Some(Secret::from_text(ROTATED)),
+    });
+    let checked = refresh(&owner, added.id).await.unwrap();
+    assert_eq!(checked.status, AccountStatus::Unavailable);
+    // The next check uses the refreshed credentials, sealed like any other.
+    refresh(&owner, added.id).await.unwrap();
+    assert_eq!(fake.last_checked(), ROTATED);
+    shutdown(owner).await;
+    for (path, bytes) in state_files(&env.state) {
+        assert!(!contains(&bytes, ROTATED), "{} holds it", path.display());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sign_in_must_confirm_which_account_it_reached() {
+    let env = env();
+    let fake = env.server.clone();
+    let owner = env.start().await;
+    let added = add(&owner, &fake).await;
+    let again = |account: &AccountSummary| {
+        authorize_command(
+            Some(AccountRef {
+                account: account.id,
+                revision: account.revision,
+            }),
+            None,
+        )
+    };
+
+    // The provider could not say who signed in: nothing is replaced.
+    *fake.user.lock().unwrap() = Profile {
+        user_id: None,
+        ..Profile::default()
+    };
+    let started = start_authorization(&owner, again(&added)).await;
+    fake.approve();
+    let done = ended(&owner, started.id).await;
+    assert_eq!(done.state, AuthorizationState::Failed, "{done:?}");
+    assert!(done.problem.unwrap().as_str().contains("did not confirm"));
+    assert_eq!(account(&owner, added.id).await, added);
+
+    // Nor is a new account added.
+    let started = start_authorization(&owner, authorize_command(None, None)).await;
+    fake.approve();
+    assert_eq!(
+        ended(&owner, started.id).await.state,
+        AuthorizationState::Failed
+    );
+
+    // Another user at the provider cannot take over the account.
+    *fake.user.lock().unwrap() = profile("9999", "someone-else");
+    let started = start_authorization(&owner, again(&added)).await;
+    fake.approve();
+    let done = ended(&owner, started.id).await;
+    assert_eq!(done.state, AuthorizationState::Failed, "{done:?}");
+    let kept = account(&owner, added.id).await;
+    assert_eq!(kept, added);
+    assert_eq!(kept.username.as_deref(), Some("synthetic-user"));
+    assert_eq!(accounts(&owner).await.accounts.len(), 1);
+    refresh(&owner, added.id).await.unwrap();
+    assert_eq!(fake.last_checked(), format!("{CREDENTIAL}-1"));
     shutdown(owner).await;
 }
 
