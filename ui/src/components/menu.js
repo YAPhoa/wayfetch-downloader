@@ -144,6 +144,13 @@ export class Menu {
                 class: entry.danger ? 'menu-item danger' : 'menu-item',
                 'data-key': `menu-item-${entry.key}`,
                 'aria-disabled': entry.disabled ? 'true' : null,
+                onpointermove: (/** @type {PointerEvent} */ event) => {
+                  // Keep the visual highlight and keyboard target together.
+                  // Touch scrolling must not move focus or scroll an item.
+                  if (event.pointerType === 'touch') return;
+                  const item = /** @type {HTMLElement} */ (event.currentTarget);
+                  if (document.activeElement !== item) item.focus({ preventScroll: true });
+                },
                 onclick: () => {
                   if (entry.disabled) return;
                   this.close(true);

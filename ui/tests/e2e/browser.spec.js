@@ -334,6 +334,17 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
     'true',
   );
   await expect(menu.getByRole('menuitem', { name: /Open file|Open containing folder/ })).toHaveCount(0);
+  // Pointer movement transfers the highlight from the initially focused
+  // item, and keyboard navigation continues from the hovered item.
+  const firstItem = menu.getByRole('menuitem', { name: 'Rename…' });
+  const copyItem = menu.getByRole('menuitem', { name: 'Copy source link' });
+  await copyItem.hover();
+  await expect(copyItem).toBeFocused();
+  await expect(firstItem).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await page.keyboard.press('ArrowUp');
+  await expect(firstItem).toBeFocused();
+  await copyItem.hover({ position: { x: 10, y: 10 } });
+  await expect(copyItem).toBeFocused();
   await menu.getByRole('menuitem', { name: 'Copy source link' }).click();
   await expect(menu).toBeHidden();
   await expect(page.getByText(`Copied the link of ${TRICKY}.`)).toBeVisible();
