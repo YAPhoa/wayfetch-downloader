@@ -28,7 +28,7 @@
 }
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --surface: #ffffff;
   --chrome: #f1f3f6;
   --ink: #1a2130;
@@ -64,30 +64,29 @@
   --font-size: 14px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --surface: #0f1318;
-    --chrome: #161b22;
-    --ink: #e4e8ee;
-    --muted: #a0aab8;
-    --line: #262d37;
-    --control: #6f7a89;
-    --accent: #7da6ee;
-    --on-accent: #0d1626;
-    --selected: #1b2740;
-    --hover: #141a21;
-    --filter-hover: #232c38;
-    --filter-selected: #30415c;
-    --track: #262d37;
-    --run: #7da6ee;
-    --ok: #6fcf97;
-    --warn: #f0a65a;
-    --bad: #f2877c;
-    --calm: #a0aab8;
-    --note-warn: #33261a;
-    --note-bad: #3a1f1d;
-    --focus: #7da6ee;
-  }
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --surface: #0f1318;
+  --chrome: #161b22;
+  --ink: #e4e8ee;
+  --muted: #a0aab8;
+  --line: #262d37;
+  --control: #6f7a89;
+  --accent: #7da6ee;
+  --on-accent: #0d1626;
+  --selected: #1b2740;
+  --hover: #141a21;
+  --filter-hover: #232c38;
+  --filter-selected: #30415c;
+  --track: #262d37;
+  --run: #7da6ee;
+  --ok: #6fcf97;
+  --warn: #f0a65a;
+  --bad: #f2877c;
+  --calm: #a0aab8;
+  --note-warn: #33261a;
+  --note-bad: #3a1f1d;
+  --focus: #7da6ee;
 }
 
 * { box-sizing: border-box; }
@@ -104,9 +103,9 @@ body {
    of pushing the page taller than the window. */
 #app { min-height: 100%; display: flow-root; }
 
-h1, h2 { margin: 0; font-weight: 600; }
+h1, h2, h3, h4 { margin: 0; font-weight: 600; }
 h1 { font-size: 18px; }
-h2 { font-size: 13px; }
+h2, h3, h4 { font-size: 13px; }
 
 a { color: var(--accent); }
 
@@ -413,14 +412,14 @@ table.jobs {
   border-collapse: collapse;
 }
 
-.jobs th, .jobs td {
+.jobs th, .jobs td, .accounts-table th, .accounts-table td {
   padding: var(--row-pad);
   text-align: left;
   white-space: nowrap;
   border-bottom: 1px solid var(--line);
 }
 
-.jobs th {
+.jobs th, .accounts-table th {
   position: sticky;
   top: 0;
   z-index: 1;
@@ -904,6 +903,75 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 
 .settings-head .icon { width: 16px; height: 16px; color: var(--accent); }
 .settings-head h2 { font-size: 14px; }
+
+/* Accounts & services: the accounts added, and the catalogue an
+   account's service is picked from, with the planned integration featured. */
+
+.accounts-table { width: 100%; min-width: 480px; border-collapse: collapse; }
+.accounts .table-scroll { flex: none; border: 1px solid var(--line); border-radius: var(--radius); }
+.accounts-table td.empty { color: var(--muted); border-bottom: 0; }
+
+
+.service-card {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.service-card p { margin: 0; }
+.service-card.featured { border-color: var(--accent); border-left-width: 3px; }
+.service-title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.service-title h4 { margin-right: 4px; }
+.tag.available { border-color: var(--ok); color: var(--ok); }
+.service-card .domains { display: flex; flex-wrap: wrap; gap: 2px 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.service-card .alias { color: var(--ink); font-weight: 500; }
+
+.dialog.services { width: min(640px, calc(100vw - 32px)); height: min(640px, calc(100vh - 32px)); }
+.dialog.services .dialog-body { flex: 1; min-height: 0; overflow: hidden; }
+.service-browser { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.service-browser .search { flex: none; margin-left: 0; }
+.service-browser .search input { width: 100%; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--control);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.chip:hover { background: var(--filter-hover); }
+.chip:has(input:checked) { border-color: var(--accent); background: var(--filter-selected); font-weight: 600; }
+.chip:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.chip .count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+
+.service-results {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.service-results:focus-visible { outline-offset: -2px; }
+.service-group { display: grid; gap: 6px; }
+.service-group h3 { color: var(--muted); font-size: 12px; }
+.service-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+
+@media (pointer: coarse) {
+  .chip { min-height: 44px; }
+}
 
 
 /* Narrow windows: the sidebar becomes a row of filters above the list. */
