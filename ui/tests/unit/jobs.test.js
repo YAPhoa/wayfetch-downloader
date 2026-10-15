@@ -6,7 +6,9 @@ import {
   canRemove,
   canRename,
   describe,
+  displayLink,
   explain,
+  fileKind,
   fileName,
   formatBytes,
   formatDuration,
@@ -124,4 +126,25 @@ test('each state filter counts the stages it shows', () => {
     cancelled: 0,
     done: 9,
   });
+});
+
+test('file kinds come from the extension, including compound ones', () => {
+  assert.equal(fileKind('report.zip'), 'ZIP archive');
+  assert.equal(fileKind('Linux.Image.TAR.GZ'), 'Gzip-compressed tar archive');
+  assert.equal(fileKind('notes.gz'), 'Gzip-compressed file');
+  assert.equal(fileKind('movie.mkv'), 'Matroska video');
+  assert.equal(fileKind('data.parquet'), 'PARQUET file');
+  assert.equal(fileKind('download-1'), 'File with no extension');
+  assert.equal(fileKind('.bashrc'), 'File with no extension');
+  assert.equal(fileKind('odd.n%me'), 'File');
+});
+
+test('links are shown without credentials, query, or fragment', () => {
+  assert.deepEqual(displayLink('https://user:secret@cdn.example.com:8443/a%20b/f.zip?sig=abc#part'), {
+    text: 'https://cdn.example.com:8443/a%20b/f.zip',
+    hidden: true,
+  });
+  assert.deepEqual(displayLink('https://example.com/f.zip'), { text: 'https://example.com/f.zip', hidden: false });
+  assert.deepEqual(displayLink('https://example.com/f.zip?'), { text: 'https://example.com/f.zip', hidden: false });
+  assert.equal(displayLink('not a link'), null);
 });

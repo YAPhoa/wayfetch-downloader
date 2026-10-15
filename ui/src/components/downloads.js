@@ -14,7 +14,9 @@ import {
   canRemove,
   canRename,
   describe,
+  displayLink,
   explain,
+  fileKind,
   fileName,
   formatBytes,
   groupCount,
@@ -221,6 +223,12 @@ export class Downloads {
     this.settings = null;
     /** The menu of commands for one row. */
     this.menu = new Menu('Download actions', () => this.schedule());
+    /**
+     * The link of the job in the details, once read; `null` if it could
+     * not be.
+     * @type {{ job: JobId, url: string | null | undefined } | null}
+     */
+    this.link = null;
 
     /** Connection state, for the status bar. */
     this.status = h('span', { class: 'status', role: 'status', 'data-status': 'connecting' });
@@ -1218,7 +1226,8 @@ export class Downloads {
   general(job) {
     const shown = progress(job, this.feed.sample(job.id));
     const state = describe(job);
-    const planned = job.destination ?? job.artifact?.root;
+    const name = fileName(job);
+    const where = this.location(job);
     return h(
       'div',
       {
@@ -1246,33 +1255,106 @@ export class Downloads {
       this.facts([
         ['State', h('span', { class: `tone-${state.tone}` }, state.label)],
         ['Speed', shown.rate && [shown.rate, shown.left && `, ${shown.left} left`].join('')],
-        ['Saves to', planned === undefined || planned === null ? 'The download folder' : this.rootPath(planned)],
-        ['Saved as', job.artifact && this.savedAs(job.artifact)],
-        ['Host', job.original_host],
+        ['File', name === undefined ? 'Named when it finishes' : h('span', { class: 'path', title: where.file }, name)],
+        ['Type', name && fileKind(name)],
         ['Size', shown.size],
+        [job.artifact ? 'Saved in' : 'Saves to', this.folder(job, where.folder)],
+        ...this.source(job),
       ]),
       job.failure && h('p', { class: `note tone-${state.tone}` }, explain(job.failure)),
     );
   }
 
   /**
-   * The published file's full path, labelled as a server path in a
-   * browser.
-   * @param {import('../client/generated/ArtifactSummary.js').ArtifactSummary} artifact
+   * The folder holding `job`'s file, or the one it will save in, and the
+   * file's full path once published. Paths are the engine's: a server's in
+   * a browser.
+   * @param {JobSummary} job
+   * @returns {{ folder: string, file?: string }}
    */
-  savedAs(artifact) {
-    const root = this.settings?.roots.find((r) => r.id === artifact.root)?.path;
-    const separator = root?.includes('\\') && !root.includes('/') ? '\\' : '/';
-    const full =
-      root === undefined
-        ? `${artifact.path} in ${this.rootPath(artifact.root)}`
-        : `${root.replace(/[\\/]+$/, '')}${separator}${artifact.path}`;
-    return h(
-      'span',
-      { class: 'saved-as' },
-      h('span', { class: 'path', title: full }, full),
-      !this.client.local && h('span', { class: 'tag' }, 'Server path'),
-    );
+  location(job) {
+    const { artifact } = job;
+    const id = artifact?.root ?? job.destination;
+    if (id === undefined || id === null) return { folder: 'The download folder' };
+    const root = this.settings?.roots.find((r) => r.id === id)?.path;
+    if (root === undefined) return { folder: this.rootPath(id) };
+    if (!artifact) return { folder: root };
+    const separator = root.includes('\\') && !root.includes('/') ? '\\' : '/';
+    const base = root.replace(/[\\/]+$/, '');
+    const parts = artifact.path.split('/');
+    return {
+      folder: [base, ...parts.slice(0, -1)].join(separator) || root,
+      file: [base, ...parts].join(separator),
+    };
+  }
+
+  /**
+   * `folder`, which opens in the file manager where the host can open it:
+   * the desktop app, once the file is published. A browser cannot open a
+   * server's folders, so there it is labelled as a server path.
+   * @param {JobSummary} job
+   * @param {string} folder
+   */
+  folder(job, folder) {
+    const { revealFile } = this.client;
+    const path =
+      revealFile && job.stage === 'complete'
+        ? h(
+            'button',
+            {
+              type: 'button',
+              class: 'link path',
+              'data-key': 'reveal-folder',
+              title: `Open ${folder}`,
+              onclick: () => void this.local(job, () => revealFile.call(this.client, job.id)),
+            },
+            folder,
+          )
+        : h('span', { class: 'path', title: folder }, folder);
+    return h('span', { class: 'location' }, path, !this.client.local && h('span', { class: 'tag' }, 'Server path'));
+  }
+
+  /**
+   * Where `job` came from. With the `sources` permission, its link without
+   * credentials, query, or fragment, which can carry a signed token, and a
+   * button to copy the whole link; otherwise only its host.
+   * @param {JobSummary} job
+   * @returns {[string, Node | string | null | undefined][]}
+   */
+  source(job) {
+    if (!this.client.permissions.includes('sources')) return [['Host', job.original_host]];
+    if (this.link?.job !== job.id) {
+      const link = { job: job.id, url: /** @type {string | null | undefined} */ (undefined) };
+      this.link = link;
+      this.client.jobSource(job.id).then(
+        (url) => {
+          link.url = url;
+          if (this.link === link) this.schedule();
+        },
+        () => {
+          link.url = null;
+          if (this.link === link) this.schedule();
+        },
+      );
+    }
+    const shown = typeof this.link.url === 'string' ? displayLink(this.link.url) : null;
+    const text = shown ? `${shown.text}${shown.hidden ? '?…' : ''}` : job.original_host;
+    if (!text) return [];
+    return [
+      [
+        'Source',
+        h(
+          'span',
+          { class: 'location' },
+          h('span', { class: 'path link-text', title: shown?.hidden ? `${text} (query hidden)` : text }, text),
+          h(
+            'button',
+            { type: 'button', class: 'link', 'data-key': 'copy-source-detail', onclick: () => void this.copySource(job) },
+            'Copy link',
+          ),
+        ),
+      ],
+    ];
   }
 
   /** @param {JobSummary} job */

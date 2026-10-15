@@ -173,7 +173,17 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
 
   // Its details, also after a reload of its address.
   await select(page, 'job-1');
-  await expect(page.locator('dd[data-fact="saved-as"] .path')).toHaveText(`${daemon.root}/${TRICKY}`);
+  // What the file is, where it came from, and where it is: a server
+  // folder, which a browser cannot open.
+  await expect(page.locator('dd[data-fact="file"] .path')).toHaveText(TRICKY);
+  await expect(page.locator('dd[data-fact="file"] .path')).toHaveAttribute('title', `${daemon.root}/${TRICKY}`);
+  await expect(page.locator('dd[data-fact="type"]')).toHaveText('BIN file');
+  await expect(page.locator('dd[data-fact="saved-in"] .path')).toHaveText(/** @type {string} */ (daemon.root));
+  await expect(page.locator('dd[data-fact="saved-in"]').getByText('Server path')).toBeVisible();
+  await expect(page.locator('dd[data-fact="saved-in"] button')).toHaveCount(0);
+  await expect(page.locator('dd[data-fact="source"] .path')).toHaveText(
+    `${fixture.base}/files/${encodeURIComponent(TRICKY)}`,
+  );
   await page.reload();
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
   await expect(page.locator('dd[data-fact="size"]')).toHaveText('20.0 MiB');
@@ -353,7 +363,9 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
 
   // A download goes to the new default; the details say where.
   // Jobs are listed oldest first, so it is on the next page.
-  await add(page, fixture.put('menu.bin', MIB));
+  // Its link carries a token, as signed CDN links do.
+  const signed = `${fixture.put('menu.bin', MIB)}?token=secret`;
+  await add(page, signed);
   await page.getByRole('button', { name: 'Next page' }).click();
   const menuRow = page.locator('tr[data-job]', { has: page.locator('td.name', { hasText: /^menu\.bin$/ }) });
   await expect(menuRow).toHaveCount(1);
@@ -362,8 +374,15 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expectState(page, job, 'Done');
   expect((await daemon.published('menu.bin', daemon.archive)).equals(content(0, MIB))).toBe(true);
   await select(page, job);
-  await expect(page.locator('dd[data-fact="saves-to"]')).toHaveText(/** @type {string} */ (daemon.archive));
-  await expect(page.locator('dd[data-fact="saved-as"] .path')).toHaveText(`${daemon.archive}/menu.bin`);
+  await expect(page.locator('dd[data-fact="saved-in"] .path')).toHaveText(/** @type {string} */ (daemon.archive));
+  await expect(page.locator('dd[data-fact="file"] .path')).toHaveAttribute('title', `${daemon.archive}/menu.bin`);
+  // The details show the link without its query, and copy all of it.
+  const source = page.locator('dd[data-fact="source"]');
+  await expect(source.locator('.path')).toHaveText(`${fixture.base}/files/menu.bin?…`);
+  await expect(source).not.toContainText('secret');
+  await source.getByRole('button', { name: 'Copy link' }).click();
+  await expect(page.getByText('Copied the link of menu.bin.')).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(signed);
   await page.getByRole('button', { name: 'Close details' }).click();
 
   // From the keyboard: the row's menu button, arrow keys, Escape back to it.

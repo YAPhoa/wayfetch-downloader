@@ -332,9 +332,12 @@ The layout is a dense download table for a desktop browser: a toolbar
 (add links, pause, resume, or cancel the selected job, filter by name,
 Settings), state filters with job counts on the left, the table (each job's
 name, the host of its link, state, progress, size, speed, and time left),
-details of the selected job below the table (including the folder it saves
-to and, once finished, the file it was saved as), and a status bar with the
-connection state. The add form says which folder new downloads go to. It
+details of the selected job below the table (its file name and kind, the
+folder it saves to, and the link it came from, shown without its query,
+which can carry a signed token, with a button to copy the whole link), and
+a status bar with the connection state. In the desktop app the folder opens
+in the file manager once the file is saved; a browser shows it as a server
+path. The add form says which folder new downloads go to. It
 follows the system's light or dark theme and uses the bundled IBM Plex Sans
 typeface (`ui/src/fonts/`, SIL Open Font License 1.1).
 
