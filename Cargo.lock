@@ -5219,6 +5219,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "url",
+ "uuid",
  "wayfetch-engine",
  "wayfetch-protocol",
 ]

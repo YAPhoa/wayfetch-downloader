@@ -11,7 +11,7 @@ use wayfetch_domain::id::{JobId, PackageId, RootId};
 use wayfetch_domain::version::Revision;
 
 use crate::command::{Command, CommandEnvelope, IdempotencyKey, InputUrl, SubmitItems};
-use crate::error::ProtocolError;
+use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
 
 /// Submits a batch of URLs.
@@ -67,9 +67,15 @@ pub enum Action {
     Resume,
     /// [`Command::Cancel`].
     Cancel,
+    /// [`Command::Rename`], with the request's `name`. Added in protocol
+    /// 1.0.
+    Rename,
+    /// [`Command::Remove`]. Added in protocol 1.0.
+    Remove,
 }
 
-/// Pauses, resumes, or cancels a job at the revision the client saw.
+/// Pauses, resumes, cancels, renames, or removes a job at the revision the
+/// client saw.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -82,31 +88,57 @@ pub struct JobCommandRequest {
     pub action: Action,
     /// The job revision the client last saw.
     pub expected_revision: Revision,
+    /// The new file name, for [`Action::Rename`] only.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub name: Option<String>,
 }
 
 impl JobCommandRequest {
-    /// The command envelope for `job`.
-    pub fn into_envelope(self, job: JobId) -> CommandEnvelope {
+    /// The command envelope for `job`. A name is required for a rename and
+    /// refused with any other action.
+    pub fn into_envelope(self, job: JobId) -> Result<CommandEnvelope, ProtocolError> {
         let expected_revision = self.expected_revision;
-        let command = match self.action {
-            Action::Pause => Command::Pause {
+        let command = match (self.action, self.name) {
+            (Action::Rename, Some(name)) => Command::Rename {
+                job,
+                expected_revision,
+                name,
+            },
+            (Action::Rename, None) => {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidRequest,
+                    "a rename needs a name",
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidRequest,
+                    "only a rename takes a name",
+                ));
+            }
+            (Action::Pause, None) => Command::Pause {
                 job,
                 expected_revision,
             },
-            Action::Resume => Command::Resume {
+            (Action::Resume, None) => Command::Resume {
                 job,
                 expected_revision,
             },
-            Action::Cancel => Command::Cancel {
+            (Action::Cancel, None) => Command::Cancel {
+                job,
+                expected_revision,
+            },
+            (Action::Remove, None) => Command::Remove {
                 job,
                 expected_revision,
             },
         };
-        CommandEnvelope {
+        Ok(CommandEnvelope {
             idempotency_key: self.idempotency_key,
             target: self.target,
             command,
-        }
+        })
     }
 }
 
@@ -143,7 +175,6 @@ impl UpdateSettingsRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ErrorCode;
     use serde_json::json;
 
     fn submit(items: serde_json::Value) -> Result<CommandEnvelope, ProtocolError> {
@@ -183,12 +214,41 @@ mod tests {
         .unwrap();
         let job = JobId::from_u64(7).unwrap();
         assert_eq!(
-            request.into_envelope(job).command,
+            request.into_envelope(job).unwrap().command,
             Command::Cancel {
                 job,
                 expected_revision: Revision::from_u64(3).unwrap()
             }
         );
+    }
+
+    #[test]
+    fn only_a_rename_carries_a_name() {
+        let request = |action: &str, name: Option<&str>| {
+            serde_json::from_value::<JobCommandRequest>(json!({
+                "idempotency_key": IdempotencyKey::generate(),
+                "target": InstanceId::generate(),
+                "action": action,
+                "expected_revision": 2,
+                "name": name,
+            }))
+            .unwrap()
+            .into_envelope(JobId::from_u64(1).unwrap())
+        };
+        assert!(matches!(
+            request("rename", Some("b.bin")).unwrap().command,
+            Command::Rename { name, .. } if name == "b.bin"
+        ));
+        for (action, name) in [("rename", None), ("remove", Some("b.bin"))] {
+            assert_eq!(
+                request(action, name).unwrap_err().code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        assert!(matches!(
+            request("remove", None).unwrap().command,
+            Command::Remove { .. }
+        ));
     }
 
     #[test]

@@ -11,13 +11,14 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::id::{JobId, PackageId, RootId};
 use wayfetch_domain::job::{JobError, JobState, Outcome};
 use wayfetch_domain::time::UtcTimestamp;
+use wayfetch_domain::version::Revision;
 use wayfetch_protocol::command::{CommandFingerprint, IdempotencyRecord, Replay, SubmitItems};
 use wayfetch_protocol::event::EventKind;
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, InstanceId, ProtocolError,
 };
 
-use super::{Store, StoreError, jobs, key, outbox, roots, sql};
+use super::{Store, StoreError, jobs, key, outbox, renames, roots, sql};
 
 impl Store {
     /// Applies a client command durably. The host has already checked the
@@ -33,22 +34,9 @@ impl Store {
         destination: Option<RootId>,
         now: UtcTimestamp,
     ) -> Result<CommandResult, ProtocolError> {
-        if envelope.target != instance {
-            return Err(ProtocolError::new(
-                ErrorCode::WrongInstance,
-                "command targets another engine instance",
-            ));
-        }
-        let idempotency_key = envelope.idempotency_key.as_uuid().to_string();
         let tx = self.write()?;
-        if let Some(record) = stored(&tx, &idempotency_key)? {
-            return match record.replay(&envelope.command) {
-                Replay::Stored(result) => Ok(result.clone()),
-                Replay::Conflict => Err(ProtocolError::new(
-                    ErrorCode::IdempotencyConflict,
-                    "idempotency key was used for a different command",
-                )),
-            };
+        if let Some(result) = replayed(&tx, envelope, instance)? {
+            return Ok(result);
         }
         let result = match &envelope.command {
             Command::Submit { items, package } => submit(&tx, items, *package, destination, now)?,
@@ -68,23 +56,93 @@ impl Store {
                 expected_revision,
                 default_root,
             } => roots::update_settings(&tx, *expected_revision, *default_root, now)?,
+            Command::Remove {
+                job,
+                expected_revision,
+            } => remove(&tx, *job, *expected_revision, now)?,
+            // The file is renamed between the store's two steps.
+            Command::Rename { .. } => {
+                return Err(ProtocolError::new(
+                    ErrorCode::Internal,
+                    "a rename runs through Store::begin_rename",
+                ));
+            }
         };
-        let result_json =
-            serde_json::to_string(&result).map_err(|_| StoreError::Corrupt("command result"))?;
-        tx.execute(
-            "INSERT INTO commands (idempotency_key, fingerprint, result, created_at) \
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                idempotency_key,
-                envelope.command.fingerprint().as_bytes().as_slice(),
-                result_json,
-                now.unix_millis(),
-            ],
-        )
-        .map_err(StoreError::from)?;
+        record(&tx, envelope, &result, now)?;
         tx.commit().map_err(StoreError::from)?;
         Ok(result)
     }
+}
+
+/// The stored result of a command already accepted under the envelope's
+/// key, after checking that the envelope is for this instance; `None` for
+/// a new command.
+pub(super) fn replayed(
+    tx: &Transaction<'_>,
+    envelope: &CommandEnvelope,
+    instance: InstanceId,
+) -> Result<Option<CommandResult>, ProtocolError> {
+    if envelope.target != instance {
+        return Err(ProtocolError::new(
+            ErrorCode::WrongInstance,
+            "command targets another engine instance",
+        ));
+    }
+    let key = envelope.idempotency_key.as_uuid().to_string();
+    // An unfinished rename records its result under its key when it ends.
+    if let Some(fingerprint) = renames::holding(tx, &key)? {
+        if fingerprint != envelope.command.fingerprint().as_bytes() {
+            return Err(ProtocolError::new(
+                ErrorCode::IdempotencyConflict,
+                "idempotency key was used for a different command",
+            ));
+        }
+        return Err(StoreError::Busy("the file is being renamed; try again shortly").into());
+    }
+    let Some(record) = stored(tx, &key)? else {
+        return Ok(None);
+    };
+    match record.replay(&envelope.command) {
+        Replay::Stored(result) => Ok(Some(result.clone())),
+        Replay::Conflict => Err(ProtocolError::new(
+            ErrorCode::IdempotencyConflict,
+            "idempotency key was used for a different command",
+        )),
+    }
+}
+
+/// Records the result of the envelope's command under its key.
+pub(super) fn record(
+    tx: &Transaction<'_>,
+    envelope: &CommandEnvelope,
+    result: &CommandResult,
+    now: UtcTimestamp,
+) -> Result<(), StoreError> {
+    record_as(
+        tx,
+        &envelope.idempotency_key.as_uuid().to_string(),
+        envelope.command.fingerprint().as_bytes(),
+        result,
+        now,
+    )
+}
+
+/// Records `result` under an idempotency key and command fingerprint.
+pub(super) fn record_as(
+    tx: &Transaction<'_>,
+    idempotency_key: &str,
+    fingerprint: &[u8],
+    result: &CommandResult,
+    now: UtcTimestamp,
+) -> Result<(), StoreError> {
+    let result =
+        serde_json::to_string(result).map_err(|_| StoreError::Corrupt("command result"))?;
+    tx.execute(
+        "INSERT INTO commands (idempotency_key, fingerprint, result, created_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![idempotency_key, fingerprint, result, now.unix_millis()],
+    )?;
+    Ok(())
 }
 
 fn stored(tx: &Transaction<'_>, key: &str) -> Result<Option<IdempotencyRecord>, StoreError> {
@@ -169,7 +227,7 @@ fn request(
     now: UtcTimestamp,
     apply: impl FnOnce(&mut JobState) -> Result<Outcome, JobError>,
 ) -> Result<CommandResult, StoreError> {
-    let mut job = jobs::load(tx, id)?;
+    let mut job = jobs::load_listed(tx, id)?;
     let previous = job.state;
     let outcome = apply(&mut job.state)?;
     if outcome == Outcome::Changed {
@@ -180,5 +238,32 @@ fn request(
         job: id,
         revision: job.state.revision(),
         changed: outcome == Outcome::Changed,
+    })
+}
+
+/// Removes a finished, failed, or cancelled job from lists and counts, with
+/// a `job_removed` event. Its files and records stay.
+fn remove(
+    tx: &Transaction<'_>,
+    id: JobId,
+    expected: Revision,
+    now: UtcTimestamp,
+) -> Result<CommandResult, StoreError> {
+    let job = jobs::load_listed(tx, id)?;
+    job.state.check_remove(expected)?;
+    if renames::pending(tx, id)? {
+        return Err(StoreError::Busy(
+            "the job's file is being renamed; try again once that finishes",
+        ));
+    }
+    tx.execute(
+        "UPDATE jobs SET removed_at = ?1, updated_at = ?1 WHERE id = ?2",
+        params![now.unix_millis(), sql(id)?],
+    )?;
+    outbox::append(tx, &EventKind::JobRemoved { job: id }, now)?;
+    Ok(CommandResult::JobUpdated {
+        job: id,
+        revision: job.state.revision(),
+        changed: true,
     })
 }

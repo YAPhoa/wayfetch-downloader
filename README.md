@@ -137,7 +137,8 @@ It listens on `127.0.0.1:7878` unless `--listen` says otherwise; anything
 beyond loopback has no TLS of its own and belongs behind an authenticated TLS
 reverse proxy. Every request needs `Authorization: Bearer TOKEN`. The token file
 holds one `TOKEN PERMISSION[,PERMISSION...]` per line, with permissions `read`,
-`submit`, and `control`, and must be readable only by its owner. If it does not
+`submit`, `control`, and `sources` (reading back submitted links, which can
+carry signed tokens), and must be readable only by its owner. If it does not
 exist, `wayfetchd` creates it with one token holding every permission; the token
 is never printed.
 
@@ -148,12 +149,17 @@ is never printed.
 | `GET /v1/jobs` | A page of jobs: `after`, `page_size`, `stage=a,b`, `package` |
 | `GET /v1/jobs/{id}` | One job |
 | `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
-| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel", "expected_revision"}` |
+| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"remove"\|"rename", "expected_revision"}`, plus `"name"` for a rename |
+| `GET /v1/jobs/{id}/source` | The link the job was submitted with (needs `sources`) |
 | `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem` |
 | `PUT /v1/settings` | Choose the default: `{"idempotency_key", "target", "expected_revision", "default_root": "root-N"}` (needs `control`) |
 | `GET /v1/events` | Server-sent events: `hello`, `event`, `progress`, `resync` |
 | `GET /v1/ready` | Readiness, without a token: `200 {"ready":true}`, or `503` with a `reason` |
 | `GET /v1/auth/session`, `POST /v1/auth/{setup,login,logout}` | Browser sign-in; see [Browser access](#browser-access) |
+
+`rename` gives a completed job's file a new name in the same folder; it never
+replaces a file, and refuses one changed outside Wayfetch. `remove` takes a
+complete, failed, or cancelled job off lists and counts and keeps its files.
 
 `target` is the instance from `/v1/capabilities` and `idempotency_key` a fresh
 UUID per logical command; a retry with the same key returns the first result.

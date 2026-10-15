@@ -550,6 +550,11 @@ export class JobFeed {
           }
           this.recount.request();
         }
+        if (kind.type === 'job_removed') {
+          // A later job moves up into the page.
+          if (this.removed(kind.job)) this.repage.request();
+          this.recount.request();
+        }
         this.changed();
         return;
       }
@@ -638,6 +643,21 @@ export class JobFeed {
       this.page.delete(job.id);
       this.pageIds = this.pageIds.filter((id) => id !== job.id);
     }
+  }
+
+  /**
+   * Drops a job removed from the list. Returns whether the page held it.
+   * @param {JobId} job
+   */
+  removed(job) {
+    this.samples.delete(job);
+    if (this.detail?.job.id === job) {
+      this.detail = null;
+      this.watchedState = 'missing';
+    }
+    if (!this.page.delete(job)) return false;
+    this.pageIds = this.pageIds.filter((id) => id !== job);
+    return true;
   }
 
   /** @param {JobId} job */

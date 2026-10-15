@@ -28,6 +28,9 @@ pub enum ErrorCode {
     /// The record is in a short non-interruptible step, such as publishing.
     /// Retry the same request later.
     Busy,
+    /// The name is taken: another file has it, or another job reserved it.
+    /// Nothing was replaced. Added in protocol 1.0.
+    AlreadyExists,
     /// The idempotency key was already used for a different command.
     IdempotencyConflict,
     /// The command targets a different engine instance.

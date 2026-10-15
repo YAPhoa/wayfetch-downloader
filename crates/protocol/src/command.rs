@@ -71,13 +71,19 @@ impl IdempotencyKey {
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Permission {
     /// Read queries and subscribe to events.
     Read,
     /// Submit new inputs.
     Submit,
-    /// Pause, resume, cancel, and otherwise control existing jobs.
+    /// Pause, resume, cancel, rename, remove, and otherwise control
+    /// existing jobs.
     Control,
+    /// Read the links jobs were submitted with, which can carry signed
+    /// tokens and so are not part of what [`Permission::Read`] shows.
+    /// Added in protocol 1.0.
+    Sources,
 }
 
 /// One URL to ingest.
@@ -227,6 +233,25 @@ pub enum Command {
         /// One of the roots the settings list, which must be available.
         default_root: RootId,
     },
+    /// Give a completed job's published file another name in the same
+    /// folder. Never replaces an existing file. Added in protocol 1.0.
+    Rename {
+        /// The job.
+        job: JobId,
+        /// The job revision the client last saw.
+        expected_revision: Revision,
+        /// The new file name: one path component, checked against the
+        /// engine's filename policy.
+        name: String,
+    },
+    /// Remove a finished, failed, or cancelled job from lists and counts.
+    /// Its files, partial data, and records stay. Added in protocol 1.0.
+    Remove {
+        /// The job.
+        job: JobId,
+        /// The job revision the client last saw.
+        expected_revision: Revision,
+    },
 }
 
 impl Permission {
@@ -242,7 +267,9 @@ impl Command {
             Self::Pause { .. }
             | Self::Resume { .. }
             | Self::Cancel { .. }
-            | Self::UpdateSettings { .. } => Permission::Control,
+            | Self::UpdateSettings { .. }
+            | Self::Rename { .. }
+            | Self::Remove { .. } => Permission::Control,
         }
     }
 
@@ -462,5 +489,14 @@ mod tests {
             package: None,
         };
         assert_eq!(submit.required_permission(), Permission::Submit);
+        let remove = Command::Remove {
+            job: JobId::from_u64(1).unwrap(),
+            expected_revision: Revision::INITIAL,
+        };
+        assert_eq!(remove.required_permission(), Permission::Control);
+        assert_eq!(
+            "sources".parse::<Permission>().unwrap(),
+            Permission::Sources
+        );
     }
 }
