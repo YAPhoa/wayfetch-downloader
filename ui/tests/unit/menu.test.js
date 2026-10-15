@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { place } from '../../src/components/menu.js';
+import { place, wantsNativeMenu } from '../../src/components/menu.js';
 
 const viewport = { width: 800, height: 600 };
 const size = { width: 200, height: 150 };
@@ -27,4 +27,28 @@ test('a menu larger than the room is kept inside the window', () => {
   const pointer = place({ left: 799, right: 799, top: 599, bottom: 599 }, size, viewport);
   assert.ok(pointer.left >= 4 && pointer.left + size.width <= viewport.width - 4);
   assert.ok(pointer.top >= 4 && pointer.top + size.height <= viewport.height - 4);
+});
+
+/**
+ * A stand-in element: `field` says whether it is inside a text field.
+ * @param {{ field?: boolean, editable?: boolean }} props
+ */
+const element = ({ field = false, editable = false }) =>
+  /** @type {Element} */ (/** @type {unknown} */ ({ closest: () => (field ? {} : null), isContentEditable: editable }));
+
+/** @param {boolean} collapsed @param {boolean} contains */
+const selection = (collapsed, contains) =>
+  /** @type {Selection} */ (/** @type {unknown} */ ({ isCollapsed: collapsed, containsNode: () => contains }));
+
+test('the native menu is kept for text fields and selected text', () => {
+  assert.equal(wantsNativeMenu(element({ field: true }), null), true);
+  assert.equal(wantsNativeMenu(element({ editable: true }), null), true);
+  assert.equal(wantsNativeMenu(element({}), selection(false, true)), true);
+});
+
+test('the native menu is suppressed everywhere else', () => {
+  assert.equal(wantsNativeMenu(element({}), null), false);
+  assert.equal(wantsNativeMenu(element({}), selection(true, true)), false);
+  // A selection elsewhere does not keep it on unselected text.
+  assert.equal(wantsNativeMenu(element({}), selection(false, false)), false);
 });
