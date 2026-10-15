@@ -202,13 +202,20 @@ impl Session<'_> {
                 })
                 .await
             }
+            "retry" => {
+                self.control(first, words, |job, expected_revision| Command::Retry {
+                    job,
+                    expected_revision,
+                })
+                .await
+            }
             _ => self.submit(text.split_ascii_whitespace()).await,
         };
         result.map(|()| Next::Continue)
     }
 
-    /// Pauses, resumes, or cancels the job named in `words`, at the
-    /// revision just read.
+    /// Pauses, resumes, cancels, or retries the job named in `words`, at
+    /// the revision just read.
     async fn control<'a>(
         &self,
         verb: &str,

@@ -1040,3 +1040,121 @@ test('the download limit is a server setting every window shares', async ({ brow
   await first.unroute('**/v1/settings');
   await context.close();
 });
+
+test('Retry continues a cancelled download, once, and says when it had to start over', async ({ browser }) => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto(daemon.origin);
+  await page.getByLabel('Owner name').fill('owner');
+  await page.getByLabel('Password').fill(PASSWORD);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.locator('.statusbar .status')).toHaveText('Live');
+
+  // A download cancelled past its first checkpoint keeps its saved data.
+  // The earlier test made the archive folder the default.
+  const NAME = 'again.bin';
+  await add(page, fixture.put(NAME, 10 * MIB, 9 * MIB));
+  await page.getByRole('button', { name: /^Active \(/ }).click();
+  // Until it is published, a download is named by its job.
+  const again = page.locator('tr[data-job]');
+  await expect(again).toHaveCount(1);
+  await expect(again.locator('.bytes')).toHaveText(/^[89]\.\d MiB of 10\.0 MiB$/);
+  const job = /** @type {string} */ (await again.getAttribute('data-job'));
+  await select(page, job);
+  const retry = page.getByRole('button', { name: `Retry ${job}` });
+  await expect(retry).toBeDisabled();
+  await page.getByRole('button', { name: `Cancel ${job}` }).click();
+  await page.getByRole('button', { name: /^Cancelled \(/ }).click();
+  await expectState(page, job, 'Cancelled');
+  await expect(retry).toBeEnabled();
+  await expect(retry).toHaveAttribute('title', /^Continues from the [89]\.\d MiB saved when it can$/);
+
+  // The row menu offers it too, and says what it does.
+  await row(page, job).click({ button: 'right' });
+  let menu = await openMenu(page);
+  await expect(menu.getByRole('menuitem', { name: /^Retry/ })).not.toHaveAttribute('aria-disabled');
+  await expect(menu.getByRole('menuitem', { name: /^Retry/ })).toContainText(/Continues from the [89]\.\d MiB saved/);
+  await page.keyboard.press('Escape');
+
+  // A retry sent for a revision the job has left is refused and explained
+  // from the job's state; nothing starts.
+  const commands = `**/v1/jobs/${job}/commands`;
+  await page.route(commands, async (route) => {
+    const body = JSON.parse(route.request().postData() ?? '{}');
+    await route.continue({ postData: JSON.stringify({ ...body, expected_revision: body.expected_revision - 1 }) });
+  });
+  await retry.click();
+  await expect(page.getByText(`${job} changed in the meantime and is still stopped.`, { exact: false })).toBeVisible();
+  await page.unroute(commands);
+  await expectState(page, job, 'Cancelled');
+
+  // While the engine has not answered, Retry cannot be sent again, from
+  // the toolbar or the menu.
+  /** @type {() => void} */
+  let answer = () => {};
+  let held = 0;
+  await page.route(commands, async (route) => {
+    held += 1;
+    await new Promise((resolve) => {
+      answer = () => resolve(undefined);
+    });
+    await route.continue();
+  });
+  const requestsBefore = fixture.requested.length;
+  await retry.click();
+  await expect.poll(() => held).toBe(1);
+  await expect(retry).toBeDisabled();
+  await row(page, job).click({ button: 'right' });
+  menu = await openMenu(page);
+  await expect(menu.getByRole('menuitem', { name: /^Retry/ })).toHaveAttribute('aria-disabled', 'true');
+  await expect(menu.getByRole('menuitem', { name: /^Retry/ })).toContainText('Waiting for the server to answer');
+  await page.keyboard.press('Escape');
+  answer();
+  await expect(page.getByText(`Retrying ${job}. It continues from the`, { exact: false })).toBeVisible();
+  await page.unroute(commands);
+  expect(held).toBe(1);
+
+  // It continues from the saved data: one request, for the rest.
+  await page.getByRole('button', { name: /^All \(/ }).click();
+  await page.goto(`${daemon.origin}/jobs/${job}`);
+  await expect(page.locator('dd[data-fact="state"]')).toHaveText('Downloading');
+  await expect.poll(() => fixture.requested.length).toBe(requestsBefore + 1);
+  const resumedAt = Number(/^bytes=(\d+)-$/.exec(fixture.ranges.at(-1) ?? '')?.[1]);
+  expect(resumedAt).toBeGreaterThanOrEqual(8 * MIB);
+  // Reloading changes nothing about the accepted retry.
+  await page.reload();
+  await expect(page.locator('dd[data-fact="state"]')).toHaveText('Downloading');
+  expect(fixture.requested.length).toBe(requestsBefore + 1);
+  fixture.release(NAME);
+  await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
+  expect((await daemon.published(NAME, daemon.archive)).equals(content(0, 10 * MIB))).toBe(true);
+  await expect(page.locator('[data-note="restart"]')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: `Retry ${job}` })).toBeDisabled();
+  await page.getByRole('button', { name: 'Close details' }).click();
+
+  // A file replaced on the server cannot be continued: Retry starts over,
+  // and the details say why.
+  const CHANGED = 'changed.bin';
+  await add(page, fixture.put(CHANGED, 10 * MIB, 9 * MIB));
+  await page.getByRole('button', { name: /^Active \(/ }).click();
+  const changed = page.locator('tr[data-job]');
+  await expect(changed).toHaveCount(1);
+  await expect(changed.locator('.bytes')).toHaveText(/^[89]\.\d MiB of 10\.0 MiB$/);
+  const second = /** @type {string} */ (await changed.getAttribute('data-job'));
+  await select(page, second);
+  await page.getByRole('button', { name: `Cancel ${second}` }).click();
+  await expect(page.locator('dd[data-fact="state"]')).toHaveText('Cancelled');
+  fixture.replace(CHANGED);
+  fixture.release(CHANGED);
+  await page.getByRole('button', { name: `Retry ${second}` }).click();
+  await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
+  await expect(page.locator('[data-note="restart"]')).toHaveText(
+    'Started over from the beginning: the file on the server changed since the saved data was downloaded.',
+  );
+  await page.getByRole('tab', { name: 'Engine details' }).click();
+  await expect(page.locator('dd[data-fact="restarted-because"]')).toHaveText(
+    'the file on the server changed since the saved data was downloaded',
+  );
+  expect((await daemon.published(CHANGED, daemon.archive)).equals(content(0, 10 * MIB))).toBe(true);
+  await context.close();
+});

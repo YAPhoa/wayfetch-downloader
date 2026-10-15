@@ -63,6 +63,17 @@ struct Resource {
     /// Response headers never arrive.
     no_headers: bool,
     filename: Option<String>,
+    /// How a range request is answered instead of honoring it.
+    range_reply: Option<RangeReply>,
+}
+
+/// An unusable answer to a range request.
+#[derive(Debug, Clone, Copy)]
+enum RangeReply {
+    /// `206` starting a few bytes before the requested start.
+    WrongStart,
+    /// `416` reporting the full length.
+    Unsatisfiable,
 }
 
 impl Resource {
@@ -75,6 +86,7 @@ impl Resource {
             stall_at: None,
             no_headers: false,
             filename: None,
+            range_reply: None,
         }
     }
 
@@ -200,8 +212,22 @@ impl Transport for Fake {
                 .validators
                 .as_ref()
                 .is_none_or(|v| *v == representation || !resource.if_range);
-            let (framing, start) = match request.range {
-                Some((start, None)) if resource.ranges && matches => (
+            let (framing, start) = match (request.range, resource.range_reply) {
+                (Some((start, None)), Some(RangeReply::WrongStart)) => (
+                    Framing::Partial {
+                        first: start - 1,
+                        last: len - 1,
+                        complete: Some(len),
+                    },
+                    start - 1,
+                ),
+                (Some(_), Some(RangeReply::Unsatisfiable)) => (
+                    Framing::Unsatisfiable {
+                        complete: Some(len),
+                    },
+                    len,
+                ),
+                (Some((start, None)), None) if resource.ranges && matches => (
                     Framing::Partial {
                         first: start,
                         last: len - 1,
@@ -2041,8 +2067,10 @@ async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
         panic!()
     };
     drop(hang);
-    let mut hang = Hang::start();
+    // Published before the folder hangs again; under load it could
+    // otherwise still be publishing, which opens the folder.
     complete(&owner, c).await;
+    let mut hang = Hang::start();
     let locating = tokio::spawn({
         let handle = handle.clone();
         async move { handle.published_path(c, ALL).await }
@@ -2535,5 +2563,429 @@ async fn the_collected_list_is_bounded() {
     }
     assert_eq!(seen, MAX_COLLECTED_LINKS);
     assert!(jobs(&owner).await.is_empty());
+    shutdown(owner).await;
+}
+
+// Manual retry: the same job again, continuing verified saved data when it
+// safely can.
+
+fn retry(owner: &EngineOwner, job: &JobSummary) -> CommandEnvelope {
+    envelope(
+        owner,
+        Command::Retry {
+            job: job.id,
+            expected_revision: job.revision,
+        },
+    )
+}
+
+/// An environment whose stalled transfers fail quickly.
+fn failing_env() -> Env {
+    let mut env = env();
+    env.timeouts = Timeouts {
+        idle_read: Duration::from_millis(100),
+        ..Timeouts::DEFAULT
+    };
+    env
+}
+
+/// Puts `data` at `path`, stalling at `at`, and waits for the job
+/// submitted for it to fail with `at` bytes durable. The stall is then
+/// lifted.
+async fn failed_at(
+    env: &Env,
+    owner: &EngineOwner,
+    path: &str,
+    data: &Bytes,
+    at: usize,
+) -> JobSummary {
+    let mut resource = Resource::new(data.clone());
+    resource.stall_at = Some(at);
+    env.server.put(path, resource);
+    let [id] = submit(owner, &[path]).await[..] else {
+        panic!()
+    };
+    let failed = wait_for(owner, id, |j| j.stage == JobStage::Failed).await;
+    assert_eq!(failed.bytes_done, at as u64);
+    assert_eq!(
+        failed.failure.as_ref().unwrap().code,
+        FailureCode::RequestTimeout
+    );
+    env.server.update(path, |r| r.stall_at = None);
+    failed
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_transfer_retries_from_its_verified_offset() {
+    let env = failing_env();
+    let data = body(48 * KIB + 3);
+    let owner = env.start().await;
+    let failed = failed_at(&env, &owner, "/retry.bin", &data, 20 * KIB).await;
+    assert_eq!(env.staging_files(), 1);
+
+    let result = owner.handle().execute(retry(&owner, &failed), ALL).await;
+    assert!(matches!(
+        result,
+        Ok(CommandResult::JobUpdated { changed: true, .. })
+    ));
+    let done = complete(&owner, failed.id).await;
+    assert!(done.generation > failed.generation);
+    assert_eq!(done.package, failed.package);
+    assert_eq!(done.destination, failed.destination);
+    assert_eq!(done.restart_reason, None);
+    // Only the rest was asked for, on condition it is the same file.
+    assert_eq!(
+        env.server.ranges_requested(),
+        vec![None, Some((20 * KIB as u64, None))]
+    );
+    let resumed = env.server.requests.lock().unwrap()[1].clone();
+    assert_eq!(
+        resumed.validators.unwrap().strong_etag.as_deref(),
+        Some("\"v1\"")
+    );
+    assert_eq!(env.published("retry.bin"), data);
+    assert_eq!(env.staging_files(), 0);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_partial_retries_in_this_session_and_after_restart() {
+    let env = env();
+    let data = body(32 * KIB);
+    for path in ["/now.bin", "/later.bin"] {
+        let mut resource = Resource::new(data.clone());
+        resource.stall_at = Some(12 * KIB);
+        env.server.put(path, resource);
+    }
+    let owner = env.start().await;
+    let ids = submit(&owner, &["/now.bin", "/later.bin"]).await;
+    for &id in &ids {
+        wait_for(&owner, id, |j| j.bytes_done == 12 * KIB as u64).await;
+        let summary = job(&owner, id).await;
+        let cancel = Command::Cancel {
+            job: id,
+            expected_revision: summary.revision,
+        };
+        owner
+            .handle()
+            .execute(envelope(&owner, cancel), ALL)
+            .await
+            .unwrap();
+        wait_for(&owner, id, |j| j.stage == JobStage::Cancelled).await;
+    }
+    for path in ["/now.bin", "/later.bin"] {
+        env.server.update(path, |r| r.stall_at = None);
+    }
+    let cancelled = job(&owner, ids[0]).await;
+    owner
+        .handle()
+        .execute(retry(&owner, &cancelled), ALL)
+        .await
+        .unwrap();
+    complete(&owner, ids[0]).await;
+    assert_eq!(env.published("now.bin"), data);
+    shutdown(owner).await;
+
+    // After a restart the partial is still kept, and a retry continues it.
+    let owner = env.start().await;
+    let cancelled = job(&owner, ids[1]).await;
+    assert_eq!(cancelled.stage, JobStage::Cancelled);
+    assert_eq!(cancelled.bytes_done, 12 * KIB as u64);
+    owner
+        .handle()
+        .execute(retry(&owner, &cancelled), ALL)
+        .await
+        .unwrap();
+    let done = complete(&owner, ids[1]).await;
+    assert_eq!(done.restart_reason, None);
+    assert_eq!(env.published("later.bin"), data);
+    let continued = env
+        .server
+        .ranges_requested()
+        .into_iter()
+        .filter(|r| *r == Some((12 * KIB as u64, None)))
+        .count();
+    assert_eq!(continued, 2);
+    assert_eq!(env.staging_files(), 0);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_and_stale_retries_start_one_attempt() {
+    let env = failing_env();
+    let data = body(24 * KIB);
+    let owner = env.start().await;
+    let failed = failed_at(&env, &owner, "/once.bin", &data, 8 * KIB).await;
+    let handle = owner.handle();
+    // Two clients retry from the same view at once.
+    let (first, second) = (retry(&owner, &failed), retry(&owner, &failed));
+    let (a, b) = tokio::join!(
+        handle.execute(first.clone(), ALL),
+        handle.execute(second.clone(), ALL)
+    );
+    let (accepted, refused) = match (a, b) {
+        (Ok(result), Err(e)) => ((first, result), e),
+        (Err(e), Ok(result)) => ((second, result), e),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(refused.code, ErrorCode::RevisionConflict);
+    assert!(refused.current_revision.is_some());
+    // The accepted request's key replays its result, even once the job
+    // has moved on.
+    let done = complete(&owner, failed.id).await;
+    let (envelope, result) = accepted;
+    assert_eq!(handle.execute(envelope, ALL).await.unwrap(), result);
+    assert_eq!(job(&owner, failed.id).await, done);
+    // A retry from the old view, or of a finished job, changes nothing.
+    assert_eq!(
+        handle
+            .execute(retry(&owner, &failed), ALL)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::RevisionConflict
+    );
+    assert_eq!(
+        handle
+            .execute(retry(&owner, &done), ALL)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::NotApplicable
+    );
+    // One attempt asked for the rest, once.
+    assert_eq!(
+        env.server.ranges_requested(),
+        vec![None, Some((8 * KIB as u64, None))]
+    );
+    assert_eq!(env.published("once.bin"), data);
+    assert!(!env.root.join("once (1).bin").exists());
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_needs_control_and_this_instance() {
+    let env = failing_env();
+    let owner = env.start().await;
+    let failed = failed_at(&env, &owner, "/denied.bin", &body(8 * KIB), 4 * KIB).await;
+    let handle = owner.handle();
+    let err = handle
+        .execute(
+            retry(&owner, &failed),
+            &[Permission::Read, Permission::Submit],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
+    let mut elsewhere = retry(&owner, &failed);
+    elsewhere.target = wayfetch_protocol::InstanceId::generate();
+    let err = handle.execute(elsewhere, ALL).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::WrongInstance);
+    assert_eq!(job(&owner, failed.id).await, failed);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_that_cannot_continue_starts_from_zero_and_says_why() {
+    type Change = fn(&Env, &mut Resource);
+    let cases: [(&str, Change, &str, bool); 5] = [
+        (
+            "changed",
+            |_, r| r.etag = Some("\"v2\"".into()),
+            "changed",
+            true,
+        ),
+        ("ignores-range", |_, r| r.ranges = false, "whole file", true),
+        (
+            "unsatisfiable",
+            |_, r| r.range_reply = Some(RangeReply::Unsatisfiable),
+            "nothing was left",
+            true,
+        ),
+        (
+            "missing",
+            |env, _| {
+                for entry in std::fs::read_dir(env.root.join(".wayfetch/staging")).unwrap() {
+                    std::fs::remove_file(entry.unwrap().path()).unwrap();
+                }
+            },
+            "missing",
+            false,
+        ),
+        (
+            "replaced",
+            |env, _| {
+                for entry in std::fs::read_dir(env.root.join(".wayfetch/staging")).unwrap() {
+                    let path = entry.unwrap().path();
+                    let bytes = std::fs::read(&path).unwrap();
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::write(&path, bytes).unwrap();
+                }
+            },
+            "replaced",
+            false,
+        ),
+    ];
+    for (name, change, reason, ranged) in cases {
+        let env = failing_env();
+        let path = format!("/{name}.bin");
+        let data = body(40 * KIB);
+        let owner = env.start().await;
+        let failed = failed_at(&env, &owner, &path, &data, 16 * KIB).await;
+        // The server's file is replaced by another of the same length.
+        let fresh = if name == "changed" {
+            body(40 * KIB).iter().map(|b| b ^ 0xff).collect::<Bytes>()
+        } else {
+            data.clone()
+        };
+        env.server.update(&path, |r| {
+            r.body = fresh.clone();
+            change(&env, r);
+        });
+        owner
+            .handle()
+            .execute(retry(&owner, &failed), ALL)
+            .await
+            .unwrap();
+        let done = complete(&owner, failed.id).await;
+        let why = done.restart_reason.expect(name);
+        assert!(why.as_str().contains(reason), "{name}: {why}");
+        // The file is one whole response, never saved bytes joined to
+        // another file's.
+        assert_eq!(env.published(&format!("{name}.bin")), fresh, "{name}");
+        let mut expected = vec![None];
+        if ranged {
+            expected.push(Some((16 * KIB as u64, None)));
+        }
+        expected.push(None);
+        assert_eq!(env.server.ranges_requested(), expected, "{name}");
+        // A file that took the partial's name is not Wayfetch's to remove.
+        let foreign = usize::from(name == "replaced");
+        assert_eq!(env.staging_files(), foreign, "{name}");
+        shutdown(owner).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_malformed_range_on_retry_fails_without_writing() {
+    let env = failing_env();
+    let data = body(24 * KIB);
+    let owner = env.start().await;
+    let failed = failed_at(&env, &owner, "/malformed.bin", &data, 8 * KIB).await;
+    env.server.update("/malformed.bin", |r| {
+        r.range_reply = Some(RangeReply::WrongStart);
+    });
+    owner
+        .handle()
+        .execute(retry(&owner, &failed), ALL)
+        .await
+        .unwrap();
+    let again = wait_for(&owner, failed.id, |j| {
+        j.stage == JobStage::Failed && j.generation > failed.generation
+    })
+    .await;
+    assert_eq!(
+        again.failure.as_ref().unwrap().code,
+        FailureCode::IntegrityMismatch
+    );
+    // The saved data is kept, unchanged, for another retry.
+    assert_eq!(again.bytes_done, 8 * KIB as u64);
+    assert_eq!(env.staging_files(), 1);
+    assert!(!env.root.join("malformed.bin").exists());
+    // Once the server answers properly, it continues from there.
+    env.server
+        .update("/malformed.bin", |r| r.range_reply = None);
+    owner
+        .handle()
+        .execute(retry(&owner, &again), ALL)
+        .await
+        .unwrap();
+    complete(&owner, failed.id).await;
+    assert_eq!(env.published("malformed.bin"), data);
+    assert_eq!(
+        env.server.ranges_requested().last(),
+        Some(&Some((8 * KIB as u64, None)))
+    );
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_into_an_unmounted_folder_blocks_without_writing() {
+    let env = failing_env();
+    let data = body(16 * KIB);
+    let owner = env.start().await;
+    let failed = failed_at(&env, &owner, "/unmounted.bin", &data, 4 * KIB).await;
+    shutdown(owner).await;
+    // The drive is gone: the root's sentinel no longer answers.
+    let mounted = env.root.with_extension("mounted");
+    std::fs::rename(&env.root, &mounted).unwrap();
+    std::fs::create_dir(&env.root).unwrap();
+    let owner = env.start_uninitialized().await;
+    owner
+        .handle()
+        .execute(retry(&owner, &failed), ALL)
+        .await
+        .unwrap();
+    let blocked = wait_for(&owner, failed.id, |j| j.stage == JobStage::Blocked).await;
+    assert_eq!(
+        blocked.failure.unwrap().code,
+        FailureCode::DestinationUnavailable
+    );
+    assert!(std::fs::read_dir(&env.root).unwrap().next().is_none());
+    assert_eq!(env.server.requests.lock().unwrap().len(), 1);
+    shutdown(owner).await;
+    // Back again, its saved data is still there to continue.
+    std::fs::remove_dir(&env.root).unwrap();
+    std::fs::rename(&mounted, &env.root).unwrap();
+    let owner = env.start().await;
+    let blocked = job(&owner, failed.id).await;
+    assert_eq!(blocked.bytes_done, 4 * KIB as u64);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retried_collected_link_keeps_its_entry_across_restart() {
+    let env = failing_env();
+    let data = body(20 * KIB);
+    let mut resource = Resource::new(data.clone());
+    resource.stall_at = Some(8 * KIB);
+    env.server.put("/kept.bin", resource);
+    let owner = env.start().await;
+    owner
+        .handle()
+        .execute(
+            collect(&owner, &["https://files.example/kept.bin"], None),
+            ALL,
+        )
+        .await
+        .unwrap();
+    let page = links(&owner).await;
+    let (applied, refused) = applied(&owner, start_links(&owner, &[&page.items[0]])).await;
+    assert!(refused.is_empty());
+    let id = applied[0].job.unwrap();
+    let failed = wait_for(&owner, id, |j| j.stage == JobStage::Failed).await;
+    env.server.update("/kept.bin", |r| r.stall_at = None);
+    let before = links(&owner).await.items;
+    owner
+        .handle()
+        .execute(retry(&owner, &failed), ALL)
+        .await
+        .unwrap();
+    complete(&owner, id).await;
+    // The same entry, pointing at the same job; nothing was collected or
+    // removed by the retry.
+    let after = links(&owner).await.items;
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, before[0].id);
+    assert_eq!(after[0].job, Some(id));
+    assert_eq!(jobs(&owner).await.len(), 1);
+    shutdown(owner).await;
+    let owner = env.start().await;
+    let restarted = links(&owner).await.items;
+    assert_eq!(
+        (restarted[0].id, restarted[0].job),
+        (before[0].id, Some(id))
+    );
+    assert_eq!(env.published("kept.bin"), data);
     shutdown(owner).await;
 }
