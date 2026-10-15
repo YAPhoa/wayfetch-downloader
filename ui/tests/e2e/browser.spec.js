@@ -1058,3 +1058,116 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   expect((await daemon.published(CHANGED, daemon.archive)).equals(content(0, 10 * MIB))).toBe(true);
   await context.close();
 });
+
+/**
+ * The window sizes Settings is checked at: wide, the desktop app's default
+ * and minimum, and a phone.
+ */
+const WIDTHS = [1280, 1100, 640, 360];
+
+/**
+ * Where the Settings button is at each of `WIDTHS`, after checking that it
+ * is the toolbar's only one, at the right end of its first row, clear of
+ * every other control, with nothing scrolling sideways.
+ * @param {import('@playwright/test').Page} page
+ */
+async function settingsPlaces(page) {
+  /** @type {string[]} */
+  const places = [];
+  for (const width of WIDTHS) {
+    await page.setViewportSize({ width, height: 720 });
+    const place = await page.evaluate(() => {
+      const shown = [...document.querySelectorAll('[data-key="open-settings"]')].filter(
+        (el) => /** @type {HTMLElement} */ (el).offsetParent !== null,
+      );
+      if (shown.length !== 1) return `${shown.length} Settings buttons`;
+      const button = shown[0];
+      const toolbar = /** @type {HTMLElement} */ (button.closest('.toolbar'));
+      const box = button.getBoundingClientRect();
+      const bar = toolbar.getBoundingClientRect();
+      const brand = /** @type {Element} */ (toolbar.querySelector('.brand')).getBoundingClientRect();
+      const style = getComputedStyle(toolbar);
+      if (Math.round(bar.right - parseFloat(style.paddingRight) - box.right) !== 0) return 'not at the right end';
+      if (box.top >= brand.bottom) return 'not in the first row';
+      for (const other of toolbar.querySelectorAll('button, a, input, .tool-group')) {
+        if (other === button || /** @type {HTMLElement} */ (other).offsetParent === null) continue;
+        const r = other.getBoundingClientRect();
+        if (r.left < box.right && box.left < r.right && r.top < box.bottom && box.top < r.bottom) {
+          return `overlaps ${other.textContent}`;
+        }
+      }
+      const root = document.documentElement;
+      if (root.scrollWidth > root.clientWidth) return 'scrolls sideways';
+      return `${box.left},${box.top} ${box.width}x${box.height}`;
+    });
+    places.push(`${width}: ${place}`);
+  }
+  await page.setViewportSize({ width: 1280, height: 720 });
+  return places;
+}
+
+test('Settings stays at the right end of the toolbar in every view and state', async ({ browser }) => {
+  // A daemon of its own, so Downloads starts empty.
+  const own = await new Daemon(await freePort()).init();
+  await own.start();
+  try {
+    const page = await (await browser.newContext()).newPage();
+    await page.goto(own.origin);
+    await page.getByLabel('Setup secret').fill((await own.setupSecret()).trim());
+    await page.getByLabel('Owner name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
+    await page.getByLabel('Repeat password').fill(PASSWORD);
+    await page.getByRole('button', { name: 'Create owner' }).click();
+    await expect(page.getByText('No downloads yet.')).toBeVisible();
+
+    // Downloads with no jobs sets the place every other view keeps.
+    const places = await settingsPlaces(page);
+    expect(places.join('\n')).not.toMatch(/: [^\d]/);
+    const expectSame = async () => expect(await settingsPlaces(page)).toEqual(places);
+    const settings = page.locator('[data-key="open-settings"]:visible');
+    await expect(settings).toHaveAccessibleName('Settings');
+    await expect(settings.locator('svg.icon-settings')).toHaveCount(1);
+
+    await page.getByRole('button', { name: 'Add links' }).click();
+    await expect(page).toHaveURL(`${own.origin}/add`);
+    await expectSame();
+
+    // Links, with a notice and a count, then with links selected.
+    const NAME = 'settings-place.bin';
+    await page.getByLabel('Links, one per line').fill(fixture.put(NAME, 10 * MIB, 9 * MIB));
+    await page.getByRole('button', { name: 'Collect links' }).click();
+    await expect(page).toHaveURL(`${own.origin}/links`);
+    await expect(page.getByText('Collected 1 link for review.')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Links (1)' })).toBeVisible();
+    await expectSame();
+    await page.locator('tbody.batch .batch-head input[type="checkbox"]').check();
+    await expect(page.locator('.selection-summary strong')).toHaveText('1 link selected');
+    await expectSame();
+
+    // Downloads with a job in progress, then with it selected.
+    await page.getByRole('button', { name: 'Start selected' }).click();
+    await page.getByRole('button', { name: 'View downloads' }).click();
+    const job = page.locator('tr[data-job="job-1"]');
+    await expect(job.locator('td[data-state]')).toHaveText('Downloading');
+    await expectSame();
+    await job.locator('td.name a').click();
+    await expect(page.getByRole('button', { name: 'Pause job-1' })).toBeEnabled();
+    await expectSame();
+
+    // Settings itself has Back and its sections instead.
+    await settings.click();
+    await expect(page).toHaveURL(`${own.origin}/settings`);
+    await expect(page.locator('[data-key="open-settings"]:visible')).toHaveCount(0);
+    await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Display' }).click();
+    await expect(page).toHaveURL(`${own.origin}/settings/display`);
+    await page.getByRole('button', { name: 'Back to Downloads' }).click();
+    await expect(page).toHaveURL(`${own.origin}/jobs/job-1`);
+    await expect(settings).toBeFocused();
+    await expectSame();
+    fixture.release(NAME);
+    await expect(job.locator('td[data-state]')).toHaveText('Done');
+    await expectSame();
+  } finally {
+    await own.remove();
+  }
+});
