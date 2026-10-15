@@ -447,7 +447,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(pane.getByRole('heading', { name: 'Download folder' })).toBeVisible();
   const archive = pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) });
   await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.root}`) })).toBeChecked();
-  await expect(pane.getByText('Server path')).toHaveCount(2);
+  await expect(pane.getByText('Server paths', { exact: true })).toBeVisible();
   // Nothing asks for a command line.
   await expect(page.locator('.settings-page code')).toHaveCount(0);
   await expectFitsWindow(page);
