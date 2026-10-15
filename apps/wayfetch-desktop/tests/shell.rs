@@ -1041,6 +1041,26 @@ async fn the_row_menu_opens_renames_and_removes_through_the_host() {
         .wait_for("!document.querySelector('dialog') && document.activeElement?.dataset.key === 'open-settings'")
         .await;
 
+    // The webview's own menu (Reload, Inspect Element) stays out of the
+    // window, except in a text field and over selected text.
+    let native = shell
+        .js(
+            "const offered = (el) => el.dispatchEvent(new MouseEvent('contextmenu',
+               { bubbles: true, cancelable: true, button: 2 }));
+             const heading = document.querySelector('thead th');
+             const page = offered(heading);
+             const field = offered(document.querySelector('input[type=\"search\"]'));
+             getSelection().selectAllChildren(heading);
+             const selected = offered(heading);
+             getSelection().removeAllRanges();
+             return { page, field, selected };",
+        )
+        .await;
+    assert_eq!(
+        native,
+        json!({"page": false, "field": true, "selected": true})
+    );
+
     // A right-click on the row opens its menu inside the window, with the
     // host's file actions.
     shell
