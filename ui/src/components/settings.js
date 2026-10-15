@@ -232,17 +232,11 @@ export class SettingsPage {
     };
     show(
       this.content,
-      SECTIONS.map(({ id, label, about, icon: name }) =>
+      SECTIONS.map(({ id, label, about }) =>
         h(
           'section',
           { class: 'settings-panel', 'data-section': id, 'aria-labelledby': `settings-${id}`, hidden: true },
-          h(
-            'div',
-            { class: 'settings-head' },
-            icon(name),
-            h('h2', { id: `settings-${id}` }, label),
-          ),
-          h('p', { class: 'hint' }, about),
+          h('header', { class: 'settings-head' }, h('h2', { id: `settings-${id}` }, label), h('p', { class: 'hint' }, about)),
           panels[id],
         ),
       ),
@@ -288,9 +282,9 @@ export class SettingsPage {
             h(
               'span',
               { class: 'choice-text' },
+              icon('folder'),
               h('span', { class: 'path' }, root.path),
-              !client.local && h('span', { class: 'tag' }, 'Server path'),
-              root.id === settings.default_root && h('span', { class: 'tag current' }, 'Current'),
+              root.id === settings.default_root && h('span', { class: 'tag current' }, 'Default'),
               !root.available &&
                 h('span', { class: 'problem' }, `Unavailable: ${root.problem ?? 'the folder cannot be opened'}`),
             ),
@@ -412,15 +406,24 @@ export class SettingsPage {
         },
         h(
           'fieldset',
-          null,
-          h('legend', null, 'Save new downloads to'),
-          choices.length > 0 ? choices : h('p', { class: 'hint' }, 'There is no permitted folder.'),
+          { class: 'settings-group' },
+          h(
+            'legend',
+            { class: 'group-head' },
+            h('span', { class: 'group-title' }, 'Save new downloads to'),
+            h('span', { class: 'group-note' }, client.local ? 'Folders on this computer' : 'Server paths'),
+          ),
+          choices.length > 0
+            ? h('div', { class: 'group-rows' }, choices)
+            : h('p', { class: 'group-empty' }, 'There is no permitted folder.'),
+          h('div', { class: 'group-foot' }, message, choose, save),
         ),
-        h('p', { class: 'hint' }, 'Downloads already added keep their folder.'),
-        client.local
-          ? h('p', { class: 'hint' }, 'Choose any folder on this computer to add it.')
-          : h('p', { class: 'hint' }, 'These folders are on the server.'),
-        h('div', { class: 'row' }, save, choose, message),
+        h(
+          'p',
+          { class: 'hint' },
+          'Downloads already added keep their folder.',
+          client.local && ' Choose any folder on this computer to add it.',
+        ),
       );
       // Keyboard focus stays on the same control, such as Save, or moves
       // from a disabled one to the next enabled one.
@@ -507,74 +510,83 @@ export class SettingsPage {
     return destination;
   }
 
-  /** Appearance and density are applied immediately, on this device. */
+  /** Theme and row density, applied at once and kept on this device. */
   displaySection() {
-    /** @type {[import('../theme.js').Theme, string][]} */
-    const options = [
-      ['system', 'System'],
-      ['light', 'Light'],
-      ['dark', 'Dark'],
-    ];
-    return h(
-      'div',
-      null,
-      h(
-        'fieldset',
-        null,
-        h('legend', null, 'Theme'),
-        options.map(([value, label]) =>
-          h(
-            'label',
-            { class: 'choice' },
-            h('input', {
-              type: 'radio',
-              name: 'theme',
-              value,
-              checked: (theme?.get() ?? 'system') === value,
-              onchange: () => theme?.set(value),
-            }),
-            h('span', { class: 'choice-text' }, label),
-          ),
-        ),
-      ),
-      h('p', { class: 'hint' }, 'System follows your device’s appearance. Applies at once, on this device only.'),
-      this.densitySection(),
-    );
-  }
-
-  /** Row density, applied at once and kept on this device. */
-  densitySection() {
     const { context } = this;
-    /** @type {[Density, string][]} */
-    const options = [
-      ['compact', 'Compact'],
-      ['comfortable', 'Comfortable'],
-    ];
     return h(
       'div',
       { class: 'settings-section' },
       h(
-        'fieldset',
-        null,
-        h('legend', null, 'Row density'),
-        options.map(([value, label]) =>
-          h(
-            'label',
-            { class: 'choice' },
-            h('input', {
-              type: 'radio',
-              name: 'density',
-              value,
-              checked: context.density() === value,
-              onchange: () => context.setDensity(value),
-            }),
-            h('span', { class: 'choice-text' }, label),
+        'div',
+        { class: 'settings-group' },
+        h('div', { class: 'group-head' }, h('span', { class: 'group-title' }, 'Appearance')),
+        h(
+          'div',
+          { class: 'group-rows' },
+          settingRow(
+            'theme',
+            'Theme',
+            'System follows your device’s appearance.',
+            /** @type {[import('../theme.js').Theme, string][]} */ ([
+              ['system', 'System'],
+              ['light', 'Light'],
+              ['dark', 'Dark'],
+            ]),
+            theme?.get() ?? 'system',
+            (value) => theme?.set(value),
+          ),
+          settingRow(
+            'density',
+            'Row density',
+            'Compact fits more downloads on screen.',
+            /** @type {[Density, string][]} */ ([
+              ['compact', 'Compact'],
+              ['comfortable', 'Comfortable'],
+            ]),
+            context.density(),
+            (value) => context.setDensity(value),
           ),
         ),
       ),
       h('p', { class: 'hint' }, 'Applies at once, on this device only.'),
     );
   }
+}
+
+/**
+ * One setting in a group: its name and what it does, and a segmented
+ * choice of `options` with `current` picked.
+ * @template {string} T
+ * @param {string} name
+ * @param {string} label
+ * @param {string} about
+ * @param {[T, string][]} options
+ * @param {T} current
+ * @param {(value: T) => void} change
+ */
+function settingRow(name, label, about, options, current, change) {
+  return h(
+    'div',
+    { class: 'setting-row' },
+    h(
+      'div',
+      { class: 'setting-text' },
+      h('span', { class: 'setting-name', id: `setting-${name}` }, label),
+      h('span', { class: 'hint' }, about),
+    ),
+    h(
+      'div',
+      { class: 'segmented', role: 'radiogroup', 'aria-labelledby': `setting-${name}` },
+      options.map(([value, text]) =>
+        h(
+          'label',
+          null,
+          h('input', { type: 'radio', name, value, checked: current === value, onchange: () => change(value) }),
+          h('span', null, text),
+        ),
+      ),
+    ),
+  );
 }
 
 /** The columns of the accounts table. */
@@ -593,31 +605,40 @@ function accountsSection() {
   const integrations = new Set();
   return h(
     'div',
-    { class: 'settings-section accounts' },
+    { class: 'settings-section' },
     h(
       'div',
-      { class: 'row' },
+      { class: 'settings-group accounts' },
       h(
-        'button',
-        { type: 'button', 'data-key': 'add-account', onclick: () => pickService(integrations) },
-        icon('add'),
-        'Add account…',
-      ),
-    ),
-    h(
-      'div',
-      { class: 'table-scroll' },
-      h(
-        'table',
-        { class: 'accounts-table', 'aria-label': 'Accounts' },
-        h('thead', null, h('tr', null, ACCOUNT_COLUMNS.map((name) => h('th', { scope: 'col' }, name)))),
+        'div',
+        { class: 'group-head' },
+        h('span', { class: 'group-title' }, 'Accounts'),
         h(
-          'tbody',
-          null,
+          'button',
+          { type: 'button', 'data-key': 'add-account', onclick: () => pickService(integrations) },
+          icon('add'),
+          'Add account…',
+        ),
+      ),
+      h(
+        'div',
+        { class: 'table-scroll' },
+        h(
+          'table',
+          { class: 'accounts-table', 'aria-label': 'Accounts' },
+          h('thead', null, h('tr', null, ACCOUNT_COLUMNS.map((name) => h('th', { scope: 'col' }, name)))),
           h(
-            'tr',
+            'tbody',
             null,
-            h('td', { class: 'empty', colspan: ACCOUNT_COLUMNS.length, 'data-key': 'no-accounts' }, 'No accounts added yet.'),
+            h(
+              'tr',
+              null,
+              h(
+                'td',
+                { class: 'empty', colspan: ACCOUNT_COLUMNS.length, 'data-key': 'no-accounts' },
+                'No accounts added yet.',
+              ),
+            ),
           ),
         ),
       ),
