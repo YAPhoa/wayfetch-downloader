@@ -4,7 +4,9 @@
 // selected job; and a status bar. It talks to the engine only through a
 // `WayfetchClient`, so any transport can host it.
 //
-// Routes: `/` lists jobs; `/jobs/<id>` also selects one.
+// Routes: `/` lists jobs; `/jobs/<id>` also selects one; `/settings` and
+// its sections show the Settings page in place of the list, while the
+// workspace keeps following the engine.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { JobFeed } from '../client/feed.js';
@@ -25,8 +27,9 @@ import {
 } from '../client/jobs.js';
 import { openDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
+import { icon } from './icons.js';
 import { Menu } from './menu.js';
-import { openSettings } from './settings.js';
+import { SETTINGS_PATH, SettingsPage, sectionPath, settingsSection } from './settings.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -97,33 +100,10 @@ function jobFromPath(path) {
   return match ? /** @type {JobId} */ (match[1]) : null;
 }
 
-/**
- * A small stroke icon, hidden from assistive technology.
- * @param {string} path SVG path data
- */
-function icon(path) {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('viewBox', '0 0 14 14');
-  svg.setAttribute('aria-hidden', 'true');
-  svg.setAttribute('class', 'icon');
-  const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  line.setAttribute('d', path);
-  svg.append(line);
-  return svg;
+/** The app's name, at the start of a toolbar. */
+function brand() {
+  return h('span', { class: 'brand' }, icon('brand'), 'Wayfetch');
 }
-
-/** @type {Record<StateAction | 'add' | 'search' | 'brand' | 'settings' | 'more', string>} */
-const ICONS = {
-  settings:
-    'M7 4.75a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 1 0 0-4.5M7 1v1.5M7 11.5V13M1 7h1.5M11.5 7H13M2.8 2.8l1 1M10.2 10.2l1 1M2.8 11.2l1-1M10.2 3.8l1-1',
-  more: 'M3 7h.01M7 7h.01M11 7h.01',
-  brand: 'M7 1.5v7.5M4 6l3 3 3-3M2.5 12h9',
-  add: 'M7 2v10M2 7h10',
-  pause: 'M4.5 3v8M9.5 3v8',
-  resume: 'M4 2.5l7 4.5-7 4.5z',
-  cancel: 'M3.5 3.5l7 7M10.5 3.5l-7 7',
-  search: 'M6 2.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7M8.6 8.6l3 3',
-};
 
 /** @param {Tone} tone */
 function dot(tone) {
@@ -247,7 +227,7 @@ export class Downloads {
           onclick: (/** @type {MouseEvent} */ event) =>
             this.command(action, /** @type {HTMLButtonElement} */ (event.currentTarget)),
         },
-        icon(ICONS[action]),
+        icon(action),
         ACTION_LABELS[action],
       ),
     );
@@ -262,7 +242,7 @@ export class Downloads {
         'aria-controls': 'add-links',
         onclick: () => this.toggleAdd(),
       },
-      icon(ICONS.add),
+      icon('add'),
       'Add links',
     );
     this.filters = h('nav', { class: 'filters', 'aria-label': 'Filter by state' });
@@ -276,19 +256,19 @@ export class Downloads {
         type: 'button',
         class: 'tool settings-button',
         'data-key': 'open-settings',
-        'aria-haspopup': 'dialog',
         onclick: () => this.openSettings(),
       },
-      icon(ICONS.settings),
+      icon('settings'),
       'Settings',
     );
     /** @type {Density} */
     this.density = 'compact';
     this.setDensity(savedDensity());
 
-    this.element = h(
+    /** The Downloads view: everything but the status bar. */
+    this.view = h(
       'div',
-      { class: 'workspace' },
+      { class: 'downloads-view' },
       this.buildToolbar(),
       this.addPanel,
       this.banner,
@@ -305,6 +285,32 @@ export class Downloads {
           this.inspector,
         ),
       ),
+    );
+    this.settingsPage = new SettingsPage({
+      client,
+      hello: () => this.feed.hello,
+      density: () => this.density,
+      setDensity: (density) => this.setDensity(density),
+      onSettings: (settings) => {
+        this.settings = settings;
+        this.schedule();
+      },
+      onSignedOut: () => this.signedOut(),
+      navigate: (path) => this.navigate(path),
+      back: () => this.navigate(this.downloadsPath),
+      brand: brand(),
+    });
+    /** The Downloads route last shown, which Settings goes back to. */
+    this.downloadsPath = '/';
+    /** What had focus in Downloads when Settings opened, for coming back. */
+    /** @type {string | null} */
+    this.returnFocus = null;
+
+    this.element = h(
+      'div',
+      { class: 'workspace' },
+      this.view,
+      this.settingsPage.element,
       h(
         'footer',
         { class: 'statusbar' },
@@ -339,20 +345,13 @@ export class Downloads {
     );
   }
 
-  /** Opens the Settings dialog; focus comes back to its button. */
-  openSettings() {
-    this.menu.close(false);
-    openSettings({
-      client: this.client,
-      hello: () => this.feed.hello,
-      density: () => this.density,
-      setDensity: (density) => this.setDensity(density),
-      onSettings: (settings) => {
-        this.settings = settings;
-        this.schedule();
-      },
-      onSignedOut: () => this.signedOut(),
-    });
+  /**
+   * Shows the Settings page, at `section` if given; going back returns
+   * focus to what had it.
+   * @param {import('./settings.js').Section} [section]
+   */
+  openSettings(section) {
+    this.navigate(section ? sectionPath(section) : SETTINGS_PATH);
   }
 
   /**
@@ -378,10 +377,49 @@ export class Downloads {
   }
 
   route() {
+    const section = settingsSection(location.pathname);
+    if (section !== null) {
+      this.showSettings(section);
+      return;
+    }
+    const back = this.hideSettings();
+    this.downloadsPath = location.pathname;
     const job = jobFromPath(location.pathname);
     if (job !== this.feed.watched) this.notice = '';
     this.feed.watch(job).catch((error) => this.report(error));
     this.render();
+    if (back !== null) refocus(this.element, back);
+  }
+
+  /**
+   * Shows the Settings page at `section` in place of the Downloads view,
+   * which keeps its state, as the feed keeps following the engine.
+   * @param {import('./settings.js').Section} section
+   */
+  showSettings(section) {
+    const path = sectionPath(section);
+    if (location.pathname !== SETTINGS_PATH && location.pathname !== path) history.replaceState(null, '', path);
+    if (!this.settingsPage.shown) {
+      this.menu.close(false);
+      this.returnFocus = focusedKey(this.view);
+      this.view.hidden = true;
+      this.settingsPage.element.querySelector('.toolbar')?.after(this.banner);
+    }
+    this.settingsPage.open(section);
+    this.render();
+  }
+
+  /**
+   * Shows the Downloads view again, if Settings was shown, and says what
+   * to focus there.
+   * @returns {string | null}
+   */
+  hideSettings() {
+    if (!this.settingsPage.shown) return null;
+    this.settingsPage.close();
+    this.addPanel.after(this.banner);
+    this.view.hidden = false;
+    return this.returnFocus ?? 'open-settings';
   }
 
   /** @param {string} density */
@@ -449,7 +487,7 @@ export class Downloads {
       root && !root.available && h('span', { class: 'problem' }, root.problem ?? 'Unavailable'),
       h(
         'button',
-        { type: 'button', class: 'link', 'data-key': 'change-destination', onclick: () => this.openSettings() },
+        { type: 'button', class: 'link', 'data-key': 'change-destination', onclick: () => this.openSettings('folder') },
         'Change…',
       ),
     );
@@ -493,7 +531,7 @@ export class Downloads {
     return h(
       'header',
       { class: 'toolbar' },
-      h('span', { class: 'brand' }, icon(ICONS.brand), 'Wayfetch'),
+      brand(),
       this.addToggle,
       h(
         'div',
@@ -503,7 +541,7 @@ export class Downloads {
       h(
         'div',
         { class: 'search' },
-        icon(ICONS.search),
+        icon('search'),
         h('label', { for: 'filter-names', class: 'visually-hidden' }, 'Filter this page by name'),
         search,
       ),
@@ -1042,7 +1080,7 @@ export class Downloads {
           this.openMenu(job, button.getBoundingClientRect());
         },
       },
-      icon(ICONS.more),
+      icon('more'),
     );
     return h(
       'tr',
@@ -1196,7 +1234,7 @@ export class Downloads {
           'aria-label': 'Close details',
           onclick: () => this.navigate('/'),
         },
-        icon(ICONS.cancel),
+        icon('cancel'),
       ),
     );
   }

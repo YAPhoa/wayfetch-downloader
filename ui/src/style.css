@@ -238,12 +238,20 @@ code { font-family: ui-monospace, monospace; }
 #app > .message { max-width: 26rem; margin: 12vh auto; }
 
 /* The workspace: toolbar, optional add panel and banner, sidebar and
-   list, status bar. It fills the window; the table scrolls inside. */
+   list, status bar. It fills the window; the table scrolls inside. The
+   Settings page takes the place of everything but the status bar. */
 
 .workspace {
   display: flex;
   flex-direction: column;
   height: 100vh;
+}
+
+.downloads-view, .settings-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .toolbar {
@@ -639,7 +647,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
   .menu-item { min-height: 44px; }
 }
 
-/* Modal dialogs: Settings and Rename. */
+/* Modal dialogs, such as Rename. */
 
 .dialog {
   width: min(560px, calc(100vw - 32px));
@@ -676,13 +684,9 @@ dd { margin: 0; overflow-wrap: anywhere; }
   overscroll-behavior: contain;
 }
 
-.dialog form { display: grid; gap: 10px; }
-.dialog .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dialog form, .settings-section, .destination-form { display: grid; gap: 10px; }
+.dialog .row, .settings-section .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .dialog input[type='text'] { width: 100%; }
-
-.settings-section { display: grid; gap: 10px; }
-.settings-section + .settings-section { padding-top: 16px; border-top: 1px solid var(--line); }
-.settings-section h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; font-weight: 600; }
 
 fieldset { display: grid; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
 legend { padding: 0 0 4px; color: var(--muted); }
@@ -708,6 +712,75 @@ dd .path { font-family: ui-monospace, monospace; }
 dd button.link.path { padding: 0; text-align: left; overflow-wrap: anywhere; }
 dd .link-text { overflow-wrap: anywhere; }
 
+/* The Settings page: a menu of sections beside the selected one. */
+
+.settings-page h1 { font-size: 15px; }
+.settings-page h1:focus { outline: none; }
+.settings-page h1:focus-visible { outline: 2px solid var(--focus); }
+
+.tool.back { margin-right: 8px; }
+
+.settings-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.settings-nav {
+  flex: 0 0 196px;
+  padding: 12px 8px;
+  overflow-y: auto;
+  background: var(--chrome);
+  border-right: 1px solid var(--line);
+}
+
+.settings-nav ul { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+
+.settings-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.settings-link .icon { color: var(--muted); }
+.settings-link:hover { background: var(--hover); }
+.settings-link:focus-visible { outline-offset: -2px; }
+
+.settings-link[aria-current='page'] {
+  border-left-color: var(--accent);
+  background: var(--selected);
+  font-weight: 600;
+}
+
+.settings-link[aria-current='page'] .icon { color: var(--accent); }
+
+.settings-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+
+.settings-panel { display: grid; gap: 12px; max-width: 680px; }
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-head .icon { width: 16px; height: 16px; color: var(--accent); }
+.settings-head h2 { font-size: 14px; }
+
+
 /* Narrow windows: the sidebar becomes a row of filters above the list. */
 
 @media (max-width: 720px) {
@@ -718,6 +791,12 @@ dd .link-text { overflow-wrap: anywhere; }
   .filter { width: auto; }
   .search { flex-basis: 100%; margin-left: 0; }
   .inspector { max-height: none; }
+  .settings-body { flex-direction: column; }
+  .settings-nav { flex: none; padding: 8px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .settings-nav ul { flex-direction: row; flex-wrap: wrap; }
+  .settings-link { border-left: 0; border-bottom: 3px solid transparent; border-radius: var(--radius) var(--radius) 0 0; }
+  .settings-link[aria-current='page'] { border-bottom-color: var(--accent); }
+  .settings-content { overflow-y: visible; padding: 16px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
