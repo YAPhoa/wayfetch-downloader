@@ -5,9 +5,11 @@
 //! | Command | Engine operation |
 //! |---|---|
 //! | `hello` | handshake: instance, boot epoch, protocol, head, limits |
-//! | `query` | a [`Query`]: list, inspect, or count jobs, settings, a job's link |
+//! | `query` | a [`Query`]: list, inspect, or count jobs, settings, a job's link, collected links |
 //! | `submit` | [`SubmitRequest`] as a submit command |
 //! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, rename, or remove |
+//! | `collect_links` | [`CollectRequest`]: collect links for review |
+//! | `links_command` | [`LinksCommandRequest`]: start, remove, or move collected links |
 //! | `update_settings` | [`UpdateSettingsRequest`]: choose the default destination |
 //! | `remove_root` | [`RemoveRootRequest`]: stop offering a folder the user added |
 //! | `choose_download_folder` | the native folder dialog; the chosen folder becomes a permitted destination |
@@ -43,7 +45,8 @@ use wayfetch_engine::domain::id::JobId;
 use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::RootSummary;
 use wayfetch_engine::protocol::request::{
-    JobCommandRequest, RemoveRootRequest, SubmitRequest, UpdateSettingsRequest,
+    CollectRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
+    UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
     ErrorCode, EventCursor, Hello, Permission, ProtocolError, Query, QueryResult, StreamItem,
@@ -98,6 +101,27 @@ pub async fn job_command(
 ) -> IpcResult<CommandResult> {
     let job: JobId = decode(job)?;
     let envelope = decode::<JobCommandRequest>(request)?.into_envelope(job)?;
+    desktop.engine.execute(envelope, GRANTED).await
+}
+
+/// Collects links for review without starting them.
+#[tauri::command]
+pub async fn collect_links(
+    desktop: State<'_, Desktop>,
+    request: Value,
+) -> IpcResult<CommandResult> {
+    let envelope = decode::<CollectRequest>(request)?.into_envelope()?;
+    desktop.engine.execute(envelope, GRANTED).await
+}
+
+/// Starts, removes, or moves collected links at the revisions the renderer
+/// saw.
+#[tauri::command]
+pub async fn links_command(
+    desktop: State<'_, Desktop>,
+    request: Value,
+) -> IpcResult<CommandResult> {
+    let envelope = decode::<LinksCommandRequest>(request)?.into_envelope()?;
     desktop.engine.execute(envelope, GRANTED).await
 }
 

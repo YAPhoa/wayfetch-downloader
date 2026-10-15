@@ -18,7 +18,7 @@ use wayfetch_protocol::query::{
 };
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
-use super::{Store, StoreError, files, key, outbox, sql};
+use super::{Store, StoreError, files, key, links, outbox, sql};
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
 /// the job's newest partial; the next three describe its published file,
@@ -259,6 +259,43 @@ pub(super) fn save(
     Ok(())
 }
 
+/// Creates the queued job of source link `source`, saved in `root`, and
+/// marks the link staged, with a `job_added` event. The link's unique job
+/// makes a second call for it fail rather than add another job.
+pub(super) fn create(
+    tx: &Transaction<'_>,
+    source: i64,
+    package: i64,
+    root: Option<i64>,
+    now: UtcTimestamp,
+) -> Result<JobId, StoreError> {
+    let state = JobState::new();
+    let desired: &'static str = state.desired().into();
+    tx.execute(
+        "INSERT INTO jobs (source_link_id, package_id, desired_state, stage, generation, \
+         revision, root_id, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        params![
+            source,
+            package,
+            desired,
+            state.stage().as_str(),
+            sql(state.generation())?,
+            sql(state.revision())?,
+            root,
+            now.unix_millis(),
+        ],
+    )?;
+    let id: JobId = key(tx.last_insert_rowid())?;
+    tx.execute(
+        "UPDATE source_links SET staged = 1, held = 0, problem = NULL WHERE id = ?1",
+        [source],
+    )?;
+    let job = load(tx, id)?;
+    outbox::append(tx, &EventKind::JobAdded { job: job.summary() }, now)?;
+    Ok(id)
+}
+
 /// Appends `job_changed` for a change outside the job's state, such as its
 /// expected size.
 pub(super) fn announce(
@@ -274,7 +311,8 @@ pub(super) fn announce(
 impl Store {
     /// The ingestion step for direct links: creates a queued job for up to
     /// `limit` submitted links that have none, oldest first, each with a
-    /// `job_added` event. Safe to repeat after a crash; returns the new jobs.
+    /// `job_added` event. Collected links wait to be started instead. Safe
+    /// to repeat after a crash; returns the new jobs.
     pub fn stage_pending(
         &mut self,
         limit: u32,
@@ -285,35 +323,14 @@ impl Store {
             .prepare(
                 "SELECT s.id, b.package_id, b.root_id FROM source_links s \
                  JOIN input_batches b ON b.id = s.batch_id \
-                 WHERE s.staged = 0 ORDER BY s.id LIMIT ?1",
+                 WHERE s.staged = 0 AND s.held = 0 ORDER BY s.id LIMIT ?1",
             )?
             .query_map([limit], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<Result<_, _>>()?;
-        let state = JobState::new();
-        let desired: &'static str = state.desired().into();
-        let mut staged = Vec::with_capacity(pending.len());
-        for (source, package, root) in pending {
-            tx.execute(
-                "INSERT INTO jobs (source_link_id, package_id, desired_state, stage, generation, \
-                 revision, root_id, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-                params![
-                    source,
-                    package,
-                    desired,
-                    state.stage().as_str(),
-                    sql(state.generation())?,
-                    sql(state.revision())?,
-                    root,
-                    now.unix_millis(),
-                ],
-            )?;
-            let id: JobId = key(tx.last_insert_rowid())?;
-            tx.execute("UPDATE source_links SET staged = 1 WHERE id = ?1", [source])?;
-            let job = load(&tx, id)?;
-            outbox::append(&tx, &EventKind::JobAdded { job: job.summary() }, now)?;
-            staged.push(id);
-        }
+        let staged = pending
+            .into_iter()
+            .map(|(source, package, root)| create(&tx, source, package, root, now))
+            .collect::<Result<Vec<_>, _>>()?;
         tx.commit()?;
         Ok(staged)
     }
@@ -554,6 +571,13 @@ impl Store {
                     .collect::<Result<_, StoreError>>()?;
                 QueryResult::JobCounts(JobCounts { stages, as_of })
             }
+            Query::ListLinks { after, page_size } => {
+                QueryResult::Links(links::list(&tx, *after, *page_size, as_of)?)
+            }
+            Query::LinkSource { link } => QueryResult::LinkSource {
+                link: *link,
+                url: links::source(&tx, *link)?,
+            },
             // Availability is checked outside the store, by the coordinator.
             Query::Settings {} => {
                 return Err(ProtocolError::new(
