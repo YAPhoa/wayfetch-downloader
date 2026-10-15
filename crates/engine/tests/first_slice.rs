@@ -1591,5 +1591,43 @@ async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
             .iter()
             .any(|r| r.id == registered.id)
     );
-    shutdown(owner).await;
+
+    // A registration still stuck in the folder at shutdown keeps the state
+    // directory locked until the folder answers, and then stops without
+    // writing to it, so no later owner of the directory races it.
+    drop(hang);
+    let mut hang = Hang::start();
+    let late = folder(&env, "late/stalled");
+    let registering = tokio::spawn({
+        let (handle, late) = (handle.clone(), late.clone());
+        async move { handle.register_root(late, ALL).await }
+    });
+    // The configured folder's next check hangs too; waits for both.
+    hang.entered().await;
+    let _ = tokio::time::timeout(Duration::from_millis(500), hang.entered()).await;
+    use wayfetch_engine::ShutdownRequest;
+    use wayfetch_engine::state_dir::{StateDir, StateDirError};
+    let report = owner
+        .shutdown(ShutdownRequest {
+            // Past the probe deadline, so only the registration is left.
+            timeout: Some(Duration::from_secs(3)),
+        })
+        .await;
+    assert!(!report.clean && !report.state_dir_released, "{report:?}");
+    assert!(matches!(
+        StateDir::open(&env.state),
+        Err(StateDirError::Locked(_))
+    ));
+    hang.release();
+    let stopped = registering.await.unwrap().unwrap_err();
+    assert_eq!(stopped.code, ErrorCode::ShuttingDown);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while StateDir::open(&env.state).is_err() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the lock was never released"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(std::fs::read_dir(&late).unwrap().next().is_none());
 }
