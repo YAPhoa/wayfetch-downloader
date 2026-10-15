@@ -1130,13 +1130,33 @@ export class Downloads {
       const sample = feed.sample(job.id);
       const isSelected = job.id === selected;
       const old = this.rows.get(job.id);
-      const row =
+      let row =
         old &&
         old.job === job &&
         old.sample === sample &&
         old.selected === isSelected
           ? old.row
           : this.row(job, sample, isSelected);
+      if (old && row !== old.row) {
+        // Progress and fresh snapshots must not remove the name link or
+        // menu button between pointer-down and click.
+        const name = old.row.querySelector('td.name');
+        const link = old.row.querySelector('td.name a');
+        const more = old.row.querySelector('button.more');
+        if (name && link && more) {
+          name.setAttribute('title', jobName(job));
+          if (link.textContent !== jobName(job)) link.textContent = jobName(job);
+          if (isSelected) link.setAttribute('aria-current', 'true');
+          else link.removeAttribute('aria-current');
+          more.setAttribute('aria-label', `Actions for ${jobName(job)}`);
+          old.row.classList.toggle('selected', isSelected);
+          // These cells contain display values only; the interactive
+          // cells and their ancestors stay connected.
+          const cells = [...row.cells];
+          for (let i = 1; i < 7; i++) old.row.cells[i].replaceWith(cells[i]);
+          row = old.row;
+        }
+      }
       // Kept up to date in place, so opening a menu redraws no row.
       const menuOpen = this.menu.owner === job.id;
       row.classList.toggle('menu-open', menuOpen);
@@ -1198,6 +1218,7 @@ export class Downloads {
    * @param {boolean} selected
    */
   row(job, sample, selected) {
+    const current = () => this.rows.get(job.id)?.job ?? job;
     const shown = progress(job, sample);
     const state = describe(job);
     const name = jobName(job);
@@ -1217,7 +1238,7 @@ export class Downloads {
             this.menu.close(true);
             return;
           }
-          this.openMenu(job, button.getBoundingClientRect());
+          this.openMenu(current(), button.getBoundingClientRect());
         },
       },
       icon('more'),
@@ -1239,12 +1260,12 @@ export class Downloads {
             event.button === 0 && event.clientX === 0 && event.clientY === 0
               ? more.getBoundingClientRect()
               : { left: event.clientX, right: event.clientX, top: event.clientY, bottom: event.clientY };
-          this.openMenu(job, anchor);
+          this.openMenu(current(), anchor);
         },
         onkeydown: (/** @type {KeyboardEvent} */ event) => {
           if (!(event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey))) return;
           event.preventDefault();
-          this.openMenu(job, more.getBoundingClientRect());
+          this.openMenu(current(), more.getBoundingClientRect());
         },
       },
       h(
