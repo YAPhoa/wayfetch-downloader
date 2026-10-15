@@ -52,6 +52,12 @@ text?: string,
  */
 destination?: RootId, 
 /**
+ * The destination's path, kept after the folder stops being
+ * permitted: a link saving to a removed folder still says which, and
+ * is refused at start until given another.
+ */
+destination_path?: string, 
+/**
  * Why it is invalid, or why it was last refused when started.
  */
 problem?: DiagnosticText, };

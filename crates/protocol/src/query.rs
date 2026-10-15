@@ -366,6 +366,12 @@ pub struct CollectedLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub destination: Option<RootId>,
+    /// The destination's path, kept after the folder stops being
+    /// permitted: a link saving to a removed folder still says which, and
+    /// is refused at start until given another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub destination_path: Option<String>,
     /// Why it is invalid, or why it was last refused when started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]

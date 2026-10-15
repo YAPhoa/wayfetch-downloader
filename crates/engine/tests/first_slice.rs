@@ -1184,6 +1184,8 @@ async fn only_an_idle_folder_the_user_added_can_be_removed() {
     // another folder.
     let page = links(&owner).await;
     let [link] = &page.items[..] else { panic!() };
+    assert_eq!(link.destination, Some(added.id));
+    assert_eq!(link.destination_path.as_deref(), chosen.to_str());
     let (started, refused) = applied(&owner, start_links(&owner, &[link])).await;
     assert!(started.is_empty());
     assert_eq!(refused.len(), 1);

@@ -9,7 +9,9 @@
 -- one transaction. Links submitted to start at once are never held.
 -- `revision` changes when the user edits the link, so a command made from
 -- an older view is refused. `root_id` is where it will be saved, copied to
--- its job; NULL for the operator's download root. An entry that is not a
+-- its job; NULL for the operator's download root. It is looked up, not
+-- enforced: a folder may stop being permitted while links name it, and
+-- its `roots` row, which is never deleted, still gives its path. An entry that is not a
 -- valid link is kept with `invalid` = 1 and stored without credentials,
 -- and `problem` says why it is invalid or why starting it was last
 -- refused.
