@@ -1,12 +1,17 @@
-// The Downloads workspace: a toolbar to add links, act on the selected
-// download, and open Settings; state filters; a table of one page of jobs,
-// each with a menu of what can be done with it; an inspector for the
-// selected job; and a status bar. It talks to the engine only through a
-// `WayfetchClient`, so any transport can host it.
+// The Downloads workspace: a toolbar to add links, switch between the
+// Downloads and Links views, act on the selected download, and open
+// Settings; state filters; a table of one page of jobs, each with a menu
+// of what can be done with it; an inspector for the selected job; and a
+// status bar. It talks to the engine only through a `WayfetchClient`, so
+// any transport can host it.
 //
-// Routes: `/` lists jobs; `/jobs/<id>` also selects one; `/settings` and
-// its sections show the Settings page in place of the list, while the
-// workspace keeps following the engine.
+// Adding links, on a page of its own, collects them on the Links page
+// for review; nothing downloads until they are started there.
+//
+// Routes: `/` lists jobs; `/jobs/<id>` also selects one; `/links` shows
+// the collected links; `/add` the Add links page; `/settings` and its
+// sections the Settings page. Add links and Settings take the place of
+// either view, while the workspace keeps following the engine.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { JobFeed } from '../client/feed.js';
@@ -25,9 +30,11 @@ import {
   jobName,
   progress,
 } from '../client/jobs.js';
+import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
-import { focusedKey, h, refocus, show } from './dom.js';
+import { copyText, focusedKey, h, refocus, show } from './dom.js';
 import { icon } from './icons.js';
+import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu } from './menu.js';
 import { SETTINGS_PATH, SettingsPage, sectionPath, settingsSection } from './settings.js';
 
@@ -122,27 +129,6 @@ function nameProblem(name) {
   return null;
 }
 
-/**
- * Copies `text` to the clipboard: through the Clipboard API where the page
- * may use it, else through a selected, hidden field.
- * @param {string} text
- */
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-    return;
-  } catch {
-    // Not a secure context, or not allowed; fall back below.
-  }
-  const field = h('textarea', { class: 'visually-hidden', readonly: true, 'aria-hidden': 'true' });
-  field.value = text;
-  document.body.append(field);
-  field.select();
-  const copied = document.execCommand('copy');
-  field.remove();
-  if (!copied) throw new Error('The clipboard is not available.');
-}
-
 /** Reads the saved density; storage may be unavailable. */
 function savedDensity() {
   try {
@@ -171,7 +157,17 @@ export class Downloads {
   constructor(client, { onSignedOut, account = null }) {
     this.client = client;
     this.onSignedOut = onSignedOut;
-    this.feed = new JobFeed(client, { pageSize: PAGE_SIZE, onChange: () => this.schedule() });
+    this.feed = new JobFeed(client, {
+      pageSize: PAGE_SIZE,
+      onChange: () => this.schedule(),
+      // Collecting and starting links change the Links list; reconnecting
+      // may have missed either.
+      onEvent: (kind) => {
+        if (kind === null || kind.type === 'batch_accepted' || kind.type === 'job_added') {
+          void this.linksPage.refresh();
+        }
+      },
+    });
     /** `after` of each earlier page, for going back. */
     /** @type {(JobId | null)[]} */
     this.earlier = [];
@@ -231,36 +227,16 @@ export class Downloads {
         ACTION_LABELS[action],
       ),
     );
-    this.destinationLine = h('p', { class: 'destination', 'data-key': 'add-destination' });
-    this.addPanel = this.buildAdd();
-    this.addToggle = h(
-      'button',
-      {
-        type: 'button',
-        class: 'primary',
-        'aria-expanded': 'false',
-        'aria-controls': 'add-links',
-        onclick: () => this.toggleAdd(),
-      },
-      icon('add'),
-      'Add links',
-    );
+    /** Links in the collected list, once read. @type {number | null} */
+    this.linkTotal = null;
+    /** Each toolbar's view switcher, kept current by `renderViews`. */
+    /** @type {HTMLElement[]} */
+    this.viewSwitchers = [];
     this.filters = h('nav', { class: 'filters', 'aria-label': 'Filter by status' });
     this.tableBody = h('tbody');
     this.listStatus = h('p', { class: 'list-status', role: 'status' });
     this.pager = h('nav', { class: 'pager', 'aria-label': 'Pages' });
     this.inspector = h('section', { class: 'inspector', 'aria-label': 'Selected download' });
-    this.settingsButton = h(
-      'button',
-      {
-        type: 'button',
-        class: 'tool settings-button',
-        'data-key': 'open-settings',
-        onclick: () => this.openSettings(),
-      },
-      icon('settings'),
-      'Settings',
-    );
     /** @type {Density} */
     this.density = 'compact';
     this.setDensity(savedDensity());
@@ -269,8 +245,7 @@ export class Downloads {
     this.view = h(
       'div',
       { class: 'downloads-view' },
-      this.buildToolbar(),
-      this.addPanel,
+      this.downloadsToolbar(),
       this.banner,
       h(
         'div',
@@ -297,12 +272,46 @@ export class Downloads {
       },
       onSignedOut: () => this.signedOut(),
       navigate: (path) => this.navigate(path),
-      back: () => this.navigate(this.downloadsPath),
+      back: () => this.navigate(this.viewPath),
+      backLabel: () => this.backLabel(),
       brand: brand(),
     });
-    /** The Downloads route last shown, which Settings goes back to. */
+    this.addPage = new AddLinksPage({
+      client,
+      hello: () => this.feed.hello,
+      settings: () => this.settings,
+      onSettings: (settings) => {
+        this.settings = settings;
+        this.schedule();
+        this.linksPage.render();
+      },
+      onCollected: (result) => this.collected(result),
+      onSignedOut: () => this.signedOut(),
+      back: () => this.navigate(this.viewPath),
+      backLabel: () => this.backLabel(),
+      brand: brand(),
+    });
+    /** The menu of commands for collected links. */
+    this.linksMenu = new Menu('Link actions', () => this.linksPage.markMenu());
+    this.linksPage = new LinksPage({
+      client,
+      hello: () => this.feed.hello,
+      settings: () => this.settings,
+      rootPath: (id) => this.rootPath(id),
+      navigate: (path) => this.navigate(path),
+      onSignedOut: () => this.signedOut(),
+      onTotal: (total) => {
+        this.linkTotal = total;
+        this.renderViews();
+      },
+      toolbar: (tools, search) => this.toolbar(tools, search),
+      menu: this.linksMenu,
+    });
+    /** The Downloads or Links route last shown, which Settings goes back to. */
+    this.viewPath = '/';
+    /** The Downloads route last shown. */
     this.downloadsPath = '/';
-    /** What had focus in Downloads when Settings opened, for coming back. */
+    /** What had focus in that view when Settings or Add links opened, for coming back. */
     /** @type {string | null} */
     this.returnFocus = null;
 
@@ -310,6 +319,8 @@ export class Downloads {
       'div',
       { class: 'workspace' },
       this.view,
+      this.linksPage.element,
+      this.addPage.element,
       this.settingsPage.element,
       h(
         'footer',
@@ -321,6 +332,7 @@ export class Downloads {
         account,
       ),
       this.menu.element,
+      this.linksMenu.element,
     );
     this.onPopState = () => this.route();
   }
@@ -334,12 +346,13 @@ export class Downloads {
     this.loadSettings();
   }
 
-  /** Reads where new downloads go, for the add panel and the inspector. */
+  /** Reads the permitted folders, for adding links, the Links page, and the inspector. */
   loadSettings() {
     this.client.settings().then(
       (settings) => {
         this.settings = settings;
         this.schedule();
+        this.linksPage.render();
       },
       (error) => this.report(error),
     );
@@ -368,6 +381,7 @@ export class Downloads {
     this.active = false;
     window.removeEventListener('popstate', this.onPopState);
     this.feed.stop();
+    this.linksPage.close();
   }
 
   /** @param {string} path */
@@ -376,23 +390,49 @@ export class Downloads {
     this.route();
   }
 
+  /** The view or page shown. */
+  get current() {
+    if (this.settingsPage.shown) return this.settingsPage.element;
+    if (this.addPage.shown) return this.addPage.element;
+    return this.linksPage.shown ? this.linksPage.element : this.view;
+  }
+
   route() {
     const section = settingsSection(location.pathname);
     if (section !== null) {
       this.showSettings(section);
       return;
     }
-    const back = this.hideSettings();
-    this.downloadsPath = location.pathname;
-    const job = jobFromPath(location.pathname);
-    if (job !== this.feed.watched) this.notice = '';
-    this.feed.watch(job).catch((error) => this.report(error));
+    if (location.pathname === ADD_PATH) {
+      this.showAdd();
+      return;
+    }
+    const back = this.leavePage();
+    const links = location.pathname === LINKS_PATH;
+    if ((this.viewPath === LINKS_PATH) !== links) this.closeMenus();
+    this.viewPath = location.pathname;
+    this.view.hidden = links;
+    if (links) {
+      this.linksPage.open();
+    } else {
+      this.linksPage.close();
+      this.downloadsPath = location.pathname;
+      const job = jobFromPath(location.pathname);
+      if (job !== this.feed.watched) this.notice = '';
+      this.feed.watch(job).catch((error) => this.report(error));
+    }
+    this.current.querySelector('.toolbar')?.after(this.banner);
     this.render();
-    if (back !== null) refocus(this.element, back);
+    if (back !== null) refocus(this.current, back);
+  }
+
+  closeMenus() {
+    this.menu.close(false);
+    this.linksMenu.close(false);
   }
 
   /**
-   * Shows the Settings page at `section` in place of the Downloads view,
+   * Shows the Settings page at `section` in place of the view shown,
    * which keeps its state, as the feed keeps following the engine.
    * @param {import('./settings.js').Section} section
    */
@@ -400,26 +440,54 @@ export class Downloads {
     const path = sectionPath(section);
     if (location.pathname !== SETTINGS_PATH && location.pathname !== path) history.replaceState(null, '', path);
     if (!this.settingsPage.shown) {
-      this.menu.close(false);
-      this.returnFocus = focusedKey(this.view);
-      this.view.hidden = true;
+      this.enterPage('open-settings');
       this.settingsPage.element.querySelector('.toolbar')?.after(this.banner);
     }
     this.settingsPage.open(section);
     this.render();
   }
 
+  /** Shows the Add links page in place of the view shown. */
+  showAdd() {
+    if (!this.addPage.shown) {
+      this.enterPage('add-links');
+      this.addPage.element.querySelector('.toolbar')?.after(this.banner);
+    }
+    this.addPage.open();
+    this.render();
+  }
+
   /**
-   * Shows the Downloads view again, if Settings was shown, and says what
-   * to focus there.
+   * Hides the view or page shown, for Settings or Add links, noting what
+   * to focus on coming back: what had focus in a view, else `fallback`.
+   * @param {string} fallback
+   */
+  enterPage(fallback) {
+    this.closeMenus();
+    if (!this.settingsPage.shown && !this.addPage.shown) {
+      this.returnFocus = focusedKey(this.current) ?? fallback;
+    }
+    this.settingsPage.close();
+    this.addPage.close();
+    this.view.hidden = true;
+    this.linksPage.close();
+  }
+
+  /**
+   * Leaves Settings or Add links, if shown, and says what to focus in the
+   * view shown next.
    * @returns {string | null}
    */
-  hideSettings() {
-    if (!this.settingsPage.shown) return null;
+  leavePage() {
+    if (!this.settingsPage.shown && !this.addPage.shown) return null;
     this.settingsPage.close();
-    this.addPanel.after(this.banner);
-    this.view.hidden = false;
-    return this.returnFocus ?? 'open-settings';
+    this.addPage.close();
+    return this.returnFocus;
+  }
+
+  /** What going back from Settings or Add links is called. */
+  backLabel() {
+    return this.viewPath === LINKS_PATH ? 'Back to Links' : 'Back to Downloads';
   }
 
   /** @param {string} density */
@@ -447,18 +515,19 @@ export class Downloads {
       return;
     }
     // Parts are rebuilt below; keyboard focus stays on the same control.
-    const focused = focusedKey(this.element);
+    const page = this.current;
+    const focused = focusedKey(page);
     this.status.dataset.status = feed.status;
     show(this.status, STATUS_LABELS[feed.status]);
     show(this.noticeLine, this.notice);
     this.noticeLine.classList.toggle('ok', this.notice !== '' && this.notice === this.succeeded);
     this.renderBanner();
-    this.renderDestination();
+    this.renderViews();
     this.renderFilters();
     this.renderList();
     this.renderActions();
     this.renderInspector();
-    refocus(this.element, focused);
+    refocus(page, focused);
   }
 
   renderBanner() {
@@ -471,26 +540,6 @@ export class Downloads {
     }
     this.banner.hidden = text === null;
     show(this.banner, text);
-  }
-
-  /** Says where new downloads go, next to the add form. */
-  renderDestination() {
-    const settings = this.settings;
-    const root = settings?.roots.find((r) => r.id === settings.default_root);
-    show(
-      this.destinationLine,
-      h('span', { class: 'label' }, 'Saving to'),
-      root
-        ? h('span', { class: 'path', title: root.path }, root.path)
-        : h('span', { class: 'path unknown' }, settings ? 'the download folder' : 'Loading…'),
-      root && !this.client.local && h('span', { class: 'tag' }, 'Server path'),
-      root && !root.available && h('span', { class: 'problem' }, root.problem ?? 'Unavailable'),
-      h(
-        'button',
-        { type: 'button', class: 'link', 'data-key': 'change-destination', onclick: () => this.openSettings('folder') },
-        'Change…',
-      ),
-    );
   }
 
   /** Tells the shell, once, that the session is gone. */
@@ -514,9 +563,45 @@ export class Downloads {
     this.schedule();
   }
 
-  // The toolbar and adding links.
+  // Toolbars, views, and adding links.
 
-  buildToolbar() {
+  /**
+   * A toolbar for the Downloads or Links view: adding links, switching
+   * views, `tools` for what is selected there, `search`, and Settings.
+   * @param {Node} tools
+   * @param {Node} search
+   */
+  toolbar(tools, search) {
+    const views = h('nav', { class: 'views', 'aria-label': 'Views' });
+    this.viewSwitchers.push(views);
+    return h(
+      'header',
+      { class: 'toolbar' },
+      brand(),
+      h(
+        'button',
+        { type: 'button', class: 'primary', 'data-key': 'add-links', onclick: () => this.navigate(ADD_PATH) },
+        icon('add'),
+        'Add links',
+      ),
+      views,
+      tools,
+      search,
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'tool settings-button',
+          'data-key': 'open-settings',
+          onclick: () => this.openSettings(),
+        },
+        icon('settings'),
+        'Settings',
+      ),
+    );
+  }
+
+  downloadsToolbar() {
     const search = h('input', {
       type: 'search',
       id: 'filter-names',
@@ -528,16 +613,8 @@ export class Downloads {
         this.schedule();
       },
     });
-    return h(
-      'header',
-      { class: 'toolbar' },
-      brand(),
-      this.addToggle,
-      h(
-        'div',
-        { class: 'tool-group', role: 'group', 'aria-label': 'Selected download' },
-        this.actionButtons,
-      ),
+    return this.toolbar(
+      h('div', { class: 'tool-group', role: 'group', 'aria-label': 'Selected download' }, this.actionButtons),
       h(
         'div',
         { class: 'search' },
@@ -545,79 +622,62 @@ export class Downloads {
         h('label', { for: 'filter-names', class: 'visually-hidden' }, 'Filter this page by name'),
         search,
       ),
-      this.settingsButton,
     );
   }
 
-  /** Shows or hides the add panel, focusing its field when shown. */
-  toggleAdd() {
-    const open = this.addPanel.hidden;
-    this.addPanel.hidden = !open;
-    this.addToggle.setAttribute('aria-expanded', String(open));
-    if (open) this.addPanel.querySelector('textarea')?.focus();
+  /** Marks the view shown in each switcher, with the Links count. */
+  renderViews() {
+    const links = this.viewPath === LINKS_PATH;
+    const total = this.linkTotal;
+    for (const views of this.viewSwitchers) {
+      const focused = focusedKey(views);
+      show(
+        views,
+        this.viewLink('/', 'Downloads', !links, null),
+        this.viewLink(LINKS_PATH, 'Links', links, total),
+      );
+      refocus(views, focused);
+    }
   }
 
-  buildAdd() {
-    const message = h('p', { class: 'message', role: 'status' });
-    const urls = h('textarea', {
-      name: 'urls',
-      rows: 3,
-      required: true,
-      spellcheck: 'false',
-      placeholder: 'https://example.com/file.zip',
-      'aria-label': 'Links to download, one per line',
-    });
-    const add = h('button', { type: 'submit', class: 'primary' }, 'Add');
-    const close = h('button', { type: 'button', onclick: () => this.toggleAdd() }, 'Close');
-    /** The key of the submission being retried, kept while the text stays the same. */
-    let key = { text: '', value: '' };
+  /**
+   * @param {string} path
+   * @param {string} label
+   * @param {boolean} current
+   * @param {number | null} total
+   */
+  viewLink(path, label, current, total) {
     return h(
-      'form',
+      'a',
       {
-        id: 'add-links',
-        class: 'add',
-        hidden: true,
-        onsubmit: async (/** @type {SubmitEvent} */ event) => {
+        href: path,
+        class: 'view',
+        'data-key': `view-${label.toLowerCase()}`,
+        'aria-current': current ? 'page' : null,
+        // Read as "Links (3)", not "Links3".
+        'aria-label': total ? `${label} (${total})` : null,
+        onclick: (/** @type {MouseEvent} */ event) => {
+          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
           event.preventDefault();
-          const text = urls.value;
-          const items = text.split(/\s+/).filter(Boolean);
-          const hello = this.feed.hello;
-          if (items.length === 0) return;
-          if (!hello) {
-            show(message, 'Not connected yet. Try again in a moment.');
-            return;
-          }
-          if (items.length > hello.limits.max_submit_items) {
-            show(message, `At most ${hello.limits.max_submit_items} links at a time.`);
-            return;
-          }
-          if (key.text !== text) key = { text, value: idempotencyKey() };
-          add.disabled = true;
-          try {
-            const result = await this.client.submit({
-              idempotencyKey: key.value,
-              target: hello.instance,
-              items,
-            });
-            const accepted = result.type === 'submitted' ? result.accepted : items.length;
-            urls.value = '';
-            key = { text: '', value: '' };
-            show(message, `Added ${accepted} ${accepted === 1 ? 'download' : 'downloads'}.`);
-          } catch (error) {
-            if (error instanceof WayfetchError && error.code === 'unauthenticated') {
-              this.signedOut();
-              return;
-            }
-            show(message, error instanceof WayfetchError ? error.message : String(error));
-          } finally {
-            add.disabled = false;
-          }
+          // Downloads as last left, with its selected download.
+          this.navigate(path === '/' ? this.downloadsPath : path);
         },
       },
-      urls,
-      this.destinationLine,
-      h('div', { class: 'row' }, add, close, message),
+      label,
+      total ? h('span', { class: 'count' }, total) : null,
     );
+  }
+
+  /**
+   * Shows links just collected on the Links page, with focus on their
+   * batch.
+   * @param {import('./collect.js').Collected} result
+   */
+  collected(result) {
+    this.returnFocus = null;
+    this.navigate(LINKS_PATH);
+    this.linksPage.say(collectedText(result), { ok: result.invalid === 0, warn: result.invalid > 0 });
+    void this.linksPage.refresh().then(() => refocus(this.linksPage.element, `select-${result.batch}`));
   }
 
   /** Whether this client may change downloads. */
@@ -1010,7 +1070,7 @@ export class Downloads {
     if (feed.status === 'live' && jobs.length === 0) {
       if (feed.jobs.length > 0) empty = 'No downloads on this page match the filter.';
       else if (this.group !== 'all') empty = 'No downloads in this state.';
-      else empty = 'No downloads yet. Use Add links to start one.';
+      else empty = 'No downloads yet. Use Add links to collect some, then start them on the Links page.';
     }
     show(this.listStatus, empty);
     show(

@@ -648,6 +648,93 @@ async fn finished_jobs_are_renamed_and_removed_over_http() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn links_are_collected_reviewed_and_started_over_http() {
+    let server = Server::https().await;
+    let dirs = Dirs::ready(&server);
+    let daemon = Daemon::start(&dirs).await;
+    let client = daemon.owner();
+    let data = body(1024);
+    server.put("/a.bin", Resource::new(data.clone()));
+    let signed = format!("{}?token=secret", server.url("/b.bin"));
+
+    let collect = client.command(json!({"items": [server.url("/a.bin"), "nonsense", signed]}));
+    let (status, collected) = client.post("/v1/staging/links", &collect).await;
+    assert_eq!(status, StatusCode::OK, "{collected}");
+    assert_eq!(
+        (collected["collected"].clone(), collected["invalid"].clone()),
+        (json!(2), json!(1))
+    );
+    // A retry replays the result and collects nothing more.
+    assert_eq!(
+        client.post("/v1/staging/links", &collect).await.1,
+        collected
+    );
+    assert!(client.jobs().await.is_empty());
+    assert!(server.log().is_empty());
+
+    let (status, page) = client.get("/v1/staging/links?page_size=2").await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    let next = page["next_after"].as_str().unwrap().to_owned();
+    let (_, rest) = client.get(&format!("/v1/staging/links?after={next}")).await;
+    let (a, invalid, b) = (&page["items"][0], &page["items"][1], &rest["items"][0]);
+    assert_eq!(
+        (a["check"].clone(), a["name_hint"].clone()),
+        (json!("not_checked"), json!("a.bin"))
+    );
+    assert_eq!(
+        (invalid["check"].clone(), invalid["text"].clone()),
+        (json!("invalid"), json!("nonsense"))
+    );
+    // Only a client with the sources permission reads the whole link.
+    assert!(!b.to_string().contains("secret"));
+    let source = format!("/v1/staging/links/{}/source", b["id"].as_str().unwrap());
+    assert_eq!(client.get(&source).await.1["url"], json!(signed));
+    let reader = daemon.client(READER_TOKEN);
+    assert_eq!(reader.get(&source).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(reader.get("/v1/staging/links").await.0, StatusCode::OK);
+    let refused = reader.command(json!({"items": ["https://x.example/"]}));
+    let (status, _) = reader.post("/v1/staging/links", &refused).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Starting the selected link creates one download for it.
+    let refs = |links: &[&Value]| {
+        links
+            .iter()
+            .map(|l| json!({"link": l["id"], "revision": l["revision"]}))
+            .collect::<Vec<_>>()
+    };
+    let start = client.command(json!({"action": "start", "links": refs(&[a])}));
+    let (status, started) = client.post("/v1/staging/commands", &start).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let job = started["applied"][0]["job"].as_str().unwrap().to_owned();
+    assert_eq!(client.post("/v1/staging/commands", &start).await.1, started);
+    client.stage(&job, "complete").await;
+    assert_eq!(dirs.published("a.bin"), data);
+    assert_eq!(client.jobs().await.len(), 1);
+
+    // A move needs a destination; a removal takes none.
+    let bad = client.command(json!({"action": "move", "links": refs(&[b])}));
+    assert_eq!(
+        client.post("/v1/staging/commands", &bad).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let remove = client.command(json!({"action": "remove", "links": refs(&[invalid, b])}));
+    let (status, removed) = client.post("/v1/staging/commands", &remove).await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(removed["applied"].as_array().unwrap().len(), 2);
+    // The started link stays listed with its download.
+    let (_, left) = client.get("/v1/staging/links").await;
+    assert_eq!(left["total"], 1);
+    assert_eq!(left["items"][0]["job"], job.as_str());
+    assert_eq!(client.jobs().await.len(), 1);
+    assert_eq!(server.log().len(), 1);
+
+    daemon.stop("TERM").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn requests_without_a_valid_token_are_refused() {
     let server = Server::https().await;
     let dirs = Dirs::ready(&server);

@@ -17,6 +17,9 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/contract.js').JobStage} JobStage
  * @typedef {import('../client/contract.js').Permission} Permission
  * @typedef {import('../client/contract.js').RootId} RootId
+ * @typedef {import('../client/contract.js').LinkId} LinkId
+ * @typedef {import('../client/contract.js').LinkRef} LinkRef
+ * @typedef {import('../client/contract.js').LinksAction} LinksAction
  * @typedef {import('../client/generated/SessionStatus.js').SessionStatus} SessionStatus
  * @typedef {import('../client/generated/SetupRequest.js').SetupRequest} SetupRequest
  * @typedef {import('../client/generated/LoginRequest.js').LoginRequest} LoginRequest
@@ -25,6 +28,8 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/generated/UpdateSettingsRequest.js').UpdateSettingsRequest} UpdateSettingsRequest
  * @typedef {import('../client/generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
  * @typedef {import('../client/generated/AddRootRequest.js').AddRootRequest} AddRootRequest
+ * @typedef {import('../client/generated/CollectRequest.js').CollectRequest} CollectRequest
+ * @typedef {import('../client/generated/LinksCommandRequest.js').LinksCommandRequest} LinksCommandRequest
  */
 
 /** Server-sent event types, as `wayfetch-api` names them. */
@@ -127,6 +132,37 @@ export class HttpClient {
     /** @type {SubmitRequest} */
     const body = { idempotency_key: idempotencyKey, target, items };
     return this.request('POST', '/v1/inputs', { body });
+  }
+
+  /** @param {{ after?: LinkId | null, pageSize: number }} request */
+  listLinks({ after, pageSize }) {
+    const query = new URLSearchParams({ page_size: String(pageSize) });
+    if (after) query.set('after', after);
+    return this.request('GET', `/v1/staging/links?${query}`);
+  }
+
+  /** @param {{ idempotencyKey: string, target: string, items: string[], destination?: RootId | null }} request */
+  collectLinks({ idempotencyKey, target, items, destination }) {
+    /** @type {CollectRequest} */
+    const body = { idempotency_key: idempotencyKey, target, items };
+    if (destination) body.destination = destination;
+    return this.request('POST', '/v1/staging/links', { body });
+  }
+
+  /**
+   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId }} request
+   */
+  linksCommand({ idempotencyKey, target, action, links, destination }) {
+    /** @type {LinksCommandRequest} */
+    const body = { idempotency_key: idempotencyKey, target, action, links };
+    if (destination !== undefined) body.destination = destination;
+    return this.request('POST', '/v1/staging/commands', { body });
+  }
+
+  /** @param {LinkId} link */
+  async linkSource(link) {
+    const result = await this.request('GET', `/v1/staging/links/${encodeURIComponent(link)}/source`);
+    return String(result.url);
   }
 
   /**

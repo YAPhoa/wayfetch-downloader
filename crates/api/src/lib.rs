@@ -188,6 +188,12 @@ impl Api {
             .route("/v1/jobs/{id}/commands", post(routes::job_command))
             .route("/v1/jobs/{id}/source", get(routes::job_source))
             .route(
+                "/v1/staging/links",
+                get(routes::list_links).post(routes::collect_links),
+            )
+            .route("/v1/staging/links/{id}/source", get(routes::link_source))
+            .route("/v1/staging/commands", post(routes::links_command))
+            .route(
                 "/v1/settings",
                 get(routes::settings).put(routes::update_settings),
             )

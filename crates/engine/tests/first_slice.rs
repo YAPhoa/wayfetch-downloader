@@ -9,8 +9,9 @@
 //! checkpoints after a restart), T03 (`200` to a range request), T05
 //! (representation changed during resume), T09 (stalled headers and body),
 //! T27 (cancelled generation), and T47 (bounded subscriber replay). The
-//! last tests cover destination roots and the default for new jobs, and
-//! renaming and removing finished jobs.
+//! last tests cover destination roots and the default for new jobs,
+//! renaming and removing finished jobs, and links collected for review
+//! before they are started.
 
 mod support;
 
@@ -30,12 +31,17 @@ use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
+use wayfetch_protocol::command::{
+    AppliedLink, CollectItems, LinkRef, LinkRefs, MAX_COLLECTED_LINKS, MAX_SUBMIT_ITEMS,
+};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::{JobId, RootId};
 use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::domain::version::Revision;
 use wayfetch_protocol::event::{EventKind, ResyncReason};
-use wayfetch_protocol::query::{JobFilter, JobSummary, PageSize, Settings};
+use wayfetch_protocol::query::{
+    CollectedLink, JobFilter, JobSummary, LinkCheck, LinkPage, PageSize, Settings,
+};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Permission, ProtocolError, Query,
     QueryResult, StreamItem, Subscribe,
@@ -1149,6 +1155,15 @@ async fn only_an_idle_folder_the_user_added_can_be_removed() {
     env.server.update("/slow.bin", |r| r.stall_at = None);
     complete(&owner, job).await;
 
+    // A link collected to be saved there does not keep it.
+    handle
+        .execute(
+            collect(&owner, &["https://files.example/later.bin"], Some(added.id)),
+            ALL,
+        )
+        .await
+        .unwrap();
+
     // Then it goes, its files stay, and a retry replays.
     let removal = remove_root(&owner, revision, added.id);
     let removed = handle.execute(removal.clone(), ALL).await.unwrap();
@@ -1165,6 +1180,16 @@ async fn only_an_idle_folder_the_user_added_can_be_removed() {
             .any(|r| r.id == added.id)
     );
     assert!(chosen.join("slow.bin").exists());
+    // The link stays, and starting it is refused until it is given
+    // another folder.
+    let page = links(&owner).await;
+    let [link] = &page.items[..] else { panic!() };
+    assert_eq!(link.destination, Some(added.id));
+    assert_eq!(link.destination_path.as_deref(), chosen.to_str());
+    let (started, refused) = applied(&owner, start_links(&owner, &[link])).await;
+    assert!(started.is_empty());
+    assert_eq!(refused.len(), 1);
+    assert_eq!(links(&owner).await.total, 1);
     let refused = handle
         .execute(
             remove_root(&owner, settings(&owner).await.revision, added.id),
@@ -1890,4 +1915,417 @@ async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(std::fs::read_dir(&late).unwrap().next().is_none());
+}
+
+// Collected links: kept for review, started only when chosen, each once.
+
+const SIGNED: &str = "https://files.example/b.bin?token=secret#part";
+
+fn collect(owner: &EngineOwner, items: &[&str], destination: Option<RootId>) -> CommandEnvelope {
+    let items = items.iter().map(|i| (*i).to_owned()).collect::<Vec<_>>();
+    envelope(
+        owner,
+        Command::CollectLinks {
+            items: CollectItems::try_from(items).unwrap(),
+            destination,
+        },
+    )
+}
+
+fn refs(links: &[&CollectedLink]) -> LinkRefs {
+    let refs = links.iter().map(|l| LinkRef {
+        link: l.id,
+        revision: l.revision,
+    });
+    LinkRefs::try_from(refs.collect::<Vec<_>>()).unwrap()
+}
+
+fn start_links(owner: &EngineOwner, links: &[&CollectedLink]) -> CommandEnvelope {
+    envelope(owner, Command::StartLinks { links: refs(links) })
+}
+
+async fn links(owner: &EngineOwner) -> LinkPage {
+    let query = Query::ListLinks {
+        after: None,
+        page_size: PageSize::DEFAULT,
+    };
+    match owner.handle().query(query, ALL).await.unwrap() {
+        QueryResult::Links(page) => page,
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn applied(
+    owner: &EngineOwner,
+    envelope: CommandEnvelope,
+) -> (Vec<AppliedLink>, Vec<(ErrorCode, String)>) {
+    match owner.handle().execute(envelope, ALL).await.unwrap() {
+        CommandResult::LinksApplied { applied, refused } => (
+            applied,
+            refused
+                .into_iter()
+                .map(|r| (r.code, r.message.as_str().to_owned()))
+                .collect(),
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn collected_links_wait_for_review_and_survive_restart() {
+    let env = env();
+    env.server.put("/a.bin", Resource::new(body(5 * KIB)));
+    env.server.put("/b.bin", Resource::new(body(6 * KIB)));
+    let owner = env.start().await;
+    // Once the download folder is identified, as reading the settings
+    // ensures, a batch collected without a chosen folder is bound to the
+    // default; before, it is left absent, which also means that folder.
+    assert_eq!(settings(&owner).await.default_root, Some(ROOT));
+    let collected = owner
+        .handle()
+        .execute(
+            collect(
+                &owner,
+                &[
+                    " https://files.example/a.bin ",
+                    "ftp://user:pw@files.example/c?k=1",
+                    SIGNED,
+                ],
+                None,
+            ),
+            ALL,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        collected,
+        CommandResult::LinksCollected {
+            collected: 2,
+            invalid: 1,
+            ..
+        }
+    ));
+    // Nothing was created or fetched.
+    assert!(jobs(&owner).await.is_empty());
+    assert_eq!(counted(&owner).await, 0);
+    assert!(env.server.requests.lock().unwrap().is_empty());
+
+    let page = links(&owner).await;
+    assert_eq!(page.total, 3);
+    let [a, c, b] = &page.items[..] else {
+        panic!("{page:?}")
+    };
+    assert_eq!((a.batch, c.batch), (b.batch, b.batch));
+    assert_eq!(
+        (
+            a.check,
+            a.host.as_ref().unwrap().as_str(),
+            a.name_hint.as_deref()
+        ),
+        (LinkCheck::NotChecked, "files.example", Some("a.bin"))
+    );
+    assert_eq!(a.destination, Some(ROOT));
+    // The signed link is listed by host and name only; the whole link,
+    // token included, needs the sources permission.
+    assert_eq!(b.name_hint.as_deref(), Some("b.bin"));
+    assert_eq!(b.text, None);
+    let source = Query::LinkSource { link: b.id };
+    let denied = owner
+        .handle()
+        .query(source.clone(), &[Permission::Read])
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, ErrorCode::PermissionDenied);
+    let QueryResult::LinkSource { url, .. } = owner.handle().query(source, ALL).await.unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(url, SIGNED);
+    // The invalid entry is kept with its problem, never its credentials.
+    assert_eq!(c.check, LinkCheck::Invalid);
+    assert_eq!(c.text.as_deref(), Some("ftp://files.example/c…"));
+    assert!(
+        c.problem.as_ref().unwrap().as_str().contains("http"),
+        "{c:?}"
+    );
+    shutdown(owner).await;
+
+    let owner = env.start().await;
+    assert_eq!(links(&owner).await.items, page.items);
+    assert!(jobs(&owner).await.is_empty());
+    assert!(env.server.requests.lock().unwrap().is_empty());
+
+    // Only the chosen link starts; the invalid one is refused and stays.
+    let start = start_links(&owner, &[a, c]);
+    let (done, refused) = applied(&owner, start.clone()).await;
+    let [
+        AppliedLink {
+            link,
+            job: Some(id),
+            ..
+        },
+    ] = done[..]
+    else {
+        panic!("{done:?}")
+    };
+    assert_eq!(link, a.id);
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].0, ErrorCode::NotApplicable);
+    let finished = complete(&owner, id).await;
+    assert_eq!(finished.destination, Some(ROOT));
+    assert_eq!(env.published("a.bin"), body(5 * KIB));
+    // The started link stays listed with its download until removed.
+    let left = links(&owner).await;
+    assert_eq!(left.total, 3);
+    assert_eq!(left.items[0].job, Some(id));
+    assert_eq!(left.items[1..], [c.clone(), b.clone()]);
+    assert!(
+        env.server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.url.path() == "/a.bin")
+    );
+
+    // A retry, a double click with a fresh key, and a concurrent client
+    // all find the same download.
+    let (again, _) = applied(&owner, start).await;
+    assert_eq!(again, done);
+    let (twice, none) = applied(&owner, start_links(&owner, &[a])).await;
+    assert_eq!((twice, none.len()), (done.clone(), 0));
+    let (first, second) = tokio::join!(
+        applied(&owner, start_links(&owner, &[b])),
+        applied(&owner, start_links(&owner, &[b])),
+    );
+    assert_eq!(first.0, second.0);
+    assert_eq!(jobs(&owner).await.len(), 2);
+    shutdown(owner).await;
+    let owner = env.start().await;
+    let kept = links(&owner).await;
+    assert_eq!(kept.total, 3);
+    assert_eq!(kept.items[0].job, Some(id));
+    assert_eq!(kept.items[2].job, first.0[0].job);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn link_destinations_change_only_the_chosen_links() {
+    let mut env = env();
+    let media = folder(&env, "media");
+    env.roots.push(media.clone());
+    let media_id = env.init_root(&media);
+    env.server.put("/a.bin", Resource::new(body(5 * KIB)));
+    let owner = env.start().await;
+    owner
+        .handle()
+        .execute(
+            collect(&owner, &["https://files.example/a.bin", SIGNED], None),
+            ALL,
+        )
+        .await
+        .unwrap();
+    let page = links(&owner).await;
+    let [a, b] = &page.items[..] else { panic!() };
+    let before = settings(&owner).await;
+
+    let to_media = |links: &[&CollectedLink], root| {
+        envelope(
+            &owner,
+            Command::MoveLinks {
+                links: refs(links),
+                destination: root,
+            },
+        )
+    };
+    let (moved, none) = applied(&owner, to_media(&[a], media_id)).await;
+    assert!(none.is_empty());
+    let revision = a.revision.next().unwrap();
+    assert_eq!(moved[0].revision, Some(revision));
+    let page = links(&owner).await;
+    assert_eq!(
+        (page.items[0].destination, page.items[0].revision),
+        (Some(media_id), revision)
+    );
+    // The other link, the default, and the settings revision keep theirs.
+    assert_eq!(page.items[1], *b);
+    let after = settings(&owner).await;
+    assert_eq!(
+        (after.revision, after.default_root),
+        (before.revision, before.default_root)
+    );
+
+    // A start from the view before the move is refused, and the link stays.
+    let (none, stale) = applied(&owner, start_links(&owner, &[a])).await;
+    assert!(none.is_empty());
+    assert_eq!(stale[0].0, ErrorCode::RevisionConflict);
+    assert_eq!(links(&owner).await.total, 2);
+
+    // Unknown and unavailable roots are refused whole.
+    let unknown = RootId::from_u64(99).unwrap();
+    assert_eq!(
+        refused(&owner, to_media(&[b], unknown)).await,
+        ErrorCode::NotFound
+    );
+    let mounted = folder(&env, "media-mounted");
+    std::fs::remove_dir(&mounted).unwrap();
+    std::fs::rename(&media, &mounted).unwrap();
+    std::fs::create_dir(&media).unwrap();
+    assert_eq!(
+        refused(&owner, to_media(&[b], media_id)).await,
+        ErrorCode::NotApplicable
+    );
+    assert_eq!(
+        refused(&owner, collect(&owner, &[SIGNED], Some(media_id))).await,
+        ErrorCode::NotApplicable
+    );
+    // A link whose folder went away is not started, and says why.
+    let current = links(&owner).await.items[0].clone();
+    let (none, unusable) = applied(&owner, start_links(&owner, &[&current])).await;
+    assert!(none.is_empty());
+    assert_eq!(unusable[0].0, ErrorCode::NotApplicable);
+    let current = links(&owner).await.items[0].clone();
+    assert!(
+        current
+            .problem
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .contains("cannot be used")
+    );
+    assert!(jobs(&owner).await.is_empty());
+    assert_eq!(std::fs::read_dir(&media).unwrap().count(), 0);
+
+    // Remounted, it starts into the chosen folder.
+    std::fs::remove_dir(&media).unwrap();
+    std::fs::rename(&mounted, &media).unwrap();
+    let (started, _) = applied(&owner, start_links(&owner, &[&current])).await;
+    let done = complete(&owner, started[0].job.unwrap()).await;
+    assert_eq!(done.destination, Some(media_id));
+    assert_eq!(std::fs::read(media.join("a.bin")).unwrap(), body(5 * KIB));
+    let started = links(&owner).await.items[0].clone();
+    assert!(started.problem.is_none());
+    // Once started, it keeps its folder.
+    assert_eq!(
+        refused_one(&owner, to_media(&[&started], ROOT)).await,
+        ErrorCode::NotApplicable
+    );
+    shutdown(owner).await;
+}
+
+async fn refused_one(owner: &EngineOwner, envelope: CommandEnvelope) -> ErrorCode {
+    let (done, refused) = applied(owner, envelope).await;
+    assert!(done.is_empty(), "{done:?}");
+    refused[0].0
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_links_removes_only_their_collected_records() {
+    let env = env();
+    env.server.put("/a.bin", Resource::new(body(5 * KIB)));
+    let owner = env.start().await;
+    owner
+        .handle()
+        .execute(
+            collect(&owner, &["https://files.example/a.bin", SIGNED], None),
+            ALL,
+        )
+        .await
+        .unwrap();
+    let page = links(&owner).await;
+    let [a, b] = &page.items[..] else { panic!() };
+    let (started, _) = applied(&owner, start_links(&owner, &[a])).await;
+    let id = started[0].job.unwrap();
+    complete(&owner, id).await;
+
+    let remove =
+        |links: &[&CollectedLink]| envelope(&owner, Command::RemoveLinks { links: refs(links) });
+    // The list is shared: removing or moving entries needs control.
+    for command in [
+        remove(&[b]),
+        envelope(
+            &owner,
+            Command::MoveLinks {
+                links: refs(&[b]),
+                destination: ROOT,
+            },
+        ),
+    ] {
+        let denied = owner
+            .handle()
+            .execute(command, &[Permission::Read, Permission::Submit])
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, ErrorCode::PermissionDenied);
+    }
+    assert_eq!(links(&owner).await.total, 2);
+    // The started link leaves the list too; its download keeps its source.
+    let a = &links(&owner).await.items[0].clone();
+    let (removed, refused_links) = applied(&owner, remove(&[a, b])).await;
+    assert_eq!(removed.len(), 2);
+    assert!(refused_links.is_empty());
+    assert_eq!(links(&owner).await.total, 0);
+    // The started download and its file are untouched.
+    assert_eq!(job(&owner, id).await.stage, JobStage::Complete);
+    assert_eq!(env.published("a.bin"), body(5 * KIB));
+    // Removing again, or starting what was removed, changes nothing.
+    let (again, none) = applied(&owner, remove(&[b])).await;
+    assert_eq!((again.len(), none.len()), (1, 0));
+    let (none, gone) = applied(&owner, start_links(&owner, &[b])).await;
+    assert!(none.is_empty());
+    assert_eq!(gone[0].0, ErrorCode::NotFound);
+    assert_eq!(jobs(&owner).await.len(), 1);
+    // Collecting needs the submit permission.
+    let denied = owner
+        .handle()
+        .execute(collect(&owner, &[SIGNED], None), &[Permission::Read])
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, ErrorCode::PermissionDenied);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_collected_list_is_bounded() {
+    let env = env();
+    let owner = env.start().await;
+    let batch: Vec<String> = (0..MAX_SUBMIT_ITEMS)
+        .map(|i| format!("https://files.example/{i}.bin"))
+        .collect();
+    let batch: Vec<&str> = batch.iter().map(String::as_str).collect();
+    for _ in 0..MAX_COLLECTED_LINKS / MAX_SUBMIT_ITEMS {
+        owner
+            .handle()
+            .execute(collect(&owner, &batch, None), ALL)
+            .await
+            .unwrap();
+    }
+    let full = owner
+        .handle()
+        .execute(collect(&owner, &[SIGNED], None), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(full.code, ErrorCode::LimitExceeded);
+    // Pages stay within their size, and walk the whole list in order.
+    let mut after = None;
+    let mut seen = 0;
+    loop {
+        let query = Query::ListLinks {
+            after,
+            page_size: PageSize::try_from(500).unwrap(),
+        };
+        let QueryResult::Links(page) = owner.handle().query(query, ALL).await.unwrap() else {
+            panic!()
+        };
+        assert!(page.items.len() <= 500);
+        assert_eq!(page.total, MAX_COLLECTED_LINKS as u64);
+        seen += page.items.len();
+        match page.next_after {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, MAX_COLLECTED_LINKS);
+    assert!(jobs(&owner).await.is_empty());
+    shutdown(owner).await;
 }

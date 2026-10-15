@@ -28,12 +28,17 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/contract.js').Permission} Permission
  * @typedef {import('../client/contract.js').RootId} RootId
  * @typedef {import('../client/contract.js').RootSummary} RootSummary
+ * @typedef {import('../client/contract.js').LinkId} LinkId
+ * @typedef {import('../client/contract.js').LinkRef} LinkRef
+ * @typedef {import('../client/contract.js').LinksAction} LinksAction
  * @typedef {import('../client/generated/Query.js').Query} Query
  * @typedef {import('../client/generated/ProtocolError.js').ProtocolError} ProtocolError
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
  * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
  * @typedef {import('../client/generated/UpdateSettingsRequest.js').UpdateSettingsRequest} UpdateSettingsRequest
  * @typedef {import('../client/generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
+ * @typedef {import('../client/generated/CollectRequest.js').CollectRequest} CollectRequest
+ * @typedef {import('../client/generated/LinksCommandRequest.js').LinksCommandRequest} LinksCommandRequest
  */
 
 /**
@@ -119,6 +124,40 @@ export class DesktopIpcClient {
     /** @type {SubmitRequest} */
     const request = { idempotency_key: idempotencyKey, target, items };
     return this.call('submit', { request });
+  }
+
+  /** @param {{ after?: LinkId | null, pageSize: number }} request */
+  listLinks({ after, pageSize }) {
+    /** @type {Query} */
+    const query = { type: 'list_links', page_size: pageSize };
+    if (after) query.after = after;
+    return this.call('query', { query });
+  }
+
+  /** @param {{ idempotencyKey: string, target: string, items: string[], destination?: RootId | null }} request */
+  collectLinks({ idempotencyKey, target, items, destination }) {
+    /** @type {CollectRequest} */
+    const request = { idempotency_key: idempotencyKey, target, items };
+    if (destination) request.destination = destination;
+    return this.call('collect_links', { request });
+  }
+
+  /**
+   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId }} request
+   */
+  linksCommand({ idempotencyKey, target, action, links, destination }) {
+    /** @type {LinksCommandRequest} */
+    const request = { idempotency_key: idempotencyKey, target, action, links };
+    if (destination !== undefined) request.destination = destination;
+    return this.call('links_command', { request });
+  }
+
+  /** @param {LinkId} link */
+  async linkSource(link) {
+    /** @type {Query} */
+    const query = { type: 'link_source', link };
+    const result = await this.call('query', { query });
+    return String(result.url);
   }
 
   /**
