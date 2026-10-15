@@ -22,13 +22,15 @@ use super::{Store, StoreError, files, key, links, outbox, sql};
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
 /// the job's newest partial; the next three describe its published file,
-/// then come the submitted link, the job's destination root, and whether
-/// the user removed it from lists.
+/// then come the submitted link, the job's destination root, whether the
+/// user removed it from lists, and why its latest attempt restarted from
+/// zero.
 const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.generation, \
      j.revision, j.bytes_total, j.failure_code, j.failure_retry_at, j.failure_message, \
      COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
                ORDER BY p.generation DESC LIMIT 1), 0), \
-     a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id, j.removed_at IS NOT NULL";
+     a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id, j.removed_at IS NOT NULL, \
+     j.restart_reason";
 
 /// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
 /// has exactly one source link.
@@ -73,6 +75,8 @@ pub(super) struct StoredJob {
     destination: Option<RootId>,
     /// Removed from lists and counts by the user.
     pub(super) removed: bool,
+    /// Why the latest attempt started from zero.
+    restart_reason: Option<DiagnosticText>,
 }
 
 impl StoredJob {
@@ -91,6 +95,7 @@ impl StoredJob {
             artifact: self.artifact.clone(),
             original_host: Some(self.original_host.clone()),
             destination: self.destination,
+            restart_reason: self.restart_reason.clone(),
         }
     }
 }
@@ -112,6 +117,7 @@ struct RawJob {
     input_url: String,
     root: Option<i64>,
     removed: bool,
+    restart_reason: Option<String>,
 }
 
 impl RawJob {
@@ -135,6 +141,7 @@ impl RawJob {
             input_url: row.get(14)?,
             root: row.get(15)?,
             removed: row.get(16)?,
+            restart_reason: row.get(17)?,
         })
     }
 
@@ -180,6 +187,7 @@ impl RawJob {
             original_host,
             destination: self.root.map(key).transpose()?,
             removed: self.removed,
+            restart_reason: self.restart_reason.as_deref().map(DiagnosticText::new),
         })
     }
 }
@@ -251,11 +259,26 @@ pub(super) fn save(
     }
     job.failure = failure;
     // Queued again under a new generation, the job starts from zero: no
-    // generation will reopen its earlier files.
+    // generation will reopen its earlier files, except one a retry
+    // reserved for exactly this generation.
     if job.state.stage() == JobStage::Queued && job.state.generation() != previous.generation() {
-        files::abandon_staging(tx, job.id, job.state.generation())?;
+        files::abandon_unreserved(tx, job.id, job.state.generation())?;
     }
     outbox::append(tx, &EventKind::JobChanged { job: job.summary() }, now)?;
+    Ok(())
+}
+
+/// Records why `job`'s latest attempt started from zero, or clears it.
+pub(super) fn set_restart_reason(
+    tx: &Transaction<'_>,
+    job: &mut StoredJob,
+    reason: Option<DiagnosticText>,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE jobs SET restart_reason = ?1 WHERE id = ?2",
+        params![reason.as_ref().map(DiagnosticText::as_str), sql(job.id)?],
+    )?;
+    job.restart_reason = reason;
     Ok(())
 }
 
@@ -375,6 +398,35 @@ impl Store {
         let outcome = job.state.advance(to, presented)?;
         if outcome == Outcome::Changed {
             save(&tx, &mut job, &previous, failure, now)?;
+        }
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// Returns an active job of generation `presented` to the queue under a
+    /// new generation, which starts from zero, recording `reason` so a
+    /// client can say why its saved data was not continued. A transferring
+    /// job steps back to resolving first. One transaction, so the reason is
+    /// never shown without the restart, or the restart without it.
+    pub(crate) fn restart_from_zero(
+        &mut self,
+        id: JobId,
+        presented: Generation,
+        reason: &str,
+        now: UtcTimestamp,
+    ) -> Result<Outcome, StoreError> {
+        let tx = self.write()?;
+        let mut job = load(&tx, id)?;
+        if job.state.stage() == JobStage::Transferring {
+            let previous = job.state;
+            job.state.advance(JobStage::Resolving, presented)?;
+            save(&tx, &mut job, &previous, None, now)?;
+        }
+        let previous = job.state;
+        let outcome = job.state.advance(JobStage::Queued, presented)?;
+        if outcome == Outcome::Changed {
+            set_restart_reason(&tx, &mut job, Some(DiagnosticText::new(reason)))?;
+            save(&tx, &mut job, &previous, None, now)?;
         }
         tx.commit()?;
         Ok(outcome)

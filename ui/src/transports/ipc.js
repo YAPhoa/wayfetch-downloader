@@ -84,6 +84,7 @@ function failure(error) {
     const refused = /** @type {ProtocolError} */ (error);
     return new WayfetchError(refused.code, String(refused.message ?? refused.code), {
       currentRevision: refused.current_revision ?? undefined,
+      retryAt: refused.retry_at ?? undefined,
     });
   }
   return new WayfetchError('unavailable', `The desktop engine did not answer: ${String(error)}`);
