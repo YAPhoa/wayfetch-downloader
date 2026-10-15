@@ -7,6 +7,8 @@
     "allow-query",
     "allow-submit",
     "allow-job-command",
+    "allow-collect-links",
+    "allow-links-command",
     "allow-update-settings",
     "allow-remove-root",
     "allow-choose-download-folder",

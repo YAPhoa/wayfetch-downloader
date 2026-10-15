@@ -83,6 +83,9 @@ pub struct TransportLimits {
     pub max_submit_items: u16,
     /// Maximum bytes of one input URL.
     pub max_url_bytes: u32,
+    /// Maximum links waiting in the collected list. Added in protocol 1.1.
+    #[serde(default)]
+    pub max_collected_links: u32,
 }
 
 impl TransportLimits {
@@ -91,6 +94,7 @@ impl TransportLimits {
         max_page_size: crate::query::PageSize::MAX.get(),
         max_submit_items: crate::command::MAX_SUBMIT_ITEMS as u16,
         max_url_bytes: crate::command::MAX_URL_BYTES as u32,
+        max_collected_links: crate::command::MAX_COLLECTED_LINKS as u32,
     };
 }
 

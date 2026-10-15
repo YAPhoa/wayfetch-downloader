@@ -3,8 +3,10 @@ import type { EventCursor } from "./EventCursor.js";
 import type { JobCounts } from "./JobCounts.js";
 import type { JobId } from "./JobId.js";
 import type { JobSummary } from "./JobSummary.js";
+import type { LinkPage } from "./LinkPage.js";
 import type { Page } from "./Page.js";
 import type { Settings } from "./Settings.js";
+import type { SourceLinkId } from "./SourceLinkId.js";
 
 /**
  * A query's answer.
@@ -24,5 +26,14 @@ as_of: EventCursor, } | { "type": "jobs" } & Page<JobSummary> | { "type": "job_c
 job: JobId, 
 /**
  * The link exactly as it was submitted.
+ */
+url: string, } | { "type": "links" } & LinkPage | { "type": "link_source", 
+/**
+ * The link.
+ */
+link: SourceLinkId, 
+/**
+ * The entry exactly as it was collected; for an invalid one, less
+ * any credentials it held.
  */
 url: string, };

@@ -81,7 +81,7 @@ impl Fixture {
             command,
         };
         self.store
-            .execute(&envelope, self.instance, None, NOW)
+            .execute(&envelope, self.instance, &Default::default(), NOW)
             .map_err(|e| e.code)
     }
 
@@ -189,7 +189,7 @@ fn rejected_commands_leave_no_record() {
     };
     let err = f
         .store
-        .execute(&envelope, f.instance, None, NOW)
+        .execute(&envelope, f.instance, &Default::default(), NOW)
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::WrongInstance);
 }

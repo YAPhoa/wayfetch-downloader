@@ -1,0 +1,136 @@
+// What the views say about collected links: how entered text becomes
+// entries, how a link is named and described, how the list is grouped by
+// batch, and what a command's refusals mean. No DOM, so it is tested
+// under Node.
+
+/**
+ * @typedef {import('./contract.js').CollectedLink} CollectedLink
+ * @typedef {import('./contract.js').LinkId} LinkId
+ * @typedef {import('./contract.js').RefusedLink} RefusedLink
+ * @typedef {import('./contract.js').Hello} Hello
+ * @typedef {import('./jobs.js').Tone} Tone
+ */
+
+/**
+ * The entries in pasted or typed text: one per whitespace-separated word,
+ * since a link has no spaces. Blank lines are ignored.
+ * @param {string} text
+ */
+export function entries(text) {
+  return text.split(/\s+/).filter(Boolean);
+}
+
+/**
+ * What stops `items` from being sent, within the engine's published
+ * limits, or `null`. The engine checks again and has the final say.
+ * @param {string[]} items
+ * @param {Hello['limits']} limits
+ */
+export function entriesProblem(items, limits) {
+  if (items.length === 0) return 'Paste or type at least one link.';
+  if (items.length > limits.max_submit_items) {
+    return `At most ${limits.max_submit_items} links at a time; this has ${items.length}.`;
+  }
+  const encoder = new TextEncoder();
+  const long = items.findIndex((item) => encoder.encode(item).length > limits.max_url_bytes);
+  if (long >= 0) return `Link ${long + 1} is longer than ${limits.max_url_bytes} bytes.`;
+  return null;
+}
+
+/**
+ * A link's name: the file name its path suggests, the text of an invalid
+ * entry, or `null` when neither is known.
+ * @param {CollectedLink} link
+ */
+export function linkName(link) {
+  return link.name_hint ?? link.text ?? null;
+}
+
+/**
+ * What a link's status column says. `Not checked` is all that is known
+ * about a valid link: collecting never contacts its server. A started
+ * link stays listed, added to Downloads, until removed.
+ * @param {CollectedLink} link
+ * @returns {{ label: string, tone: Tone, detail: string | null }}
+ */
+export function linkStatus(link) {
+  if (link.job) return { label: 'Added to Downloads', tone: 'ok', detail: null };
+  if (link.check === 'invalid') {
+    return { label: 'Invalid link', tone: 'bad', detail: link.problem ?? null };
+  }
+  return {
+    label: 'Not checked',
+    tone: link.problem ? 'warn' : 'calm',
+    detail: link.problem ? `Not started: ${link.problem}` : null,
+  };
+}
+
+/**
+ * Whether `link` can be started: valid, and not started already.
+ * @param {CollectedLink} link
+ */
+export function startable(link) {
+  return link.check !== 'invalid' && !link.job;
+}
+
+/**
+ * `links` in batches, in list order. A batch split across pages shows on
+ * each.
+ * @param {readonly CollectedLink[]} links
+ * @returns {{ batch: string, collectedAt: number, links: CollectedLink[] }[]}
+ */
+export function batches(links) {
+  /** @type {{ batch: string, collectedAt: number, links: CollectedLink[] }[]} */
+  const groups = [];
+  for (const link of links) {
+    const last = groups.at(-1);
+    if (last?.batch === link.batch) last.links.push(link);
+    else groups.push({ batch: link.batch, collectedAt: link.collected_at, links: [link] });
+  }
+  return groups;
+}
+
+/**
+ * Whether `link` matches filter text `query`, already lower case: by
+ * name, host, or problem.
+ * @param {CollectedLink} link
+ * @param {string} query
+ */
+export function matches(link, query) {
+  if (query === '') return true;
+  return [linkName(link), link.host, link.problem].some((text) => text?.toLowerCase().includes(query));
+}
+
+/**
+ * `n` and a noun, singular or plural.
+ * @param {number} n
+ * @param {string} one
+ * @param {string} [many]
+ */
+export function count(n, one, many = `${one}s`) {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/**
+ * Why links were refused, in one sentence per kind of reason, so many
+ * refusals for one reason read as one line.
+ * @param {readonly RefusedLink[]} refused
+ */
+export function refusals(refused) {
+  /** @type {Map<string, number>} */
+  const reasons = new Map();
+  for (const { message } of refused) reasons.set(message, (reasons.get(message) ?? 0) + 1);
+  return [...reasons].map(([message, n]) => (n === 1 ? message : `${n} links: ${message}`)).join(' ');
+}
+
+/**
+ * When a batch was collected, for its heading.
+ * @param {number} millis
+ * @param {Date} [now]
+ */
+export function collectedWhen(millis, now = new Date()) {
+  const at = new Date(millis);
+  const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (at.toDateString() === now.toDateString()) return `today at ${time}`;
+  return `${at.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })} at ${time}`;
+}

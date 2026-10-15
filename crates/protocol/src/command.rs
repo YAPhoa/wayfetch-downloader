@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
-use wayfetch_domain::id::{BatchId, JobId, PackageId, RootId};
+use wayfetch_domain::id::{BatchId, JobId, PackageId, RootId, SourceLinkId};
+use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::version::Revision;
 
 use crate::error::{ErrorCode, ProtocolError};
@@ -30,6 +31,10 @@ use crate::instance::InstanceId;
 pub const MAX_SUBMIT_ITEMS: usize = 1000;
 /// Maximum length of one submitted URL in bytes.
 pub const MAX_URL_BYTES: usize = 8192;
+/// Maximum links waiting in the collected list, across every batch. A
+/// collect command that would exceed it is refused whole. Added in
+/// protocol 1.1.
+pub const MAX_COLLECTED_LINKS: usize = 10_000;
 
 /// A client-chosen key identifying one logical command across retries. A
 /// UUID, so clients can generate one without coordination.
@@ -173,20 +178,109 @@ impl TryFrom<Vec<InputUrl>> for SubmitItems {
     type Error = ProtocolError;
 
     fn try_from(items: Vec<InputUrl>) -> Result<Self, Self::Error> {
-        match items.len() {
-            0 => Err(ProtocolError::new(ErrorCode::InvalidRequest, "no inputs")),
-            n if n > MAX_SUBMIT_ITEMS => Err(ProtocolError::new(
-                ErrorCode::LimitExceeded,
-                "too many inputs",
-            )),
-            _ => Ok(Self(items)),
-        }
+        bounded(&items, "no inputs")?;
+        Ok(Self(items))
     }
 }
 
 impl From<SubmitItems> for Vec<InputUrl> {
     fn from(value: SubmitItems) -> Self {
         value.0
+    }
+}
+
+/// Text to collect: a bounded, non-empty list of entries, each at most
+/// [`MAX_URL_BYTES`]. Entries are kept as entered, not validated as URLs
+/// here: the engine records an entry that is not a valid link as invalid,
+/// with its problem, beside the valid ones. Added in protocol 1.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<String>", into = "Vec<String>")]
+pub struct CollectItems(Vec<String>);
+
+impl CollectItems {
+    /// The entries, in submission order.
+    pub fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<String>> for CollectItems {
+    type Error = ProtocolError;
+
+    fn try_from(items: Vec<String>) -> Result<Self, Self::Error> {
+        bounded(&items, "no links")?;
+        if let Some(i) = items.iter().position(|item| item.len() > MAX_URL_BYTES) {
+            return Err(ProtocolError::new(
+                ErrorCode::LimitExceeded,
+                &format!("item {} rejected: URL too long", i + 1),
+            ));
+        }
+        Ok(Self(items))
+    }
+}
+
+impl From<CollectItems> for Vec<String> {
+    fn from(value: CollectItems) -> Self {
+        value.0
+    }
+}
+
+/// A collected link, at the revision the client last saw. Added in
+/// protocol 1.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct LinkRef {
+    /// The link.
+    pub link: SourceLinkId,
+    /// Its revision as the client saw it.
+    pub revision: Revision,
+}
+
+/// A bounded, non-empty list of collected links, each named once. Added
+/// in protocol 1.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<LinkRef>", into = "Vec<LinkRef>")]
+pub struct LinkRefs(Vec<LinkRef>);
+
+impl LinkRefs {
+    /// The links, in the order given.
+    pub fn as_slice(&self) -> &[LinkRef] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<LinkRef>> for LinkRefs {
+    type Error = ProtocolError;
+
+    fn try_from(links: Vec<LinkRef>) -> Result<Self, Self::Error> {
+        bounded(&links, "no links")?;
+        let mut seen = std::collections::HashSet::with_capacity(links.len());
+        if !links.iter().all(|l| seen.insert(l.link)) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "a link is named more than once",
+            ));
+        }
+        Ok(Self(links))
+    }
+}
+
+impl From<LinkRefs> for Vec<LinkRef> {
+    fn from(value: LinkRefs) -> Self {
+        value.0
+    }
+}
+
+/// Checks a command's list holds 1 to [`MAX_SUBMIT_ITEMS`] entries.
+fn bounded<T>(items: &[T], empty: &str) -> Result<(), ProtocolError> {
+    match items.len() {
+        0 => Err(ProtocolError::new(ErrorCode::InvalidRequest, empty)),
+        n if n > MAX_SUBMIT_ITEMS => Err(ProtocolError::new(
+            ErrorCode::LimitExceeded,
+            "too many inputs",
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -261,6 +355,40 @@ pub enum Command {
         /// The folder.
         root: RootId,
     },
+    /// Collect links for review, as a new batch: nothing is downloaded or
+    /// fetched until they are started. An entry that is not a valid link is
+    /// kept as invalid, with its problem. Added in protocol 1.1.
+    CollectLinks {
+        /// The entries.
+        items: CollectItems,
+        /// Where the links will be saved: a permitted root that is
+        /// available now. The default destination if absent.
+        destination: Option<RootId>,
+    },
+    /// Turn collected links into downloads, each once; they stay listed
+    /// with their download until removed. A link that changed since the
+    /// client saw it, is invalid, or whose destination cannot be used is
+    /// refused and stays collected. Added in protocol 1.1.
+    StartLinks {
+        /// The links.
+        links: LinkRefs,
+    },
+    /// Remove collected links from the list. Only their collected records
+    /// go; downloads already started are not affected. Added in protocol
+    /// 1.1.
+    RemoveLinks {
+        /// The links.
+        links: LinkRefs,
+    },
+    /// Choose where collected links will be saved. The default destination
+    /// and other links keep theirs, and a link already started is refused.
+    /// Added in protocol 1.1.
+    MoveLinks {
+        /// The links.
+        links: LinkRefs,
+        /// A permitted root that is available now.
+        destination: RootId,
+    },
 }
 
 impl Permission {
@@ -272,8 +400,14 @@ impl Command {
     /// The permission the caller needs.
     pub const fn required_permission(&self) -> Permission {
         match self {
-            Self::Submit { .. } => Permission::Submit,
-            Self::Pause { .. }
+            Self::Submit { .. } | Self::CollectLinks { .. } | Self::StartLinks { .. } => {
+                Permission::Submit
+            }
+            // The list is shared: changing or dropping entries someone
+            // else collected is control, like changing their downloads.
+            Self::RemoveLinks { .. }
+            | Self::MoveLinks { .. }
+            | Self::Pause { .. }
             | Self::Resume { .. }
             | Self::Cancel { .. }
             | Self::UpdateSettings { .. }
@@ -352,6 +486,56 @@ pub enum CommandResult {
         /// Whether the command changed anything.
         changed: bool,
     },
+    /// Links were collected. Added in protocol 1.1.
+    LinksCollected {
+        /// The batch they were collected as.
+        batch: BatchId,
+        /// Entries collected as valid links.
+        collected: u32,
+        /// Entries kept as invalid.
+        invalid: u32,
+    },
+    /// A command on collected links was applied to some of them and
+    /// refused for the rest, which stay as they were. Added in protocol
+    /// 1.1.
+    LinksApplied {
+        /// The links it applied to.
+        applied: Vec<AppliedLink>,
+        /// The links it was refused for.
+        refused: Vec<RefusedLink>,
+    },
+}
+
+/// A collected link a command applied to. Added in protocol 1.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct AppliedLink {
+    /// The link.
+    pub link: SourceLinkId,
+    /// The download it started as, for a start; also for a link started
+    /// before, which is never started twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub job: Option<JobId>,
+    /// Its revision after a destination change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub revision: Option<Revision>,
+}
+
+/// A collected link a command was refused for. Added in protocol 1.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RefusedLink {
+    /// The link.
+    pub link: SourceLinkId,
+    /// Why, as an error code: `not_found` for a link that was removed,
+    /// `revision_conflict` for one that changed, `not_applicable` for an
+    /// invalid link, one already started, or a destination that cannot be
+    /// used.
+    pub code: ErrorCode,
+    /// What to do about it.
+    pub message: DiagnosticText,
 }
 
 /// What a stored idempotency record says about a newly received envelope.
