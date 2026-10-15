@@ -96,7 +96,9 @@ body {
   color: var(--ink);
 }
 
-#app { min-height: 100%; }
+/* A flow root, so the sign-in card's top margin stays inside it instead
+   of pushing the page taller than the window. */
+#app { min-height: 100%; display: flow-root; }
 
 h1, h2 { margin: 0; font-weight: 600; }
 h1 { font-size: 18px; }
@@ -360,7 +362,9 @@ code { font-family: ui-monospace, monospace; }
 .notice:empty { display: none; }
 .notice { margin: 0; padding: 6px 16px; color: var(--bad); border-bottom: 1px solid var(--line); }
 
-.table-scroll { flex: 1; min-height: 0; overflow: auto; }
+/* Positioned, so absolutely placed hidden text in the table is clipped by
+   this scroller instead of growing the page. */
+.table-scroll { position: relative; flex: 1; min-height: 0; overflow: auto; }
 
 table.jobs {
   width: 100%;

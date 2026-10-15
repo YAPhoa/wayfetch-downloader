@@ -60,13 +60,27 @@ async function select(page, job) {
 /**
  * @param {import('@playwright/test').Page} page
  * @param {string} url
+ * @param {string} [added]
  */
-async function add(page, url) {
+async function add(page, url, added = 'Added 1 download.') {
   const links = page.getByLabel('Links to download, one per line');
   if (!(await links.isVisible())) await page.getByRole('button', { name: 'Add links' }).click();
   await links.fill(url);
   await page.getByRole('button', { name: 'Add', exact: true }).click();
-  await expect(page.getByText('Added 1 download.')).toBeVisible();
+  await expect(page.getByText(added)).toBeVisible();
+}
+
+/**
+ * The page itself never scrolls: the screen fits the window, and long
+ * lists scroll inside the table.
+ * @param {import('@playwright/test').Page} page
+ */
+async function expectFitsWindow(page) {
+  const [scrolled, window] = await page.evaluate(() => [
+    document.documentElement.scrollHeight,
+    document.documentElement.clientHeight,
+  ]);
+  expect(scrolled).toBe(window);
 }
 
 test('a browser signs in, downloads, controls jobs, and outlives a daemon restart', async ({
@@ -90,6 +104,7 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   // First run: the owner is created with the setup secret.
   await page.goto(daemon.origin);
   await expect(page.getByRole('heading', { name: 'Set up Wayfetch' })).toBeVisible();
+  await expectFitsWindow(page);
   await page.getByLabel('Setup secret').fill((await daemon.setupSecret()).trim());
   await page.getByLabel('Owner name').fill('owner');
   await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
@@ -138,6 +153,7 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await daemon.start();
   await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
   await expect(page.getByText('Your session ended')).toBeVisible();
+  await expectFitsWindow(page);
   await page.getByLabel('Owner name').fill('owner');
   await page.getByLabel('Password').fill(PASSWORD);
   await page.getByRole('button', { name: 'Sign in' }).click();
@@ -190,6 +206,14 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   // The counts follow the change.
   await expect(page.getByRole('button', { name: 'Cancelled (1)' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'All (2)' })).toBeVisible();
+
+  // A long list scrolls inside the table, not the page.
+  const many = Array.from({ length: 50 }, (_, i) => fixture.put(`many-${i}.bin`, 1024));
+  await add(page, many.join('\n'), 'Added 50 downloads.');
+  await expect(page.locator('tr[data-job]')).toHaveCount(50);
+  await expectFitsWindow(page);
+  const table = page.locator('.table-scroll');
+  expect(await table.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
 
   // Text from downloads stayed text.
   expect(await page.locator('img').count()).toBe(0);
