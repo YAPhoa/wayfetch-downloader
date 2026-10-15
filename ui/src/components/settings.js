@@ -365,15 +365,7 @@ export class SettingsPage {
         h('p', { class: 'hint' }, 'Downloads already added keep their folder.'),
         client.local
           ? h('p', { class: 'hint' }, 'Choose any folder on this computer to add it.')
-          : h(
-              'p',
-              { class: 'hint' },
-              'These folders are on the server. Only folders its operator allowed are listed; the operator adds one with ',
-              h('code', null, 'wayfetchd init-root'),
-              ' and ',
-              h('code', null, '--root'),
-              '.',
-            ),
+          : h('p', { class: 'hint' }, 'These folders are on the server.'),
         h('div', { class: 'row' }, save, choose, message),
       );
       // Keyboard focus stays on the same control, such as Save, or moves

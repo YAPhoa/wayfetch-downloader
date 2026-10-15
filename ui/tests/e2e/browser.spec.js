@@ -323,6 +323,8 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   const archive = pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) });
   await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.root}`) })).toBeChecked();
   await expect(pane.getByText('Server path')).toHaveCount(2);
+  // Nothing asks for a command line.
+  await expect(page.locator('.settings-page code')).toHaveCount(0);
   await expectFitsWindow(page);
   // Row density applies at once.
   await displayLink.click();
