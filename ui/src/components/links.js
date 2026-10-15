@@ -613,13 +613,13 @@ export class LinksPage {
       );
       return;
     }
-    const folders = [...new Set(chosen.map((l) => l.destination))];
+    const folders = [...new Set(chosen.map((l) => this.linkFolder(l)))];
     const invalid = chosen.filter((l) => l.check === 'invalid').length;
     const homeless = chosen.filter((l) => l.check !== 'invalid' && this.removed(l.destination)).length;
     const where =
       folders.length === 1
-        ? this.folderName(folders[0])
-        : h('span', { title: folders.map((f) => this.folderName(f)).join('\n') }, `${folders.length} folders`);
+        ? folders[0]
+        : h('span', { title: folders.join('\n') }, `${folders.length} folders`);
     show(
       this.summary,
       h('strong', null, `${count(chosen.length, 'link')} selected`),
@@ -641,6 +641,14 @@ export class LinksPage {
   folderName(id) {
     if (id === undefined) return 'the download folder';
     return this.removed(id) ? 'A removed folder' : this.context.rootPath(id);
+  }
+
+  /**
+   * Where `link` will be saved; a removed folder by the path it had.
+   * @param {CollectedLink} link
+   */
+  linkFolder(link) {
+    return (this.removed(link.destination) && link.destination_path) || this.folderName(link.destination);
   }
 
   /**
@@ -746,7 +754,7 @@ export class LinksPage {
       },
       icon('more'),
     );
-    const folder = this.folderName(link.destination);
+    const folder = this.linkFolder(link);
     const root = this.context.settings()?.roots.find((r) => r.id === link.destination);
     return h(
       'tr',
@@ -807,7 +815,7 @@ export class LinksPage {
         { class: 'folder', title: folder },
         h('span', { class: 'path' }, folder),
         root && !root.available && h('span', { class: 'problem' }, ' (unavailable)'),
-        this.removed(link.destination) && h('span', { class: 'problem' }, ' (choose another)'),
+        this.removed(link.destination) && h('span', { class: 'problem' }, ' (removed; choose another)'),
       ),
       h('td', { class: 'row-actions' }, more),
     );

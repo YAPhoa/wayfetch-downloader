@@ -476,7 +476,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   expect(await readFile(join(films, 'kept.bin'), 'utf8')).toBe('kept');
   await page.locator('[data-key="settings-back"]').click();
   await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: /^Links/ }).click();
-  await expect(orphan.locator('td.folder')).toHaveText('A removed folder (choose another)');
+  await expect(orphan.locator('td.folder')).toHaveText(`${films} (removed; choose another)`);
   await orphan.getByRole('checkbox').check();
   await expect(page.locator('.selection-summary')).toContainText(
     '1 link saving to a removed folder will not start; choose another with Save to.',
