@@ -881,14 +881,22 @@ impl Coordinator {
                     | Command::Resume { .. }
                     | Command::UpdateSettings { .. }
                     | Command::Rename { .. }
-                    | Command::Remove { .. } => None,
+                    | Command::Remove { .. }
+                    | Command::RemoveRoot { .. } => None,
                 };
                 if let Err(e) = self.prepare(&envelope).await {
                     let _ = reply.send(Err(e));
                     return;
                 }
                 let destination = self.destinations.default_root();
-                let settings = matches!(envelope.command, Command::UpdateSettings { .. });
+                let settings = matches!(
+                    envelope.command,
+                    Command::UpdateSettings { .. } | Command::RemoveRoot { .. }
+                );
+                let removed = match envelope.command {
+                    Command::RemoveRoot { root, .. } => Some(root),
+                    _ => None,
+                };
                 let (result, interrupt, current) = self
                     .with_store(move |store| {
                         let result = store.execute(&envelope, instance, destination, now());
@@ -908,11 +916,23 @@ impl Coordinator {
                         let current = (settings && result.is_ok())
                             .then(|| store.settings().ok())
                             .flatten();
-                        (result, interrupt, current)
+                        // A replayed removal may predate adding the folder
+                        // again, so the store says whether it is gone.
+                        let gone = removed.filter(|&root| {
+                            result.is_ok()
+                                && store.root_rows().is_ok_and(|rows| {
+                                    !rows.iter().any(|r| r.id == root && r.registered)
+                                })
+                        });
+                        (result, interrupt, (current, gone))
                     })
                     .await;
+                let (current, gone) = current;
                 if let Some((revision, chosen)) = current {
                     self.destinations.set_settings(revision, chosen);
+                }
+                if let Some(root) = gone {
+                    self.destinations.remove(root);
                 }
                 if let Some(job) = interrupt {
                     if let Some(token) = self.running.get(&job) {
@@ -1016,6 +1036,7 @@ impl Coordinator {
                         path: path.to_string_lossy().into_owned(),
                         available: true,
                         problem: None,
+                        added: self.destinations.added(id),
                     }
                 });
                 let _ = reply.send(registered);
@@ -1026,8 +1047,9 @@ impl Coordinator {
 
     /// Checks a command before the store runs it. A submit needs every
     /// configured root identified that can be, so the default is current.
-    /// A settings change must name a permitted root that is available now;
-    /// a retry of one already recorded is only replayed.
+    /// A settings change must name a permitted root that is available now,
+    /// and only a root the user added can be removed; a retry of either
+    /// already recorded is only replayed.
     async fn prepare(&mut self, envelope: &CommandEnvelope) -> Result<(), ProtocolError> {
         match envelope.command {
             Command::Submit { .. } => self.refresh_destinations().await,
@@ -1048,6 +1070,26 @@ impl Coordinator {
                             &format!("the destination is unavailable: {problem}"),
                         )
                     })?;
+            }
+            // Only a folder the user added can be removed; the store checks
+            // the rest.
+            Command::RemoveRoot { root, .. } => {
+                if self.replays(envelope).await? {
+                    return Ok(());
+                }
+                self.refresh_destinations().await;
+                if self.destinations.get(root).is_none() {
+                    return Err(ProtocolError::new(
+                        ErrorCode::NotFound,
+                        "destination not found",
+                    ));
+                }
+                if !self.destinations.added(root) {
+                    return Err(ProtocolError::new(
+                        ErrorCode::NotApplicable,
+                        "the server's configuration names this folder, so it cannot be removed here",
+                    ));
+                }
             }
             // A job resumed may be waiting for its root to be found.
             Command::Resume { .. } => self.identify_destinations(),

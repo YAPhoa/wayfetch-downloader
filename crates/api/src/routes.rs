@@ -13,6 +13,7 @@
 //! | `PUT /v1/settings` | [`Command::UpdateSettings`] |
 //! | `GET /v1/folders` | [`EngineHandle::browse_folders`]: folders on the server, to choose one to add |
 //! | `POST /v1/roots` | [`EngineHandle::register_root`]: permits a server folder as a destination |
+//! | `POST /v1/roots/remove` | [`EngineHandle::execute`]: stops offering a folder the user added |
 //! | `GET /v1/events` | subscription, as server-sent events |
 //! | `GET /v1/ready` | readiness: lifecycle phase, a handshake, the host's check |
 //!
@@ -41,7 +42,7 @@ use wayfetch_engine::domain::job::JobStage;
 use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::{FolderListing, JobFilter, PageSize, RootSummary};
 use wayfetch_engine::protocol::request::{
-    AddRootRequest, JobCommandRequest, SubmitRequest, UpdateSettingsRequest,
+    AddRootRequest, JobCommandRequest, RemoveRootRequest, SubmitRequest, UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
     CommandEnvelope, ErrorCode, EventCursor, Hello, InstanceId, Query, QueryResult, StreamItem,
@@ -216,6 +217,16 @@ pub async fn add_root(
 ) -> ApiResult<RootSummary> {
     let path = std::path::PathBuf::from(request.path);
     Ok(Json(app.engine.register_root(path, &grant.0).await?))
+}
+
+/// Stops offering a folder the user added as a destination; its files
+/// stay where they are. Needs the `control` permission.
+pub async fn remove_root(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    JsonBody(request): JsonBody<RemoveRootRequest>,
+) -> ApiResult<CommandResult> {
+    execute(&app, &grant, request.into_envelope()).await
 }
 
 async fn execute(

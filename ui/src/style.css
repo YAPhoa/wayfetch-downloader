@@ -729,6 +729,11 @@ legend { padding: 0 0 4px; color: var(--muted); }
 .choice-text .path { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 .choice-text .problem { flex-basis: 100%; }
 
+/* A folder the user added has a Remove button at the end of its row. */
+.choice-row { display: flex; align-items: flex-start; gap: 8px; }
+.choice-row .choice { flex: 1; min-width: 0; }
+.remove-root { flex: none; min-height: 24px; padding: 0 8px; }
+
 .empty-state {
   padding: 12px;
   border: 1px dashed var(--line);

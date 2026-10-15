@@ -202,6 +202,85 @@ pub(super) fn update_settings(
     })
 }
 
+/// Stops offering root `id`, which the user added, at the settings
+/// revision the client saw: it stays recorded, so adding its folder again
+/// restores the same root. The coordinator has checked that the operator
+/// does not configure it. The current default, and a root that unfinished
+/// jobs save to, are refused.
+pub(super) fn remove_root(
+    tx: &Transaction<'_>,
+    expected: Revision,
+    id: RootId,
+    now: UtcTimestamp,
+) -> Result<CommandResult, ProtocolError> {
+    let (revision, current) = settings(tx)?;
+    if expected != revision {
+        return Err(ProtocolError {
+            current_revision: Some(revision),
+            ..ProtocolError::new(
+                ErrorCode::RevisionConflict,
+                "settings changed since they were read",
+            )
+        });
+    }
+    let root = sql(id)?;
+    let registered: Option<bool> = tx
+        .query_row(
+            "SELECT registered FROM roots WHERE id = ?1",
+            [root],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StoreError::from)?;
+    if registered != Some(true) {
+        return Err(ProtocolError::new(
+            ErrorCode::NotFound,
+            "destination not found",
+        ));
+    }
+    if current == Some(id) {
+        return Err(ProtocolError::new(
+            ErrorCode::NotApplicable,
+            "new downloads are saved to this folder; choose another default first",
+        ));
+    }
+    let unfinished: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE root_id = ?1 \
+             AND stage NOT IN ('complete', 'failed', 'cancelled')",
+            [root],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)?;
+    if unfinished > 0 {
+        let noun = if unfinished == 1 {
+            "download is"
+        } else {
+            "downloads are"
+        };
+        return Err(ProtocolError::new(
+            ErrorCode::NotApplicable,
+            &format!(
+                "{unfinished} unfinished {noun} saving to this folder; let them finish or cancel them first"
+            ),
+        ));
+    }
+    let next = revision
+        .next()
+        .map_err(|_| StoreError::Corrupt("settings revision"))?;
+    tx.execute("UPDATE roots SET registered = 0 WHERE id = ?1", [root])
+        .map_err(StoreError::from)?;
+    tx.execute(
+        "UPDATE settings SET revision = ?1, updated_at = ?2 WHERE id = 1",
+        params![sql(next)?, now.unix_millis()],
+    )
+    .map_err(StoreError::from)?;
+    Ok(CommandResult::SettingsUpdated {
+        revision: next,
+        changed: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

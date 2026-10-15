@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 1, minor: 0 });
+export const PROTOCOL = Object.freeze({ major: 1, minor: 1 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -87,6 +87,12 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 0 });
  *     target: string,
  *     expectedRevision: number,
  *     defaultRoot: RootId,
+ *   }) => Promise<CommandResult>,
+ *   removeRoot: (request: {
+ *     idempotencyKey: string,
+ *     target: string,
+ *     expectedRevision: number,
+ *     root: RootId,
  *   }) => Promise<CommandResult>,
  *   subscribe: (after: EventCursor | null, sink: StreamSink) => Subscription,
  *   chooseDownloadFolder?: () => Promise<RootSummary | null>,

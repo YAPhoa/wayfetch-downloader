@@ -158,6 +158,7 @@ is never printed.
 | `PUT /v1/settings` | Choose the default: `{"idempotency_key", "target", "expected_revision", "default_root": "root-N"}` (needs `control`) |
 | `GET /v1/folders` | The folders inside `path` (absolute; the top of the filesystem if absent), without hidden ones, at most 1,000 (needs `control`) |
 | `POST /v1/roots` | Add the server folder `{"path"}` as a destination, returning it with its `id` (needs `control`) |
+| `POST /v1/roots/remove` | Stop offering a folder the user added (`{"idempotency_key", "target", "expected_revision", "root"}`); its files stay (needs `control`) |
 | `GET /v1/events` | Server-sent events: `hello`, `event`, `progress`, `resync` |
 | `GET /v1/ready` | Readiness, without a token: `200 {"ready":true}`, or `503` with a `reason` |
 | `GET /v1/auth/session`, `POST /v1/auth/{setup,login,logout}` | Browser sign-in; see [Browser access](#browser-access) |

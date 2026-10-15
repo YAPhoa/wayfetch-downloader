@@ -362,6 +362,9 @@ pub(crate) struct Destinations {
     known: BTreeMap<RootId, PathBuf>,
     /// Configured paths not identified yet, in configuration order.
     pending: Vec<PathBuf>,
+    /// Every path the operator configured, the download root included:
+    /// permitted while configured, so the user cannot remove them.
+    configured: Vec<PathBuf>,
     /// Settings revision.
     revision: Revision,
     /// The user's chosen default, which may no longer be permitted.
@@ -383,6 +386,12 @@ impl Destinations {
             fallback: config.download_root.clone(),
             known,
             pending: config.roots.clone(),
+            configured: config
+                .roots
+                .iter()
+                .chain(&config.download_root)
+                .cloned()
+                .collect(),
             revision,
             chosen,
         })
@@ -430,6 +439,19 @@ impl Destinations {
     /// Records a root the host registered.
     pub(crate) fn add(&mut self, id: RootId, path: PathBuf) {
         self.known.insert(id, path);
+    }
+
+    /// Whether permitted root `id` was added by the user rather than
+    /// configured, so they may remove it.
+    pub(crate) fn added(&self, id: RootId) -> bool {
+        self.known
+            .get(&id)
+            .is_some_and(|path| !self.configured.contains(path))
+    }
+
+    /// Forgets a root the user removed.
+    pub(crate) fn remove(&mut self, id: RootId) {
+        self.known.remove(&id);
     }
 
     /// Whether another root can be permitted while `registering` others
@@ -509,6 +531,7 @@ impl Destinations {
                     path: root.path.to_string_lossy().into_owned(),
                     available: available.is_ok(),
                     problem: available.err().map(|e| DiagnosticText::new(&e)),
+                    added: self.added(root.id),
                 })
                 .collect(),
         }

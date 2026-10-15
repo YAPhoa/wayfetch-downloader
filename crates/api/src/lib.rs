@@ -193,6 +193,7 @@ impl Api {
             )
             .route("/v1/folders", get(routes::folders))
             .route("/v1/roots", post(routes::add_root))
+            .route("/v1/roots/remove", post(routes::remove_root))
             .route("/v1/events", get(routes::events))
             .route_layer(middleware::from_fn_with_state(
                 state.clone(),

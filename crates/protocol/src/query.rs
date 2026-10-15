@@ -257,6 +257,11 @@ pub struct RootSummary {
     /// Why it is unavailable, if it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<DiagnosticText>,
+    /// Whether the user added it, rather than the operator's configuration,
+    /// so [`crate::Command::RemoveRoot`] may remove it. Added in protocol
+    /// 1.1.
+    #[serde(default)]
+    pub added: bool,
 }
 
 /// The most folders a [`FolderListing`] names.
@@ -455,6 +460,7 @@ mod tests {
                 path: "/media".into(),
                 available: false,
                 problem: Some(DiagnosticText::new("missing")),
+                added: true,
             }],
         });
         assert_eq!(
@@ -463,8 +469,12 @@ mod tests {
                 "type": "settings",
                 "revision": 3,
                 "default_root": "root-2",
-                "roots": [{"id": "root-2", "path": "/media", "available": false, "problem": "missing"}],
+                "roots": [{"id": "root-2", "path": "/media", "available": false, "problem": "missing", "added": true}],
             })
         );
+        // A 1.0 engine's roots carry no `added`: none can be removed.
+        let older: RootSummary =
+            from_value(json!({"id": "root-2", "path": "/media", "available": true})).unwrap();
+        assert!(!older.added);
     }
 }

@@ -172,6 +172,35 @@ impl UpdateSettingsRequest {
     }
 }
 
+/// Stops offering a folder the user added as a destination.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RemoveRootRequest {
+    /// Identifies the command across retries.
+    pub idempotency_key: IdempotencyKey,
+    /// The instance the client believes it is talking to.
+    pub target: InstanceId,
+    /// The settings revision the client last saw.
+    pub expected_revision: Revision,
+    /// The folder.
+    pub root: RootId,
+}
+
+impl RemoveRootRequest {
+    /// The command envelope.
+    pub fn into_envelope(self) -> CommandEnvelope {
+        CommandEnvelope {
+            idempotency_key: self.idempotency_key,
+            target: self.target,
+            command: Command::RemoveRoot {
+                expected_revision: self.expected_revision,
+                root: self.root,
+            },
+        }
+    }
+}
+
 /// Permits a folder on the engine's host as a destination, by its path.
 /// The path is checked and the folder initialized by the engine; choosing
 /// it as the default is a separate settings change.

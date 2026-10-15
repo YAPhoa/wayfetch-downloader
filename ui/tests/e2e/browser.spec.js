@@ -5,7 +5,7 @@
 
 import { expect, test } from '@playwright/test';
 
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { Daemon, Fixture, MIB, content, freePort } from './harness.js';
@@ -390,6 +390,16 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await pane.getByRole('button', { name: 'Add folder…' }).click();
   await page.keyboard.press('Escape');
   await expect(pane.getByText('No folder was chosen; nothing changed.')).toBeVisible();
+  // Only a folder the user added can be removed; its files stay.
+  const films = join(shares, 'films');
+  await writeFile(join(films, 'kept.bin'), 'kept');
+  await expect(pane.getByRole('button', { name: /^Remove / })).toHaveCount(1);
+  await pane.getByRole('button', { name: `Remove ${films}` }).click();
+  await expect(pane.getByText(`Removed ${films}. Its files stay there;`, { exact: false })).toBeVisible();
+  await expect(pane.getByRole('radio', { name: new RegExp(`^${films}`) })).toHaveCount(0);
+  await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) })).toBeChecked();
+  await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) })).toBeFocused();
+  expect(await readFile(join(films, 'kept.bin'), 'utf8')).toBe('kept');
   await pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) }).check();
   // The download kept running meanwhile, and finishes while Settings is shown.
   expect(await daemon.published(running).then(() => 'published', () => 'not yet')).toBe('not yet');

@@ -37,8 +37,8 @@ use wayfetch_protocol::domain::version::Revision;
 use wayfetch_protocol::event::{EventKind, ResyncReason};
 use wayfetch_protocol::query::{JobFilter, JobSummary, PageSize, Settings};
 use wayfetch_protocol::{
-    Command, CommandEnvelope, CommandResult, ErrorCode, Permission, Query, QueryResult, StreamItem,
-    Subscribe,
+    Command, CommandEnvelope, CommandResult, ErrorCode, Permission, ProtocolError, Query,
+    QueryResult, StreamItem, Subscribe,
 };
 
 /// A file the fake server holds.
@@ -1077,6 +1077,133 @@ async fn the_owner_lists_server_folders_to_choose_one_to_register() {
     }
     let registered = handle.register_root(base.join("Alpha"), ALL).await.unwrap();
     assert!(registered.available);
+    shutdown(owner).await;
+}
+
+fn remove_root(owner: &EngineOwner, revision: Revision, root: RootId) -> CommandEnvelope {
+    envelope(
+        owner,
+        Command::RemoveRoot {
+            expected_revision: revision,
+            root,
+        },
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_idle_folder_the_user_added_can_be_removed() {
+    let env = env();
+    let mut resource = Resource::new(body(16 * KIB));
+    resource.stall_at = Some(8 * KIB);
+    env.server.put("/slow.bin", resource);
+    let owner = env.start().await;
+    let handle = owner.handle();
+    let chosen = folder(&env, "chosen");
+    let added = handle.register_root(chosen.clone(), ALL).await.unwrap();
+    assert!(added.added);
+    let listed = settings(&owner).await;
+    assert!(listed.roots.iter().any(|r| r.id == ROOT && !r.added));
+    let code = |result: Result<CommandResult, ProtocolError>| result.unwrap_err().code;
+
+    // The operator's folder, a stale revision, and the default are refused.
+    let revision = listed.revision;
+    let refused = handle
+        .execute(remove_root(&owner, revision, ROOT), ALL)
+        .await;
+    assert_eq!(code(refused), ErrorCode::NotApplicable);
+    let stale = Revision::INITIAL
+        .next()
+        .unwrap()
+        .next()
+        .unwrap()
+        .next()
+        .unwrap();
+    let refused = handle
+        .execute(remove_root(&owner, stale, added.id), ALL)
+        .await;
+    assert_eq!(code(refused), ErrorCode::RevisionConflict);
+    handle
+        .execute(choose(&owner, revision, added.id), ALL)
+        .await
+        .unwrap();
+    let revision = settings(&owner).await.revision;
+    let refused = handle
+        .execute(remove_root(&owner, revision, added.id), ALL)
+        .await;
+    assert_eq!(code(refused), ErrorCode::NotApplicable);
+
+    // A download still saving there keeps it.
+    let [job] = submit(&owner, &["/slow.bin"]).await[..] else {
+        panic!()
+    };
+    wait_for(&owner, job, |j| j.bytes_done > 0).await;
+    handle
+        .execute(choose(&owner, revision, ROOT), ALL)
+        .await
+        .unwrap();
+    let revision = settings(&owner).await.revision;
+    let refused = handle
+        .execute(remove_root(&owner, revision, added.id), ALL)
+        .await;
+    assert_eq!(code(refused), ErrorCode::NotApplicable);
+    env.server.update("/slow.bin", |r| r.stall_at = None);
+    complete(&owner, job).await;
+
+    // Then it goes, its files stay, and a retry replays.
+    let removal = remove_root(&owner, revision, added.id);
+    let removed = handle.execute(removal.clone(), ALL).await.unwrap();
+    assert!(matches!(
+        removed,
+        CommandResult::SettingsUpdated { changed: true, .. }
+    ));
+    assert_eq!(handle.execute(removal.clone(), ALL).await.unwrap(), removed);
+    assert!(
+        !settings(&owner)
+            .await
+            .roots
+            .iter()
+            .any(|r| r.id == added.id)
+    );
+    assert!(chosen.join("slow.bin").exists());
+    let refused = handle
+        .execute(
+            remove_root(&owner, settings(&owner).await.revision, added.id),
+            ALL,
+        )
+        .await;
+    assert_eq!(code(refused), ErrorCode::NotFound);
+
+    // Adding the folder again brings back the same root, and an old
+    // removal replayed afterwards does not hide it.
+    let again = handle.register_root(chosen.clone(), ALL).await.unwrap();
+    assert_eq!(again.id, added.id);
+    assert_eq!(handle.execute(removal, ALL).await.unwrap(), removed);
+    assert!(
+        settings(&owner)
+            .await
+            .roots
+            .iter()
+            .any(|r| r.id == added.id)
+    );
+    shutdown(owner).await;
+
+    // A removal lasts across restarts.
+    let owner = env.start().await;
+    let revision = settings(&owner).await.revision;
+    owner
+        .handle()
+        .execute(remove_root(&owner, revision, added.id), ALL)
+        .await
+        .unwrap();
+    shutdown(owner).await;
+    let owner = env.start().await;
+    assert!(
+        !settings(&owner)
+            .await
+            .roots
+            .iter()
+            .any(|r| r.id == added.id)
+    );
     shutdown(owner).await;
 }
 

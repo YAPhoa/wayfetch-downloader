@@ -520,6 +520,43 @@ async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
             .any(|r| r["id"] == root["id"]),
         "{settings}"
     );
+    assert_eq!(root["added"], true);
+
+    // A folder the user added can be removed, with `control`; the
+    // operator's cannot. Its files stay.
+    std::fs::write(parent.join("films/kept.bin"), b"kept").unwrap();
+    let removal = |root: &serde_json::Value| {
+        client.command(json!({ "expected_revision": settings["revision"], "root": root["id"] }))
+    };
+    let remove = removal(&root);
+    assert_eq!(
+        reader.post("/v1/roots/remove", &remove).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let configured = settings["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["added"] == false)
+        .unwrap();
+    let (status, error) = client.post("/v1/roots/remove", &removal(configured)).await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::CONFLICT, &"not_applicable".into())
+    );
+    let (status, removed) = client.post("/v1/roots/remove", &remove).await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(removed["type"], "settings_updated");
+    let (_, settings) = client.get("/v1/settings").await;
+    assert!(
+        !settings["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == root["id"]),
+        "{settings}"
+    );
+    assert!(parent.join("films/kept.bin").exists());
     // The daemon's own state cannot become a destination.
     let (status, error) = client
         .post("/v1/roots", &json!({ "path": dirs.state }))
