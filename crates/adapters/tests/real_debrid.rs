@@ -11,7 +11,8 @@ use support::{
     Answer, CLIENT_SECRET, CREDENTIALS_PATH, DEVICE_CODE, DEVICE_PATH, Server, TOKEN_PATH,
     USER_CODE, USER_PATH,
 };
-use wayfetch_adapters::real_debrid::{Endpoint, OPEN_SOURCE_CLIENT_ID, RealDebrid};
+use wayfetch_adapters::Endpoint;
+use wayfetch_adapters::real_debrid::{OFFICIAL_API, OPEN_SOURCE_CLIENT_ID, RealDebrid};
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
     AccountProvider, Checked, PollOutcome, Profile, ProviderError,
@@ -357,7 +358,7 @@ async fn free_accounts_have_no_expiry() {
 fn downloads_are_not_claimed() {
     let support = RealDebrid::new(
         Arc::new(HttpTransport::new(HttpConfig::default()).unwrap()),
-        Endpoint::official(),
+        Endpoint::official(OFFICIAL_API),
     )
     .support();
     assert!(!support.downloads);

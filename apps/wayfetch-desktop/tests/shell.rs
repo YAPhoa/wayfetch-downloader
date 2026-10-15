@@ -1605,8 +1605,10 @@ fn account_cell(n: usize, text: &str) -> String {
 async fn an_account_is_signed_in_and_managed_through_the_window() {
     let provider = rd::Server::start().await;
     let mut dirs = Dirs::new().await;
-    dirs.args
-        .extend(["--real-debrid-endpoint".to_owned(), provider.base()]);
+    dirs.args.extend([
+        "--provider-endpoint".to_owned(),
+        format!("real-debrid={}", provider.base()),
+    ]);
     let shell = Shell::launch(&dirs).await;
     shell.click("[data-key=\"open-settings\"]").await;
     shell

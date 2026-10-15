@@ -1604,8 +1604,10 @@ async fn accounts_are_signed_in_and_managed_over_http() {
     );
     // No --credential-key: the daemon keeps its key beside the token file.
     let key = dirs.tokens.with_file_name("credential-key");
-    dirs.args
-        .extend(["--real-debrid-endpoint".into(), provider.base().into()]);
+    dirs.args.extend([
+        "--provider-endpoint".into(),
+        format!("real-debrid={}", provider.base()).into(),
+    ]);
     let daemon = Daemon::start(&dirs).await;
     let client = daemon.owner();
 
