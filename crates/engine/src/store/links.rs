@@ -423,8 +423,9 @@ pub(super) fn list(
     let mut items = tx
         .prepare(
             "SELECT s.id, s.batch_id, b.created_at, s.revision, s.invalid, s.input_url, \
-             s.root_id, s.problem FROM source_links s \
+             s.root_id, s.problem, r.path FROM source_links s \
              JOIN input_batches b ON b.id = s.batch_id \
+             LEFT JOIN roots r ON r.id = s.root_id \
              WHERE s.held = 1 AND s.id > ?1 ORDER BY s.id LIMIT ?2",
         )?
         .query_map(
@@ -439,11 +440,12 @@ pub(super) fn list(
                     r.get::<_, String>(5)?,
                     r.get::<_, Option<i64>>(6)?,
                     r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
                 ))
             },
         )?
         .map(|row| {
-            let (id, batch, created, revision, invalid, text, root, problem) = row?;
+            let (id, batch, created, revision, invalid, text, root, problem, path) = row?;
             let url = (!invalid).then(|| Url::parse(&text).ok()).flatten();
             if !invalid && url.is_none() {
                 return Err(StoreError::Corrupt("collected link"));
@@ -465,6 +467,7 @@ pub(super) fn list(
                     .map(|name| name.as_str().to_owned()),
                 text: invalid.then(|| shown_text(&text)),
                 destination: root.map(key).transpose()?,
+                destination_path: path,
                 problem: problem.as_deref().map(DiagnosticText::new),
             })
         })
