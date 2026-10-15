@@ -82,8 +82,10 @@ pub struct EngineArgs {
     /// The key file that encrypts provider account credentials: 64 hex
     /// digits, readable by its owner only, outside the state directory.
     /// Created when the first account is added if it does not exist then,
-    /// and never replaced afterwards. Without it, accounts cannot be added;
-    /// downloads work either way.
+    /// and never replaced afterwards. `wayfetchd` defaults to
+    /// `credential-key` beside its token file, the desktop app to a file
+    /// beside the state directory; without one, accounts cannot be added.
+    /// Downloads work either way.
     #[arg(long, value_name = "FILE")]
     pub credential_key: Option<PathBuf>,
     /// Another address serving Real-Debrid's API, for testing against a
@@ -94,9 +96,7 @@ pub struct EngineArgs {
 
 impl EngineArgs {
     /// Uses a key file beside the state directory, named after it, unless
-    /// one was given: for a desktop, where one person owns both. A server
-    /// operator names the key file, so it can live on other storage than
-    /// the state.
+    /// one was given: for a desktop, where one person owns both.
     pub fn default_credential_key(&mut self) -> Result<(), String> {
         if self.credential_key.is_none() {
             let state = absolute(&self.state.state_dir)?;
