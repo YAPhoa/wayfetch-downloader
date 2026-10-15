@@ -454,6 +454,18 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(pane.getByText('No folder was chosen; nothing changed.')).toBeVisible();
   // Only a folder the user added can be removed; its files stay.
   const films = join(shares, 'films');
+  // Links collected to be saved there do not keep it; they show it as
+  // removed until given another folder.
+  await page.locator('[data-key="settings-back"]').click();
+  await page.getByRole('button', { name: 'Add links' }).click();
+  await page.getByLabel('Save to').selectOption({ label: films });
+  await page.getByLabel('Links, one per line').fill(fixture.put('orphan.bin', MIB));
+  await page.getByRole('button', { name: 'Collect links' }).click();
+  await expect(page).toHaveURL(`${daemon.origin}/links`);
+  const orphan = page.locator('tr[data-link]', { has: page.locator('td.name', { hasText: /^orphan\.bin$/ }) });
+  await expect(orphan.locator('td.folder')).toHaveText(films);
+  await settingsButton.click();
+  await folderLink.click();
   await writeFile(join(films, 'kept.bin'), 'kept');
   await expect(pane.getByRole('button', { name: /^Remove / })).toHaveCount(1);
   await pane.getByRole('button', { name: `Remove ${films}` }).click();
@@ -462,6 +474,19 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) })).toBeChecked();
   await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) })).toBeFocused();
   expect(await readFile(join(films, 'kept.bin'), 'utf8')).toBe('kept');
+  await page.locator('[data-key="settings-back"]').click();
+  await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: /^Links/ }).click();
+  await expect(orphan.locator('td.folder')).toHaveText('A removed folder (choose another)');
+  await orphan.getByRole('checkbox').check();
+  await expect(page.locator('.selection-summary')).toContainText(
+    '1 link saving to a removed folder will not start; choose another with Save to.',
+  );
+  await page.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(page.getByText('No links collected.')).toBeVisible();
+  expect(fixture.requested).not.toContain('orphan.bin');
+  await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: 'Downloads' }).click();
+  await settingsButton.click();
+  await folderLink.click();
   await pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) }).check();
   // The download kept running meanwhile, and finishes while Settings is shown.
   expect(await daemon.published(running).then(() => 'published', () => 'not yet')).toBe('not yet');
