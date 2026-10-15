@@ -1512,7 +1512,7 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
         .wait_for("document.querySelector('.links-page .notice > span')?.textContent === 'Removed 1 link from the list.'")
         .await;
 
-    // Only the chosen link starts; the other stays, unfetched.
+    // Only the chosen link starts; the other waits, unfetched.
     tick(&shell, "start.bin").await;
     shell
         .wait_for("document.querySelector('.selection-summary strong')?.textContent === '1 link selected'")
@@ -1523,7 +1523,14 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
     shell
         .wait_for("document.querySelector('.links-page .notice > span')?.textContent.startsWith('Started 1 download.')")
         .await;
-    assert_eq!(collected(&shell).await, json!(["keep.bin"]));
+    // The started link stays listed, added to Downloads.
+    assert_eq!(collected(&shell).await, json!(["keep.bin", "start.bin"]));
+    assert_eq!(
+        shell
+            .js("return [...document.querySelectorAll('.links-page tr.started td.link-status')].map((c) => c.textContent);")
+            .await,
+        json!(["Added to Downloads"])
+    );
     eventually(|| async {
         std::fs::read(dirs.root.join("start.bin"))
             .ok()

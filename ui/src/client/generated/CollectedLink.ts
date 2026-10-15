@@ -2,6 +2,7 @@
 import type { BatchId } from "./BatchId.js";
 import type { DiagnosticText } from "./DiagnosticText.js";
 import type { HostName } from "./HostName.js";
+import type { JobId } from "./JobId.js";
 import type { LinkCheck } from "./LinkCheck.js";
 import type { Revision } from "./Revision.js";
 import type { RootId } from "./RootId.js";
@@ -9,7 +10,8 @@ import type { SourceLinkId } from "./SourceLinkId.js";
 import type { UtcTimestamp } from "./UtcTimestamp.js";
 
 /**
- * A link waiting in the collected list. Added in protocol 1.1.
+ * A link in the collected list: waiting to be started, or started and
+ * kept until removed. Added in protocol 1.1.
  */
 export type CollectedLink = { 
 /**
@@ -57,6 +59,10 @@ destination?: RootId,
  * is refused at start until given another.
  */
 destination_path?: string, 
+/**
+ * The download it was added as, once started.
+ */
+job?: JobId, 
 /**
  * Why it is invalid, or why it was last refused when started.
  */

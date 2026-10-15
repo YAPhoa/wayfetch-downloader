@@ -608,7 +608,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
     '1 link saving to a removed folder will not start; choose another with Save to.',
   );
   await page.getByRole('button', { name: 'Remove', exact: true }).click();
-  await expect(page.getByText('No links collected.')).toBeVisible();
+  await expect(orphan).toHaveCount(0);
   expect(fixture.requested).not.toContain('orphan.bin');
   await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: 'Downloads' }).click();
   await settingsButton.click();
@@ -804,6 +804,13 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(`${daemon.origin}/links`);
   await expect(views.getByRole('link', { name: 'Links' })).toHaveAttribute('aria-current', 'page');
+  // Links the earlier tests started stay listed, added to Downloads, until
+  // removed; removing them leaves their downloads.
+  await expect(page.locator('tr.started').first()).toBeVisible();
+  await expect(page.locator('tr.started td.link-status').first()).toHaveText('Added to Downloads');
+  await page.locator('[data-key="select-all-links"]').check();
+  await expect(page.getByRole('button', { name: 'Start selected' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(page.getByText('No links collected.')).toBeVisible();
 
   // Add links is a page of its own. Leaving it collects nothing, and
@@ -900,9 +907,10 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(start).toBeEnabled();
   await start.click();
   await expect(page.getByText('Started 1 download.')).toBeVisible();
-  await expect(linkRow('review-a.bin')).toHaveCount(0);
-  await expect(linkRow('review-b.bin')).toHaveCount(1);
-  await expect(views.getByRole('link', { name: 'Links (1)' })).toBeVisible();
+  await expect(linkRow('review-a.bin').locator('td.link-status')).toHaveText('Added to Downloads');
+  await expect(linkRow('review-a.bin').getByRole('checkbox')).not.toBeChecked();
+  await expect(linkRow('review-b.bin').locator('td.link-status')).toHaveText('Not checked');
+  await expect(views.getByRole('link', { name: 'Links (2)' })).toBeVisible();
   await expect
     .poll(async () => (await daemon.published('review-a.bin', daemon.root).catch(() => null))?.equals(content(0, MIB)))
     .toBe(true);
@@ -921,8 +929,9 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.emulateMedia({ colorScheme: 'light' });
 
-  // The rest are removed: nothing is downloaded, and Downloads has the one
-  // started.
+  // Both are removed from the list: nothing more is downloaded, and
+  // Downloads keeps the one started.
+  await linkRow('review-a.bin').getByRole('checkbox').check();
   await linkRow('review-b.bin').getByRole('checkbox').check();
   await page.getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(page.getByText('No links collected.')).toBeVisible();

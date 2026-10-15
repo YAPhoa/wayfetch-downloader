@@ -333,7 +333,8 @@ pub enum LinkCheck {
     Invalid,
 }
 
-/// A link waiting in the collected list. Added in protocol 1.1.
+/// A link in the collected list: waiting to be started, or started and
+/// kept until removed. Added in protocol 1.1.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct CollectedLink {
@@ -372,6 +373,10 @@ pub struct CollectedLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub destination_path: Option<String>,
+    /// The download it was added as, once started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub job: Option<JobId>,
     /// Why it is invalid, or why it was last refused when started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
