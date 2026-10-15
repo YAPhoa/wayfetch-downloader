@@ -10,6 +10,8 @@
 //! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, rename, or remove |
 //! | `update_settings` | [`UpdateSettingsRequest`]: choose the default destination |
 //! | `choose_download_folder` | the native folder dialog; the chosen folder becomes a permitted destination |
+//! | `open_file` | opens a finished job's file with this computer's default application |
+//! | `reveal_file` | opens the folder holding a finished job's file |
 //! | `subscribe` | an event subscription, delivered on a channel |
 //! | `acknowledge` | the renderer has handled a subscription's items |
 //! | `unsubscribe` | ends a subscription |
@@ -19,7 +21,8 @@
 //! the renderer has no filesystem, database, shell, or network access.
 //! Downloads go only to roots the engine permits: configured ones, and
 //! folders the user picked in the host's native dialog. The renderer never
-//! sends a path; it chooses among roots by ID.
+//! sends a path; it chooses among roots by ID, and names a job to open,
+//! whose file the engine locates and checks is still the one it published.
 //!
 //! Arguments and results are the protocol's own JSON, the same the HTTP
 //! API carries, and errors are [`ProtocolError`]s, so idempotency,
@@ -27,6 +30,8 @@
 //! behave as they do over HTTP. The window belongs to the person signed in
 //! to this computer's session, so the host grants it the local owner's
 //! permissions (section 4.6); nothing from the renderer can widen them.
+
+use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -121,6 +126,41 @@ pub async fn choose_download_folder(
         .register_root(folder, GRANTED)
         .await
         .map(Some)
+}
+
+/// Opens a finished job's file with this computer's default application.
+#[tauri::command]
+pub async fn open_file(desktop: State<'_, Desktop>, job: Value) -> IpcResult<()> {
+    let file = desktop.engine.published_path(decode(job)?, GRANTED).await?;
+    launch(file).await
+}
+
+/// Opens the folder holding a finished job's file in the file manager.
+#[tauri::command]
+pub async fn reveal_file(desktop: State<'_, Desktop>, job: Value) -> IpcResult<()> {
+    let file = desktop.engine.published_path(decode(job)?, GRANTED).await?;
+    let folder = file.parent().map(Path::to_owned).ok_or_else(not_opened)?;
+    launch(folder).await
+}
+
+/// Hands `path`, which the engine located, to the desktop's handler for
+/// it. `opener` runs `xdg-open` with the path as one argument, never
+/// through a shell command line, and the path is absolute, so it is never
+/// read as an option or a URL. The handler runs detached: closing what it
+/// opens is the user's business, and the engine is not involved.
+async fn launch(path: PathBuf) -> IpcResult<()> {
+    debug_assert!(path.is_absolute());
+    tokio::task::spawn_blocking(move || opener::open(&path))
+        .await
+        .map_err(|_| not_opened())?
+        .map_err(|_| not_opened())
+}
+
+fn not_opened() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::NotApplicable,
+        "this computer has no application to open it",
+    )
 }
 
 /// Follows durable events after `after`, or from now. Items arrive on

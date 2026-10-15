@@ -21,6 +21,10 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 # The native folder dialog, with the GTK 3 backend the WebView already
 # links; no XDG portal or D-Bus stack (see src/picker.rs).
 rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
+# Opens a finished download, or the folder holding it, through the
+# desktop's own handler (xdg-open) with the path as one argument;
+# never a shell command line (see src/ipc.rs).
+opener = { version = "0.9.0", default-features = false }
 
 [features]
 # Replaces the folder dialog with a scripted answer, for the real-window

@@ -5,7 +5,9 @@
 // Arguments and answers are the protocol's JSON, as over HTTP, and the
 // host's refusals are the protocol's errors, so the views behave the same
 // in both shells. There is no sign-in: the window belongs to the person
-// using this computer, and the host decides what it may do.
+// using this computer, and the host decides what it may do. Being local,
+// this client can also show the host's folder dialog and open a finished
+// job's file or folder; each names a job, never a path.
 //
 // Event subscriptions arrive on a Tauri channel. The host sends a bounded
 // number of items ahead of this client's acknowledgements, so a page that
@@ -23,11 +25,21 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/contract.js').JobId} JobId
  * @typedef {import('../client/contract.js').JobAction} JobAction
  * @typedef {import('../client/contract.js').JobStage} JobStage
+ * @typedef {import('../client/contract.js').Permission} Permission
+ * @typedef {import('../client/contract.js').RootId} RootId
+ * @typedef {import('../client/contract.js').RootSummary} RootSummary
  * @typedef {import('../client/generated/Query.js').Query} Query
  * @typedef {import('../client/generated/ProtocolError.js').ProtocolError} ProtocolError
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
  * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
+ * @typedef {import('../client/generated/UpdateSettingsRequest.js').UpdateSettingsRequest} UpdateSettingsRequest
  */
+
+/**
+ * What the host grants the window: the local owner's permissions.
+ * @type {readonly Permission[]}
+ */
+const OWNER = Object.freeze(['read', 'submit', 'control', 'sources']);
 
 /**
  * The parts of Tauri's global API (`window.__TAURI__.core`) this client
@@ -70,6 +82,9 @@ export class DesktopIpcClient {
   /** @param {TauriCore} [core] */
   constructor(core = tauriCore()) {
     this.core = core;
+    this.permissions = OWNER;
+    /** The engine runs in this app, on this computer. */
+    this.local = true;
   }
 
   hello() {
@@ -107,9 +122,9 @@ export class DesktopIpcClient {
 
   /**
    * @param {JobId} job
-   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number }} request
+   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number, name?: string }} request
    */
-  jobCommand(job, { idempotencyKey, target, action, expectedRevision }) {
+  jobCommand(job, { idempotencyKey, target, action, expectedRevision, name }) {
     /** @type {JobCommandRequest} */
     const request = {
       idempotency_key: idempotencyKey,
@@ -117,7 +132,63 @@ export class DesktopIpcClient {
       action,
       expected_revision: expectedRevision,
     };
+    if (name !== undefined) request.name = name;
     return this.call('job_command', { job, request });
+  }
+
+  /** @param {JobId} job */
+  async jobSource(job) {
+    /** @type {Query} */
+    const query = { type: 'job_source', job };
+    const result = await this.call('query', { query });
+    return String(result.url);
+  }
+
+  settings() {
+    /** @type {Query} */
+    const query = { type: 'settings' };
+    return this.call('query', { query });
+  }
+
+  /**
+   * @param {{ idempotencyKey: string, target: string, expectedRevision: number, defaultRoot: RootId }} request
+   */
+  updateSettings({ idempotencyKey, target, expectedRevision, defaultRoot }) {
+    /** @type {UpdateSettingsRequest} */
+    const request = {
+      idempotency_key: idempotencyKey,
+      target,
+      expected_revision: expectedRevision,
+      default_root: defaultRoot,
+    };
+    return this.call('update_settings', { request });
+  }
+
+  /**
+   * Shows the host's folder dialog; the folder chosen becomes a permitted
+   * destination. `null` if the dialog was cancelled.
+   * @returns {Promise<RootSummary | null>}
+   */
+  chooseDownloadFolder() {
+    return this.call('choose_download_folder');
+  }
+
+  /**
+   * Opens a finished job's file with this computer's default application.
+   * @param {JobId} job
+   * @returns {Promise<void>}
+   */
+  openFile(job) {
+    return this.call('open_file', { job });
+  }
+
+  /**
+   * Shows a finished job's file in this computer's file manager.
+   * @param {JobId} job
+   * @returns {Promise<void>}
+   */
+  revealFile(job) {
+    return this.call('reveal_file', { job });
   }
 
   /**

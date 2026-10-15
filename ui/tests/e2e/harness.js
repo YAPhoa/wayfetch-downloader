@@ -138,9 +138,9 @@ export async function freePort() {
 }
 
 /**
- * A `wayfetchd` with its own state directory, download root, token file,
- * and auth directory, serving browsers on a fixed loopback port across
- * restarts.
+ * A `wayfetchd` with its own state directory, download root, a second
+ * permitted folder, token file, and auth directory, serving browsers on a
+ * fixed loopback port across restarts.
  */
 export class Daemon {
   /** @param {number} port */
@@ -156,10 +156,13 @@ export class Daemon {
     this.dir = await mkdtemp(join(tmpdir(), 'wayfetch-ui-'));
     this.state = join(this.dir, 'state');
     this.root = join(this.dir, 'downloads');
+    this.archive = join(this.dir, 'archive');
     this.auth = join(this.dir, 'auth');
-    await mkdir(this.root);
-    const init = spawnSync(WAYFETCHD, ['init-root', '--state-dir', this.state, this.root]);
-    if (init.status !== 0) throw new Error(`init-root failed: ${init.stderr}`);
+    for (const folder of [this.root, this.archive]) {
+      await mkdir(folder);
+      const init = spawnSync(WAYFETCHD, ['init-root', '--state-dir', this.state, folder]);
+      if (init.status !== 0) throw new Error(`init-root failed: ${init.stderr}`);
+    }
     return this;
   }
 
@@ -170,6 +173,7 @@ export class Daemon {
         'run',
         '--state-dir', /** @type {string} */ (this.state),
         '--download-root', /** @type {string} */ (this.root),
+        '--root', /** @type {string} */ (this.archive),
         '--token-file', join(/** @type {string} */ (this.dir), 'api-tokens'),
         '--listen', `127.0.0.1:${this.port}`,
         '--auth-dir', /** @type {string} */ (this.auth),
@@ -207,9 +211,12 @@ export class Daemon {
     return readFile(join(/** @type {string} */ (this.auth), 'setup-secret'), 'utf8');
   }
 
-  /** @param {string} name */
-  published(name) {
-    return readFile(join(/** @type {string} */ (this.root), name));
+  /**
+   * @param {string} name
+   * @param {string} [folder] the download root unless given
+   */
+  published(name, folder = this.root) {
+    return readFile(join(/** @type {string} */ (folder), name));
   }
 
   async remove() {

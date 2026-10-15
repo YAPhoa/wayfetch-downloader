@@ -10,6 +10,8 @@ const COMMANDS: &[&str] = &[
     "job_command",
     "update_settings",
     "choose_download_folder",
+    "open_file",
+    "reveal_file",
     "subscribe",
     "acknowledge",
     "unsubscribe",
