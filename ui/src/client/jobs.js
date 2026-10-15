@@ -288,3 +288,97 @@ export function fileName(job) {
 export function jobName(job) {
   return fileName(job) ?? job.id;
 }
+
+/**
+ * What kind of file each extension names, for formats people commonly
+ * download. Others are described by their extension alone.
+ * @type {Readonly<Record<string, string>>}
+ */
+const KINDS = Object.freeze({
+  zip: 'ZIP archive',
+  '7z': '7-Zip archive',
+  rar: 'RAR archive',
+  tar: 'Tar archive',
+  'tar.gz': 'Gzip-compressed tar archive',
+  tgz: 'Gzip-compressed tar archive',
+  'tar.xz': 'XZ-compressed tar archive',
+  txz: 'XZ-compressed tar archive',
+  'tar.bz2': 'Bzip2-compressed tar archive',
+  'tar.zst': 'Zstandard-compressed tar archive',
+  gz: 'Gzip-compressed file',
+  xz: 'XZ-compressed file',
+  bz2: 'Bzip2-compressed file',
+  zst: 'Zstandard-compressed file',
+  iso: 'Disc image',
+  img: 'Disk image',
+  dmg: 'macOS disk image',
+  exe: 'Windows program',
+  msi: 'Windows installer',
+  deb: 'Debian package',
+  rpm: 'RPM package',
+  apk: 'Android package',
+  appimage: 'Linux AppImage',
+  mp4: 'MP4 video',
+  m4v: 'MP4 video',
+  mkv: 'Matroska video',
+  webm: 'WebM video',
+  avi: 'AVI video',
+  mov: 'QuickTime video',
+  mp3: 'MP3 audio',
+  m4a: 'MPEG-4 audio',
+  aac: 'AAC audio',
+  flac: 'FLAC audio',
+  ogg: 'Ogg audio',
+  opus: 'Opus audio',
+  wav: 'WAV audio',
+  jpg: 'JPEG image',
+  jpeg: 'JPEG image',
+  png: 'PNG image',
+  gif: 'GIF image',
+  webp: 'WebP image',
+  avif: 'AVIF image',
+  svg: 'SVG image',
+  pdf: 'PDF document',
+  epub: 'EPUB e-book',
+  txt: 'Text file',
+  csv: 'CSV table',
+  json: 'JSON file',
+  docx: 'Word document',
+  xlsx: 'Excel workbook',
+  pptx: 'PowerPoint presentation',
+  torrent: 'Torrent file',
+});
+
+/**
+ * What kind of file `name` is, judged by its extension: the engine
+ * records no media type, and the name is what the user's programs go by.
+ * @param {string} name
+ */
+export function fileKind(name) {
+  const lower = name.toLowerCase();
+  const parts = lower.split('.');
+  if (parts.length < 2 || (parts.length === 2 && parts[0] === '')) return 'File with no extension';
+  const double = parts.slice(-2).join('.');
+  const extension = /** @type {string} */ (parts.at(-1));
+  if (parts.length > 2 && Object.hasOwn(KINDS, double)) return KINDS[double];
+  if (Object.hasOwn(KINDS, extension)) return KINDS[extension];
+  return /^[a-z0-9]{1,10}$/.test(extension) ? `${extension.toUpperCase()} file` : 'File';
+}
+
+/**
+ * A link as it can be shown on screen: scheme, host, and path. Credentials,
+ * the query, and the fragment are left out, since they can carry a signed
+ * token; `hidden` says whether any were. `null` if it is not a URL.
+ * @param {string} link
+ * @returns {{ text: string, hidden: boolean } | null}
+ */
+export function displayLink(link) {
+  let url;
+  try {
+    url = new URL(link);
+  } catch {
+    return null;
+  }
+  const hidden = url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '';
+  return { text: `${url.protocol}//${url.host}${url.pathname}`, hidden };
+}

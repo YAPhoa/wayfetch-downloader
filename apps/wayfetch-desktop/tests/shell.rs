@@ -1107,6 +1107,32 @@ async fn the_row_menu_opens_renames_and_removes_through_the_host() {
         ))
         .await;
 
+    // The details name the file, its kind, its link, and this computer's
+    // folder, which opens in the file manager.
+    shell.select("job-1").await;
+    // The link is read after the details open; the host shows until then.
+    shell
+        .wait_for("document.querySelector('dd[data-fact=\"source\"] .path')?.textContent.startsWith('http')")
+        .await;
+    let details = shell
+        .js(
+            "const fact = (name) => document.querySelector(`dd[data-fact=\"${name}\"]`);
+             return { file: fact('file').textContent, type: fact('type').textContent,
+                      folder: fact('saved-in').querySelector('button')?.textContent,
+                      server: fact('saved-in').textContent.includes('Server path'),
+                      source: fact('source')?.querySelector('.path')?.textContent }",
+        )
+        .await;
+    assert_eq!(
+        details,
+        json!({"file": "desk.bin", "type": "BIN file", "folder": dirs.root.display().to_string(),
+               "server": false, "source": server.url("/desk.bin")})
+    );
+    shell.click("[data-key=\"reveal-folder\"]").await;
+    eventually(|| async { (dirs.opened().len() == 3).then_some(()) }).await;
+    assert_eq!(dirs.opened()[2], dirs.root.display().to_string());
+    shell.click("[data-key=\"close-details\"]").await;
+
     // Rename in place.
     shell.click("[data-key=\"menu-job-1\"]").await;
     shell.click("[data-key=\"menu-item-rename\"]").await;
@@ -1143,6 +1169,6 @@ async fn the_row_menu_opens_renames_and_removes_through_the_host() {
         refused,
         json!(["not_found", "invalid_request", "not_found"])
     );
-    assert_eq!(dirs.opened().len(), 2);
+    assert_eq!(dirs.opened().len(), 3);
     shell.close().await;
 }
