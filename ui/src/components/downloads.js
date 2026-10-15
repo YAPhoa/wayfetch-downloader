@@ -29,6 +29,8 @@ import {
   groupCount,
   jobName,
   progress,
+  restartNote,
+  retryPlan,
 } from '../client/jobs.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
@@ -56,11 +58,13 @@ import { SETTINGS_PATH, SettingsPage, sectionPath, settingsSection } from './set
 export const PAGE_SIZE = 50;
 
 /** @type {Record<StateAction, string>} */
-const ACTION_LABELS = { pause: 'Pause', resume: 'Resume', cancel: 'Cancel' };
+const ACTION_LABELS = { pause: 'Pause', resume: 'Resume', cancel: 'Cancel', retry: 'Retry' };
 
 /** Why a menu item does not apply, when the job's state is the reason. */
 const NOT_FINISHED = 'Once it has finished';
 const NOT_ENDED = 'Once it has finished, failed, or been cancelled';
+const NOT_STOPPED = 'Once it has failed or been cancelled';
+const PENDING = 'Waiting for the server to answer';
 const NO_CONTROL = 'You may only view downloads';
 
 /** @type {Record<FeedStatus, string>} */
@@ -87,6 +91,10 @@ function commandFailed(error) {
     case 'busy':
       return 'This download is being saved. Try again in a moment.';
     case 'not_applicable':
+      if (error.retryAt !== undefined) {
+        const at = new Date(error.retryAt).toLocaleString();
+        return `The source asked Wayfetch to wait. You can retry after ${at}.`;
+      }
       return error.message || 'That does not apply to this download any more.';
     case 'already_exists':
       return 'A file with that name is already in the folder. Choose another name.';
@@ -217,7 +225,13 @@ export class Downloads {
     this.shown = h('span', { class: 'shown' });
     this.banner = h('div', { class: 'banner', role: 'alert', hidden: true });
     this.noticeLine = h('p', { class: 'notice', role: 'status' });
-    this.actionButtons = /** @type {const} */ (['pause', 'resume', 'cancel']).map((action) =>
+    /**
+     * Jobs with a command sent and not yet answered, which is not sent
+     * again meanwhile.
+     * @type {Set<JobId>}
+     */
+    this.inFlight = new Set();
+    this.actionButtons = /** @type {const} */ (['pause', 'resume', 'cancel', 'retry']).map((action) =>
       h(
         'button',
         {
@@ -693,12 +707,13 @@ export class Downloads {
   /** Enables the toolbar's commands the selected job accepts. */
   renderActions() {
     const job = this.feed.watchedJob;
-    const allowed = new Set(job && this.canControl ? availableActions(job) : []);
+    const allowed = new Set(job && this.canControl && !this.inFlight.has(job.id) ? availableActions(job) : []);
     for (const button of this.actionButtons) {
       const action = /** @type {StateAction} */ (button.dataset.action);
       button.disabled = !allowed.has(action);
       const label = ACTION_LABELS[action];
       button.setAttribute('aria-label', job ? `${label} ${job.id}` : label);
+      if (action === 'retry') button.title = job && allowed.has('retry') ? retryPlan(job) : '';
     }
   }
 
@@ -711,16 +726,19 @@ export class Downloads {
     const job = this.feed.watchedJob;
     if (!job) return;
     button.disabled = true;
-    await this.send(job, action);
+    if (action === 'retry') await this.retry(job);
+    else await this.send(job, action);
   }
 
   /**
    * Sends one command for `job` at the revision shown, then re-reads it.
    * Resolves to whether the engine accepted it; a refusal is shown in the
-   * notice line, or passed to `refused` if given.
+   * notice line, or passed to `refused` if given. While the engine has not
+   * answered, the job takes no other command from this view, so a second
+   * click cannot send a second request.
    * @param {JobSummary} job
    * @param {StateAction | 'rename' | 'remove'} action
-   * @param {{ name?: string, refused?: (text: string) => void }} [options]
+   * @param {{ name?: string, refused?: (text: string, error?: WayfetchError) => void }} [options]
    */
   async send(job, action, { name, refused } = {}) {
     const hello = this.feed.hello;
@@ -729,7 +747,10 @@ export class Downloads {
       this.schedule();
       return false;
     }
+    if (this.inFlight.has(job.id)) return false;
+    this.inFlight.add(job.id);
     this.notice = '';
+    this.schedule();
     let accepted = false;
     try {
       await this.client.jobCommand(job.id, {
@@ -747,14 +768,58 @@ export class Downloads {
         return false;
       }
       const text = commandFailed(error);
-      if (refused) refused(text);
+      if (refused) refused(text, error);
       else this.notice = `${jobName(job)}: ${text}`;
+    } finally {
+      this.inFlight.delete(job.id);
     }
     this.schedule();
     if (action !== 'remove' || !accepted) {
       await this.feed.refresh(job.id).catch((error) => this.report(error));
     }
     return accepted;
+  }
+
+  /**
+   * The current summary of job `id`, if this view holds it.
+   * @param {JobId} id
+   */
+  heldJob(id) {
+    const watched = this.feed.watchedJob;
+    return watched?.id === id ? watched : this.feed.jobs.find((j) => j.id === id);
+  }
+
+  /**
+   * Starts a failed or cancelled job again, and says what that does: it
+   * continues the saved data when the server still offers the same file.
+   * A refusal because the job changed meanwhile is explained from its
+   * state once re-read.
+   * @param {JobSummary} job
+   */
+  async retry(job) {
+    const name = jobName(job);
+    /** @type {WayfetchError | undefined} */
+    let refusal;
+    const accepted = await this.send(job, 'retry', {
+      refused: (text, error) => {
+        refusal = error;
+        this.notice = `${name}: ${text}`;
+      },
+    });
+    if (accepted) {
+      this.done(
+        job.bytes_done > 0
+          ? `Retrying ${name}. It continues from the ${formatBytes(job.bytes_done)} saved if the server still offers the same file, and otherwise starts over and says why.`
+          : `Retrying ${name} from the beginning.`,
+      );
+    } else if (refusal?.code === 'revision_conflict') {
+      const now = this.heldJob(job.id);
+      this.notice =
+        now && availableActions(now).includes('retry')
+          ? `${name} changed in the meantime and is still stopped. Check it, then choose Retry again.`
+          : `${name} was already started again or changed state, so it was not retried twice.`;
+    }
+    this.schedule();
   }
 
   // The row menu.
@@ -785,7 +850,10 @@ export class Downloads {
     const { client } = this;
     const control = this.canControl;
     const finished = job.stage === 'complete';
-    const actions = new Set(control ? availableActions(job) : []);
+    const busy = this.inFlight.has(job.id);
+    const actions = new Set(control && !busy ? availableActions(job) : []);
+    /** Why a state command is unavailable, or `fallback` for its state. */
+    const why = (/** @type {string | undefined} */ fallback) => (!control ? NO_CONTROL : busy ? PENDING : fallback);
     /** @type {MenuEntry[]} */
     const entries = [];
     const { openFile, revealFile } = client;
@@ -825,15 +893,22 @@ export class Downloads {
         key: toggle,
         label: ACTION_LABELS[toggle],
         disabled: !actions.has(toggle),
-        hint: !control ? NO_CONTROL : undefined,
+        hint: why(undefined),
         run: () => void this.send(job, toggle),
       },
       {
         key: 'cancel',
         label: 'Cancel download',
         disabled: !actions.has('cancel'),
-        hint: !control ? NO_CONTROL : undefined,
+        hint: why(undefined),
         run: () => void this.send(job, 'cancel'),
+      },
+      {
+        key: 'retry',
+        label: 'Retry',
+        disabled: !actions.has('retry'),
+        hint: why(actions.has('retry') ? retryPlan(job) : NOT_STOPPED),
+        run: () => void this.retry(job),
       },
       {
         key: 'remove',
@@ -1365,6 +1440,7 @@ export class Downloads {
         ...this.source(job),
       ]),
       job.failure && h('p', { class: `note tone-${state.tone}` }, explain(job.failure)),
+      restartNote(job) && h('p', { class: 'note tone-warn', 'data-note': 'restart' }, restartNote(job)),
     );
   }
 
@@ -1477,6 +1553,7 @@ export class Downloads {
         ['Failure code', job.failure?.code],
         ['Diagnostic', job.failure?.message],
         ['Next retry', job.failure?.retry_at && new Date(job.failure.retry_at).toLocaleString()],
+        ['Restarted because', job.restart_reason],
       ]),
     );
   }

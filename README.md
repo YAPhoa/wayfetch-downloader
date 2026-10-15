@@ -175,7 +175,7 @@ is never printed.
 | `GET /v1/jobs` | A page of jobs: `after`, `page_size`, `stage=a,b`, `package` |
 | `GET /v1/jobs/{id}` | One job |
 | `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
-| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"remove"\|"rename", "expected_revision"}`, plus `"name"` for a rename |
+| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"rename", "expected_revision"}`, plus `"name"` for a rename |
 | `GET /v1/jobs/{id}/source` | The link the job was submitted with (needs `sources`) |
 | `POST /v1/staging/links` | Collect links for review without downloading them: `{"idempotency_key", "target", "items": [text...], "destination"?: "root-N"}` |
 | `GET /v1/staging/links` | A page of collected links: `after`, `page_size` |
@@ -193,6 +193,13 @@ is never printed.
 `rename` gives a completed job's file a new name in the same folder; it never
 replaces a file, and refuses one changed outside Wayfetch. `remove` takes a
 complete, failed, or cancelled job off lists and counts and keeps its files.
+`retry` starts a failed, or fully stopped cancelled, job again as the same
+job, with the same link, folder, and collected-links entry. It continues
+the data already saved when the server still offers the same file and
+accepts the request for the rest, and otherwise starts from zero, with the
+reason in the job's `restart_reason`. A failure that names a time to wait
+until is refused with `not_applicable` and that `retry_at`. Like the other
+job actions it needs `control`.
 
 `/v1/inputs` starts downloads at once. Collected links instead stay listed
 until removed, survive restarts, and are never fetched until started; a
@@ -371,7 +378,7 @@ wayfetchd run --state-dir /tmp/wf/state --download-root /tmp/wf/downloads \
 ```
 
 The layout is a dense download table for a desktop browser: a toolbar
-(add links, pause, resume, or cancel the selected job, filter by name,
+(add links, pause, resume, cancel, or retry the selected job, filter by name,
 Settings), state filters with job counts on the left, the table (each job's
 name, the host of its link, state, progress, size, speed, and time left),
 details of the selected job below the table (its file name and kind, the
@@ -394,7 +401,9 @@ Not available yet and none can be added; direct links never need an
 account. Each row has a menu, from its "…"
 button, a right-click, or Shift+F10 or the Menu key: rename a finished
 file in its folder (never replacing another file), copy the link it came
-from (with the `sources` permission), pause, resume, or cancel, and remove
+from (with the `sources` permission), pause, resume, cancel, or retry a
+failed or cancelled download (continuing its saved data when it can; its
+details say why when it had to start over), and remove
 a finished, failed, or cancelled job from the list, which keeps its file. A browser cannot open
 files on the server, so it does not offer to.
 
