@@ -193,29 +193,35 @@ impl Root {
         }
         sys::sync_dir(&dir).map_err(FsError::io("sync folder"))?;
         crash_point!("rename-before-unlink");
-        self.remove_old_name(&dir, from_name, &file.identity)?;
+        self.remove_old_name(&dir, from_name, to_name, &file.identity)?;
         crash_point!("rename-before-commit");
         Ok(())
     }
 
     /// Classifies an interrupted rename of `file` to `to` after a restart.
-    /// It is `Renamed` if the new name holds the published file; the
-    /// folder is then synchronized again, and the old name removed if it
-    /// still holds the file. Nothing else is changed: a file that is not
-    /// the published one is never deleted.
+    /// It is `Renamed` if the folder lists the new name, spelled exactly,
+    /// and it holds the published file; the folder is then synchronized
+    /// again, and the old name removed if it still holds the file. Nothing
+    /// else is changed: a file that is not the published one is never
+    /// deleted.
+    ///
+    /// On a case-insensitive or normalizing filesystem another spelling of
+    /// the old name opens the old name's entry; it is not listed, so it is
+    /// never taken for the new name.
     pub fn reconcile_rename(
         &self,
         file: &PublishedFile,
         to: &RelativePath,
     ) -> Result<RenameCheck, FsError> {
         let (dir, from_name, to_name) = self.rename_names(file, to)?;
-        let renamed =
-            file_at(&dir, to_name)?.is_some_and(|(identity, _)| identity.matches(&file.identity));
+        let renamed = listed(&dir, [to_name])? == [true]
+            && file_at(&dir, to_name)?
+                .is_some_and(|(identity, _)| identity.matches(&file.identity));
         if !renamed {
             return Ok(RenameCheck::NotRenamed);
         }
         sys::sync_dir(&dir).map_err(FsError::io("sync folder"))?;
-        self.remove_old_name(&dir, from_name, &file.identity)?;
+        self.remove_old_name(&dir, from_name, to_name, &file.identity)?;
         Ok(RenameCheck::Renamed)
     }
 
@@ -264,13 +270,20 @@ impl Root {
 
     /// Removes `name` from `dir` if it holds the file `identity`, and
     /// synchronizes the folder.
+    /// Removes `name` if it holds the file whose new name is `new`. Only
+    /// if the folder lists both names, spelled exactly, as two entries: on
+    /// a case-insensitive or normalizing filesystem two spellings can open
+    /// one entry, and removing one would remove the file.
     fn remove_old_name(
         &self,
         dir: &Dir,
         name: &str,
+        new: &str,
         identity: &FileIdentity,
     ) -> Result<(), FsError> {
-        let ours = file_at(dir, name)?.is_some_and(|(found, _)| found.matches(identity));
+        let separate = name != new && listed(dir, [name, new])? == [true, true];
+        let ours =
+            separate && file_at(dir, name)?.is_some_and(|(found, _)| found.matches(identity));
         if ours {
             dir.remove_file(name)
                 .map_err(FsError::io("remove old name"))?;
@@ -318,6 +331,18 @@ fn is_staged(found: Option<(FileIdentity, u64)>, expected: &FileIdentity, size: 
 
 /// Identity and length of whatever has `name` in `dir`, without following a
 /// symlink.
+/// Whether the folder lists an entry named exactly as each of `names`.
+fn listed<const N: usize>(dir: &Dir, names: [&str; N]) -> Result<[bool; N], FsError> {
+    let mut found = [false; N];
+    for entry in dir.entries().map_err(FsError::io("list folder"))? {
+        let name = entry.map_err(FsError::io("list folder"))?.file_name();
+        for (seen, wanted) in found.iter_mut().zip(names) {
+            *seen |= name == wanted;
+        }
+    }
+    Ok(found)
+}
+
 fn file_at(dir: &Dir, name: &str) -> Result<Option<(FileIdentity, u64)>, FsError> {
     match dir.symlink_metadata(name) {
         Ok(meta) => Ok(Some((sys::identity(&meta)?, meta.len()))),
@@ -628,6 +653,27 @@ mod tests {
             RenameCheck::NotRenamed
         );
         assert!(tmp.path().join("c.bin").exists());
+    }
+
+    /// Case-insensitive filesystems cannot be made here, so the guard is
+    /// checked directly: the old name goes only while the folder lists the
+    /// new name, spelled exactly, as another entry.
+    #[test]
+    fn the_old_name_stays_unless_the_new_one_is_another_entry() {
+        let (tmp, root) = root();
+        let file = published(&root, "a.bin", b"data");
+        let dir = root.dir.try_clone().unwrap();
+        assert_eq!(listed(&dir, ["a.bin", "A.BIN"]).unwrap(), [true, false]);
+        for new in ["A.BIN", "a.bin"] {
+            root.remove_old_name(&dir, "a.bin", new, &file.identity)
+                .unwrap();
+            assert!(tmp.path().join("a.bin").exists(), "{new}");
+        }
+        std::fs::hard_link(tmp.path().join("a.bin"), tmp.path().join("A.BIN")).unwrap();
+        root.remove_old_name(&dir, "a.bin", "A.BIN", &file.identity)
+            .unwrap();
+        assert!(!tmp.path().join("a.bin").exists());
+        assert_eq!(std::fs::read(tmp.path().join("A.BIN")).unwrap(), b"data");
     }
 
     #[test]

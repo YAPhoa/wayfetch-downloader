@@ -1145,6 +1145,13 @@ async fn a_published_file_is_renamed_in_place_without_replacing_anything() {
         refused(&owner, rename(&owner, &done, "C.BIN")).await,
         ErrorCode::AlreadyExists
     );
+    // Changing only the case is refused: on a case-insensitive
+    // filesystem both names are one file.
+    assert_eq!(
+        refused(&owner, rename(&owner, &done, "A.BIN")).await,
+        ErrorCode::InvalidRequest
+    );
+    assert_eq!(env.published("a.bin"), body(3 * KIB));
     assert_eq!(job(&owner, a).await, done);
 
     let change = rename(&owner, &done, "b.bin");
@@ -1470,10 +1477,12 @@ async fn a_job_submitted_before_the_download_root_is_mounted_is_saved_there() {
     shutdown(owner).await;
 }
 
-/// A hung mount: while it lasts, opening a folder named `stalled` blocks
-/// until [`Hang::release`].
+/// A hung mount: while it lasts, work on a folder named `stalled` blocks
+/// at the failpoint until [`Hang::release`]. [`Hang::start`] blocks opening
+/// the folder.
 #[cfg(feature = "failpoints")]
 struct Hang {
+    point: &'static str,
     entered: tokio::sync::mpsc::UnboundedReceiver<()>,
     gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
 }
@@ -1481,10 +1490,14 @@ struct Hang {
 #[cfg(feature = "failpoints")]
 impl Hang {
     fn start() -> Self {
+        Self::at("root-open-stall")
+    }
+
+    fn at(point: &'static str) -> Self {
         let (entered, rx) = tokio::sync::mpsc::unbounded_channel();
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let held = gate.clone();
-        fail::cfg_callback("root-open-stall", move || {
+        fail::cfg_callback(point, move || {
             let _ = entered.send(());
             let (open, released) = &*held;
             let mut open = open.lock().unwrap();
@@ -1493,7 +1506,11 @@ impl Hang {
             }
         })
         .unwrap();
-        Self { entered: rx, gate }
+        Self {
+            point,
+            entered: rx,
+            gate,
+        }
     }
 
     /// Waits until something is blocked in the folder.
@@ -1504,7 +1521,7 @@ impl Hang {
     }
 
     fn release(&self) {
-        fail::remove("root-open-stall");
+        fail::remove(self.point);
         *self.gate.0.lock().unwrap() = true;
         self.gate.1.notify_all();
     }
@@ -1618,6 +1635,35 @@ async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
     tokio::time::timeout(PROMPT, job(&owner, c)).await.unwrap();
     hang.release();
     assert_eq!(locating.await.unwrap().unwrap(), chosen.join("c.bin"));
+
+    // While a rename is recorded but has not yet moved the file, looking
+    // the file up, or renaming it again, is refused rather than taking the
+    // rename for one a crash interrupted.
+    drop(hang);
+    let mut hang = Hang::at("rename-recorded");
+    let before = job(&owner, c).await;
+    let renaming = tokio::spawn({
+        let (handle, change) = (handle.clone(), rename(&owner, &before, "c2.bin"));
+        async move { handle.execute(change, ALL).await }
+    });
+    hang.entered().await;
+    let open = tokio::time::timeout(PROMPT, handle.published_path(c, ALL))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(open.code, ErrorCode::Busy);
+    let again = tokio::time::timeout(PROMPT, refused(&owner, rename(&owner, &before, "c3.bin")))
+        .await
+        .unwrap();
+    assert_eq!(again, ErrorCode::Busy);
+    hang.release();
+    renaming.await.unwrap().unwrap();
+    assert!(!chosen.join("c.bin").exists() && !chosen.join("c3.bin").exists());
+    assert_eq!(job(&owner, c).await.artifact.unwrap().path, "c2.bin");
+    assert_eq!(
+        handle.published_path(c, ALL).await.unwrap(),
+        chosen.join("c2.bin")
+    );
 
     // A registration still stuck in the folder at shutdown keeps the state
     // directory locked until the folder answers, and then stops without

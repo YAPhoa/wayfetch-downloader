@@ -60,7 +60,7 @@ use wayfetch_protocol::{
 
 use crate::cleanup;
 use crate::config::{ConfigError, EngineConfig};
-use crate::destinations::{self, Destination, Destinations, Probes};
+use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::fs::Root;
 use crate::published;
@@ -200,6 +200,7 @@ impl EngineBuilder {
             held: HashSet::new(),
             destinations,
             probes,
+            file_jobs: Claims::default(),
             registering: 0,
             identifying: false,
             settings_waiting: Vec::new(),
@@ -775,6 +776,8 @@ struct Coordinator {
     destinations: Destinations,
     /// Filesystem checks of root folders.
     probes: Probes,
+    /// Jobs whose published file a request is working on.
+    file_jobs: Claims<JobId>,
     /// Folders being registered.
     registering: usize,
     /// Whether configured roots are being looked for.
@@ -1078,6 +1081,7 @@ impl Coordinator {
         published::Files {
             store: self.client.clone(),
             probes: self.probes.clone(),
+            jobs: self.file_jobs.clone(),
             roots: self.destinations.clone(),
             instance: self.identity.instance,
             cancel: self.supervisor.cancel.clone(),
