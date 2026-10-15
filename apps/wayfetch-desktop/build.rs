@@ -8,6 +8,8 @@ const COMMANDS: &[&str] = &[
     "query",
     "submit",
     "job_command",
+    "update_settings",
+    "choose_download_folder",
     "subscribe",
     "acknowledge",
     "unsubscribe",

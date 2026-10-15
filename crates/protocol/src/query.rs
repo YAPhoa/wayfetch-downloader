@@ -125,6 +125,9 @@ pub enum Query {
         #[cfg_attr(feature = "ts", ts(as = "Option<JobFilter>", optional))]
         filter: JobFilter,
     },
+    /// The user's settings and the destinations they may choose. Added in
+    /// protocol 0.3.
+    Settings {},
 }
 
 impl Query {
@@ -183,6 +186,11 @@ pub struct JobSummary {
     /// Added in protocol 0.2; absent from events recorded before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_host: Option<HostName>,
+    /// The root the job saves its file in, fixed when it was submitted or,
+    /// for a job submitted before it could be, when it first started.
+    /// Absent until then. Added in protocol 0.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<RootId>,
 }
 
 /// A file a job published.
@@ -222,6 +230,37 @@ pub struct JobCounts {
     pub as_of: EventCursor,
 }
 
+/// A destination root a client may choose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RootSummary {
+    /// The root.
+    pub id: RootId,
+    /// Where it is, on the engine's host: a server path for a remote
+    /// client.
+    pub path: String,
+    /// Whether it could be opened and verified just now.
+    pub available: bool,
+    /// Why it is unavailable, if it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<DiagnosticText>,
+}
+
+/// The user's settings. Added in protocol 0.3.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Settings {
+    /// Revision to present with the next settings change.
+    pub revision: Revision,
+    /// Where newly submitted jobs are saved: the chosen default, or the
+    /// operator's download root until one is chosen. Absent if there is
+    /// neither, and new jobs then wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_root: Option<RootId>,
+    /// The destinations a client may choose, in ID order.
+    pub roots: Vec<RootSummary>,
+}
+
 /// A query's answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -238,6 +277,8 @@ pub enum QueryResult {
     Jobs(Page<JobSummary>),
     /// Answer to [`Query::CountJobs`].
     JobCounts(JobCounts),
+    /// Answer to [`Query::Settings`].
+    Settings(Settings),
 }
 
 #[cfg(test)]
@@ -341,9 +382,40 @@ mod tests {
         });
         let job: JobSummary = from_value(old.clone()).unwrap();
         assert_eq!(job.original_host, None);
+        assert_eq!(job.destination, None);
         let mut new = old;
         new["original_host"] = json!("files.example");
+        new["destination"] = json!("root-2");
         let job: JobSummary = from_value(new).unwrap();
         assert_eq!(job.original_host.unwrap().as_str(), "files.example");
+        assert_eq!(job.destination, RootId::from_u64(2));
+    }
+
+    #[test]
+    fn settings_wire_form() {
+        assert_eq!(
+            from_value::<Query>(json!({"type": "settings"})).unwrap(),
+            Query::Settings {}
+        );
+        assert!(from_value::<Query>(json!({"type": "settings", "roots": []})).is_err());
+        let settings = QueryResult::Settings(Settings {
+            revision: Revision::from_u64(3).unwrap(),
+            default_root: RootId::from_u64(2),
+            roots: vec![RootSummary {
+                id: RootId::from_u64(2).unwrap(),
+                path: "/media".into(),
+                available: false,
+                problem: Some(DiagnosticText::new("missing")),
+            }],
+        });
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap(),
+            json!({
+                "type": "settings",
+                "revision": 3,
+                "default_root": "root-2",
+                "roots": [{"id": "root-2", "path": "/media", "available": false, "problem": "missing"}],
+            })
+        );
     }
 }

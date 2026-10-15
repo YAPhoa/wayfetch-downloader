@@ -11,8 +11,6 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use wayfetch_domain::id::RootId;
-
 /// A configuration value is invalid.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
@@ -29,23 +27,18 @@ pub enum ConfigError {
         /// Largest accepted value.
         max: u64,
     },
-    /// Two roots share an ID.
-    #[error("{0} is configured more than once")]
-    DuplicateRoot(RootId),
+    /// A root is configured more than once.
+    #[error("root {} is configured more than once", .0.display())]
+    DuplicateRoot(PathBuf),
+    /// A root's path is relative.
+    #[error("root {} is not an absolute path", .0.display())]
+    RelativeRoot(PathBuf),
+    /// More roots than [`EngineConfig::MAX_ROOTS`].
+    #[error("{0} roots are configured; at most {max} are supported", max = EngineConfig::MAX_ROOTS)]
+    TooManyRoots(usize),
     /// The download root is not one of the configured roots.
-    #[error("download root {0} is not configured")]
-    UnknownDownloadRoot(RootId),
-}
-
-/// A destination root the operator configured. The directory must have
-/// been initialized with [`crate::fs::Root::initialize`]; the engine never
-/// does that implicitly.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RootConfig {
-    /// The root's ID.
-    pub id: RootId,
-    /// Where it is mounted.
-    pub path: PathBuf,
+    #[error("download root {} is not configured", .0.display())]
+    UnknownDownloadRoot(PathBuf),
 }
 
 /// Bounds on the engine's queues, buffers, and retained history.
@@ -99,10 +92,16 @@ pub struct EngineConfig {
     /// Default time allowed for a graceful shutdown before the engine
     /// reports unfinished work.
     pub shutdown_timeout: Duration,
-    /// Destination roots.
-    pub roots: Vec<RootConfig>,
-    /// Root that downloads are published in. Without one, jobs stay queued.
-    pub download_root: Option<RootId>,
+    /// Destination roots the operator permits, by absolute path. Each must
+    /// have been initialized with [`crate::initialize_root`]; the engine
+    /// never does that implicitly. Clients may choose among these, and
+    /// among roots a host registered on its user's request
+    /// ([`crate::EngineHandle::register_root`]).
+    pub roots: Vec<PathBuf>,
+    /// Root that downloads are published in unless the user chose another
+    /// default; one of `roots`. Without one, and without a chosen default,
+    /// jobs stay queued.
+    pub download_root: Option<PathBuf>,
     /// Queue, buffer, and retention bounds.
     pub limits: Limits,
     /// Request deadlines.
@@ -218,6 +217,9 @@ impl EngineConfig {
     pub const MAX_REQUEST_QUEUE: usize = 65_536;
     /// Default graceful shutdown budget.
     pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+    /// Most destination roots permitted at once, configured and registered
+    /// together.
+    pub const MAX_ROOTS: usize = 64;
 
     /// Configuration with defaults for everything but the state directory.
     /// It has no roots, so nothing is downloaded until one is added.
@@ -238,23 +240,24 @@ impl EngineConfig {
         bounds("request_queue", 1, Self::MAX_REQUEST_QUEUE as u64)
             .check(self.request_queue.get() as u64)?;
         bounds("shutdown_timeout_ms", 1, HOUR_MS).check_duration(self.shutdown_timeout)?;
+        if self.roots.len() > Self::MAX_ROOTS {
+            return Err(ConfigError::TooManyRoots(self.roots.len()));
+        }
         for (i, root) in self.roots.iter().enumerate() {
-            if self.roots[..i].iter().any(|r| r.id == root.id) {
-                return Err(ConfigError::DuplicateRoot(root.id));
+            if !root.is_absolute() {
+                return Err(ConfigError::RelativeRoot(root.clone()));
+            }
+            if self.roots[..i].contains(root) {
+                return Err(ConfigError::DuplicateRoot(root.clone()));
             }
         }
-        if let Some(id) = self.download_root
-            && self.root(id).is_none()
+        if let Some(root) = &self.download_root
+            && !self.roots.contains(root)
         {
-            return Err(ConfigError::UnknownDownloadRoot(id));
+            return Err(ConfigError::UnknownDownloadRoot(root.clone()));
         }
         self.limits.validate()?;
         self.timeouts.validate()
-    }
-
-    /// The configured root `id`.
-    pub fn root(&self, id: RootId) -> Option<&RootConfig> {
-        self.roots.iter().find(|r| r.id == id)
     }
 }
 
@@ -326,18 +329,33 @@ mod tests {
     }
 
     #[test]
-    fn roots_must_be_unique_and_known() {
-        let id = RootId::from_u64(1).unwrap();
-        let root = RootConfig {
-            id,
-            path: "/downloads".into(),
-        };
+    fn roots_must_be_unique_absolute_bounded_and_known() {
+        let root = PathBuf::from("/downloads");
         let mut c = config();
-        c.download_root = Some(id);
-        assert_eq!(c.validate(), Err(ConfigError::UnknownDownloadRoot(id)));
+        c.download_root = Some(root.clone());
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::UnknownDownloadRoot(root.clone()))
+        );
         c.roots.push(root.clone());
         assert_eq!(c.validate(), Ok(()));
-        c.roots.push(root);
-        assert_eq!(c.validate(), Err(ConfigError::DuplicateRoot(id)));
+        c.roots.push(root.clone());
+        assert_eq!(c.validate(), Err(ConfigError::DuplicateRoot(root)));
+
+        let mut c = config();
+        c.roots.push("downloads".into());
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::RelativeRoot("downloads".into()))
+        );
+
+        let mut c = config();
+        c.roots = (0..=EngineConfig::MAX_ROOTS)
+            .map(|i| PathBuf::from(format!("/r{i}")))
+            .collect();
+        assert_eq!(
+            c.validate(),
+            Err(ConfigError::TooManyRoots(EngineConfig::MAX_ROOTS + 1))
+        );
     }
 }

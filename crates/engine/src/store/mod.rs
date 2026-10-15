@@ -35,6 +35,8 @@
 //!   abandoned in the same transaction.
 //! * [`Store::finish_staging_cleanup`]: what removing an abandoned staging
 //!   file found.
+//! * `Store::allocate_root`, `Store::adopt_root`, `Store::register_root`,
+//!   and `Store::forget_root`: one root recorded by path.
 //! * [`Store::begin_publication`], [`Store::complete_publication`] (with
 //!   the job's completion), and [`Store::abandon_publication`]: the
 //!   publication intent around the filesystem link.
@@ -52,12 +54,14 @@ mod files;
 mod jobs;
 mod outbox;
 mod progress;
+mod roots;
 #[cfg(test)]
 mod scenarios;
 pub mod schema;
 
 pub use files::Partial;
 pub use jobs::Admission;
+pub(crate) use roots::path_text;
 
 use std::path::Path;
 
@@ -119,6 +123,17 @@ pub enum StoreError {
     /// A parked stage was requested without the failure that explains it.
     #[error("moving to {0} requires a failure")]
     MissingFailure(wayfetch_domain::job::JobStage),
+    /// A root cannot be recorded.
+    #[error("root rejected: {0}")]
+    Root(&'static str),
+    /// A sentinel names a root recorded at another path.
+    #[error("the folder is marked as {id}, which is recorded at {recorded}")]
+    RootMoved {
+        /// The root the sentinel names.
+        id: RootId,
+        /// Where the store records it.
+        recorded: String,
+    },
 }
 
 impl From<StoreError> for ProtocolError {
@@ -129,6 +144,10 @@ impl From<StoreError> for ProtocolError {
             StoreError::Job(e) => e.into(),
             StoreError::NotFound(what) => {
                 ProtocolError::new(ErrorCode::NotFound, &format!("{what} not found"))
+            }
+            StoreError::Root(_) => ProtocolError::new(ErrorCode::InvalidRequest, &err.to_string()),
+            StoreError::RootMoved { .. } => {
+                ProtocolError::new(ErrorCode::NotApplicable, &err.to_string())
             }
             _ => ProtocolError::new(ErrorCode::Internal, "storage failure"),
         }

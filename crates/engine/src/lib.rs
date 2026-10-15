@@ -20,6 +20,7 @@ macro_rules! crash_point {
 
 mod cleanup;
 pub mod config;
+mod destinations;
 mod download;
 pub mod fs;
 pub mod lifecycle;
@@ -28,7 +29,8 @@ mod store;
 pub mod subscription;
 pub mod transfer;
 
-pub use config::{ConfigError, EngineConfig, Limits, RootConfig, Timeouts};
+pub use config::{ConfigError, EngineConfig, Limits, Timeouts};
+pub use destinations::{RootError, initialize_root};
 #[cfg(feature = "failpoints")]
 pub use fail;
 pub use lifecycle::{

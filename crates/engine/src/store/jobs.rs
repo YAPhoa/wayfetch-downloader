@@ -7,7 +7,7 @@ use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Transaction, params, params_from_iter};
 use strum::VariantArray;
 use wayfetch_domain::failure::{Failure, FailureCode};
-use wayfetch_domain::id::{JobId, PackageId};
+use wayfetch_domain::id::{JobId, PackageId, RootId};
 use wayfetch_domain::job::{DesiredState, JobStage, JobState, Outcome};
 use wayfetch_domain::name::{DiagnosticText, HostName};
 use wayfetch_domain::time::UtcTimestamp;
@@ -22,12 +22,12 @@ use super::{Store, StoreError, files, key, outbox, sql};
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
 /// the job's newest partial; the next three describe its published file,
-/// and the last is the submitted link.
+/// then come the submitted link and the job's destination root.
 const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.generation, \
      j.revision, j.bytes_total, j.failure_code, j.failure_retry_at, j.failure_message, \
      COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
                ORDER BY p.generation DESC LIMIT 1), 0), \
-     a.root_id, a.target_path, a.size_bytes, s.input_url";
+     a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id";
 
 /// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
 /// has exactly one source link.
@@ -47,6 +47,8 @@ pub struct Admission {
     pub desired: DesiredState,
     /// The submitted input.
     pub url: String,
+    /// Where it is saved, if decided yet.
+    pub root: Option<RootId>,
 }
 
 /// Stages that are parked with a failure explaining why.
@@ -67,6 +69,7 @@ pub(super) struct StoredJob {
     pub(super) failure: Option<FailureSummary>,
     artifact: Option<ArtifactSummary>,
     original_host: HostName,
+    destination: Option<RootId>,
 }
 
 impl StoredJob {
@@ -84,6 +87,7 @@ impl StoredJob {
             failure: self.failure.clone(),
             artifact: self.artifact.clone(),
             original_host: Some(self.original_host.clone()),
+            destination: self.destination,
         }
     }
 }
@@ -103,6 +107,7 @@ struct RawJob {
     bytes_done: i64,
     artifact: Option<(i64, String, i64)>,
     input_url: String,
+    root: Option<i64>,
 }
 
 impl RawJob {
@@ -124,6 +129,7 @@ impl RawJob {
                 None => None,
             },
             input_url: row.get(14)?,
+            root: row.get(15)?,
         })
     }
 
@@ -167,6 +173,7 @@ impl RawJob {
                 })
                 .transpose()?,
             original_host,
+            destination: self.root.map(key).transpose()?,
         })
     }
 }
@@ -258,21 +265,22 @@ impl Store {
         now: UtcTimestamp,
     ) -> Result<Vec<JobId>, StoreError> {
         let tx = self.write()?;
-        let pending: Vec<(i64, i64)> = tx
+        let pending: Vec<(i64, i64, Option<i64>)> = tx
             .prepare(
-                "SELECT s.id, b.package_id FROM source_links s \
+                "SELECT s.id, b.package_id, b.root_id FROM source_links s \
                  JOIN input_batches b ON b.id = s.batch_id \
                  WHERE s.staged = 0 ORDER BY s.id LIMIT ?1",
             )?
-            .query_map([limit], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([limit], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<Result<_, _>>()?;
         let state = JobState::new();
         let desired: &'static str = state.desired().into();
         let mut staged = Vec::with_capacity(pending.len());
-        for (source, package) in pending {
+        for (source, package, root) in pending {
             tx.execute(
                 "INSERT INTO jobs (source_link_id, package_id, desired_state, stage, generation, \
-                 revision, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                 revision, root_id, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
                 params![
                     source,
                     package,
@@ -280,6 +288,7 @@ impl Store {
                     state.stage().as_str(),
                     sql(state.generation())?,
                     sql(state.revision())?,
+                    root,
                     now.unix_millis(),
                 ],
             )?;
@@ -340,34 +349,38 @@ impl Store {
 
     /// Up to `limit` jobs ready for the coordinator to pick up, skipping
     /// `running`: recovering jobs first, then queued ones, oldest first.
-    /// The scheduler reads only as many as it has free slots, so waiting
-    /// jobs stay in the database rather than in memory.
+    /// Jobs without a destination are included only if `unassigned`, when
+    /// there is a default to give them. The scheduler reads only as many as
+    /// it has free slots, so waiting jobs stay in the database rather than
+    /// in memory.
     pub fn admissible(
         &mut self,
         limit: usize,
         running: &[JobId],
+        unassigned: bool,
     ) -> Result<Vec<Admission>, StoreError> {
         let tx = self.read()?;
         let fetch = i64::try_from(limit.saturating_add(running.len())).unwrap_or(i64::MAX);
-        let rows: Vec<(i64, String, i64, String, String)> = tx
+        let rows: Vec<(i64, String, i64, String, String, Option<i64>)> = tx
             .prepare(
-                "SELECT j.id, j.stage, j.generation, j.desired_state, s.input_url \
+                "SELECT j.id, j.stage, j.generation, j.desired_state, s.input_url, j.root_id \
                  FROM jobs j JOIN source_links s ON s.id = j.source_link_id \
-                 WHERE j.stage IN ('queued', 'recovering') \
+                 WHERE j.stage IN ('queued', 'recovering') AND (?2 OR j.root_id IS NOT NULL) \
                  ORDER BY j.stage = 'recovering' DESC, j.id LIMIT ?1",
             )?
-            .query_map([fetch], |row| {
+            .query_map(params![fetch, unassigned], |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<Result<_, _>>()?;
         let mut ready = Vec::with_capacity(limit);
-        for (id, stage, generation, desired, url) in rows {
+        for (id, stage, generation, desired, url, root) in rows {
             let id: JobId = key(id)?;
             if running.contains(&id) || ready.len() == limit {
                 continue;
@@ -379,9 +392,30 @@ impl Store {
                 desired: DesiredState::from_str(&desired)
                     .map_err(|_| StoreError::Corrupt("desired state"))?,
                 url,
+                root: root.map(key).transpose()?,
             });
         }
         Ok(ready)
+    }
+
+    /// Gives a job submitted without a destination the root it will be
+    /// saved in, with a `job_changed` event. A job that has one keeps it.
+    pub fn assign_root(
+        &mut self,
+        id: JobId,
+        root: RootId,
+        now: UtcTimestamp,
+    ) -> Result<(), StoreError> {
+        let tx = self.write()?;
+        let updated = tx.execute(
+            "UPDATE jobs SET root_id = ?1, updated_at = ?2 WHERE id = ?3 AND root_id IS NULL",
+            params![sql(root)?, now.unix_millis(), sql(id)?],
+        )?;
+        if updated == 1 {
+            announce(&tx, id, now)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// The job's stage, desired state, and generation.
@@ -491,6 +525,13 @@ impl Store {
                     })
                     .collect::<Result<_, StoreError>>()?;
                 QueryResult::JobCounts(JobCounts { stages, as_of })
+            }
+            // Availability is checked outside the store, by the coordinator.
+            Query::Settings {} => {
+                return Err(ProtocolError::new(
+                    wayfetch_protocol::ErrorCode::Internal,
+                    "settings are answered by the coordinator",
+                ));
             }
         };
         Ok(result)

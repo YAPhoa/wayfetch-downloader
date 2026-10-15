@@ -34,6 +34,7 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -42,13 +43,16 @@ use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use wayfetch_domain::id::JobId;
+use wayfetch_domain::failure::FailureCode;
+use wayfetch_domain::id::{JobId, RootId};
 use wayfetch_domain::job::{DesiredState, JobStage};
+use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_protocol::command::MAX_SUBMIT_ITEMS;
 use wayfetch_protocol::event::{
     DurableEvent, EventCursor, ResyncReason, Retained, SubscriptionStart,
 };
+use wayfetch_protocol::query::{FailureSummary, RootSummary};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Hello, InstanceId, Permission,
     ProtocolError, ProtocolVersion, Query, QueryResult, Subscribe, TransportLimits,
@@ -56,6 +60,7 @@ use wayfetch_protocol::{
 
 use crate::cleanup;
 use crate::config::{ConfigError, EngineConfig};
+use crate::destinations::{self, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::fs::Root;
 use crate::state_dir::{Identity, StateDir, StateDirError};
@@ -136,18 +141,18 @@ impl EngineBuilder {
     /// directory.
     pub async fn start(self) -> Result<EngineOwner, StartError> {
         self.config.validate()?;
-        let path = self.config.state_dir.clone();
-        let limits = self.config.limits.clone();
-        let (state_dir, store, head) = self
+        let config = self.config.clone();
+        let (state_dir, store, head, destinations) = self
             .runtime
             .spawn_blocking(move || -> Result<_, StartError> {
-                let state_dir = StateDir::open(&path)?;
+                let state_dir = StateDir::open(&config.state_dir)?;
                 let mut store = Store::open(state_dir.path())?;
                 store.recover_after_restart(now())?;
                 stage_all(&mut store)?;
-                prune(&mut store, &limits)?;
+                prune(&mut store, &config.limits)?;
                 let head = store.event_head()?;
-                Ok((state_dir, store, head))
+                let destinations = Destinations::load(&mut store, &config)?;
+                Ok((state_dir, store, head, destinations))
             })
             .await??;
         let identity = state_dir.identity();
@@ -177,6 +182,7 @@ impl EngineBuilder {
             shutdown_timeout: self.config.shutdown_timeout,
             supervisor: supervisor.clone(),
         };
+        let probes = Probes::new(supervisor.guard());
         let coordinator = Coordinator {
             identity,
             inbox,
@@ -188,6 +194,9 @@ impl EngineBuilder {
             transport: self.transport,
             running: HashMap::new(),
             held: HashSet::new(),
+            destinations,
+            probes,
+            registering: 0,
             events,
             published: head,
             pruned_at: Instant::now(),
@@ -379,6 +388,7 @@ enum Request {
         Subscribe,
         oneshot::Sender<Result<Subscription, ProtocolError>>,
     ),
+    RegisterRoot(PathBuf, oneshot::Sender<Result<RootSummary, ProtocolError>>),
     /// Runs arbitrary store work, for fault-injection tests.
     #[cfg(test)]
     Run(Box<dyn FnOnce(&mut Store) + Send>, oneshot::Sender<()>),
@@ -463,6 +473,23 @@ impl EngineHandle {
         response.await.map_err(|_| shutting_down())?
     }
 
+    /// Permits the existing directory `path` as a destination on the
+    /// user's explicit request, such as a folder chosen in a native picker,
+    /// initializing it as a root unless it already is one. The root stays
+    /// permitted across restarts; choosing it as the default is a separate
+    /// settings change. Hosts call this only for a path their user chose
+    /// themselves, never for one a client sent. Idempotent.
+    pub async fn register_root(
+        &self,
+        path: PathBuf,
+        granted: &[Permission],
+    ) -> Result<RootSummary, ProtocolError> {
+        authorize(Permission::Control, granted)?;
+        let (reply, response) = oneshot::channel();
+        self.send(Request::RegisterRoot(path, reply))?;
+        response.await.map_err(|_| shutting_down())?
+    }
+
     fn send(&self, request: Request) -> Result<(), ProtocolError> {
         if self.readiness() != Readiness::Ready {
             return Err(shutting_down());
@@ -514,24 +541,102 @@ fn prune(store: &mut Store, limits: &crate::config::Limits) -> Result<(), StoreE
     Ok(())
 }
 
-/// Picks up to `free` jobs to run, other than `excluded`, moving queued
-/// ones to resolving.
-fn admit(store: &mut Store, free: usize, excluded: &[JobId]) -> Vec<Admission> {
-    let Ok(ready) = store.admissible(free, excluded) else {
-        return Vec::new();
+/// Jobs one admission pass may block before it yields to other work. The
+/// pass then asks for another, so jobs behind any number of blocked ones
+/// still start.
+const ADMIT_BLOCK_BUDGET: usize = 64;
+
+/// Picks up to `free` jobs to run, other than `excluded`, with where each
+/// is saved, moving queued ones to resolving. A job submitted without a
+/// destination belongs to the operator's download root, never to a
+/// default chosen since; only an engine with no download root gives such
+/// a job the default, since it was meant for none. A job whose root is no longer permitted, or that
+/// has none while the download root cannot be identified, is blocked, and
+/// the jobs behind it are looked at instead; without any download root,
+/// such a job waits. Also returns whether jobs are left to look at because
+/// the pass blocked [`ADMIT_BLOCK_BUDGET`] of them.
+fn admit(
+    store: &mut Store,
+    free: usize,
+    excluded: &[JobId],
+    roots: &Destinations,
+) -> (Vec<(Admission, Destination)>, bool) {
+    let fallback = if roots.has_download_root() {
+        roots.download_root()
+    } else {
+        roots.default_root()
     };
-    ready
-        .into_iter()
-        .filter_map(|mut job| {
+    let unplaced = fallback.is_none() && roots.fallback_pending();
+    let block = |store: &mut Store, job: &Admission, why: &str| {
+        let failure = FailureSummary {
+            code: FailureCode::DestinationUnavailable,
+            retry_at: None,
+            message: Some(DiagnosticText::new(why)),
+        };
+        let _ = store.record_stage(
+            job.job,
+            JobStage::Blocked,
+            job.generation,
+            Some(failure),
+            now(),
+        );
+    };
+    // Every job looked at is skipped by later reads in this pass, whether
+    // it started, was blocked, or could not be changed.
+    let mut skipped = excluded.to_vec();
+    let mut admitted = Vec::new();
+    let mut blocked = 0;
+    while admitted.len() < free {
+        let wanted = free - admitted.len();
+        let Ok(ready) = store.admissible(wanted, &skipped, fallback.is_some() || unplaced) else {
+            break;
+        };
+        let last = ready.len() < wanted;
+        for mut job in ready {
+            skipped.push(job.job);
+            let Some(id) = job.root.or(fallback) else {
+                block(
+                    store,
+                    &job,
+                    "the download folder is not initialized, or its drive is not mounted",
+                );
+                blocked += 1;
+                continue;
+            };
+            let Some(root) = roots.get(id) else {
+                block(
+                    store,
+                    &job,
+                    "the job's destination folder is no longer permitted",
+                );
+                blocked += 1;
+                continue;
+            };
+            if job.root.is_none() {
+                if store.assign_root(job.job, id, now()).is_err() {
+                    continue;
+                }
+                job.root = Some(id);
+            }
             if job.stage == JobStage::Queued {
-                store
+                if store
                     .advance_job(job.job, JobStage::Resolving, job.generation, None, now())
-                    .ok()?;
+                    .is_err()
+                {
+                    continue;
+                }
                 job.stage = JobStage::Resolving;
             }
-            Some(job)
-        })
-        .collect()
+            admitted.push((job, root));
+        }
+        if last {
+            break;
+        }
+        if blocked >= ADMIT_BLOCK_BUDGET {
+            return (admitted, true);
+        }
+    }
+    (admitted, false)
 }
 
 /// Settles a job whose download task ended while it was still active: a
@@ -574,6 +679,14 @@ enum Internal {
     Store(StoreWork),
     /// A download task ended, and whether it was interrupted.
     Finished(JobId, bool),
+    /// An admission pass stopped early; admit again.
+    Admit,
+    /// A folder's registration ended.
+    Registered {
+        path: PathBuf,
+        result: Result<RootId, ProtocolError>,
+        reply: oneshot::Sender<Result<RootSummary, ProtocolError>>,
+    },
 }
 
 /// A download's way to the store: each call is queued to the coordinator
@@ -629,6 +742,12 @@ struct Coordinator {
     /// instead of being admitted again by this run. At most one entry per
     /// job.
     held: HashSet<JobId>,
+    /// Permitted roots and the default.
+    destinations: Destinations,
+    /// Filesystem checks of root folders.
+    probes: Probes,
+    /// Folders being registered.
+    registering: usize,
     /// Live durable events for subscribers.
     events: broadcast::Sender<DurableEvent>,
     /// Position of the last event broadcast.
@@ -638,6 +757,7 @@ struct Coordinator {
 
 impl Coordinator {
     async fn run(mut self) {
+        self.refresh_destinations().await;
         // A pass a crash interrupted is finished before work starts.
         self.clean_staging().await;
         self.changed().await;
@@ -665,11 +785,19 @@ impl Coordinator {
             Request::Execute(envelope, reply) => {
                 let target = match envelope.command {
                     Command::Pause { job, .. } | Command::Cancel { job, .. } => Some(job),
-                    Command::Submit { .. } | Command::Resume { .. } => None,
+                    Command::Submit { .. }
+                    | Command::Resume { .. }
+                    | Command::UpdateSettings { .. } => None,
                 };
-                let (result, interrupt) = self
+                if let Err(e) = self.prepare(&envelope).await {
+                    let _ = reply.send(Err(e));
+                    return;
+                }
+                let destination = self.destinations.default_root();
+                let settings = matches!(envelope.command, Command::UpdateSettings { .. });
+                let (result, interrupt, current) = self
                     .with_store(move |store| {
-                        let result = store.execute(&envelope, instance, now());
+                        let result = store.execute(&envelope, instance, destination, now());
                         if let Ok(CommandResult::Submitted { .. }) = result {
                             // The batch is durable whatever happens here;
                             // links left unstaged are staged at the next start.
@@ -683,9 +811,15 @@ impl Coordinator {
                                     .job_state(job)
                                     .is_ok_and(|s| s.desired() != DesiredState::Running)
                         });
-                        (result, interrupt)
+                        let current = (settings && result.is_ok())
+                            .then(|| store.settings().ok())
+                            .flatten();
+                        (result, interrupt, current)
                     })
                     .await;
+                if let Some((revision, chosen)) = current {
+                    self.destinations.set_settings(revision, chosen);
+                }
                 if let Some(job) = interrupt {
                     if let Some(token) = self.running.get(&job) {
                         token.cancel();
@@ -701,12 +835,14 @@ impl Coordinator {
                 let _ = reply.send(result);
                 self.changed().await;
             }
+            Request::Query(Query::Settings {}, reply) => self.settings(reply).await,
             Request::Query(query, reply) => {
                 let result = self
                     .with_store(move |store| store.query(&query, instance))
                     .await;
                 let _ = reply.send(result);
             }
+            Request::RegisterRoot(path, reply) => self.register_root(path, reply),
             Request::Subscribe(request, reply) => {
                 let subscription = self.subscribe(request).await;
                 let _ = reply.send(subscription.map_err(ProtocolError::from));
@@ -738,15 +874,165 @@ impl Coordinator {
                 // may have been queued to start from zero.
                 self.clean_staging().await;
             }
+            // `changed` below admits.
+            Internal::Admit => {}
+            Internal::Registered {
+                path,
+                result,
+                reply,
+            } => {
+                self.registering -= 1;
+                let registered = result.map(|id| {
+                    self.destinations.add(id, path.clone());
+                    RootSummary {
+                        id,
+                        path: path.to_string_lossy().into_owned(),
+                        available: true,
+                        problem: None,
+                    }
+                });
+                let _ = reply.send(registered);
+            }
         }
         self.changed().await;
+    }
+
+    /// Checks a command before the store runs it. A submit needs every
+    /// configured root identified that can be, so the default is current.
+    /// A settings change must name a permitted root that is available now;
+    /// a retry of one already recorded is only replayed.
+    async fn prepare(&mut self, envelope: &CommandEnvelope) -> Result<(), ProtocolError> {
+        match envelope.command {
+            Command::Submit { .. } => self.refresh_destinations().await,
+            Command::UpdateSettings { default_root, .. } => {
+                if self.replays(envelope).await? {
+                    return Ok(());
+                }
+                self.refresh_destinations().await;
+                let root = self.destinations.get(default_root).ok_or_else(|| {
+                    ProtocolError::new(ErrorCode::NotFound, "destination not found")
+                })?;
+                self.probes
+                    .check(root, self.identity.instance)
+                    .await
+                    .map_err(|problem| {
+                        ProtocolError::new(
+                            ErrorCode::NotApplicable,
+                            &format!("the destination is unavailable: {problem}"),
+                        )
+                    })?;
+            }
+            Command::Pause { .. } | Command::Resume { .. } | Command::Cancel { .. } => {}
+        }
+        Ok(())
+    }
+
+    /// Whether the store holds a result for this command, which it replays.
+    async fn replays(&mut self, envelope: &CommandEnvelope) -> Result<bool, ProtocolError> {
+        let key = envelope.idempotency_key.as_uuid().to_string();
+        Ok(self
+            .with_store(move |store| store.has_command(&key))
+            .await?)
+    }
+
+    /// Answers the settings query. Roots are checked off the coordinator,
+    /// so a hung mount delays only this answer.
+    async fn settings(&mut self, reply: oneshot::Sender<Result<QueryResult, ProtocolError>>) {
+        self.refresh_destinations().await;
+        let (destinations, probes) = (self.destinations.clone(), self.probes.clone());
+        let instance = self.identity.instance;
+        self.supervisor.spawn(async move {
+            let mut checks = tokio::task::JoinSet::new();
+            for (i, root) in destinations.all().into_iter().enumerate() {
+                let probes = probes.clone();
+                checks.spawn(async move { (i, probes.check(root, instance).await) });
+            }
+            let mut available = checks.join_all().await;
+            available.sort_by_key(|(i, _)| *i);
+            let available = available.into_iter().map(|(_, a)| a).collect();
+            let _ = reply.send(Ok(QueryResult::Settings(destinations.settings(available))));
+        });
+    }
+
+    /// Registers the folder at `path` as a permitted root in a task of its
+    /// own, so a folder that hangs delays only this request.
+    fn register_root(
+        &mut self,
+        path: PathBuf,
+        reply: oneshot::Sender<Result<RootSummary, ProtocolError>>,
+    ) {
+        if !self.destinations.has_room_for(&path, self.registering) {
+            let _ = reply.send(Err(destinations::RootError::TooMany.into()));
+            return;
+        }
+        self.registering += 1;
+        let (store, probes) = (self.client.clone(), self.probes.clone());
+        let (instance, cancel) = (self.identity.instance, self.supervisor.cancel.clone());
+        // Not abandoned on cancellation: it stops between steps instead,
+        // and a hung step keeps the engine from shutting down cleanly.
+        self.supervisor.spawn(async move {
+            let result =
+                destinations::register(&store, &probes, &cancel, path.clone(), instance).await;
+            if cancel.is_cancelled() {
+                let _ = reply.send(Err(shutting_down()));
+                return;
+            }
+            let _ = store
+                .0
+                .send(Internal::Registered {
+                    path,
+                    result,
+                    reply,
+                })
+                .await;
+        });
+    }
+
+    /// Identifies configured roots not identified yet: from the store, or
+    /// by their sentinels, read off the coordinator within the probes'
+    /// deadline. A folder that does not answer in time is tried again later.
+    async fn refresh_destinations(&mut self) {
+        if self.destinations.complete() {
+            return;
+        }
+        let (mut destinations, probes) = (self.destinations.clone(), self.probes.clone());
+        self.destinations = self
+            .with_store(move |store| {
+                destinations.recall(store, &probes);
+                destinations
+            })
+            .await;
+        let instance = self.identity.instance;
+        let mut checks = tokio::task::JoinSet::new();
+        for path in self.destinations.unidentified() {
+            let probes = self.probes.clone();
+            checks.spawn(async move {
+                let id = probes.identify(&path, instance).await;
+                id.map(|id| (path, id))
+            });
+        }
+        let found: Vec<_> = checks.join_all().await.into_iter().flatten().collect();
+        if found.is_empty() {
+            return;
+        }
+        let mut destinations = self.destinations.clone();
+        self.destinations = self
+            .with_store(move |store| {
+                for (path, id) in found {
+                    // A sentinel naming a root recorded elsewhere stays
+                    // unidentified; the operator decides.
+                    let _ = destinations.adopt(store, path, id);
+                }
+                destinations
+            })
+            .await;
     }
 
     /// Removes staging files no job generation can reopen from every root
     /// that opens (see [`cleanup`]). A root that does not open is skipped,
     /// and a pass that stops early is continued by the next one.
     async fn clean_staging(&mut self) {
-        let (roots, instance) = (self.config.roots.clone(), self.identity.instance);
+        let (roots, instance) = (self.destinations.all(), self.identity.instance);
         self.with_store(move |store| {
             for root in roots {
                 if let Ok(root) = Root::open(&root.path, root.id, instance) {
@@ -773,14 +1059,6 @@ impl Coordinator {
         let Some(transport) = self.transport.clone() else {
             return;
         };
-        let Some(root) = self
-            .config
-            .download_root
-            .and_then(|id| self.config.root(id))
-            .cloned()
-        else {
-            return;
-        };
         let free = self
             .config
             .limits
@@ -790,18 +1068,24 @@ impl Coordinator {
         if free == 0 {
             return;
         }
+        self.refresh_destinations().await;
         let excluded: Vec<JobId> = self.running.keys().chain(&self.held).copied().collect();
-        let admitted = self
-            .with_store(move |store| admit(store, free, &excluded))
+        let roots = self.destinations.clone();
+        let (admitted, more) = self
+            .with_store(move |store| admit(store, free, &excluded, &roots))
             .await;
-        for job in admitted {
+        if more {
+            // After the requests already waiting.
+            let _ = self.client.0.try_send(Internal::Admit);
+        }
+        for (job, root) in admitted {
             let id = job.job;
             let cancel = self.supervisor.cancel.child_token();
             self.running.insert(id, cancel.clone());
             let download = Download {
                 store: self.client.clone(),
                 transport: transport.clone(),
-                root: root.clone(),
+                root,
                 instance: self.identity.instance,
                 boot_epoch: self.identity.boot_epoch,
                 limits: self.config.limits.clone(),
