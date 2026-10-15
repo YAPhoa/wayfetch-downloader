@@ -3,6 +3,8 @@ import { test } from 'node:test';
 
 import {
   availableActions,
+  canRemove,
+  canRename,
   describe,
   explain,
   fileName,
@@ -30,6 +32,19 @@ function job(fields) {
     ...fields,
   };
 }
+
+test('only published files are renamed, and only ended jobs removed', () => {
+  assert.equal(canRename(job({ stage: 'complete', display: 'complete' })), true);
+  for (const stage of /** @type {const} */ (['queued', 'transferring', 'publishing', 'failed', 'cancelled'])) {
+    assert.equal(canRename(job({ stage })), false, stage);
+  }
+  for (const stage of /** @type {const} */ (['complete', 'failed', 'cancelled'])) {
+    assert.equal(canRemove(job({ stage })), true, stage);
+  }
+  for (const stage of /** @type {const} */ (['queued', 'transferring', 'paused', 'publishing', 'waiting'])) {
+    assert.equal(canRemove(job({ stage })), false, stage);
+  }
+});
 
 test('actions mirror the engine’s rules', () => {
   assert.deepEqual(availableActions(job({ stage: 'transferring' })), ['pause', 'cancel']);

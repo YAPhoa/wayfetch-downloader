@@ -35,6 +35,24 @@ export function availableActions(job) {
 }
 
 /**
+ * Whether a job's file can be renamed: only once it is published
+ * (`JobState::request_rename`).
+ * @param {JobSummary} job
+ */
+export function canRename(job) {
+  return job.stage === 'complete';
+}
+
+/**
+ * Whether a job can be removed from the list: only once it has ended
+ * (`JobState::check_remove`). Its file stays where it is.
+ * @param {JobSummary} job
+ */
+export function canRemove(job) {
+  return job.stage === 'complete' || job.stage === 'failed' || job.stage === 'cancelled';
+}
+
+/**
  * Each state's plain name and tone.
  * @type {Readonly<Record<DisplayState, [string, Tone]>>}
  */
