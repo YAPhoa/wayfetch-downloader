@@ -7,7 +7,12 @@
 
 import { h, show } from '../components/dom.js';
 import { Downloads } from '../components/downloads.js';
+import { suppressNativeMenu } from '../components/menu.js';
 import { DesktopIpcClient } from '../transports/ipc.js';
+
+// An app window, not a web page: no Reload or Inspect Element on a
+// right-click, though text fields and selections keep copy and paste.
+suppressNativeMenu(document);
 
 const root = /** @type {HTMLElement} */ (document.getElementById('app'));
 let client;

@@ -45,6 +45,37 @@ export function place(anchor, size, viewport) {
   };
 }
 
+/** Inputs whose text can be edited, and so copied and pasted. */
+const TEXT_FIELDS = ['text', 'search', 'url', 'email', 'password', 'tel', 'number']
+  .map((type) => `input[type="${type}"]`)
+  .concat('input:not([type])', 'textarea')
+  .join(', ');
+
+/**
+ * Whether a right-click on `target` should get the webview's own menu:
+ * in a text field, for cut, copy and paste, and over selected text, for
+ * copy. Everywhere else an app shows only its own menus.
+ * @param {Element} target
+ * @param {Selection | null} selection
+ */
+export function wantsNativeMenu(target, selection) {
+  if (target.closest(TEXT_FIELDS) || /** @type {HTMLElement} */ (target).isContentEditable === true) return true;
+  return Boolean(selection && !selection.isCollapsed && selection.containsNode(target, true));
+}
+
+/**
+ * Keeps the webview's own menu (Reload, Inspect Element, …) out of an
+ * app's window, except where `wantsNativeMenu` says it helps. Menus the
+ * page opens itself, such as a row's, are unaffected.
+ * @param {Document} doc
+ */
+export function suppressNativeMenu(doc) {
+  doc.addEventListener('contextmenu', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || !wantsNativeMenu(target, doc.getSelection())) event.preventDefault();
+  });
+}
+
 export class Menu {
   /**
    * @param {string} label the menu's accessible name
