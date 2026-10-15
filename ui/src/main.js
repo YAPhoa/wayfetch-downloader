@@ -5,6 +5,7 @@
 // session) brings back the sign-in form; downloads are never affected by
 // what happens to this page.
 
+import './theme.js';
 import { loginView, setupView } from './components/auth.js';
 import { h, show } from './components/dom.js';
 import { Downloads } from './components/downloads.js';

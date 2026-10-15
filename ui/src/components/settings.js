@@ -14,6 +14,7 @@
 // that one. The page is part of the Downloads workspace, which keeps
 // following the engine while it is shown.
 
+import { theme } from '../theme.js';
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { browseServerFolders } from './folders.js';
@@ -51,7 +52,7 @@ import { pickService } from './services.js';
  */
 export const SECTIONS = [
   { id: 'folder', label: 'Download folder', about: 'Where new downloads are saved.', icon: 'folder' },
-  { id: 'display', label: 'Display', about: 'How the downloads list looks.', icon: 'display' },
+  { id: 'display', label: 'Display', about: 'Appearance and downloads list layout.', icon: 'display' },
   {
     id: 'accounts',
     label: 'Accounts & services',
@@ -220,7 +221,7 @@ export class SettingsPage {
   build() {
     const panels = {
       folder: this.destinationSection(),
-      display: this.densitySection(),
+      display: this.displaySection(),
       accounts: accountsSection(),
     };
     show(
@@ -498,6 +499,41 @@ export class SettingsPage {
     };
     void reload();
     return destination;
+  }
+
+  /** Appearance and density are applied immediately, on this device. */
+  displaySection() {
+    /** @type {[import('../theme.js').Theme, string][]} */
+    const options = [
+      ['system', 'System'],
+      ['light', 'Light'],
+      ['dark', 'Dark'],
+    ];
+    return h(
+      'div',
+      null,
+      h(
+        'fieldset',
+        null,
+        h('legend', null, 'Theme'),
+        options.map(([value, label]) =>
+          h(
+            'label',
+            { class: 'choice' },
+            h('input', {
+              type: 'radio',
+              name: 'theme',
+              value,
+              checked: (theme?.get() ?? 'system') === value,
+              onchange: () => theme?.set(value),
+            }),
+            h('span', { class: 'choice-text' }, label),
+          ),
+        ),
+      ),
+      h('p', { class: 'hint' }, 'System follows your device’s appearance. Applies at once, on this device only.'),
+      this.densitySection(),
+    );
   }
 
   /** Row density, applied at once and kept on this device. */

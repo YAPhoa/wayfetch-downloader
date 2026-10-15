@@ -174,7 +174,7 @@ async function expectServiceCatalogue(page, accounts) {
   const surface = () => card.evaluate((el) => getComputedStyle(el).backgroundColor);
   expect(await surface()).toBe('rgb(255, 255, 255)');
   await page.emulateMedia({ colorScheme: 'dark' });
-  expect(await surface()).toBe('rgb(15, 19, 24)');
+  await expect.poll(surface).toBe('rgb(15, 19, 24)');
   await page.emulateMedia({ colorScheme: 'light' });
   // Escape clears a search, then closes it and stays in Settings, back on
   // Add account.
@@ -429,12 +429,30 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   // Nothing asks for a command line.
   await expect(page.locator('.settings-page code')).toHaveCount(0);
   await expectFitsWindow(page);
-  // Row density applies at once.
+  // Theme and row density apply at once.
   await displayLink.click();
   await expect(page).toHaveURL(`${daemon.origin}/settings/display`);
   await expect(displayLink).toHaveAttribute('aria-current', 'page');
   await expect(folderLink).not.toHaveAttribute('aria-current');
   await expect(pane.getByRole('heading', { name: 'Download folder' })).toBeHidden();
+  await expect(pane.getByRole('radio', { name: 'System', exact: true })).toBeChecked();
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await pane.getByRole('radio', { name: 'Light', exact: true }).check();
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'light');
+  await page.reload();
+  await expect(pane.getByRole('radio', { name: 'Light', exact: true })).toBeChecked();
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'light');
+  await pane.getByRole('radio', { name: 'Dark', exact: true }).check();
+  await page.emulateMedia({ colorScheme: 'light' });
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
+  await pane.getByRole('radio', { name: 'System', exact: true }).check();
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'light');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await expect(page.locator('html')).toHaveCSS('color-scheme', 'dark');
+  await page.reload();
+  await expect(pane.getByRole('radio', { name: 'System', exact: true })).toBeChecked();
+  await page.emulateMedia({ colorScheme: 'light' });
   await pane.getByRole('radio', { name: 'Comfortable' }).check();
   expect(await page.evaluate(() => document.documentElement.dataset.density)).toBe('comfortable');
   await pane.getByRole('radio', { name: 'Compact' }).check();
@@ -572,6 +590,8 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await page.getByRole('button', { name: 'Back to Downloads' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/`);
   await expect(settingsButton).toBeFocused();
+  // Reloading to verify theme persistence reset the workspace's Add form.
+  await page.getByRole('button', { name: 'Add links' }).click();
   await destination.getByRole('button', { name: 'Change…' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/settings/folder`);
   await expect(folderLink).toHaveAttribute('aria-current', 'page');
