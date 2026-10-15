@@ -29,6 +29,8 @@ export function browseServerFolders(server, start) {
   return new Promise((resolve, reject) => {
     /** @type {FolderListing | null} */
     let shown = null;
+    /** Counts listings asked for; only the latest one's answer is shown. */
+    let asked = 0;
     /** @type {RootSummary | Error | null} */
     let outcome = null;
     const field = h('input', {
@@ -45,7 +47,7 @@ export function browseServerFolders(server, start) {
     );
     const list = h('ul', { class: 'folder-list', 'aria-label': 'Folders inside' });
     const message = h('p', { class: 'message', role: 'status' });
-    const add = h('button', { type: 'submit', class: 'primary', 'data-key': 'folder-add' }, 'Add this folder');
+    const add = h('button', { type: 'submit', class: 'primary', 'data-key': 'folder-add', disabled: true }, 'Add this folder');
     const form = h(
       'form',
       {
@@ -57,14 +59,17 @@ export function browseServerFolders(server, start) {
             await go(field.value.trim(), 'folder-path');
             return;
           }
-          if (!shown) return;
+          // Adding is offered only while the folder shown is the one
+          // listed last, not while another is loading or after it failed.
+          if (!shown || add.disabled) return;
+          const at = asked;
           add.disabled = true;
           show(message, 'Adding…');
           try {
             outcome = await server.addFolder(shown.path);
             dialog.close();
           } catch (error) {
-            if (!failed(error)) add.disabled = false;
+            if (!failed(error) && at === asked) add.disabled = false;
           }
         },
       },
@@ -107,20 +112,25 @@ export function browseServerFolders(server, start) {
     };
 
     /**
-     * Lists the folders at `path`, keeping focus near `from`.
+     * Lists the folders at `path`, keeping focus near `from`. A slower
+     * answer to an earlier request is dropped.
      * @param {string | null} path
      * @param {string} from the `data-key` of the control used
      */
     const go = async (path, from) => {
+      const at = ++asked;
+      add.disabled = true;
       message.classList.remove('error');
       show(message, 'Loading…');
       let listing;
       try {
         listing = await server.browseFolders(path === '' ? null : path);
       } catch (error) {
-        failed(error);
+        // Adding stays off: the path typed is not the folder listed.
+        if (at === asked || (error instanceof WayfetchError && error.code === 'unauthenticated')) failed(error);
         return;
       }
+      if (at !== asked) return;
       shown = listing;
       field.value = listing.path;
       up.disabled = listing.parent === undefined;

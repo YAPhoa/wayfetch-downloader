@@ -372,11 +372,41 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await folders.getByRole('button', { name: 'Up' }).click();
   await expect(at).toHaveValue(/** @type {string} */ (daemon.dir));
   await expect(folders.getByRole('button', { name: 'shares' })).toBeVisible();
+  // A folder that could not be listed cannot be added in place of the
+  // one listed before it.
+  const addThis = folders.getByRole('button', { name: 'Add this folder' });
+  await expect(addThis).toBeEnabled();
   await at.fill(join(shares, 'missing'));
   await at.press('Enter');
   await expect(folders.getByText('The folder does not exist.')).toBeVisible();
+  await expect(addThis).toBeDisabled();
+  // A slow answer for a folder left behind is dropped.
+  const left = /** @type {string} */ (daemon.dir);
+  const slow = `**/v1/folders?path=${encodeURIComponent(left)}`;
+  let held = false;
+  /** @type {() => void} */
+  let answer = () => {};
+  await page.route(slow, async (route) => {
+    held = true;
+    await new Promise((resolve) => {
+      answer = () => resolve(undefined);
+    });
+    await route.continue();
+  });
+  await at.fill(left);
+  await at.press('Enter');
+  await expect.poll(() => held).toBe(true);
+  await expect(addThis).toBeDisabled();
   await at.fill(shares);
   await at.press('Enter');
+  await expect(folders.getByRole('list', { name: 'Folders inside' }).getByRole('button')).toHaveText(['films']);
+  const late = page.waitForResponse((response) => response.url().includes(encodeURIComponent(left)));
+  answer();
+  await late;
+  await page.unroute(slow);
+  // The late answer would have been drawn by now.
+  await page.waitForTimeout(200);
+  await expect(at).toHaveValue(shares);
   await expect(folders.getByRole('list', { name: 'Folders inside' }).getByRole('button')).toHaveText(['films']);
   await folders.getByRole('button', { name: 'films' }).click();
   await expect(at).toHaveValue(join(shares, 'films'));

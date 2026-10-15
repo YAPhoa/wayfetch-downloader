@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use wayfetch_domain::id::RootId;
 use wayfetch_domain::name::DiagnosticText;
@@ -52,6 +53,12 @@ use crate::store::{Store, StoreError, path_text};
 /// How long an availability check may take before the root is reported as
 /// not responding.
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How many requests about folders the user names (browsing, adding) may
+/// have filesystem work running at once, finished or not. Such paths are
+/// unbounded, so each holding one thread on a hung mount could otherwise
+/// use up the blocking threads.
+pub(crate) const MAX_NAMED_FOLDER_WORK: usize = 8;
 
 /// A permitted root and where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +214,7 @@ pub(crate) async fn register(
     state_dir: PathBuf,
 ) -> Result<RootId, ProtocolError> {
     check_path(&path)?;
+    let probes = &probes.bounded()?;
     let _slot = probes.claim(&path).ok_or_else(|| {
         ProtocolError::new(
             ErrorCode::Busy,
@@ -283,6 +291,7 @@ pub(crate) async fn browse(
     }
     let owned = path.clone();
     probes
+        .bounded()?
         .timed(&path, move || list_folders(&owned))
         .await
         .unwrap_or_else(|| {
@@ -584,12 +593,17 @@ impl<K: Hash + Eq + Clone> Claims<K> {
 /// path: a check that is still running when another is asked for is not
 /// repeated, so a hung mount holds one thread, however often it is asked
 /// about.
+///
+/// Work on folders the user names is also bounded overall
+/// ([`Probes::bounded`]), since their paths are not.
 #[derive(Debug, Clone)]
 pub(crate) struct Probes {
     running: Claims<PathBuf>,
     /// Held by every check until it ends, so the state directory stays
     /// locked while one may still touch a folder.
     guard: Arc<dyn Any + Send + Sync>,
+    /// Permits for work on folders the user names.
+    named: Arc<Semaphore>,
 }
 
 impl Default for Probes {
@@ -604,7 +618,25 @@ impl Probes {
         Self {
             running: Claims::default(),
             guard,
+            named: Arc::new(Semaphore::new(MAX_NAMED_FOLDER_WORK)),
         }
+    }
+
+    /// Probes for one request about a folder the user named, holding one
+    /// of [`MAX_NAMED_FOLDER_WORK`] permits until every piece of work they
+    /// start has ended, even work whoever awaited it gave up on. Refused
+    /// as busy when none is free.
+    pub(crate) fn bounded(&self) -> Result<Self, ProtocolError> {
+        let permit = self.named.clone().try_acquire_owned().map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::Busy,
+                "too many folders are still being read or are not responding; try again later",
+            )
+        })?;
+        Ok(Self {
+            guard: Arc::new((self.guard.clone(), permit)),
+            ..self.clone()
+        })
     }
 
     /// Claims `path`, unless work on it is still running.
@@ -864,5 +896,43 @@ mod tests {
         assert_eq!(probes.identify(&path, f.instance).await, None);
         drop(slot);
         assert_eq!(probes.identify(&path, f.instance).await, Some(root.id));
+    }
+
+    #[tokio::test]
+    async fn work_on_named_folders_is_bounded_until_it_ends() {
+        let f = fixture();
+        let probes = Probes::default();
+        // Browsing a hung folder gives up at the deadline, but its work
+        // keeps a permit until it ends.
+        let (release, hung) = std::sync::mpsc::channel::<()>();
+        let hung = Arc::new(Mutex::new(hung));
+        let mut held = Vec::new();
+        for _ in 0..MAX_NAMED_FOLDER_WORK {
+            let bounded = probes.bounded().unwrap();
+            let hung = hung.clone();
+            held.push(bounded.blocking(move || {
+                let _ = hung.lock().unwrap().recv();
+            }));
+        }
+        let path = f.dir("browsed");
+        let err = browse(&probes, Some(path.clone())).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Busy);
+        // Giving up on the work does not free its permit.
+        drop(held);
+        assert_eq!(
+            browse(&probes, Some(path.clone())).await.unwrap_err().code,
+            ErrorCode::Busy
+        );
+        for _ in 0..MAX_NAMED_FOLDER_WORK {
+            release.send(()).unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while probes.named.available_permits() < MAX_NAMED_FOLDER_WORK {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        browse(&probes, Some(path)).await.unwrap();
     }
 }
