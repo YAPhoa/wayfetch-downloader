@@ -501,7 +501,12 @@ export function signIn(context, service, support, account, done) {
         account: account ? { account: account.id, revision: account.revision } : undefined,
         alias: name || undefined,
       });
-      if (!open) return;
+      if (!open) {
+        // Closed while asking: the sign-in started anyway, so stop it
+        // rather than leave it holding one of the engine's few slots.
+        if (result.type === 'authorization_started') void client.cancelAuthorization(result.id).catch(() => {});
+        return;
+      }
       if (result.type === 'account_authorized') {
         finish('Signed in.');
         return;
