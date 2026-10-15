@@ -259,15 +259,28 @@ code { font-family: ui-monospace, monospace; }
   min-height: 0;
 }
 
+/* The name, then items that wrap within the main part; the control at the
+   end (Settings) keeps the right of the first row whatever they are. */
 .toolbar {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 8px 16px;
   background: var(--chrome);
   border-bottom: 1px solid var(--line);
 }
+
+.toolbar-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar > :not(.toolbar-main) { flex: none; }
+.toolbar > .brand { min-height: 32px; }
 
 .brand {
   display: inline-flex;
@@ -1111,6 +1124,9 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
   .filter { width: auto; }
   .search { flex-basis: 100%; margin-left: 0; }
   .toolbar .search { order: 1; }
+  /* The name and Settings share the first row; the rest wraps below. */
+  .toolbar { flex-wrap: wrap; justify-content: space-between; }
+  .toolbar-main { order: 1; flex-basis: 100%; }
   .views { align-self: auto; margin: 0; }
   .view { min-height: 32px; }
   .links-page .table-scroll { overflow-y: visible; }
