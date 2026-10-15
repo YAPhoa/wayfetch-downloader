@@ -1178,6 +1178,47 @@ async fn the_row_menu_opens_renames_and_removes_through_the_host() {
         .wait_for(&section_shown("accounts", "/settings/accounts"))
         .await;
     fits_window(&shell, ".settings-content").await;
+    // No accounts added; the catalogue of services to add one from is
+    // searched by an address and offers nothing to add yet. Escape clears
+    // the search, then closes it, keeping Settings.
+    shell.click("[data-key=\"add-account\"]").await;
+    shell
+        .wait_for(
+            "document.querySelectorAll('dialog.services .service-card').length === 20
+             && document.activeElement?.dataset.key === 'service-search'",
+        )
+        .await;
+    fits_window(&shell, "dialog.services").await;
+    shell
+        .client
+        .active_element()
+        .await
+        .unwrap()
+        .send_keys("rg.to")
+        .await
+        .unwrap();
+    shell
+        .wait_for(
+            "[...document.querySelectorAll('dialog.services .service-card h4')].map((n) => n.textContent).join() === 'Rapidgator'",
+        )
+        .await;
+    let catalogue = shell
+        .js("const d = document.querySelector('dialog.services');
+             return { buttons: [...d.querySelectorAll('button')].map((b) => b.textContent),
+                      unavailable: d.querySelector('.service-card').textContent.includes('Not available yet') }")
+        .await;
+    assert_eq!(catalogue, json!({"buttons": ["×"], "unavailable": true}));
+    press(&shell, Key::Escape).await;
+    shell
+        .wait_for("document.querySelectorAll('dialog.services .service-card').length === 20")
+        .await;
+    press(&shell, Key::Escape).await;
+    shell
+        .wait_for(
+            "!document.querySelector('dialog') && location.pathname === '/settings/accounts'
+             && document.activeElement?.dataset.key === 'add-account'",
+        )
+        .await;
     press(&shell, Key::Escape).await;
     shell
         .wait_for(
