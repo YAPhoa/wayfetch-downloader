@@ -34,12 +34,12 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use wayfetch_engine::domain::id::{JobId, PackageId};
 use wayfetch_engine::domain::job::JobStage;
-use wayfetch_engine::domain::version::Revision;
-use wayfetch_engine::protocol::command::{CommandResult, InputUrl, SubmitItems};
+use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::{JobFilter, PageSize};
+use wayfetch_engine::protocol::request::{JobCommandRequest, SubmitRequest};
 use wayfetch_engine::protocol::{
-    Command, CommandEnvelope, ErrorCode, EventCursor, Hello, IdempotencyKey, InstanceId, Query,
-    QueryResult, StreamItem, Subscribe,
+    CommandEnvelope, ErrorCode, EventCursor, Hello, InstanceId, Query, QueryResult, StreamItem,
+    Subscribe,
 };
 use wayfetch_engine::{EngineHandle, Readiness};
 
@@ -141,69 +141,13 @@ async fn checks(app: &AppState) -> Option<&'static str> {
     .err()
 }
 
-/// The body of `POST /v1/inputs`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct SubmitRequest {
-    idempotency_key: IdempotencyKey,
-    target: InstanceId,
-    /// Raw, so each URL is validated with its own error code and position.
-    items: Vec<String>,
-    #[serde(default)]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    package: Option<PackageId>,
-}
-
 /// Submits a batch of URLs.
 pub async fn submit(
     State(app): State<AppState>,
     Extension(grant): Extension<Grant>,
     JsonBody(request): JsonBody<SubmitRequest>,
 ) -> ApiResult<CommandResult> {
-    let items = request
-        .items
-        .iter()
-        .enumerate()
-        .map(|(i, raw)| {
-            InputUrl::parse(raw).map_err(|e| {
-                ApiError::new(e.code, &format!("item {} rejected: {}", i + 1, e.message))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let command = Command::Submit {
-        items: SubmitItems::try_from(items)?,
-        package: request.package,
-    };
-    execute(
-        &app,
-        &grant,
-        request.idempotency_key,
-        request.target,
-        command,
-    )
-    .await
-}
-
-/// A job command's action.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub enum Action {
-    Pause,
-    Resume,
-    Cancel,
-}
-
-/// The body of `POST /v1/jobs/{id}/commands`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct JobCommandRequest {
-    idempotency_key: IdempotencyKey,
-    target: InstanceId,
-    action: Action,
-    expected_revision: Revision,
+    execute(&app, &grant, request.into_envelope()?).await
 }
 
 /// Pauses, resumes, or cancels a job at the revision the client saw.
@@ -213,44 +157,14 @@ pub async fn job_command(
     Path(id): Path<String>,
     JsonBody(request): JsonBody<JobCommandRequest>,
 ) -> ApiResult<CommandResult> {
-    let job = job_id(&id)?;
-    let expected_revision = request.expected_revision;
-    let command = match request.action {
-        Action::Pause => Command::Pause {
-            job,
-            expected_revision,
-        },
-        Action::Resume => Command::Resume {
-            job,
-            expected_revision,
-        },
-        Action::Cancel => Command::Cancel {
-            job,
-            expected_revision,
-        },
-    };
-    execute(
-        &app,
-        &grant,
-        request.idempotency_key,
-        request.target,
-        command,
-    )
-    .await
+    execute(&app, &grant, request.into_envelope(job_id(&id)?)).await
 }
 
 async fn execute(
     app: &AppState,
     grant: &Grant,
-    idempotency_key: IdempotencyKey,
-    target: InstanceId,
-    command: Command,
+    envelope: CommandEnvelope,
 ) -> ApiResult<CommandResult> {
-    let envelope = CommandEnvelope {
-        idempotency_key,
-        target,
-        command,
-    };
     Ok(Json(app.engine.execute(envelope, &grant.0).await?))
 }
 

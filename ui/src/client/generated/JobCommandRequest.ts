@@ -5,6 +5,22 @@ import type { InstanceId } from "./InstanceId.js";
 import type { Revision } from "./Revision.js";
 
 /**
- * The body of `POST /v1/jobs/{id}/commands`.
+ * Pauses, resumes, or cancels a job at the revision the client saw.
  */
-export type JobCommandRequest = { idempotency_key: IdempotencyKey, target: InstanceId, action: Action, expected_revision: Revision, };
+export type JobCommandRequest = { 
+/**
+ * Identifies the command across retries.
+ */
+idempotency_key: IdempotencyKey, 
+/**
+ * The instance the client believes it is talking to.
+ */
+target: InstanceId, 
+/**
+ * What to do.
+ */
+action: Action, 
+/**
+ * The job revision the client last saw.
+ */
+expected_revision: Revision, };

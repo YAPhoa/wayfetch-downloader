@@ -9,10 +9,10 @@ members = [
     "crates/cli",
     "crates/api",
     "apps/wayfetchd",
+    "apps/wayfetch-desktop",
 ]
-# The desktop host is added as a member later; default members leave
-# out any host that needs a desktop or frontend toolchain, so a plain
-# `cargo build` never pulls one in.
+# Default members leave out the desktop host, which needs a WebView and its
+# system libraries, so a plain `cargo build` never pulls one in.
 default-members = [
     "crates/domain",
     "crates/protocol",
