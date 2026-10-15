@@ -15,6 +15,8 @@ import {
   GROUPS,
   groupCount,
   progress,
+  restartNote,
+  retryPlan,
 } from '../../src/client/jobs.js';
 
 /**
@@ -53,10 +55,22 @@ test('actions mirror the engine’s rules', () => {
   assert.deepEqual(availableActions(job({ stage: 'paused', desired: 'paused' })), ['resume', 'cancel']);
   // Still pausing: it can be resumed or cancelled, not paused again.
   assert.deepEqual(availableActions(job({ stage: 'transferring', desired: 'paused' })), ['resume', 'cancel']);
-  assert.deepEqual(availableActions(job({ stage: 'failed' })), ['cancel']);
+  assert.deepEqual(availableActions(job({ stage: 'failed' })), ['cancel', 'retry']);
   assert.deepEqual(availableActions(job({ stage: 'publishing' })), []);
   assert.deepEqual(availableActions(job({ stage: 'complete' })), []);
-  assert.deepEqual(availableActions(job({ stage: 'cancelled', desired: 'cancelled' })), []);
+  assert.deepEqual(availableActions(job({ stage: 'cancelled', desired: 'cancelled' })), ['retry']);
+  // A cancel still stopping is not retried until it settles.
+  assert.deepEqual(availableActions(job({ stage: 'transferring', desired: 'cancelled' })), []);
+});
+
+test('retry says whether it continues saved data and why a job started over', () => {
+  assert.equal(retryPlan(job({ stage: 'failed', bytes_done: 2048 })), 'Continues from the 2.0 KiB saved when it can');
+  assert.equal(retryPlan(job({ stage: 'cancelled' })), 'Starts the download again');
+  assert.equal(restartNote(job({})), undefined);
+  assert.equal(
+    restartNote(job({ restart_reason: 'the file on the server changed since the saved data was downloaded' })),
+    'Started over from the beginning: the file on the server changed since the saved data was downloaded.',
+  );
 });
 
 test('progress uses durable bytes unless a sample is ahead', () => {

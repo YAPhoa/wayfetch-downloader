@@ -1,5 +1,6 @@
-//! Staging-file records, adoption after restart, and publication intents
-//! (sections 7.6 and 7.7, ADR-16, ADR-17; tests T24, T27, T28, T31).
+//! Staging-file records, adoption after a restart or a manual retry, and
+//! publication intents (sections 7.6 and 7.7, ADR-16, ADR-17; tests T24,
+//! T27, T28, T31).
 //!
 //! The store never touches files. The filesystem side ([`crate::fs`])
 //! creates, validates, links, and reconciles them; these records say which
@@ -13,6 +14,7 @@ use wayfetch_domain::version::{BootEpoch, Generation};
 
 use super::{Store, StoreError, jobs, key, progress, sql};
 use crate::fs::{FileIdentity, RelativePath, Removal, StagingRecord};
+use crate::lifecycle::SoleAttempt;
 use crate::transfer::lease::Representation;
 use crate::transfer::range::is_complete;
 
@@ -30,6 +32,9 @@ pub struct Partial {
     pub representation: Option<Representation>,
     /// The file name that response suggested, if any.
     pub suggested_name: Option<String>,
+    /// The generation a manual retry reserved the file for, which may
+    /// adopt it while the engine runs ([`Store::adopt_retained`]).
+    pub reserved_for: Option<Generation>,
 }
 
 impl Partial {
@@ -129,6 +134,67 @@ pub(super) fn abandon_staging(
     Ok(())
 }
 
+/// [`abandon_staging`] for a job returning to the queue under `below`:
+/// a file a retry reserved for exactly that generation is left to it.
+pub(super) fn abandon_unreserved(
+    tx: &Transaction<'_>,
+    job: JobId,
+    below: Generation,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE staging_files SET cleanup = 'pending' \
+         WHERE job_id = ?1 AND generation < ?2 AND cleanup IS NULL \
+         AND (handoff_generation IS NULL OR handoff_generation <> ?2)",
+        params![sql(job)?, sql(below)?],
+    )?;
+    Ok(())
+}
+
+/// Reserves the newest file of `job` that a generation may still reopen
+/// for `generation`, the attempt a manual retry just queued. Runs in the
+/// retry's transaction, before the job is saved as queued, so the file is
+/// never abandoned in between. A job without such a file starts from zero.
+pub(super) fn reserve_for_retry(
+    tx: &Transaction<'_>,
+    job: JobId,
+    generation: Generation,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE staging_files SET handoff_generation = ?2 \
+         WHERE job_id = ?1 AND cleanup IS NULL AND generation = ( \
+             SELECT MAX(generation) FROM staging_files WHERE job_id = ?1 AND cleanup IS NULL)",
+        params![sql(job)?, sql(generation)?],
+    )?;
+    Ok(())
+}
+
+/// Moves the staging file of `job` at generation `previous`, its durable
+/// coverage, and any unfinished publication of it to `generation`, owned
+/// by boot `epoch`. The caller has proved that nothing else can write it.
+fn hand_over(
+    tx: &Transaction<'_>,
+    job: JobId,
+    previous: i64,
+    generation: Generation,
+    epoch: BootEpoch,
+) -> Result<StagingRecord, StoreError> {
+    tx.execute(
+        "UPDATE staging_files SET generation = ?1, boot_epoch = ?2, handoff_generation = NULL \
+         WHERE job_id = ?3 AND generation = ?4",
+        params![sql(generation)?, sql(epoch)?, sql(job)?, previous],
+    )?;
+    tx.execute(
+        "UPDATE partials SET generation = ?1 WHERE job_id = ?2 AND generation = ?3",
+        params![sql(generation)?, sql(job)?, previous],
+    )?;
+    tx.execute(
+        "UPDATE publications SET generation = ?1 \
+         WHERE job_id = ?2 AND generation = ?3 AND state = 'intended'",
+        params![sql(generation)?, sql(job)?, previous],
+    )?;
+    staging(tx, job, generation)?.ok_or(StoreError::Corrupt("staging file"))
+}
+
 /// Loads `id` and checks it is at `generation` in one of `stages`.
 fn job_at(
     tx: &Transaction<'_>,
@@ -194,13 +260,13 @@ impl Store {
     /// reopen, which is what a restart or a resumed job reopens.
     pub fn latest_staging(&mut self, job: JobId) -> Result<Option<Partial>, StoreError> {
         let tx = self.read()?;
-        let Some((record, representation, suggested_name)) = tx
+        let Some((record, representation, suggested_name, reserved_for)) = tx
             .query_row(
                 &format!(
                     "SELECT {STAGING_COLUMNS}, representation_known, representation_length, \
                      representation_etag, representation_modified, suggested_name, \
-                     representation_resource FROM staging_files WHERE job_id = ?1 AND cleanup IS NULL \
-                     ORDER BY generation DESC LIMIT 1"
+                     representation_resource, handoff_generation FROM staging_files \
+                     WHERE job_id = ?1 AND cleanup IS NULL ORDER BY generation DESC LIMIT 1"
                 ),
                 [sql(job)?],
                 |row| {
@@ -217,6 +283,7 @@ impl Store {
                         read_staging(row)?,
                         representation.transpose()?,
                         row.get::<_, Option<String>>(11)?,
+                        row.get::<_, Option<i64>>(13)?,
                     ))
                 },
             )
@@ -246,6 +313,7 @@ impl Store {
             durable_end,
             representation,
             suggested_name,
+            reserved_for: reserved_for.map(key).transpose()?,
         }))
     }
 
@@ -338,20 +406,58 @@ impl Store {
                 "only a file from an earlier generation and engine start can be adopted",
             ));
         }
-        for table in ["staging_files", "partials"] {
-            tx.execute(
-                &format!(
-                    "UPDATE {table} SET generation = ?1 WHERE job_id = ?2 AND generation = ?3"
-                ),
-                params![sql(generation)?, sql(job)?, previous],
-            )?;
-        }
-        tx.execute(
-            "UPDATE staging_files SET boot_epoch = ?1 WHERE job_id = ?2 AND generation = ?3",
-            params![sql(epoch)?, sql(job)?, sql(generation)?],
-        )?;
-        let record = staging(&tx, job, generation)?.ok_or(StoreError::Corrupt("staging file"))?;
+        let record = hand_over(&tx, job, previous, generation, epoch)?;
         tx.commit()?;
+        Ok(record)
+    }
+
+    /// Hands the newest staging file of a job a manual retry queued, with
+    /// its durable coverage and any unfinished publication, to the retry's
+    /// generation, before that attempt sends a request. The caller has
+    /// reopened and validated the file first.
+    ///
+    /// The file may come from this engine start, so its boot epoch proves
+    /// nothing. Two things together do instead: the retry reserved the
+    /// file for exactly this generation in its own transaction, and
+    /// `attempt` shows the coordinator admitted this job only after every
+    /// earlier task of it ended, so no writer of this process still holds
+    /// the file (section 7.6).
+    pub fn adopt_retained(
+        &mut self,
+        job: JobId,
+        generation: Generation,
+        epoch: BootEpoch,
+        attempt: &SoleAttempt,
+    ) -> Result<StagingRecord, StoreError> {
+        if attempt.job() != job {
+            return Err(StoreError::Staging("the admission proof names another job"));
+        }
+        let tx = self.write()?;
+        job_at(
+            &tx,
+            job,
+            generation,
+            &[JobStage::Resolving],
+            "a retried job adopts its file before it transfers",
+        )?;
+        let (previous, reserved): (i64, Option<i64>) = tx
+            .query_row(
+                "SELECT generation, handoff_generation FROM staging_files WHERE job_id = ?1 \
+                 AND cleanup IS NULL ORDER BY generation DESC LIMIT 1",
+                [sql(job)?],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("staging file"))?;
+        if reserved != Some(sql(generation)?) || previous >= sql(generation)? {
+            return Err(StoreError::Staging(
+                "only a file a retry reserved for this generation can be handed over",
+            ));
+        }
+        let record = hand_over(&tx, job, previous, generation, epoch)?;
+        crash_point!("retry-adopt-before-commit");
+        tx.commit()?;
+        crash_point!("retry-adopt-after-commit");
         Ok(record)
     }
 
@@ -501,7 +607,8 @@ impl Store {
 
     /// Drops the job's pending publication, releasing its reservation, when
     /// reconciliation found another file at the target or the staged file
-    /// lost. The files themselves are left alone.
+    /// lost, or a retried job found it not linked and will publish again.
+    /// The files themselves are left alone.
     pub fn abandon_publication(
         &mut self,
         job: JobId,
@@ -512,8 +619,12 @@ impl Store {
             &tx,
             job,
             generation,
-            &[JobStage::Publishing, JobStage::Recovering],
-            "abandoning needs a publishing or recovering job",
+            &[
+                JobStage::Publishing,
+                JobStage::Recovering,
+                JobStage::Resolving,
+            ],
+            "abandoning needs a publishing, recovering, or retried job",
         )?;
         tx.execute(
             "DELETE FROM publications WHERE job_id = ?1 AND state = 'intended'",

@@ -75,10 +75,12 @@ pub enum Action {
     Rename,
     /// [`Command::Remove`]. Added in protocol 1.0.
     Remove,
+    /// [`Command::Retry`]. Added in protocol 1.2.
+    Retry,
 }
 
-/// Pauses, resumes, cancels, renames, or removes a job at the revision the
-/// client saw.
+/// Pauses, resumes, cancels, retries, renames, or removes a job at the
+/// revision the client saw.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -133,6 +135,10 @@ impl JobCommandRequest {
                 expected_revision,
             },
             (Action::Remove, None) => Command::Remove {
+                job,
+                expected_revision,
+            },
+            (Action::Retry, None) => Command::Retry {
                 job,
                 expected_revision,
             },
@@ -396,6 +402,14 @@ mod tests {
             request("remove", None).unwrap().command,
             Command::Remove { .. }
         ));
+        assert!(matches!(
+            request("retry", None).unwrap().command,
+            Command::Retry { .. }
+        ));
+        assert_eq!(
+            request("retry", Some("b.bin")).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
     }
 
     #[test]
