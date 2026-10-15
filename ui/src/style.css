@@ -841,8 +841,9 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 /* The Settings page: a menu of sections beside the selected one. */
 
 .settings-page h1 { font-size: 15px; }
+/* The title takes focus on arrival only to start reading there; it is
+   not a control, so it draws no ring. */
 .settings-page h1:focus { outline: none; }
-.settings-page h1:focus-visible { outline: 2px solid var(--focus); }
 
 .tool.back { margin-right: 8px; }
 
@@ -890,28 +891,152 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 20px 24px;
+  padding: 28px 32px 40px;
+  /* A page read once in a while, not scanned like the list: a step
+     larger than the table text, with room between the parts. */
+  font-size: 14px;
+  line-height: 1.45;
 }
 
-.settings-panel { display: grid; gap: 12px; max-width: 680px; }
+.settings-panel { display: grid; gap: 20px; max-width: 760px; }
+.settings-head { display: grid; gap: 4px; }
+.settings-head h2 { font-size: 20px; line-height: 1.25; }
+.settings-panel .settings-section { gap: 10px; }
+.settings-content .hint { font-size: 13px; }
+.settings-content .tag { padding: 1px 8px; font-size: 12px; }
+.settings-nav { font-size: 14px; }
+.settings-link { min-height: 36px; }
 
-.settings-head {
+/* A group box, as in a desktop app's preferences: a header strip in the
+   table-header style, rows divided by rules, and an optional footer of
+   actions. */
+
+.settings-group {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.group-head {
   display: flex;
+  float: left;
+  width: 100%;
+  box-sizing: border-box;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  padding-bottom: 6px;
+  gap: 4px 12px;
+  min-height: 44px;
+  padding: 6px 12px 6px 16px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.group-title { flex: 1; color: var(--ink); font-weight: 600; }
+.group-note { font-size: 13px; }
+.group-head button { min-height: 30px; padding: 0 12px; }
+.group-rows, .group-empty, .group-foot, .settings-group .table-scroll { clear: both; }
+.group-empty { margin: 0; padding: 16px; color: var(--muted); }
+
+.settings-group .choice-row {
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 4px 12px 4px 16px;
   border-bottom: 1px solid var(--line);
 }
 
-.settings-head .icon { width: 16px; height: 16px; color: var(--accent); }
-.settings-head h2 { font-size: 14px; }
+.settings-group .choice-row:last-child { border-bottom: 0; }
+.settings-group .choice-row:hover { background: var(--hover); }
+.settings-group .choice-row:has(input:checked) { background: var(--selected); }
+.settings-group .choice { align-items: center; gap: 12px; padding: 10px 0; }
+.settings-group .choice input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.settings-group .choice:has(input:disabled) { cursor: default; }
+/* Icon, path and tag in columns, so a long path wraps beside its icon. */
+.settings-group .choice-text { display: grid; grid-template-columns: auto minmax(0, max-content) 1fr; gap: 4px 10px; }
+.settings-group .choice-text .tag { justify-self: start; }
+.settings-group .choice-text .icon { color: var(--muted); }
+.settings-group .choice-text .path { color: var(--ink); }
+.settings-group .choice-text .problem { grid-column: 2 / -1; font-size: 13px; }
+.settings-group .choice-row:has(input:checked) .choice-text .icon { color: var(--accent); }
+.settings-group .remove-root { min-height: 30px; color: var(--bad); border-color: transparent; background: transparent; }
+.settings-group .remove-root:hover:not(:disabled),
+.settings-group .remove-root:focus-visible { border-color: var(--control); background: var(--surface); }
+
+.group-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 8px;
+  padding: 12px 12px 12px 16px;
+  min-height: 56px;
+  box-sizing: border-box;
+  background: var(--chrome);
+  border-top: 1px solid var(--line);
+}
+
+/* The result of the last action wraps in its own column beside the
+   buttons, which stay together at the end. */
+.group-foot .message { flex: 1 1 240px; min-width: 0; margin-right: 8px; }
+.group-foot .message + button { margin-left: auto; }
+.group-foot button { white-space: nowrap; }
+
+/* One setting per row: its name and purpose, then the control. */
+
+.setting-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 24px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.setting-row:last-child { border-bottom: 0; }
+.setting-text { display: grid; gap: 4px; min-width: 0; }
+.setting-name { font-weight: 500; }
+
+/* Radios drawn as a row of joined buttons, like the toolbar's groups.
+   Each radio covers its whole option, so it is what a pointer hits. */
+
+.segmented {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--control);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.segmented label {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 14px;
+  border-right: 1px solid var(--control);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.segmented label:last-child { border-right: 0; }
+.segmented label:hover { background: var(--hover); }
+.segmented input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.segmented label:has(input:checked) { background: var(--filter-selected); color: var(--ink); font-weight: 600; }
+.segmented label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; z-index: 1; }
 
 /* Accounts & services: the accounts added, and the catalogue an
    account's service is picked from, with the planned integration featured. */
 
 .accounts-table { width: 100%; min-width: 480px; border-collapse: collapse; }
-.accounts .table-scroll { flex: none; border: 1px solid var(--line); border-radius: var(--radius); }
-.accounts-table td.empty { color: var(--muted); border-bottom: 0; }
+.settings-group .table-scroll { flex: none; }
+.settings-group .accounts-table th, .settings-group .accounts-table td { padding: 10px 16px; }
+.settings-group .accounts-table td.empty { padding: 28px 16px; color: var(--muted); text-align: center; border-bottom: 0; }
 
 
 .service-card {
@@ -996,6 +1121,13 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
   .settings-link { border-left: 0; border-bottom: 3px solid transparent; border-radius: var(--radius) var(--radius) 0 0; }
   .settings-link[aria-current='page'] { border-bottom-color: var(--accent); }
   .settings-content, .add-content { overflow-y: visible; padding: 16px; }
+  .settings-nav { font-size: 13px; }
+  .settings-link { min-height: 32px; }
+  .setting-row .segmented { width: 100%; }
+  .segmented label { flex: 1; justify-content: center; }
+  .group-foot button { flex: 1; justify-content: center; }
+  .group-foot .message { flex-basis: 100%; margin-right: 0; }
+  .group-foot .message:empty { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
