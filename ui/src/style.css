@@ -826,6 +826,8 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 
 .links td.name.unknown { color: var(--muted); font-weight: 400; }
 .links tr.invalid td.name { font-family: ui-monospace, monospace; font-weight: 400; }
+.links tr.started td.name { color: var(--muted); font-weight: 400; }
+.links td.link-status a { color: inherit; }
 .links td.num.unknown { color: var(--muted); }
 
 .links td.link-status { white-space: normal; min-width: 120px; max-width: 320px; }

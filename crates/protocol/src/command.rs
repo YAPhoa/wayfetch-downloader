@@ -365,9 +365,10 @@ pub enum Command {
         /// available now. The default destination if absent.
         destination: Option<RootId>,
     },
-    /// Turn collected links into downloads, each once. A link that changed
-    /// since the client saw it, is invalid, or whose destination cannot be
-    /// used is refused and stays collected. Added in protocol 1.1.
+    /// Turn collected links into downloads, each once; they stay listed
+    /// with their download until removed. A link that changed since the
+    /// client saw it, is invalid, or whose destination cannot be used is
+    /// refused and stays collected. Added in protocol 1.1.
     StartLinks {
         /// The links.
         links: LinkRefs,
@@ -380,7 +381,8 @@ pub enum Command {
         links: LinkRefs,
     },
     /// Choose where collected links will be saved. The default destination
-    /// and other links keep theirs. Added in protocol 1.1.
+    /// and other links keep theirs, and a link already started is refused.
+    /// Added in protocol 1.1.
     MoveLinks {
         /// The links.
         links: LinkRefs,
@@ -398,12 +400,14 @@ impl Command {
     /// The permission the caller needs.
     pub const fn required_permission(&self) -> Permission {
         match self {
-            Self::Submit { .. }
-            | Self::CollectLinks { .. }
-            | Self::StartLinks { .. }
-            | Self::RemoveLinks { .. }
-            | Self::MoveLinks { .. } => Permission::Submit,
-            Self::Pause { .. }
+            Self::Submit { .. } | Self::CollectLinks { .. } | Self::StartLinks { .. } => {
+                Permission::Submit
+            }
+            // The list is shared: changing or dropping entries someone
+            // else collected is control, like changing their downloads.
+            Self::RemoveLinks { .. }
+            | Self::MoveLinks { .. }
+            | Self::Pause { .. }
             | Self::Resume { .. }
             | Self::Cancel { .. }
             | Self::UpdateSettings { .. }
