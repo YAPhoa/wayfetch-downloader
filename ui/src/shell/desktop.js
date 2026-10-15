@@ -5,6 +5,7 @@
 // Reloading this page, or losing its event stream, only stops watching:
 // the engine runs in the host, and jobs continue.
 
+import '../theme.js';
 import { h, show } from '../components/dom.js';
 import { Downloads } from '../components/downloads.js';
 import { suppressNativeMenu } from '../components/menu.js';
