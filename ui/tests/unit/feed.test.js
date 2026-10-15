@@ -92,6 +92,36 @@ class FakeClient {
     throw new Error('not used');
   }
 
+  /** @returns {Promise<import('../../src/client/contract.js').Accounts>} */
+  async accounts() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<import('../../src/client/contract.js').CommandResult>} */
+  async authorizeAccount() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<import('../../src/client/contract.js').Authorization>} */
+  async authorization() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<import('../../src/client/contract.js').Authorization>} */
+  async cancelAuthorization() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<import('../../src/client/contract.js').CommandResult>} */
+  async accountCommand() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<import('../../src/client/contract.js').AccountSummary>} */
+  async refreshAccount() {
+    throw new Error('not used');
+  }
+
   get live() {
     return this.subscriptions.filter((s) => !s.closed);
   }

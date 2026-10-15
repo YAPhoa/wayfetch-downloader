@@ -579,10 +579,10 @@ impl Store {
                 url: links::source(&tx, *link)?,
             },
             // Availability is checked outside the store, by the coordinator.
-            Query::Settings {} => {
+            Query::Settings {} | Query::Accounts {} | Query::Authorization { .. } => {
                 return Err(ProtocolError::new(
                     wayfetch_protocol::ErrorCode::Internal,
-                    "settings are answered by the coordinator",
+                    "settings and accounts are answered by the coordinator",
                 ));
             }
         };

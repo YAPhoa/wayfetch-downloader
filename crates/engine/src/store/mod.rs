@@ -50,6 +50,7 @@
 //! See [`schema`]: numbered, forward-only, append-only once merged, and an
 //! engine refuses a database written by a newer schema.
 
+mod accounts;
 mod commands;
 mod files;
 mod jobs;
@@ -62,6 +63,7 @@ mod roots;
 mod scenarios;
 pub mod schema;
 
+pub(crate) use accounts::{AccountRow, CheckResult, StoredCredential};
 pub use commands::CommandContext;
 pub use files::Partial;
 pub use jobs::Admission;
@@ -72,7 +74,7 @@ pub(crate) use roots::path_text;
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
-use wayfetch_domain::id::{BatchId, JobId, PackageId, RootId, SourceLinkId};
+use wayfetch_domain::id::{AccountId, BatchId, JobId, PackageId, RootId, SourceLinkId};
 use wayfetch_domain::job::JobError;
 use wayfetch_domain::version::{BootEpoch, Generation, Revision};
 use wayfetch_protocol::{ErrorCode, ProtocolError};
@@ -286,6 +288,7 @@ macro_rules! impl_key {
 }
 
 impl_key!(
+    AccountId => "account id",
     BatchId => "batch id",
     JobId => "job id",
     PackageId => "package id",

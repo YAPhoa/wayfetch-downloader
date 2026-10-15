@@ -44,11 +44,12 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use wayfetch_domain::failure::FailureCode;
-use wayfetch_domain::id::{JobId, RootId};
+use wayfetch_domain::id::{AccountId, JobId, RootId};
 use wayfetch_domain::job::{DesiredState, JobStage};
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
-use wayfetch_protocol::command::MAX_SUBMIT_ITEMS;
+use wayfetch_protocol::account::{AccountSummary, Authorization, AuthorizationId};
+use wayfetch_protocol::command::{IdempotencyKey, MAX_SUBMIT_ITEMS};
 use wayfetch_protocol::event::{
     DurableEvent, EventCursor, ResyncReason, Retained, SubscriptionStart,
 };
@@ -58,6 +59,10 @@ use wayfetch_protocol::{
     ProtocolError, ProtocolVersion, Query, QueryResult, Subscribe, TransportLimits,
 };
 
+mod accounts;
+
+use crate::accounts::provider::AccountProvider;
+use crate::accounts::vault::Vault;
 use crate::cleanup;
 use crate::config::{ConfigError, EngineConfig};
 use crate::destinations::{self, Claims, Destination, Destinations, Probes};
@@ -110,6 +115,7 @@ pub struct EngineBuilder {
     config: EngineConfig,
     runtime: Handle,
     transport: Option<Arc<dyn Transport>>,
+    providers: Vec<Arc<dyn AccountProvider>>,
 }
 
 impl std::fmt::Debug for EngineBuilder {
@@ -117,6 +123,7 @@ impl std::fmt::Debug for EngineBuilder {
         f.debug_struct("EngineBuilder")
             .field("config", &self.config)
             .field("transport", &self.transport.is_some())
+            .field("providers", &self.providers.len())
             .finish_non_exhaustive()
     }
 }
@@ -128,7 +135,16 @@ impl EngineBuilder {
             config,
             runtime,
             transport: None,
+            providers: Vec::new(),
         }
+    }
+
+    /// Adds an account integration: accounts of its service can then be
+    /// signed in. A later one for the same service replaces it.
+    pub fn account_provider(mut self, provider: Arc<dyn AccountProvider>) -> Self {
+        self.providers.retain(|p| p.service() != provider.service());
+        self.providers.push(provider);
+        self
     }
 
     /// The transport downloads use. Without one, jobs stay queued.
@@ -143,7 +159,7 @@ impl EngineBuilder {
     pub async fn start(self) -> Result<EngineOwner, StartError> {
         self.config.validate()?;
         let config = self.config.clone();
-        let (state_dir, store, head, destinations) = self
+        let (state_dir, store, head, destinations, vault) = self
             .runtime
             .spawn_blocking(move || -> Result<_, StartError> {
                 let state_dir = StateDir::open(&config.state_dir)?;
@@ -153,10 +169,14 @@ impl EngineBuilder {
                 prune(&mut store, &config.limits)?;
                 let head = store.event_head()?;
                 let destinations = Destinations::load(&mut store, &config)?;
-                Ok((state_dir, store, head, destinations))
+                // A missing or wrong key locks accounts; the engine still
+                // starts, so downloads without one keep working.
+                let vault = Vault::open(config.credential_key.as_deref(), store.key_check()?);
+                Ok((state_dir, store, head, destinations, vault))
             })
             .await??;
         let identity = state_dir.identity();
+        let credential_key = self.config.credential_key.clone();
         let store_info = store.info().clone();
         let (readiness_tx, readiness_rx) = watch::channel(Readiness::Starting);
         let (requests, inbox) = mpsc::channel(self.config.request_queue.get());
@@ -208,6 +228,7 @@ impl EngineBuilder {
             events,
             published: head,
             pruned_at: Instant::now(),
+            accounts: accounts::AccountService::new(self.providers, vault, credential_key),
         };
         owner.supervisor.spawn(coordinator.run());
         // Unless a task already failed.
@@ -402,6 +423,14 @@ enum Request {
         oneshot::Sender<Result<FolderListing, ProtocolError>>,
     ),
     PublishedPath(JobId, oneshot::Sender<Result<PathBuf, ProtocolError>>),
+    RefreshAccount(
+        AccountId,
+        oneshot::Sender<Result<AccountSummary, ProtocolError>>,
+    ),
+    CancelAuthorization(
+        AuthorizationId,
+        oneshot::Sender<Result<Authorization, ProtocolError>>,
+    ),
     /// Runs arbitrary store work, for fault-injection tests.
     #[cfg(test)]
     Run(Box<dyn FnOnce(&mut Store) + Send>, oneshot::Sender<()>),
@@ -531,6 +560,34 @@ impl EngineHandle {
         authorize(Permission::Read, granted)?;
         let (reply, response) = oneshot::channel();
         self.send(Request::PublishedPath(job, reply))?;
+        response.await.map_err(|_| shutting_down())?
+    }
+
+    /// Checks an account with its provider now, refreshing its credentials
+    /// if they expired, and answers with what the provider said. Requests
+    /// for an account already being checked share that check. Refused for
+    /// a disabled account, and while credential storage is locked.
+    pub async fn refresh_account(
+        &self,
+        account: AccountId,
+        granted: &[Permission],
+    ) -> Result<AccountSummary, ProtocolError> {
+        authorize(Permission::Accounts, granted)?;
+        let (reply, response) = oneshot::channel();
+        self.send(Request::RefreshAccount(account, reply))?;
+        response.await.map_err(|_| shutting_down())?
+    }
+
+    /// Cancels a sign-in still waiting for the person's approval, and
+    /// answers with it; one that already ended is left as it is.
+    pub async fn cancel_authorization(
+        &self,
+        id: AuthorizationId,
+        granted: &[Permission],
+    ) -> Result<Authorization, ProtocolError> {
+        authorize(Permission::Accounts, granted)?;
+        let (reply, response) = oneshot::channel();
+        self.send(Request::CancelAuthorization(id, reply))?;
         response.await.map_err(|_| shutting_down())?
     }
 
@@ -735,6 +792,34 @@ enum Internal {
         result: Result<RootId, ProtocolError>,
         reply: oneshot::Sender<Result<RootSummary, ProtocolError>>,
     },
+    /// A provider started an authorization, or could not.
+    AccountBegun {
+        key: IdempotencyKey,
+        target: accounts::Target,
+        result: Result<
+            crate::accounts::provider::DeviceAuthorization,
+            crate::accounts::provider::ProviderError,
+        >,
+    },
+    /// The person approved an authorization.
+    AccountAuthorized {
+        flow: AuthorizationId,
+        credential: crate::accounts::Secret,
+        profile: crate::accounts::provider::Profile,
+    },
+    /// An authorization ended without approval.
+    AccountFlowEnded {
+        flow: AuthorizationId,
+        state: wayfetch_protocol::account::AuthorizationState,
+        problem: Option<String>,
+    },
+    /// A check of an account ended.
+    AccountChecked {
+        account: AccountId,
+        generation: wayfetch_domain::version::Generation,
+        result:
+            Result<crate::accounts::provider::Checked, crate::accounts::provider::ProviderError>,
+    },
 }
 
 /// A download's way to the store: each call is queued to the coordinator
@@ -809,6 +894,8 @@ struct Coordinator {
     /// Position of the last event broadcast.
     published: u64,
     pruned_at: Instant,
+    /// Accounts: the vault, sign-ins, and checks.
+    accounts: accounts::AccountService,
 }
 
 impl Coordinator {
@@ -868,6 +955,11 @@ impl Coordinator {
                 let _ = reply.send(head.map_err(ProtocolError::from).map(|h| self.hello(h)));
             }
             Request::Execute(envelope, reply)
+                if matches!(envelope.command, Command::AuthorizeAccount { .. }) =>
+            {
+                self.authorize(envelope, reply).await;
+            }
+            Request::Execute(envelope, reply)
                 if matches!(envelope.command, Command::Rename { .. }) =>
             {
                 self.refresh_destinations().await;
@@ -886,8 +978,16 @@ impl Coordinator {
                     | Command::CollectLinks { .. }
                     | Command::StartLinks { .. }
                     | Command::RemoveLinks { .. }
-                    | Command::MoveLinks { .. } => None,
+                    | Command::MoveLinks { .. }
+                    | Command::AuthorizeAccount { .. }
+                    | Command::SetAccountEnabled { .. }
+                    | Command::RemoveAccount { .. } => None,
                 };
+                let account_command = matches!(
+                    envelope.command,
+                    Command::SetAccountEnabled { .. } | Command::RemoveAccount { .. }
+                )
+                .then(|| envelope.command.clone());
                 let unusable = match self.prepare(&envelope).await {
                     Ok(unusable) => unusable,
                     Err(e) => {
@@ -956,10 +1056,17 @@ impl Coordinator {
                         }
                     }
                 }
+                if let (Some(command), true) = (&account_command, result.is_ok()) {
+                    self.account_changed(command).await;
+                }
                 let _ = reply.send(result);
                 self.changed().await;
             }
             Request::Query(Query::Settings {}, reply) => self.settings(reply).await,
+            Request::Query(Query::Accounts {}, reply) => self.list_accounts(reply).await,
+            Request::Query(Query::Authorization { id }, reply) => self.authorization(id, reply),
+            Request::RefreshAccount(account, reply) => self.refresh_account(account, reply).await,
+            Request::CancelAuthorization(id, reply) => self.cancel_authorization(id, reply),
             Request::Query(query, reply) => {
                 let result = self
                     .with_store(move |store| store.query(&query, instance))
@@ -1051,6 +1158,26 @@ impl Coordinator {
                 });
                 let _ = reply.send(registered);
             }
+            Internal::AccountBegun {
+                key,
+                target,
+                result,
+            } => self.begun(key, target, result),
+            Internal::AccountAuthorized {
+                flow,
+                credential,
+                profile,
+            } => self.authorized(flow, credential, profile).await,
+            Internal::AccountFlowEnded {
+                flow,
+                state,
+                problem,
+            } => self.flow_ended(flow, state, problem),
+            Internal::AccountChecked {
+                account,
+                generation,
+                result,
+            } => self.checked(account, generation, result).await,
         }
         self.changed().await;
     }
@@ -1136,7 +1263,10 @@ impl Coordinator {
             | Command::Cancel { .. }
             | Command::Rename { .. }
             | Command::Remove { .. }
-            | Command::RemoveLinks { .. } => {}
+            | Command::RemoveLinks { .. }
+            | Command::AuthorizeAccount { .. }
+            | Command::SetAccountEnabled { .. }
+            | Command::RemoveAccount { .. } => {}
         }
         Ok(Unusable::new())
     }
