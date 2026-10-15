@@ -86,6 +86,109 @@ async function expectFitsWindow(page) {
   expect(scrolled).toBe(window);
 }
 
+/**
+ * The service catalogue, opened to add an account from the Accounts &
+ * services section: Real-Debrid first, search by name and address,
+ * categories from the keyboard, the no-results state, nothing that can be
+ * added or connected, and a narrow window. Focus returns to Add account
+ * when it closes.
+ * @param {import('@playwright/test').Page} page
+ * @param {import('@playwright/test').Locator} accounts
+ */
+async function expectServiceCatalogue(page, accounts) {
+  const adding = accounts.getByRole('button', { name: 'Add account…' });
+  await adding.click();
+  const catalogue = page.getByRole('dialog', { name: 'Add account' });
+  const search = catalogue.getByRole('searchbox', { name: 'Search services' });
+  const status = catalogue.getByRole('status');
+  const names = catalogue.locator('.service-card h4');
+  const chips = catalogue.locator('.chip');
+  await expect(search).toBeFocused();
+  await expect(status).toHaveText('20 services');
+  await expect(chips).toHaveText(['All20', 'Multi-host services6', 'File hosting8', 'Cloud storage6']);
+  await expect(catalogue.getByRole('heading', { level: 3 })).toHaveText([
+    'Multi-host services',
+    'File hosting',
+    'Cloud storage',
+  ]);
+  // Real-Debrid leads, as the first planned integration.
+  const featured = catalogue.locator('.service-card.featured');
+  await expect(featured.locator('h4')).toHaveText('Real-Debrid');
+  await expect(featured.locator('.tag')).toHaveText(['Multi-host services', 'Planned', 'Not available yet']);
+  await expect(names.first()).toHaveText('Real-Debrid');
+  // Nothing in it can be added yet, or asks for an account.
+  await expect(catalogue.getByRole('button')).toHaveText(['×']);
+  await expect(catalogue.locator('input:not([type="search"], [type="radio"]), select, textarea')).toHaveCount(0);
+  await expect(catalogue.locator('.service-card .tag', { hasText: 'Not available yet' })).toHaveCount(20);
+  await expect(catalogue.locator('.service-card .tag.available')).toHaveCount(0);
+  // By name, ignoring case and punctuation.
+  await search.fill('real debrid');
+  await expect(names).toHaveText(['Real-Debrid']);
+  await expect(status).toHaveText('1 service');
+  // By an alias, or a pasted link: one entry, saying which domain matched.
+  await search.fill('https://rg.to/file/abc/name.rar.html');
+  await expect(names).toHaveText(['Rapidgator']);
+  await expect(catalogue.getByText('Matches rg.to')).toBeVisible();
+  await search.fill('mega');
+  // Name matches first, ungrouped while searching.
+  await expect(names).toHaveText(['MEGA', '1fichier']);
+  await expect(catalogue.getByRole('heading', { level: 3 })).toHaveCount(0);
+  await expect(catalogue.getByText('Matches megadl.fr')).toBeVisible();
+  await expect(chips).toHaveText(['All2', 'Multi-host services0', 'File hosting1', 'Cloud storage1']);
+  // A category from the keyboard: Tab reaches the selected one, arrows
+  // move between them.
+  await search.fill('');
+  await page.keyboard.press('Tab');
+  await expect(catalogue.getByRole('radio', { name: /^All/ })).toBeFocused();
+  expect(await chips.first().evaluate((el) => getComputedStyle(el).outlineStyle)).toBe('solid');
+  await page.keyboard.press('ArrowRight');
+  await expect(catalogue.getByRole('radio', { name: /^Multi-host services/ })).toBeChecked();
+  await expect(names).toHaveText(['Real-Debrid', 'AllDebrid', 'TorBox', 'Debrid-Link', 'LinkSnappy', 'premium.to']);
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  await expect(catalogue.getByRole('radio', { name: /^Cloud storage/ })).toBeChecked();
+  await expect(names).toHaveText(['MEGA', 'Google Drive', 'Dropbox', 'MediaFire', 'Pixeldrain', 'Gofile']);
+  // The list scrolls from the keyboard too.
+  await page.keyboard.press('Tab');
+  await expect(catalogue.getByRole('region', { name: 'Services' })).toBeFocused();
+  // Nothing matches: said plainly, in this category and in all.
+  await search.fill('rapidgator');
+  await expect(names).toHaveCount(0);
+  await expect(catalogue.getByText('No services match “rapidgator” in Cloud storage.')).toBeVisible();
+  await search.fill('no such service');
+  await chips.first().click();
+  await expect(catalogue.getByRole('radio', { name: /^All/ })).toBeChecked();
+  await expect(catalogue.getByText('No services match “no such service”.')).toBeVisible();
+  await expect(status).toHaveText('');
+  // A narrow window: the dialog fits, its list scrolls inside it.
+  await search.fill('');
+  await page.setViewportSize({ width: 360, height: 640 });
+  const box = await catalogue.boundingBox();
+  expect(box && box.x >= 0 && box.y >= 0 && box.x + box.width <= 360 && box.y + box.height <= 640).toBe(true);
+  const results = catalogue.locator('.service-results');
+  expect(await results.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  expect(await catalogue.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  // The dark theme has its own surfaces.
+  const card = catalogue.locator('.service-card').first();
+  const surface = () => card.evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(await surface()).toBe('rgb(255, 255, 255)');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  expect(await surface()).toBe('rgb(15, 19, 24)');
+  await page.emulateMedia({ colorScheme: 'light' });
+  // Escape clears a search, then closes it and stays in Settings, back on
+  // Add account.
+  await search.fill('rg.to');
+  await page.keyboard.press('Escape');
+  await expect(search).toHaveValue('');
+  await expect(catalogue).toBeVisible();
+  await expect(status).toHaveText('20 services');
+  await page.keyboard.press('Escape');
+  await expect(catalogue).toHaveCount(0);
+  await expect(page).toHaveURL(`${daemon.origin}/settings/accounts`);
+  await expect(adding).toBeFocused();
+}
+
 test('a browser signs in, downloads, controls jobs, and outlives a daemon restart', async ({
   browser,
 }) => {
@@ -345,12 +448,17 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(page).toHaveURL(`${daemon.origin}/settings/accounts`);
   await expect(accountsLink).toHaveAttribute('aria-current', 'page');
   await expect(accountsLink).toBeFocused();
-  // Accounts cannot be connected yet.
+  // Only accounts added are listed, in a table: none yet.
   const accounts = pane.locator('section', { has: page.getByRole('heading', { name: /Accounts & services/ }) });
-  await expect(accounts.getByText('Not available yet', { exact: true })).toBeVisible();
-  await expect(accounts.getByText(/such as Real-Debrid/)).toBeVisible();
-  await expect(accounts.locator('input, select, textarea, button')).toHaveCount(0);
+  const table = accounts.getByRole('table', { name: 'Accounts' });
+  await expect(table.getByRole('columnheader')).toHaveText(['Service', 'Account', 'Status', 'Expires', 'Traffic left']);
+  await expect(table.locator('tbody tr')).toHaveText(['No accounts added yet.']);
+  await expect(accounts.getByText(/Links you add directly download without an account/)).toBeVisible();
+  await expect(accounts.locator('.service-card')).toHaveCount(0);
+  await expect(accounts.locator('input, select, textarea')).toHaveCount(0);
+  await expect(accounts.getByRole('button')).toHaveText(['Add account…']);
   await expectFitsWindow(page);
+  await expectServiceCatalogue(page, accounts);
   // The browser's Back goes to the previous section.
   await page.goBack();
   await expect(displayLink).toHaveAttribute('aria-current', 'page');
