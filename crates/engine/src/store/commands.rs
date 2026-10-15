@@ -23,8 +23,9 @@ impl Store {
     /// Applies a client command durably. The host has already checked the
     /// caller's permission, and the coordinator that a settings change
     /// names a permitted, available root. A submitted batch is saved in
-    /// `destination`, the default root at the time, or gets one when it
-    /// first starts if there is none.
+    /// `destination`, the default root at the time. Without one, its jobs
+    /// belong to the operator's download root, which was not identified
+    /// yet, and are saved there once it is.
     pub fn execute(
         &mut self,
         envelope: &CommandEnvelope,

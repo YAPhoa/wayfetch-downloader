@@ -125,6 +125,14 @@ impl Root {
 }
 
 fn open_root_dir(path: &Path) -> Result<Dir, FsError> {
+    // A hung mount, for tests: configured to pause, opening a folder named
+    // `stalled` blocks until the failpoint is removed.
+    #[cfg(feature = "failpoints")]
+    fail::fail_point!(
+        "root-open-stall",
+        path.file_name() == Some(std::ffi::OsStr::new("stalled")),
+        |_| Err(FsError::io("open root")(io::Error::other("failpoint")))
+    );
     Dir::open_ambient_dir(path, ambient_authority()).map_err(FsError::io("open root"))
 }
 

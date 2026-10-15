@@ -44,7 +44,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use wayfetch_domain::failure::FailureCode;
-use wayfetch_domain::id::JobId;
+use wayfetch_domain::id::{JobId, RootId};
 use wayfetch_domain::job::{DesiredState, JobStage};
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
@@ -151,8 +151,7 @@ impl EngineBuilder {
                 stage_all(&mut store)?;
                 prune(&mut store, &config.limits)?;
                 let head = store.event_head()?;
-                let destinations =
-                    Destinations::load(&mut store, &config, state_dir.identity().instance)?;
+                let destinations = Destinations::load(&mut store, &config)?;
                 Ok((state_dir, store, head, destinations))
             })
             .await??;
@@ -196,6 +195,7 @@ impl EngineBuilder {
             held: HashSet::new(),
             destinations,
             probes: Probes::default(),
+            registering: 0,
             events,
             published: head,
             pruned_at: Instant::now(),
@@ -540,22 +540,32 @@ fn prune(store: &mut Store, limits: &crate::config::Limits) -> Result<(), StoreE
     Ok(())
 }
 
+/// Jobs one admission pass may block before it yields to other work. The
+/// pass then asks for another, so jobs behind any number of blocked ones
+/// still start.
+const ADMIT_BLOCK_BUDGET: usize = 64;
+
 /// Picks up to `free` jobs to run, other than `excluded`, with where each
-/// is saved, moving queued ones to resolving. A job without a destination
-/// takes the default. One whose root is no longer permitted, or that has
-/// none while the download root cannot be identified, is blocked; without
-/// any download root, such a job waits.
+/// is saved, moving queued ones to resolving. A job submitted without a
+/// destination belongs to the operator's download root, never to a
+/// default chosen since; only an engine with no download root gives such
+/// a job the default, since it was meant for none. A job whose root is no longer permitted, or that
+/// has none while the download root cannot be identified, is blocked, and
+/// the jobs behind it are looked at instead; without any download root,
+/// such a job waits. Also returns whether jobs are left to look at because
+/// the pass blocked [`ADMIT_BLOCK_BUDGET`] of them.
 fn admit(
     store: &mut Store,
     free: usize,
     excluded: &[JobId],
     roots: &Destinations,
-) -> Vec<(Admission, Destination)> {
-    let default = roots.default_root();
-    let unplaced = default.is_none() && roots.fallback_pending();
-    let Ok(ready) = store.admissible(free, excluded, default.is_some() || unplaced) else {
-        return Vec::new();
+) -> (Vec<(Admission, Destination)>, bool) {
+    let fallback = if roots.has_download_root() {
+        roots.download_root()
+    } else {
+        roots.default_root()
     };
+    let unplaced = fallback.is_none() && roots.fallback_pending();
     let block = |store: &mut Store, job: &Admission, why: &str| {
         let failure = FailureSummary {
             code: FailureCode::DestinationUnavailable,
@@ -570,16 +580,27 @@ fn admit(
             now(),
         );
     };
-    ready
-        .into_iter()
-        .filter_map(|mut job| {
-            let Some(id) = job.root.or(default) else {
+    // Every job looked at is skipped by later reads in this pass, whether
+    // it started, was blocked, or could not be changed.
+    let mut skipped = excluded.to_vec();
+    let mut admitted = Vec::new();
+    let mut blocked = 0;
+    while admitted.len() < free {
+        let wanted = free - admitted.len();
+        let Ok(ready) = store.admissible(wanted, &skipped, fallback.is_some() || unplaced) else {
+            break;
+        };
+        let last = ready.len() < wanted;
+        for mut job in ready {
+            skipped.push(job.job);
+            let Some(id) = job.root.or(fallback) else {
                 block(
                     store,
                     &job,
                     "the download folder is not initialized, or its drive is not mounted",
                 );
-                return None;
+                blocked += 1;
+                continue;
             };
             let Some(root) = roots.get(id) else {
                 block(
@@ -587,21 +608,34 @@ fn admit(
                     &job,
                     "the job's destination folder is no longer permitted",
                 );
-                return None;
+                blocked += 1;
+                continue;
             };
             if job.root.is_none() {
-                store.assign_root(job.job, id, now()).ok()?;
+                if store.assign_root(job.job, id, now()).is_err() {
+                    continue;
+                }
                 job.root = Some(id);
             }
             if job.stage == JobStage::Queued {
-                store
+                if store
                     .advance_job(job.job, JobStage::Resolving, job.generation, None, now())
-                    .ok()?;
+                    .is_err()
+                {
+                    continue;
+                }
                 job.stage = JobStage::Resolving;
             }
-            Some((job, root))
-        })
-        .collect()
+            admitted.push((job, root));
+        }
+        if last {
+            break;
+        }
+        if blocked >= ADMIT_BLOCK_BUDGET {
+            return (admitted, true);
+        }
+    }
+    (admitted, false)
 }
 
 /// Settles a job whose download task ended while it was still active: a
@@ -644,6 +678,14 @@ enum Internal {
     Store(StoreWork),
     /// A download task ended, and whether it was interrupted.
     Finished(JobId, bool),
+    /// An admission pass stopped early; admit again.
+    Admit,
+    /// A folder's registration ended.
+    Registered {
+        path: PathBuf,
+        result: Result<RootId, ProtocolError>,
+        reply: oneshot::Sender<Result<RootSummary, ProtocolError>>,
+    },
 }
 
 /// A download's way to the store: each call is queued to the coordinator
@@ -701,8 +743,10 @@ struct Coordinator {
     held: HashSet<JobId>,
     /// Permitted roots and the default.
     destinations: Destinations,
-    /// Root availability checks.
+    /// Filesystem checks of root folders.
     probes: Probes,
+    /// Folders being registered.
+    registering: usize,
     /// Live durable events for subscribers.
     events: broadcast::Sender<DurableEvent>,
     /// Position of the last event broadcast.
@@ -797,10 +841,7 @@ impl Coordinator {
                     .await;
                 let _ = reply.send(result);
             }
-            Request::RegisterRoot(path, reply) => {
-                let _ = reply.send(self.register_root(path).await);
-                self.changed().await;
-            }
+            Request::RegisterRoot(path, reply) => self.register_root(path, reply),
             Request::Subscribe(request, reply) => {
                 let subscription = self.subscribe(request).await;
                 let _ = reply.send(subscription.map_err(ProtocolError::from));
@@ -832,6 +873,25 @@ impl Coordinator {
                 // may have been queued to start from zero.
                 self.clean_staging().await;
             }
+            // `changed` below admits.
+            Internal::Admit => {}
+            Internal::Registered {
+                path,
+                result,
+                reply,
+            } => {
+                self.registering -= 1;
+                let registered = result.map(|id| {
+                    self.destinations.add(id, path.clone());
+                    RootSummary {
+                        id,
+                        path: path.to_string_lossy().into_owned(),
+                        available: true,
+                        problem: None,
+                    }
+                });
+                let _ = reply.send(registered);
+            }
         }
         self.changed().await;
     }
@@ -844,11 +904,7 @@ impl Coordinator {
         match envelope.command {
             Command::Submit { .. } => self.refresh_destinations().await,
             Command::UpdateSettings { default_root, .. } => {
-                let key = envelope.idempotency_key.as_uuid().to_string();
-                if self
-                    .with_store(move |store| store.has_command(&key))
-                    .await?
-                {
+                if self.replays(envelope).await? {
                     return Ok(());
                 }
                 self.refresh_destinations().await;
@@ -870,6 +926,14 @@ impl Coordinator {
         Ok(())
     }
 
+    /// Whether the store holds a result for this command, which it replays.
+    async fn replays(&mut self, envelope: &CommandEnvelope) -> Result<bool, ProtocolError> {
+        let key = envelope.idempotency_key.as_uuid().to_string();
+        Ok(self
+            .with_store(move |store| store.has_command(&key))
+            .await?)
+    }
+
     /// Answers the settings query. Roots are checked off the coordinator,
     /// so a hung mount delays only this answer.
     async fn settings(&mut self, reply: oneshot::Sender<Result<QueryResult, ProtocolError>>) {
@@ -889,34 +953,74 @@ impl Coordinator {
         });
     }
 
-    /// Registers the folder at `path` as a permitted root.
-    async fn register_root(&mut self, path: PathBuf) -> Result<RootSummary, ProtocolError> {
-        if !self.destinations.has_room_for(&path) {
-            return Err(destinations::RootError::TooMany.into());
+    /// Registers the folder at `path` as a permitted root in a task of its
+    /// own, so a folder that hangs delays only this request.
+    fn register_root(
+        &mut self,
+        path: PathBuf,
+        reply: oneshot::Sender<Result<RootSummary, ProtocolError>>,
+    ) {
+        if !self.destinations.has_room_for(&path, self.registering) {
+            let _ = reply.send(Err(destinations::RootError::TooMany.into()));
+            return;
         }
-        let instance = self.identity.instance;
-        let registered = path.clone();
-        let id = self
-            .with_store(move |store| destinations::initialize(store, &registered, instance, true))
-            .await?;
-        self.destinations.add(id, path.clone());
-        Ok(RootSummary {
-            id,
-            path: path.to_string_lossy().into_owned(),
-            available: true,
-            problem: None,
-        })
+        self.registering += 1;
+        let (store, probes) = (self.client.clone(), self.probes.clone());
+        let (instance, cancel) = (self.identity.instance, self.supervisor.cancel.clone());
+        self.supervisor.spawn(async move {
+            let result = tokio::select! {
+                result = destinations::register(&store, &probes, path.clone(), instance) => result,
+                () = cancel.cancelled() => {
+                    let _ = reply.send(Err(shutting_down()));
+                    return;
+                }
+            };
+            let _ = store
+                .0
+                .send(Internal::Registered {
+                    path,
+                    result,
+                    reply,
+                })
+                .await;
+        });
     }
 
-    /// Identifies configured roots not identified yet.
+    /// Identifies configured roots not identified yet: from the store, or
+    /// by their sentinels, read off the coordinator within the probes'
+    /// deadline. A folder that does not answer in time is tried again later.
     async fn refresh_destinations(&mut self) {
         if self.destinations.complete() {
+            return;
+        }
+        let (mut destinations, probes) = (self.destinations.clone(), self.probes.clone());
+        self.destinations = self
+            .with_store(move |store| {
+                destinations.recall(store, &probes);
+                destinations
+            })
+            .await;
+        let instance = self.identity.instance;
+        let mut checks = tokio::task::JoinSet::new();
+        for path in self.destinations.unidentified() {
+            let probes = self.probes.clone();
+            checks.spawn(async move {
+                let id = probes.identify(&path, instance).await;
+                id.map(|id| (path, id))
+            });
+        }
+        let found: Vec<_> = checks.join_all().await.into_iter().flatten().collect();
+        if found.is_empty() {
             return;
         }
         let mut destinations = self.destinations.clone();
         self.destinations = self
             .with_store(move |store| {
-                destinations.refresh(store);
+                for (path, id) in found {
+                    // A sentinel naming a root recorded elsewhere stays
+                    // unidentified; the operator decides.
+                    let _ = destinations.adopt(store, path, id);
+                }
                 destinations
             })
             .await;
@@ -965,9 +1069,13 @@ impl Coordinator {
         self.refresh_destinations().await;
         let excluded: Vec<JobId> = self.running.keys().chain(&self.held).copied().collect();
         let roots = self.destinations.clone();
-        let admitted = self
+        let (admitted, more) = self
             .with_store(move |store| admit(store, free, &excluded, &roots))
             .await;
+        if more {
+            // After the requests already waiting.
+            let _ = self.client.0.try_send(Internal::Admit);
+        }
         for (job, root) in admitted {
             let id = job.job;
             let cancel = self.supervisor.cancel.child_token();

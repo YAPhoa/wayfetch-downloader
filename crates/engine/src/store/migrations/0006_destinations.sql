@@ -37,8 +37,9 @@ INSERT INTO settings (id, revision, updated_at) VALUES (1, 1, 0);
 
 -- The destination chosen when the batch was submitted, and copied to each
 -- of its jobs, so a later change of the default never moves a job. NULL
--- if no destination was available; such a job takes the default when it
--- is first admitted.
+-- for jobs of earlier versions and for jobs submitted while the operator's
+-- download root was not identified yet; both belong to the download root
+-- and are given its ID when first admitted.
 ALTER TABLE input_batches ADD COLUMN root_id INTEGER CHECK (root_id > 0);
 ALTER TABLE jobs ADD COLUMN root_id INTEGER CHECK (root_id > 0);
 
