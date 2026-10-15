@@ -1,0 +1,14 @@
+{
+  "identifier": "main",
+  "description": "The main window may call the engine's explicit operations and nothing else: no core plugins, filesystem, shell, or network APIs.",
+  "windows": ["main"],
+  "permissions": [
+    "allow-hello",
+    "allow-query",
+    "allow-submit",
+    "allow-job-command",
+    "allow-subscribe",
+    "allow-acknowledge",
+    "allow-unsubscribe"
+  ]
+}

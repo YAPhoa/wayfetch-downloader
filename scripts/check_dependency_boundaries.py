@@ -40,6 +40,12 @@ RULES = {
     "wayfetch-host": HOST_AND_UI,
     "wayfetchd": DESKTOP,
     "wayfetch-cli": HOST_AND_UI,
+    # The desktop host embeds the engine behind IPC: no HTTP server or
+    # adapter, and no daemon or CLI to launch.
+    "wayfetch-desktop": [
+        "axum", "axum-*", "rust-embed", "rust-embed-*",
+        "wayfetchd", "wayfetch-api", "wayfetch-cli",
+    ],
 }
 
 

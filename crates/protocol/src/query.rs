@@ -72,12 +72,15 @@ impl From<PageSize> for u16 {
 /// Which jobs to list. Empty fields match everything.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct JobFilter {
     /// Only jobs in one of these stages. At most one entry per stage.
     #[serde(default, deserialize_with = "bounded_stages")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<JobStage>>", optional))]
     pub stages: Vec<JobStage>,
     /// Only jobs in this package.
     #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub package: Option<PackageId>,
 }
 
@@ -93,6 +96,7 @@ fn bounded_stages<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<JobStage
 /// A read request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Query {
     /// One job's current state.
     InspectJob {
@@ -103,18 +107,22 @@ pub enum Query {
     ListJobs {
         /// Which jobs.
         #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(as = "Option<JobFilter>", optional))]
         filter: JobFilter,
         /// Continue after this job ID (from the previous page's `next_after`).
         #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(optional))]
         after: Option<JobId>,
         /// Items per page.
         #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(as = "Option<u16>", optional))]
         page_size: PageSize,
     },
     /// How many jobs are in each stage. Added in protocol 0.2.
     CountJobs {
         /// Which jobs.
         #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(as = "Option<JobFilter>", optional))]
         filter: JobFilter,
     },
 }
