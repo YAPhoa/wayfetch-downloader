@@ -9,6 +9,7 @@ const COMMANDS: &[&str] = &[
     "submit",
     "job_command",
     "update_settings",
+    "remove_root",
     "choose_download_folder",
     "open_file",
     "reveal_file",

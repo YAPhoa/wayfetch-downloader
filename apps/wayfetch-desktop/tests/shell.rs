@@ -1014,6 +1014,32 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
         ))
         .await;
 
+    // Another folder added can be removed again; the default and the
+    // configured folder cannot.
+    let other = dirs.tmp.path().join("removed-from-page");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(dirs.picker(), other.to_str().unwrap()).unwrap();
+    shell.click("[data-key=\"settings-choose\"]").await;
+    shell
+        .wait_for(&format!(
+            "[...document.querySelectorAll('.remove-root')].map((b) => b.getAttribute('aria-label'))
+               .join() === {}",
+            json!(format!("Remove {}", other.display()))
+        ))
+        .await;
+    shell.click(".remove-root").await;
+    let removed = json!(format!(
+        "Removed {}. Its files stay there; add it again to save new downloads there.",
+        other.display()
+    ));
+    shell
+        .wait_for(&format!(
+            "document.querySelector('.destination-form .message')?.textContent === {removed}
+             && document.querySelectorAll('.destination-form :is(.remove-root, .choice)').length === 2"
+        ))
+        .await;
+    assert!(other.is_dir());
+
     // The download went on meanwhile, into the folder it started in.
     release(&server, "running.bin");
     eventually(|| async {

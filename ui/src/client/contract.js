@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 1, minor: 0 });
+export const PROTOCOL = Object.freeze({ major: 1, minor: 1 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -35,6 +35,7 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 0 });
  * @typedef {import('./generated/RootId.js').RootId} RootId
  * @typedef {import('./generated/RootSummary.js').RootSummary} RootSummary
  * @typedef {import('./generated/Settings.js').Settings} Settings
+ * @typedef {import('./generated/FolderListing.js').FolderListing} FolderListing
  * @typedef {import('./generated/Action.js').Action} JobAction
  * @typedef {Exclude<JobAction, 'rename' | 'remove'>} StateAction The
  *   actions that change whether a job runs.
@@ -57,7 +58,9 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 0 });
  * engine's paths are on the computer showing the page (the desktop app)
  * or on a server. Only a local host can open files and show the folder
  * dialog, so only its client has `chooseDownloadFolder`, `openFile`, and
- * `revealFile`; each takes a job or nothing, never a path.
+ * `revealFile`; each takes a job or nothing, never a path. A server's
+ * client instead has `browseFolders` and `addFolder`, which list the
+ * server's folders and add one the owner chose as a download folder.
  * @typedef {{
  *   permissions: readonly Permission[],
  *   local: boolean,
@@ -85,10 +88,18 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 0 });
  *     expectedRevision: number,
  *     defaultRoot: RootId,
  *   }) => Promise<CommandResult>,
+ *   removeRoot: (request: {
+ *     idempotencyKey: string,
+ *     target: string,
+ *     expectedRevision: number,
+ *     root: RootId,
+ *   }) => Promise<CommandResult>,
  *   subscribe: (after: EventCursor | null, sink: StreamSink) => Subscription,
  *   chooseDownloadFolder?: () => Promise<RootSummary | null>,
  *   openFile?: (job: JobId) => Promise<void>,
  *   revealFile?: (job: JobId) => Promise<void>,
+ *   browseFolders?: (path: string | null) => Promise<FolderListing>,
+ *   addFolder?: (path: string) => Promise<RootSummary>,
  * }} WayfetchClient
  */
 

@@ -6,7 +6,9 @@
 // The default destination is the engine's setting, saved at the revision
 // shown. In a browser the folders are on the server, among those its
 // operator allowed; the desktop app can also add a folder through its
-// native dialog. Row density is this device's own preference.
+// native dialog. A folder the user added can be removed again, which only
+// stops offering it: its files stay. Row density is this device's own
+// preference.
 //
 // Routes: `/settings` shows the first section; `/settings/<section>` shows
 // that one. The page is part of the Downloads workspace, which keeps
@@ -14,6 +16,7 @@
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { focusedKey, h, refocus, show } from './dom.js';
+import { browseServerFolders } from './folders.js';
 import { icon } from './icons.js';
 
 /**
@@ -21,6 +24,7 @@ import { icon } from './icons.js';
  * @typedef {import('../client/contract.js').Hello} Hello
  * @typedef {import('../client/contract.js').Settings} Settings
  * @typedef {import('../client/contract.js').RootId} RootId
+ * @typedef {import('../client/contract.js').RootSummary} RootSummary
  * @typedef {'compact' | 'comfortable'} Density
  * @typedef {'folder' | 'display' | 'accounts'} Section
  */
@@ -95,6 +99,15 @@ function notSaved(error) {
     default:
       return `Not saved: ${error.message}`;
   }
+}
+
+/**
+ * Why a folder was not removed, in plain words.
+ * @param {WayfetchError} error
+ */
+function notRemoved(error) {
+  if (error.code !== 'not_applicable') return notSaved(error);
+  return `Not removed: ${error.message}.`;
 }
 
 export class SettingsPage {
@@ -252,25 +265,46 @@ export class SettingsPage {
       const message = h('p', { class: 'message', role: 'status' }, said);
       const choices = settings.roots.map((root) =>
         h(
-          'label',
-          { class: 'choice' },
-          h('input', {
-            type: 'radio',
-            name: 'default-root',
-            value: root.id,
-            'data-key': `default-root-${root.id}`,
-            checked: root.id === selected,
-            disabled: !canChange || (!root.available && root.id !== selected),
-          }),
+          'div',
+          { class: 'choice-row' },
           h(
-            'span',
-            { class: 'choice-text' },
-            h('span', { class: 'path' }, root.path),
-            !client.local && h('span', { class: 'tag' }, 'Server path'),
-            root.id === settings.default_root && h('span', { class: 'tag current' }, 'Current'),
-            !root.available &&
-              h('span', { class: 'problem' }, `Unavailable: ${root.problem ?? 'the folder cannot be opened'}`),
+            'label',
+            { class: 'choice' },
+            h('input', {
+              type: 'radio',
+              name: 'default-root',
+              value: root.id,
+              'data-key': `default-root-${root.id}`,
+              checked: root.id === selected,
+              disabled: !canChange || (!root.available && root.id !== selected),
+            }),
+            h(
+              'span',
+              { class: 'choice-text' },
+              h('span', { class: 'path' }, root.path),
+              !client.local && h('span', { class: 'tag' }, 'Server path'),
+              root.id === settings.default_root && h('span', { class: 'tag current' }, 'Current'),
+              !root.available &&
+                h('span', { class: 'problem' }, `Unavailable: ${root.problem ?? 'the folder cannot be opened'}`),
+            ),
           ),
+          // Only a folder the user added, and not the one new downloads go
+          // to; the operator's folders stay.
+          canChange &&
+            root.added &&
+            root.id !== settings.default_root &&
+            h(
+              'button',
+              {
+                type: 'button',
+                class: 'remove-root',
+                'data-key': `remove-root-${root.id}`,
+                'aria-label': `Remove ${root.path}`,
+                onclick: (/** @type {MouseEvent} */ event) =>
+                  void remove(settings, root, selected, /** @type {HTMLButtonElement} */ (event.currentTarget), message),
+              },
+              'Remove',
+            ),
         ),
       );
       const save = h(
@@ -278,9 +312,25 @@ export class SettingsPage {
         { type: 'submit', class: 'primary', 'data-key': 'settings-save', disabled: !canChange },
         'Save',
       );
+      // The desktop app adds a folder through its own dialog; a browser
+      // lists the server's folders.
+      const { chooseDownloadFolder, browseFolders, addFolder } = client;
+      /** @type {[string, () => Promise<RootSummary | null>] | null} */
+      const adding = chooseDownloadFolder
+        ? ['Choose folder…', () => chooseDownloadFolder.call(client)]
+        : browseFolders && addFolder
+          ? [
+              'Add folder…',
+              () =>
+                browseServerFolders(
+                  { browseFolders: browseFolders.bind(client), addFolder: addFolder.bind(client) },
+                  settings.roots.find((r) => r.id === selected)?.path ?? null,
+                ),
+            ]
+          : null;
       const choose =
         canChange &&
-        client.chooseDownloadFolder &&
+        adding &&
         h(
           'button',
           {
@@ -288,14 +338,11 @@ export class SettingsPage {
             'data-key': 'settings-choose',
             onclick: async (/** @type {MouseEvent} */ event) => {
               const button = /** @type {HTMLButtonElement} */ (event.currentTarget);
-              const picker = /** @type {() => Promise<import('../client/contract.js').RootSummary | null>} */ (
-                client.chooseDownloadFolder
-              );
               working = focusedKey(destination);
               button.disabled = true;
               show(message, '');
               try {
-                const root = await picker.call(client);
+                const root = await adding[1]();
                 if (root === null) {
                   show(message, 'No folder was chosen; nothing changed.');
                   return;
@@ -310,7 +357,7 @@ export class SettingsPage {
               }
             },
           },
-          'Choose folder…',
+          adding[0],
         );
       const form = h(
         'form',
@@ -380,16 +427,59 @@ export class SettingsPage {
     };
 
     /**
+     * Stops offering `root`, a folder the user added, and shows the folders
+     * left, keeping `selected` checked if it is still one of them.
+     * @param {Settings} settings
+     * @param {RootSummary} root
+     * @param {RootId | null | undefined} selected
+     * @param {HTMLButtonElement} button
+     * @param {HTMLElement} message
+     */
+    const remove = async (settings, root, selected, button, message) => {
+      const hello = context.hello();
+      if (!hello) {
+        show(message, 'Not connected yet. Try again in a moment.');
+        return;
+      }
+      working = focusedKey(destination);
+      button.disabled = true;
+      show(message, 'Removing…');
+      try {
+        await client.removeRoot({
+          idempotencyKey: idempotencyKey(),
+          target: hello.instance,
+          expectedRevision: settings.revision,
+          root: root.id,
+        });
+        render(
+          await client.settings(),
+          selected === root.id ? undefined : selected,
+          `Removed ${root.path}. Its files stay there; add it again to save new downloads there.`,
+        );
+      } catch (error) {
+        if (error instanceof WayfetchError && error.code === 'revision_conflict') {
+          await reload('The settings were changed elsewhere and have been reloaded. Try again.');
+          return;
+        }
+        failed(error, (text) => show(message, text), notRemoved);
+        button.disabled = false;
+        refocus(destination, working);
+        working = null;
+      }
+    };
+
+    /**
      * Shows `error` with `say`; an ended session goes to the shell.
      * @param {unknown} error
      * @param {(text: string) => void} say
+     * @param {(error: WayfetchError) => string} explain
      */
-    const failed = (error, say) => {
+    const failed = (error, say, explain = notSaved) => {
       if (error instanceof WayfetchError && error.code === 'unauthenticated') {
         context.onSignedOut();
         return;
       }
-      say(error instanceof WayfetchError ? notSaved(error) : String(error));
+      say(error instanceof WayfetchError ? explain(error) : String(error));
     };
 
     /** @param {string} said */

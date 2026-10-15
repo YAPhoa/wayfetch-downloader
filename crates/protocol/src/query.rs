@@ -257,6 +257,33 @@ pub struct RootSummary {
     /// Why it is unavailable, if it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<DiagnosticText>,
+    /// Whether the user added it, rather than the operator's configuration,
+    /// so [`crate::Command::RemoveRoot`] may remove it. Added in protocol
+    /// 1.1.
+    #[serde(default)]
+    pub added: bool,
+}
+
+/// The most folders a [`FolderListing`] names.
+pub const MAX_LISTED_FOLDERS: usize = 1000;
+
+/// The folders directly inside a folder on the engine's host, for choosing
+/// one to add as a destination. Hidden folders (named with a leading dot)
+/// and names that are not valid UTF-8 are left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct FolderListing {
+    /// The folder, as an absolute path with links and `..` resolved.
+    pub path: String,
+    /// The folder containing it; absent at the top of the filesystem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub parent: Option<String>,
+    /// The names of the folders inside it, in a case-insensitive order: at
+    /// most [`MAX_LISTED_FOLDERS`].
+    pub folders: Vec<String>,
+    /// Whether more folders were left out than the listing holds.
+    pub truncated: bool,
 }
 
 /// The user's settings. Added in protocol 0.3.
@@ -433,6 +460,7 @@ mod tests {
                 path: "/media".into(),
                 available: false,
                 problem: Some(DiagnosticText::new("missing")),
+                added: true,
             }],
         });
         assert_eq!(
@@ -441,8 +469,12 @@ mod tests {
                 "type": "settings",
                 "revision": 3,
                 "default_root": "root-2",
-                "roots": [{"id": "root-2", "path": "/media", "available": false, "problem": "missing"}],
+                "roots": [{"id": "root-2", "path": "/media", "available": false, "problem": "missing", "added": true}],
             })
         );
+        // A 1.0 engine's roots carry no `added`: none can be removed.
+        let older: RootSummary =
+            from_value(json!({"id": "root-2", "path": "/media", "available": true})).unwrap();
+        assert!(!older.added);
     }
 }
