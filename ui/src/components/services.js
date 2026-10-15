@@ -1,5 +1,7 @@
-// Download services Wayfetch may work with: a short, curated catalogue for
-// the Accounts & services section of Settings, and its search.
+// Download services Wayfetch may work with: the catalogue for the Accounts
+// & services section of Settings, and its search. The services themselves
+// are data, in `ui/src/data/services.json`: adding one is an edit there,
+// checked when it is read, with no change to the code.
 //
 // The catalogue only describes services. It never enables a download
 // route: whether Wayfetch can use a service is the engine's to say, once an
@@ -24,7 +26,7 @@ import { icon } from './icons.js';
  *   category: Category,
  *   about: string,
  *   domains: readonly string[],
- *   planned?: boolean,
+ *   planned: boolean,
  * }} Service
  * @typedef {{ service: Service, alias: string | null }} Match
  */
@@ -39,168 +41,57 @@ export const CATEGORIES = [
   { id: 'cloud_storage', label: 'Cloud storage' },
 ];
 
-/**
- * The catalogue, by category, then roughly by how widely each is used.
- * @type {readonly Service[]}
- */
-export const SERVICES = [
-  {
-    id: 'real-debrid',
-    name: 'Real-Debrid',
-    category: 'multi_host',
-    about: 'One premium account that downloads links from many file hosts.',
-    domains: ['real-debrid.com'],
-    planned: true,
-  },
-  {
-    id: 'alldebrid',
-    name: 'AllDebrid',
-    category: 'multi_host',
-    about: 'Premium account that downloads from many file hosts and streaming sites.',
-    domains: ['alldebrid.com'],
-  },
-  {
-    id: 'torbox',
-    name: 'TorBox',
-    category: 'multi_host',
-    about: 'Premium account for file-host links, torrents and Usenet.',
-    domains: ['torbox.app'],
-  },
-  {
-    id: 'debrid-link',
-    name: 'Debrid-Link',
-    category: 'multi_host',
-    about: 'Premium account that downloads from many file hosts.',
-    domains: ['debrid-link.com', 'debrid-link.fr'],
-  },
-  {
-    id: 'linksnappy',
-    name: 'LinkSnappy',
-    category: 'multi_host',
-    about: 'Premium link generator for many file hosts.',
-    domains: ['linksnappy.com'],
-  },
-  {
-    id: 'premium-to',
-    name: 'premium.to',
-    category: 'multi_host',
-    about: 'Premium account for file hosts and Usenet.',
-    domains: ['premium.to'],
-  },
-  {
-    id: '1fichier',
-    name: '1fichier',
-    category: 'file_hosting',
-    about: 'French file host with free and premium downloads.',
-    domains: [
-      '1fichier.com',
-      'alterupload.com',
-      'cjoint.net',
-      'desfichiers.com',
-      'dfichiers.com',
-      'megadl.fr',
-      'mesfichiers.org',
-      'piecejointe.net',
-      'pjointe.com',
-      'tenvoi.com',
-      'dl4free.com',
-    ],
-  },
-  {
-    id: 'rapidgator',
-    name: 'Rapidgator',
-    category: 'file_hosting',
-    about: 'File host with free and premium downloads.',
-    domains: ['rapidgator.net', 'rg.to'],
-  },
-  {
-    id: 'ddownload',
-    name: 'Ddownload',
-    category: 'file_hosting',
-    about: 'File host with free and premium downloads.',
-    domains: ['ddownload.com', 'ddl.to'],
-  },
-  {
-    id: 'katfile',
-    name: 'Katfile',
-    category: 'file_hosting',
-    about: 'File host with free and premium downloads.',
-    domains: ['katfile.com'],
-  },
-  {
-    id: 'nitroflare',
-    name: 'NitroFlare',
-    category: 'file_hosting',
-    about: 'File host with free and premium downloads.',
-    domains: ['nitroflare.com', 'nitro.download'],
-  },
-  {
-    id: 'fikper',
-    name: 'Fikper',
-    category: 'file_hosting',
-    about: 'File host with free and premium downloads.',
-    domains: ['fikper.com'],
-  },
-  {
-    id: 'filefactory',
-    name: 'FileFactory',
-    category: 'file_hosting',
-    about: 'Long-running file host with free and premium downloads.',
-    domains: ['filefactory.com'],
-  },
-  {
-    id: 'uploadgig',
-    name: 'Uploadgig',
-    category: 'file_hosting',
-    about: 'File host with free and premium downloads.',
-    domains: ['uploadgig.com'],
-  },
-  {
-    id: 'mega',
-    name: 'MEGA',
-    category: 'cloud_storage',
-    about: 'End-to-end encrypted cloud storage with shared file and folder links.',
-    domains: ['mega.nz', 'mega.io', 'mega.co.nz'],
-  },
-  {
-    id: 'google-drive',
-    name: 'Google Drive',
-    category: 'cloud_storage',
-    about: 'Google’s cloud storage, with shared file and folder links.',
-    domains: ['drive.google.com', 'docs.google.com', 'drive.usercontent.google.com'],
-  },
-  {
-    id: 'dropbox',
-    name: 'Dropbox',
-    category: 'cloud_storage',
-    about: 'Cloud storage with shared file and folder links.',
-    domains: ['dropbox.com', 'dropboxusercontent.com', 'db.tt'],
-  },
-  {
-    id: 'mediafire',
-    name: 'MediaFire',
-    category: 'cloud_storage',
-    about: 'Cloud storage and file sharing with free and paid plans.',
-    domains: ['mediafire.com'],
-  },
-  {
-    id: 'pixeldrain',
-    name: 'Pixeldrain',
-    category: 'cloud_storage',
-    about: 'File storage and sharing with free and paid plans.',
-    domains: ['pixeldrain.com', 'pixeldra.in'],
-  },
-  {
-    id: 'gofile',
-    name: 'Gofile',
-    category: 'cloud_storage',
-    about: 'File storage and sharing with free and premium accounts.',
-    domains: ['gofile.io'],
-  },
-];
+/** Where the catalogue's data is, beside the UI's code. */
+const CATALOGUE = new URL('../data/services.json', import.meta.url);
 
-/** The service Wayfetch plans to integrate first, featured in the catalogue. */
-export const FEATURED = /** @type {Service} */ (SERVICES.find((service) => service.planned));
+/**
+ * The services in `data`, the content of the catalogue's file, in its
+ * order. Rejects data that is not a list of services with unique IDs,
+ * known categories, and domains no other service claims, so a mistake in
+ * the file shows at once instead of as a wrong entry.
+ * @param {unknown} data
+ * @returns {Service[]}
+ */
+export function parseCatalogue(data) {
+  const services = /** @type {{ services?: unknown }} */ (data)?.services;
+  if (!Array.isArray(services)) throw new Error('the service catalogue has no list of services');
+  const categories = new Set(CATEGORIES.map((c) => c.id));
+  const ids = new Set();
+  const domains = new Set();
+  return services.map((entry, at) => {
+    const { id, name, category, about, domains: names, planned = false } = entry ?? {};
+    const text = (/** @type {unknown} */ value) => typeof value === 'string' && value.trim() !== '';
+    const valid =
+      typeof id === 'string' &&
+      /^[a-z0-9]+(-[a-z0-9]+)*$/.test(id) &&
+      !ids.has(id) &&
+      text(name) &&
+      text(about) &&
+      categories.has(category) &&
+      typeof planned === 'boolean' &&
+      Array.isArray(names) &&
+      names.length > 0 &&
+      names.every((domain) => typeof domain === 'string' && /^[a-z0-9.-]+$/.test(domain) && !domains.has(domain));
+    if (!valid) throw new Error(`service ${at + 1} in the catalogue is not valid`);
+    ids.add(id);
+    for (const domain of names) domains.add(domain);
+    return { id, name, category, about, domains: names, planned };
+  });
+}
+
+/** @type {Promise<Service[]> | null} */
+let loading = null;
+
+/**
+ * The catalogue's services, read once from its file, which is bundled
+ * with the UI. It is imported as a JSON module, which both hosts' content
+ * policies already allow for the UI's own files.
+ * @returns {Promise<Service[]>}
+ */
+export function loadServices() {
+  loading ??= import(CATALOGUE.href, { with: { type: 'json' } }).then((module) => parseCatalogue(module.default));
+  return loading;
+}
 
 /**
  * The label of `category`.
@@ -262,11 +153,11 @@ function matchedDomain(service, host) {
  * found only by a domain carries that domain as `alias`, so the result can
  * say why it is listed. An empty query matches every service.
  * @param {string} query
- * @param {Category | null} [category]
- * @param {readonly Service[]} [services]
+ * @param {Category | null} category
+ * @param {readonly Service[]} services
  * @returns {Match[]}
  */
-export function searchServices(query, category = null, services = SERVICES) {
+export function searchServices(query, category, services) {
   const all = query.trim() === '';
   const name = letters(query);
   const host = searchedHost(query);
@@ -310,11 +201,11 @@ function availability(service, integrations) {
 }
 
 /**
- * Opens the catalogue to pick the service of an account to add: a search field, category
- * filters with how many services match each, and the matching services,
- * grouped by category until something is searched for. The planned
- * integration leads. A service can be picked only once the engine has an
- * integration for it, and none has yet, so no account can be added.
+ * Opens the catalogue to pick the service of an account to add: a search
+ * field, category filters with how many services match each, and the
+ * matching services, grouped by category until something is searched for.
+ * Planned integrations lead. A service can be picked only once the engine
+ * has an integration for it, and none has yet, so no account can be added.
  * @param {ReadonlySet<string>} integrations
  */
 export function pickService(integrations) {
@@ -370,11 +261,17 @@ export function pickService(integrations) {
     tabindex: 0,
   });
 
+  /** The catalogue, once read. */
+  /** @type {Service[] | null} */
+  let services = null;
+
   const render = () => {
+    if (services === null) return;
+    const list = services;
     const query = field.value;
     const picked = choices[radios.findIndex((radio) => radio.checked)] ?? null;
-    choices.forEach((id, at) => show(counts[at], searchServices(query, id).length));
-    const matches = searchServices(query, picked);
+    choices.forEach((id, at) => show(counts[at], searchServices(query, id, list).length));
+    const matches = searchServices(query, picked, list);
     if (matches.length === 0) {
       show(summary, '');
       show(
@@ -410,7 +307,22 @@ export function pickService(integrations) {
     );
   };
 
-  render();
+  /** Reads the catalogue and shows it, or why it could not be read. */
+  const load = async () => {
+    show(summary, 'Loading…');
+    show(results);
+    try {
+      services = await loadServices();
+      render();
+    } catch (error) {
+      show(summary, '');
+      show(
+        results,
+        h('p', { class: 'message error', role: 'alert' }, `The list of services could not be loaded: ${String(error)}`),
+      );
+    }
+  };
+
   const dialog = openDialog(
     { title: 'Add account', className: 'services' },
     h(
@@ -430,6 +342,7 @@ export function pickService(integrations) {
     ),
   );
   field.focus();
+  void load();
 }
 
 /**

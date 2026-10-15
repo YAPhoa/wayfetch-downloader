@@ -583,7 +583,7 @@ function accountsSection() {
     h(
       'p',
       { class: 'hint' },
-      'Links you add directly download without an account. To add one, pick its service, such as Real-Debrid.',
+      'Links you add directly download without an account. To add one, pick its service from the list.',
     ),
   );
 }
