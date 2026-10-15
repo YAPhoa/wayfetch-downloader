@@ -380,7 +380,8 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await at.press('Enter');
   await expect(folders.getByText('The folder does not exist.')).toBeVisible();
   await expect(addThis).toBeDisabled();
-  // A slow answer for a folder left behind is dropped.
+  // Editing the path drops a listing still on its way, and adding waits
+  // until the path typed is listed.
   const left = /** @type {string} */ (daemon.dir);
   const slow = `**/v1/folders?path=${encodeURIComponent(left)}`;
   let held = false;
@@ -398,8 +399,6 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect.poll(() => held).toBe(true);
   await expect(addThis).toBeDisabled();
   await at.fill(shares);
-  await at.press('Enter');
-  await expect(folders.getByRole('list', { name: 'Folders inside' }).getByRole('button')).toHaveText(['films']);
   const late = page.waitForResponse((response) => response.url().includes(encodeURIComponent(left)));
   answer();
   await late;
@@ -407,10 +406,21 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   // The late answer would have been drawn by now.
   await page.waitForTimeout(200);
   await expect(at).toHaveValue(shares);
+  await expect(addThis).toBeDisabled();
+  await expect(folders.getByText('Press Go to list this folder before adding it.')).toBeVisible();
+  await at.press('Enter');
   await expect(folders.getByRole('list', { name: 'Folders inside' }).getByRole('button')).toHaveText(['films']);
+  await expect(addThis).toBeEnabled();
   await folders.getByRole('button', { name: 'films' }).click();
   await expect(at).toHaveValue(join(shares, 'films'));
   await expect(folders.getByText('There are no folders inside.')).toBeVisible();
+  // A path typed over the folder shown is not added in its place.
+  await at.fill(left);
+  await expect(addThis).toBeDisabled();
+  await at.fill(join(shares, 'films'));
+  await expect(addThis).toBeDisabled();
+  await folders.getByRole('button', { name: 'Go' }).click();
+  await expect(addThis).toBeEnabled();
   await folders.getByRole('button', { name: 'Add this folder' }).click();
   await expect(folders).toBeHidden();
   await expect(pane.getByText('Folder added. Save to use it for new downloads.')).toBeVisible();

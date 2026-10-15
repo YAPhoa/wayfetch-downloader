@@ -39,6 +39,14 @@ export function browseServerFolders(server, start) {
       autocomplete: 'off',
       spellcheck: 'false',
       'data-key': 'folder-path',
+      // A path being edited is not the folder listed: adding waits for
+      // it to be listed, and a listing still on its way is dropped.
+      oninput: () => {
+        asked += 1;
+        add.disabled = true;
+        message.classList.remove('error');
+        show(message, 'Press Go to list this folder before adding it.');
+      },
     });
     const up = h(
       'button',
@@ -61,7 +69,7 @@ export function browseServerFolders(server, start) {
           }
           // Adding is offered only while the folder shown is the one
           // listed last, not while another is loading or after it failed.
-          if (!shown || add.disabled) return;
+          if (!shown || add.disabled || field.value !== shown.path) return;
           const at = asked;
           add.disabled = true;
           show(message, 'Adding…');
