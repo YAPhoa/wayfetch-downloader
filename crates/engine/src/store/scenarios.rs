@@ -933,7 +933,7 @@ fn cleanup_state(f: &mut Fixture, job: JobId, generation: Generation) -> Option<
 }
 
 fn sweep(f: &mut Fixture) -> crate::cleanup::Swept {
-    crate::cleanup::sweep(&mut f.store, &f.root).unwrap()
+    crate::cleanup::sweep_now(&mut f.store, &f.root).unwrap()
 }
 
 fn staged(f: &Fixture, job: JobId, generation: Generation) -> std::path::PathBuf {

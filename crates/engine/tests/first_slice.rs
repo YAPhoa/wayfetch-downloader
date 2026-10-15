@@ -1592,6 +1592,33 @@ async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
             .any(|r| r.id == registered.id)
     );
 
+    // Finding a file to open in a folder that hangs, and cleaning up after
+    // a download there, delay only themselves.
+    let revision = settings(&owner).await.revision;
+    handle
+        .execute(choose(&owner, revision, registered.id), ALL)
+        .await
+        .unwrap();
+    env.server.put("/c.bin", Resource::new(body(5 * KIB)));
+    let [c] = submit(&owner, &["/c.bin"]).await[..] else {
+        panic!()
+    };
+    drop(hang);
+    let mut hang = Hang::start();
+    complete(&owner, c).await;
+    let locating = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.published_path(c, ALL).await }
+    });
+    hang.entered().await;
+    tokio::time::timeout(PROMPT, handle.hello())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(PROMPT, job(&owner, c)).await.unwrap();
+    hang.release();
+    assert_eq!(locating.await.unwrap().unwrap(), chosen.join("c.bin"));
+
     // A registration still stuck in the folder at shutdown keeps the state
     // directory locked until the folder answers, and then stops without
     // writing to it, so no later owner of the directory races it.

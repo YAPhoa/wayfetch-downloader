@@ -273,10 +273,29 @@ impl Store {
 
     /// Every unfinished rename, which a restart reconciles.
     pub fn pending_renames(&mut self) -> Result<Vec<RenameIntent>, StoreError> {
+        self.renames_where("1", None)
+    }
+
+    /// The job's unfinished rename, if it has one.
+    pub fn pending_rename(&mut self, job: JobId) -> Result<Option<RenameIntent>, StoreError> {
+        Ok(self.renames_where("job_id = ?1", Some(job))?.pop())
+    }
+
+    /// The unfinished renames matching `condition` on `job`.
+    fn renames_where(
+        &mut self,
+        condition: &str,
+        job: Option<JobId>,
+    ) -> Result<Vec<RenameIntent>, StoreError> {
         let tx = self.read()?;
+        let job = job.map(sql).transpose()?;
         let rows: Vec<(i64, String)> = tx
-            .prepare("SELECT job_id, target_path FROM renames ORDER BY job_id")?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .prepare(&format!(
+                "SELECT job_id, target_path FROM renames WHERE {condition} ORDER BY job_id"
+            ))?
+            .query_map(rusqlite::params_from_iter(job), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
             .collect::<Result<_, _>>()?;
         rows.into_iter()
             .map(|(job, to)| {
