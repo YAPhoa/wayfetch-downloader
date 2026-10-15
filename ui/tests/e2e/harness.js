@@ -82,7 +82,8 @@ export class Fixture {
    * @param {import('node:http').ServerResponse} response
    */
   async serve(request, response) {
-    const name = decodeURIComponent((request.url ?? '').replace(/^\/files\//, ''));
+    // A query, like a CDN's signed token, does not name the file.
+    const name = decodeURIComponent(new URL(request.url ?? '/', this.base).pathname.replace(/^\/files\//, ''));
     const file = this.files.get(name);
     if (!file || request.method !== 'GET') {
       response.writeHead(404).end();
