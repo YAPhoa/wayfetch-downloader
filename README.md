@@ -1,11 +1,10 @@
 # Wayfetch Downloader
 
-A planned Rust download manager with a reusable engine, a self-hosted server UI,
+A Rust download manager in development with a reusable engine, a self-hosted server UI,
 and a desktop application sharing the same engine and UI.
 
-This repository currently contains the design guidance and a bootstrapped Cargo
-workspace with minimal `wayfetch-domain`, `wayfetch-protocol`,
-`wayfetch-engine`, and `wayfetch-net` library crates. The domain crate defines typed IDs, job states,
+The Cargo workspace separates the engine, protocol, networking, and application
+hosts. The domain crate defines typed IDs, job states,
 source identity, and failure scopes; the protocol crate defines commands, queries,
 errors, and events; the engine owns a locked state directory and a SQLite store
 that commits commands durably and recovers jobs after a restart. The engine can
@@ -20,7 +19,8 @@ in a foreground session, and the `wayfetchd` daemon (`apps/wayfetchd`) serves it
 through an authenticated HTTP/SSE API (`crates/api`); both compose the engine
 the same way through `crates/host`. `wayfetchd` also serves a bundled web
 UI (`ui/`) for direct downloads. The `Dockerfile` and `deploy/compose.yaml`
-run the daemon in a least-privilege container. No desktop host exists yet.
+run the daemon in a least-privilege container. The desktop host
+(`apps/wayfetch-desktop`) embeds the engine and uses the same UI through IPC.
 
 ## Repository structure
 
@@ -33,21 +33,18 @@ wayfetch-downloader/
 ├── scripts/                 # Maintained check scripts used by CI
 ├── apps/
 │   ├── wayfetchd/           # Headless server and bundled UI host
-│   ├── wayfetch-cli/        # CLI client
-│   ├── wayfetch-desktop/    # Desktop host embedding the engine
-│   ├── adapter-worker/     # Isolated provider adapter worker
-│   └── extraction-worker/  # Archive extraction worker
+│   └── wayfetch-desktop/    # Desktop host embedding the engine
 ├── crates/
 │   ├── domain/             # IDs, states, validated domain types
 │   ├── protocol/           # Shared commands, results, errors, events
 │   ├── engine/             # Reusable engine and lifecycle
-│   ├── store/              # Persistence and migrations
+│   │   └── src/
+│   │       ├── store/      # Persistence and migrations
+│   │       ├── fs/         # Safe roots, checkpoints, publication
+│   │       └── transfer/   # Transfer contracts and streaming
 │   ├── net/                # HTTP, sessions, streaming transfers
 │   ├── host/               # What the CLI, daemon, and desktop hosts share
 │   ├── cli/                # Foreground `wayfetch` host
-│   ├── fs/                 # Safe paths, checkpoints, publication
-│   ├── adapters/           # Adapter SDK and provider integrations
-│   ├── extraction/         # Archive workflow and worker supervision
 │   └── api/                # HTTP authentication and REST/SSE adapter
 ├── ui/                     # Web UI; package.json has only dev checks
 │   ├── src/components/     # Shared workflow views
@@ -55,14 +52,6 @@ wayfetch-downloader/
 │   ├── src/transports/     # HTTP/SSE and desktop IPC clients
 │   ├── src/shell/          # Desktop window bootstrap
 │   └── tests/              # Unit and real-browser tests
-├── tests/
-│   ├── fixtures/
-│   ├── integration/
-│   ├── embedding/
-│   ├── recovery/
-│   ├── security/
-│   ├── performance/
-│   └── packaging/
 ├── deploy/                 # Compose file for the server image
 ├── docs/architecture.md    # Canonical design and decision register
 ├── AGENTS.md               # Agent workflow and repository policy
@@ -71,8 +60,10 @@ wayfetch-downloader/
 └── CONTRIBUTING.md         # Contribution guidance
 ```
 
-The empty implementation directories are retained with `.gitkeep` files for this
-requested structure-only bootstrap. Remove each marker when real files are added.
+Tests live alongside the crates, applications, and UI they exercise. Add shared
+test directories only when a cross-component suite needs them. Provider adapters,
+extraction components, and worker binaries get directories when implemented;
+the suggested architecture layout does not require empty placeholders.
 The architecture's decisions remain in the single architecture brief; additional
 documentation directories can be introduced when maintained content needs them.
 
