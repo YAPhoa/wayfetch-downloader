@@ -1,0 +1,67 @@
+# Wayfetch Downloader configuration (schema version 1).
+#
+# Pass it with `--config FILE` to `wayfetchd`, `wayfetch`, or
+# `wayfetch-desktop`; nothing reads a configuration file unless named.
+# It is read once at startup: restart after changing it. Options given on
+# the command line replace the values here, and repeatable options
+# (`--root`, `--allow-network`, `--ca-cert`, `--browser-origin`) add to the
+# lists here. Relative paths are resolved against this file's directory.
+#
+# Unknown keys are refused, and the file holds no secrets: API tokens,
+# browser credentials, and service accounts live in their own owner-only
+# files and stores. Settings changed in the application are saved by the
+# engine and never written back here.
+
+schema_version = 1
+
+[storage]
+# The engine's state directory. Its parent must exist.
+state_dir = "/srv/wayfetch/state"
+# Where downloads are saved until users choose another default. Initialize
+# it, and each root below, once with `init-root`.
+download_root = "/srv/downloads"
+# Further folders users may choose as the default destination.
+roots = ["/srv/media"]
+
+[network]
+# Non-public networks downloads may also reach; only public addresses are
+# reachable otherwise.
+allow_networks = ["192.168.1.0/24"]
+# Certificate authorities (PEM or DER) to trust besides the platform's.
+# Certificate verification cannot be turned off.
+ca_certs = []
+
+[timeouts]
+# Request deadlines in seconds, 1 to 3600. Applied to requests started
+# after a restart.
+connect_seconds = 30
+# Receiving response headers, connecting included: not shorter than
+# connect_seconds.
+response_seconds = 60
+# Waiting for the next data of a download.
+transfer_idle_seconds = 60
+
+# Most downloads transferring at once, engine-wide. Users change it in
+# Settings within `min` and `max` (1 to 64 at most). `default` applies
+# until a user saves a value of their own, which then stays theirs; it
+# never locks the value. `locked = true` fixes it at `default`: users see
+# "Managed by server configuration", and a value they saved earlier is
+# kept but not used. A saved value outside a narrower range runs as the
+# nearest value allowed until the user chooses another.
+[downloads.max_active]
+default = 4
+min = 1
+max = 16
+locked = false
+
+# wayfetchd only; the other programs refuse this section.
+[server]
+# Loopback by default. Anything else belongs behind an authenticated TLS
+# reverse proxy.
+listen = "127.0.0.1:7878"
+# Owner-only file of API bearer tokens, created if missing.
+token_file = "/srv/wayfetch/api-tokens"
+# Browser sign-in: an owner-only directory for the owner account, and the
+# origins browsers reach the daemon at.
+auth_dir = "/srv/wayfetch/auth"
+browser_origins = ["https://wayfetch.example.lan"]

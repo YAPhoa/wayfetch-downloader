@@ -887,6 +887,16 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 
 .settings-link[aria-current='page'] .icon { color: var(--accent); }
 
+/* A section with changes not saved yet. */
+.settings-link .unsaved {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 .settings-content {
   flex: 1;
   min-width: 0;
@@ -1001,6 +1011,10 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 .setting-row:last-child { border-bottom: 0; }
 .setting-text { display: grid; gap: 4px; min-width: 0; }
 .setting-name { font-weight: 500; }
+.setting-text .problem { font-size: 13px; }
+.setting-text .problem:empty { display: none; }
+.setting-row input.count { flex: none; width: 8ch; min-height: 32px; box-sizing: border-box; text-align: right; }
+.setting-row input.count[aria-invalid='true'] { border-color: var(--bad); }
 
 /* Radios drawn as a row of joined buttons, like the toolbar's groups.
    Each radio covers its whole option, so it is what a pointer hits. */

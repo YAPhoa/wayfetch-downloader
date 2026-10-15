@@ -14,7 +14,7 @@
 //! | `POST /v1/staging/links` | [`Command::CollectLinks`] |
 //! | `POST /v1/staging/commands` | [`Command::StartLinks`], [`Command::RemoveLinks`], [`Command::MoveLinks`] |
 //! | `GET /v1/staging/links/{id}/source` | [`Query::LinkSource`] |
-//! | `GET /v1/settings` | [`Query::Settings`]: the default destination and the roots to choose from |
+//! | `GET /v1/settings` | [`Query::Settings`]: the default destination, the roots to choose from, and preferences |
 //! | `PUT /v1/settings` | [`Command::UpdateSettings`] |
 //! | `GET /v1/folders` | [`EngineHandle::browse_folders`]: folders on the server, to choose one to add |
 //! | `POST /v1/roots` | [`EngineHandle::register_root`]: permits a server folder as a destination |
@@ -174,8 +174,9 @@ pub async fn job_command(
     execute(&app, &grant, request.into_envelope(job_id(&id)?)?).await
 }
 
-/// The default destination and the roots a client may choose. Paths are
-/// where the roots are on the server.
+/// The default destination, the roots a client may choose, and the
+/// preferences with their policy. Paths are where the roots are on the
+/// server.
 pub async fn settings(
     State(app): State<AppState>,
     Extension(grant): Extension<Grant>,
@@ -183,8 +184,8 @@ pub async fn settings(
     Ok(Json(app.engine.query(Query::Settings {}, &grant.0).await?))
 }
 
-/// Chooses the default destination at the settings revision the client
-/// saw.
+/// Changes the default destination or a preference at the settings
+/// revision the client saw.
 pub async fn update_settings(
     State(app): State<AppState>,
     Extension(grant): Extension<Grant>,

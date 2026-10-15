@@ -319,13 +319,21 @@ pub enum Command {
         /// The job revision the client last saw.
         expected_revision: Revision,
     },
-    /// Choose where jobs submitted from now on are saved. Jobs already
-    /// submitted keep their destination. Added in protocol 0.3.
+    /// Change the user's settings, all or none: where jobs submitted from
+    /// now on are saved (jobs already submitted keep their destination),
+    /// and engine preferences, within the operator's policy. At least one
+    /// change is required. Added in protocol 0.3; every change is optional
+    /// since protocol 2.0.
     UpdateSettings {
         /// The settings revision the client last saw.
         expected_revision: Revision,
         /// One of the roots the settings list, which must be available.
-        default_root: RootId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_root: Option<RootId>,
+        /// Most downloads transferring at once, engine-wide. Added in
+        /// protocol 2.0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_active_downloads: Option<PreferenceChange>,
     },
     /// Give a completed job's published file another name in the same
     /// folder. Never replaces an existing file. Added in protocol 1.0.
@@ -389,6 +397,20 @@ pub enum Command {
         /// A permitted root that is available now.
         destination: RootId,
     },
+}
+
+/// A change to one engine preference. Added in protocol 2.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum PreferenceChange {
+    /// Save this value as the user's preference. It stays the user's
+    /// choice even when it equals today's default, so a later change to
+    /// the default does not move it.
+    Set(u64),
+    /// Remove the saved preference, so the configured default applies,
+    /// including later changes to it.
+    UseDefault,
 }
 
 impl Permission {
@@ -674,6 +696,30 @@ mod tests {
                 .collect::<String>()
         };
         assert_eq!(hex, expected);
+    }
+
+    #[test]
+    fn a_settings_change_keeps_its_older_wire_form() {
+        // A 1.x client's command, and its stored fingerprint, are unchanged
+        // by the optional preferences added in 2.0.
+        let command = Command::UpdateSettings {
+            expected_revision: Revision::from_u64(2).unwrap(),
+            default_root: RootId::from_u64(4),
+            max_active_downloads: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&command).unwrap(),
+            r#"{"type":"update_settings","expected_revision":2,"default_root":"root-4"}"#
+        );
+        let change = Command::UpdateSettings {
+            expected_revision: Revision::from_u64(2).unwrap(),
+            default_root: None,
+            max_active_downloads: Some(PreferenceChange::Set(6)),
+        };
+        assert_eq!(
+            serde_json::to_string(&change).unwrap(),
+            r#"{"type":"update_settings","expected_revision":2,"max_active_downloads":{"set":6}}"#
+        );
     }
 
     #[test]

@@ -166,6 +166,11 @@ export class Downloads {
         if (kind === null || kind.type === 'batch_accepted' || kind.type === 'job_added') {
           void this.linksPage.refresh();
         }
+        // Another client, or window, changed the settings.
+        if (kind === null || kind.type === 'settings_changed') {
+          this.loadSettings();
+          this.settingsPage.changed(kind === null ? null : kind.revision);
+        }
       },
     });
     /** `after` of each earlier page, for going back. */

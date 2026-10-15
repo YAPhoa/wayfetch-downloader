@@ -12,7 +12,7 @@ use wayfetch_domain::version::Revision;
 
 use crate::command::{
     CollectItems, Command, CommandEnvelope, IdempotencyKey, InputUrl, LinkRef, LinkRefs,
-    SubmitItems,
+    PreferenceChange, SubmitItems,
 };
 use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
@@ -145,8 +145,8 @@ impl JobCommandRequest {
     }
 }
 
-/// Chooses the default destination at the settings revision the client
-/// saw.
+/// Changes settings at the revision the client saw: the default
+/// destination, engine preferences, or both, all or none.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -157,8 +157,15 @@ pub struct UpdateSettingsRequest {
     pub target: InstanceId,
     /// The settings revision the client last saw.
     pub expected_revision: Revision,
-    /// Where jobs submitted from now on are saved.
-    pub default_root: RootId,
+    /// Where jobs submitted from now on are saved. Optional since protocol
+    /// 2.0.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub default_root: Option<RootId>,
+    /// Most downloads transferring at once. Added in protocol 2.0.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub max_active_downloads: Option<PreferenceChange>,
 }
 
 impl UpdateSettingsRequest {
@@ -170,6 +177,7 @@ impl UpdateSettingsRequest {
             command: Command::UpdateSettings {
                 expected_revision: self.expected_revision,
                 default_root: self.default_root,
+                max_active_downloads: self.max_active_downloads,
             },
         }
     }
@@ -403,8 +411,35 @@ mod tests {
             request.into_envelope().command,
             Command::UpdateSettings {
                 expected_revision: Revision::from_u64(1).unwrap(),
-                default_root: RootId::from_u64(4).unwrap(),
+                default_root: RootId::from_u64(4),
+                max_active_downloads: None,
             }
+        );
+        let preference: UpdateSettingsRequest = serde_json::from_value(json!({
+            "idempotency_key": IdempotencyKey::generate(),
+            "target": InstanceId::generate(),
+            "expected_revision": 2,
+            "max_active_downloads": {"set": 6},
+        }))
+        .unwrap();
+        assert_eq!(
+            preference.into_envelope().command,
+            Command::UpdateSettings {
+                expected_revision: Revision::from_u64(2).unwrap(),
+                default_root: None,
+                max_active_downloads: Some(PreferenceChange::Set(6)),
+            }
+        );
+        let reset: UpdateSettingsRequest = serde_json::from_value(json!({
+            "idempotency_key": IdempotencyKey::generate(),
+            "target": InstanceId::generate(),
+            "expected_revision": 2,
+            "max_active_downloads": "use_default",
+        }))
+        .unwrap();
+        assert_eq!(
+            reset.max_active_downloads,
+            Some(PreferenceChange::UseDefault)
         );
         let path = serde_json::from_value::<UpdateSettingsRequest>(json!({
             "idempotency_key": IdempotencyKey::generate(),

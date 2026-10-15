@@ -136,6 +136,29 @@ decides where new downloads may be written. Changing the default affects
 only downloads added afterwards; earlier ones keep their folder, and one
 whose folder is no longer configured waits, blocked, instead of moving.
 
+### Configuration file
+
+Every option can instead come from a TOML file passed with `--config FILE`
+(`wayfetchd`, `wayfetch`, and `wayfetch-desktop` all accept it);
+[`deploy/wayfetch.example.toml`](deploy/wayfetch.example.toml) documents each
+key. The file is read once at startup, so restart after changing it. Options
+on the command line replace the file's values, repeatable ones add to its
+lists, and relative paths are resolved against the file's directory. Unknown
+keys are refused, and errors name the line without repeating the file's
+values. Only `wayfetchd` accepts the `[server]` section.
+
+```sh
+wayfetchd init-root --config /srv/wayfetch/wayfetch.toml /srv/downloads
+wayfetchd run --config /srv/wayfetch/wayfetch.toml
+```
+
+`[downloads.max_active]` sets how many downloads transfer at once: its
+`default` (4 unless set), the range users may choose in Settings (1 to 64 at
+most), and `locked = true` to fix it at the default. A value a user saves in
+Settings is kept by the engine and wins over the default; it is never written
+to the file. Changing it takes effect at once, and lowering it stops nothing
+already running.
+
 It listens on `127.0.0.1:7878` unless `--listen` says otherwise; anything
 beyond loopback has no TLS of its own and belongs behind an authenticated TLS
 reverse proxy. Every request needs `Authorization: Bearer TOKEN`. The token file
@@ -158,8 +181,8 @@ is never printed.
 | `GET /v1/staging/links` | A page of collected links: `after`, `page_size` |
 | `POST /v1/staging/commands` | `{"idempotency_key", "target", "action": "start"\|"remove"\|"move", "links": [{"link", "revision"}...]}`, plus `"destination"` for a move |
 | `GET /v1/staging/links/{id}/source` | A collected link as entered (needs `sources`) |
-| `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem` |
-| `PUT /v1/settings` | Choose the default: `{"idempotency_key", "target", "expected_revision", "default_root": "root-N"}` (needs `control`) |
+| `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem`, and `max_active_downloads` with its source, default, saved value, range, lock, and conflict |
+| `PUT /v1/settings` | `{"idempotency_key", "target", "expected_revision"}` with `"default_root": "root-N"`, `"max_active_downloads": {"set": N}` or `"use_default"`, or both (needs `control`) |
 | `GET /v1/folders` | The folders inside `path` (absolute; the top of the filesystem if absent), without hidden ones, at most 1,000 (needs `control`) |
 | `POST /v1/roots` | Add the server folder `{"path"}` as a destination, returning it with its `id` (needs `control`) |
 | `POST /v1/roots/remove` | Stop offering a folder the user added (`{"idempotency_key", "target", "expected_revision", "root"}`); its files stay (needs `control`) |
