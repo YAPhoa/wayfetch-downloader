@@ -5,7 +5,8 @@ import type { InstanceId } from "./InstanceId.js";
 import type { Revision } from "./Revision.js";
 
 /**
- * Pauses, resumes, or cancels a job at the revision the client saw.
+ * Pauses, resumes, cancels, renames, or removes a job at the revision the
+ * client saw.
  */
 export type JobCommandRequest = { 
 /**
@@ -23,4 +24,8 @@ action: Action,
 /**
  * The job revision the client last saw.
  */
-expected_revision: Revision, };
+expected_revision: Revision, 
+/**
+ * The new file name, for [`Action::Rename`] only.
+ */
+name?: string, };

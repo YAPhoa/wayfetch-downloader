@@ -22,12 +22,13 @@ use super::{Store, StoreError, files, key, outbox, sql};
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
 /// the job's newest partial; the next three describe its published file,
-/// then come the submitted link and the job's destination root.
+/// then come the submitted link, the job's destination root, and whether
+/// the user removed it from lists.
 const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.generation, \
      j.revision, j.bytes_total, j.failure_code, j.failure_retry_at, j.failure_message, \
      COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
                ORDER BY p.generation DESC LIMIT 1), 0), \
-     a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id";
+     a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id, j.removed_at IS NOT NULL";
 
 /// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
 /// has exactly one source link.
@@ -70,6 +71,8 @@ pub(super) struct StoredJob {
     artifact: Option<ArtifactSummary>,
     original_host: HostName,
     destination: Option<RootId>,
+    /// Removed from lists and counts by the user.
+    pub(super) removed: bool,
 }
 
 impl StoredJob {
@@ -108,6 +111,7 @@ struct RawJob {
     artifact: Option<(i64, String, i64)>,
     input_url: String,
     root: Option<i64>,
+    removed: bool,
 }
 
 impl RawJob {
@@ -130,6 +134,7 @@ impl RawJob {
             },
             input_url: row.get(14)?,
             root: row.get(15)?,
+            removed: row.get(16)?,
         })
     }
 
@@ -174,6 +179,7 @@ impl RawJob {
                 .transpose()?,
             original_host,
             destination: self.root.map(key).transpose()?,
+            removed: self.removed,
         })
     }
 }
@@ -192,6 +198,16 @@ pub(super) fn load(tx: &Transaction<'_>, id: JobId) -> Result<StoredJob, StoreEr
     .optional()?
     .ok_or(StoreError::NotFound("job"))?
     .decode()
+}
+
+/// Loads a job the user has not removed, or `NotFound`: what clients may
+/// see and change.
+pub(super) fn load_listed(tx: &Transaction<'_>, id: JobId) -> Result<StoredJob, StoreError> {
+    let job = load(tx, id)?;
+    if job.removed {
+        return Err(StoreError::NotFound("job"));
+    }
+    Ok(job)
 }
 
 /// Persists `job.state` over the row last read at `previous` revision, sets
@@ -466,9 +482,21 @@ impl Store {
         };
         let result = match query {
             Query::InspectJob { job } => QueryResult::Job {
-                job: load(&tx, *job)?.summary(),
+                job: load_listed(&tx, *job)?.summary(),
                 as_of,
             },
+            Query::JobSource { job } => {
+                load_listed(&tx, *job)?;
+                let url = tx
+                    .query_row(
+                        "SELECT s.input_url FROM jobs j JOIN source_links s \
+                         ON s.id = j.source_link_id WHERE j.id = ?1",
+                        [sql(*job)?],
+                        |row| row.get(0),
+                    )
+                    .map_err(StoreError::from)?;
+                QueryResult::JobSource { job: *job, url }
+            }
             Query::ListJobs {
                 filter,
                 after,
@@ -543,10 +571,10 @@ fn placeholders(n: usize) -> String {
     vec!["?"; n].join(", ")
 }
 
-/// ` AND ...` conditions on `jobs j` selecting the jobs `filter` names,
-/// and their values in order.
+/// ` AND ...` conditions on `jobs j` selecting the listed jobs `filter`
+/// names, and their values in order.
 fn filter_clause(filter: &JobFilter) -> (String, Vec<Value>) {
-    let mut conditions = String::new();
+    let mut conditions = String::from(" AND j.removed_at IS NULL");
     let mut values = Vec::new();
     if let Some(package) = filter.package {
         conditions.push_str(" AND j.package_id = ?");

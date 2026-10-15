@@ -116,6 +116,12 @@ impl JobStage {
         )
     }
 
+    /// Complete, failed, or cancelled: nothing runs for the job, and
+    /// nothing will unless the user retries it.
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Complete | Self::Failed | Self::Cancelled)
+    }
+
     /// Stages that perform provider or transfer work and therefore require
     /// [`DesiredState::Running`] to enter.
     const fn requires_running(self) -> bool {
@@ -496,6 +502,27 @@ impl JobState {
         self.commit(next)
     }
 
+    /// Accepts a new name for a completed job's published file, advancing
+    /// the revision. The caller renames the file and records the name.
+    pub fn request_rename(&mut self, expected: Revision) -> Result<Outcome, JobError> {
+        self.check_revision(expected)?;
+        if self.stage != JobStage::Complete {
+            return Err(self.not_applicable());
+        }
+        self.commit(*self)
+    }
+
+    /// Checks that the job can be removed from lists at `expected`: it must
+    /// be complete, failed, or cancelled. Removal hides the job; its state
+    /// is unchanged.
+    pub fn check_remove(&self, expected: Revision) -> Result<(), JobError> {
+        self.check_revision(expected)?;
+        if !self.stage.is_terminal() {
+            return Err(self.not_applicable());
+        }
+        Ok(())
+    }
+
     /// Records a stage change reported by the coordinator for work of the
     /// `presented` generation.
     ///
@@ -615,6 +642,44 @@ mod tests {
         assert!(job.request_cancel(r).is_err());
         assert!(job.request_retry(r).is_err());
         assert_eq!(job, running(Complete));
+    }
+
+    #[test]
+    fn only_completed_files_are_renamed() {
+        let mut job = running(Complete);
+        let r = job.revision();
+        assert_eq!(job.request_rename(r), Ok(Outcome::Changed));
+        assert_eq!(
+            (job.stage(), job.generation()),
+            (Complete, Generation::INITIAL)
+        );
+        assert!(matches!(
+            job.request_rename(r),
+            Err(JobError::RevisionConflict { .. })
+        ));
+        for &stage in ALL.iter().filter(|&&s| s != Complete) {
+            let mut job = settled(stage);
+            let r = job.revision();
+            assert!(job.request_rename(r).is_err(), "renamed a {stage} job");
+            assert_eq!(job.revision(), r);
+        }
+    }
+
+    #[test]
+    fn only_terminal_jobs_are_removed() {
+        for &stage in ALL {
+            let job = settled(stage);
+            let removable = job.check_remove(job.revision()).is_ok();
+            assert_eq!(
+                removable,
+                matches!(stage, Complete | Failed | Cancelled),
+                "{stage}"
+            );
+        }
+        let mut job = running(Failed);
+        let stale = job.revision();
+        job.request_retry(stale).unwrap();
+        assert!(job.check_remove(stale).is_err());
     }
 
     #[test]

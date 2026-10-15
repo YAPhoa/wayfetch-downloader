@@ -1,7 +1,8 @@
-//! No-clobber publication and its crash reconciliation (section 7.7, tests
-//! T24 and T31).
+//! No-clobber publication, renaming published files, and their crash
+//! reconciliation (section 7.7, tests T24 and T31).
 
 use std::io;
+use std::path::PathBuf;
 
 use cap_std::fs::Dir;
 
@@ -24,6 +25,26 @@ pub enum PublicationCheck {
     /// for example because something truncated or extended it. It must not
     /// complete; the partial must restart.
     Damaged,
+}
+
+/// A published file as the store records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedFile {
+    /// Where it is in the root.
+    pub path: RelativePath,
+    /// The file published there.
+    pub identity: FileIdentity,
+    /// Its size.
+    pub size: u64,
+}
+
+/// Where an interrupted rename stands, judged by file identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameCheck {
+    /// The new name does not hold the file: the rename did not happen.
+    NotRenamed,
+    /// The new name holds the file, and the old name no longer does.
+    Renamed,
 }
 
 impl Root {
@@ -140,6 +161,137 @@ impl Root {
         })
     }
 
+    /// Gives the published file `file` the name `to` in the same folder.
+    /// The caller has recorded the rename first.
+    ///
+    /// The file must still be the one published, at its published size;
+    /// anything else at the old name was put there outside Wayfetch and is
+    /// left alone. The new name is hard-linked, which fails rather than
+    /// replacing a file there, checked to be the published file, and the
+    /// folder synchronized; only then is the old name removed, if it still
+    /// holds the file, and the folder synchronized again. Any crash leaves
+    /// a state [`Root::reconcile_rename`] can classify.
+    pub fn rename_published(&self, file: &PublishedFile, to: &RelativePath) -> Result<(), FsError> {
+        let (dir, from_name, to_name) = self.rename_names(file, to)?;
+        if !is_staged(file_at(&dir, from_name)?, &file.identity, file.size) {
+            return Err(self.published_problem(&dir, file)?);
+        }
+        crash_point!("rename-before-link");
+        match dir.hard_link(from_name, &dir, to_name) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(FsError::TargetExists(to.clone()));
+            }
+            Err(e) => return Err(FsError::io("link new name")(e)),
+        }
+        // The old name could have been swapped after it was checked; then
+        // the name just created is not ours to keep.
+        if !is_staged(file_at(&dir, to_name)?, &file.identity, file.size) {
+            dir.remove_file(to_name)
+                .map_err(FsError::io("remove mislinked name"))?;
+            return Err(FsError::PublishedChanged(file.path.clone()));
+        }
+        sys::sync_dir(&dir).map_err(FsError::io("sync folder"))?;
+        crash_point!("rename-before-unlink");
+        self.remove_old_name(&dir, from_name, to_name, &file.identity)?;
+        crash_point!("rename-before-commit");
+        Ok(())
+    }
+
+    /// Classifies an interrupted rename of `file` to `to` after a restart.
+    /// It is `Renamed` if the folder lists the new name, spelled exactly,
+    /// and it holds the published file; the folder is then synchronized
+    /// again, and the old name removed if it still holds the file. Nothing
+    /// else is changed: a file that is not the published one is never
+    /// deleted.
+    ///
+    /// On a case-insensitive or normalizing filesystem another spelling of
+    /// the old name opens the old name's entry; it is not listed, so it is
+    /// never taken for the new name.
+    pub fn reconcile_rename(
+        &self,
+        file: &PublishedFile,
+        to: &RelativePath,
+    ) -> Result<RenameCheck, FsError> {
+        let (dir, from_name, to_name) = self.rename_names(file, to)?;
+        let renamed = listed(&dir, [to_name])? == [true]
+            && file_at(&dir, to_name)?
+                .is_some_and(|(identity, _)| identity.matches(&file.identity));
+        if !renamed {
+            return Ok(RenameCheck::NotRenamed);
+        }
+        sys::sync_dir(&dir).map_err(FsError::io("sync folder"))?;
+        self.remove_old_name(&dir, from_name, to_name, &file.identity)?;
+        Ok(RenameCheck::Renamed)
+    }
+
+    /// The absolute path of the published file `file`, for a host to open
+    /// on its user's request, after checking that the root is mounted and
+    /// the name still holds the file at its published size.
+    pub fn published_path(&self, file: &PublishedFile) -> Result<PathBuf, FsError> {
+        self.verify()?;
+        let (parent, name) = file.path.split_last();
+        let dir = self
+            .parent_dir(parent, false)?
+            .ok_or_else(|| FsError::PublishedMissing(file.path.clone()))?;
+        if !is_staged(file_at(&dir, name)?, &file.identity, file.size) {
+            return Err(self.published_problem(&dir, file)?);
+        }
+        Ok(self.path().join(file.path.as_str()))
+    }
+
+    /// The folder of a rename and its old and new names, after checking
+    /// that the root is mounted and the new name is in the same folder.
+    fn rename_names<'a>(
+        &self,
+        file: &'a PublishedFile,
+        to: &'a RelativePath,
+    ) -> Result<(Dir, &'a str, &'a str), FsError> {
+        self.verify()?;
+        let (parent, from_name) = file.path.split_last();
+        let (to_parent, to_name) = to.split_last();
+        if parent != to_parent {
+            return Err(FsError::Unsupported("moving a file to another folder"));
+        }
+        let dir = self
+            .parent_dir(parent, false)?
+            .ok_or_else(|| FsError::PublishedMissing(file.path.clone()))?;
+        Ok((dir, from_name, to_name))
+    }
+
+    /// Why the published file's name does not hold it.
+    fn published_problem(&self, dir: &Dir, file: &PublishedFile) -> Result<FsError, FsError> {
+        let (_, name) = file.path.split_last();
+        Ok(match file_at(dir, name)? {
+            None => FsError::PublishedMissing(file.path.clone()),
+            Some(_) => FsError::PublishedChanged(file.path.clone()),
+        })
+    }
+
+    /// Removes `name` from `dir` if it holds the file `identity`, and
+    /// synchronizes the folder.
+    /// Removes `name` if it holds the file whose new name is `new`. Only
+    /// if the folder lists both names, spelled exactly, as two entries: on
+    /// a case-insensitive or normalizing filesystem two spellings can open
+    /// one entry, and removing one would remove the file.
+    fn remove_old_name(
+        &self,
+        dir: &Dir,
+        name: &str,
+        new: &str,
+        identity: &FileIdentity,
+    ) -> Result<(), FsError> {
+        let separate = name != new && listed(dir, [name, new])? == [true, true];
+        let ours =
+            separate && file_at(dir, name)?.is_some_and(|(found, _)| found.matches(identity));
+        if ours {
+            dir.remove_file(name)
+                .map_err(FsError::io("remove old name"))?;
+            sys::sync_dir(dir).map_err(FsError::io("sync folder"))?;
+        }
+        Ok(())
+    }
+
     fn remove_staging_name(&self, record: &StagingRecord) -> Result<(), FsError> {
         self.staging
             .remove_file(&record.name)
@@ -179,6 +331,18 @@ fn is_staged(found: Option<(FileIdentity, u64)>, expected: &FileIdentity, size: 
 
 /// Identity and length of whatever has `name` in `dir`, without following a
 /// symlink.
+/// Whether the folder lists an entry named exactly as each of `names`.
+fn listed<const N: usize>(dir: &Dir, names: [&str; N]) -> Result<[bool; N], FsError> {
+    let mut found = [false; N];
+    for entry in dir.entries().map_err(FsError::io("list folder"))? {
+        let name = entry.map_err(FsError::io("list folder"))?.file_name();
+        for (seen, wanted) in found.iter_mut().zip(names) {
+            *seen |= name == wanted;
+        }
+    }
+    Ok(found)
+}
+
 fn file_at(dir: &Dir, name: &str) -> Result<Option<(FileIdentity, u64)>, FsError> {
     match dir.symlink_metadata(name) {
         Ok(meta) => Ok(Some((sys::identity(&meta)?, meta.len()))),
@@ -378,6 +542,151 @@ mod tests {
         std::fs::remove_dir_all(tmp.path().join(crate::fs::PRIVATE_DIR)).unwrap();
         assert!(matches!(
             root.reconcile_publication(&record, &path("a.bin"), 1),
+            Err(FsError::SentinelMissing(_))
+        ));
+    }
+
+    /// Publishes `bytes` at `at` and returns the published file.
+    fn published(root: &Root, at: &str, bytes: &[u8]) -> PublishedFile {
+        let staging = staged(root, 1, bytes);
+        let identity = staging.record().identity;
+        root.publish(staging, &path(at), bytes.len() as u64)
+            .unwrap();
+        PublishedFile {
+            path: path(at),
+            identity,
+            size: bytes.len() as u64,
+        }
+    }
+
+    #[test]
+    fn renames_without_clobbering() {
+        let (tmp, root) = root();
+        let file = published(&root, "dir/a.bin", b"data");
+        std::fs::write(tmp.path().join("dir/taken.bin"), b"user").unwrap();
+        assert!(matches!(
+            root.rename_published(&file, &path("dir/taken.bin")),
+            Err(FsError::TargetExists(_))
+        ));
+        assert_eq!(
+            std::fs::read(tmp.path().join("dir/taken.bin")).unwrap(),
+            b"user"
+        );
+        assert!(matches!(
+            root.rename_published(&file, &path("elsewhere/b.bin")),
+            Err(FsError::Unsupported(_))
+        ));
+        root.rename_published(&file, &path("dir/b.bin")).unwrap();
+        assert!(!tmp.path().join("dir/a.bin").exists());
+        assert_eq!(
+            std::fs::read(tmp.path().join("dir/b.bin")).unwrap(),
+            b"data"
+        );
+        assert_eq!(
+            root.reconcile_rename(&file, &path("dir/b.bin")).unwrap(),
+            RenameCheck::Renamed
+        );
+    }
+
+    #[test]
+    fn a_file_replaced_outside_wayfetch_is_not_renamed() {
+        let (tmp, root) = root();
+        let file = published(&root, "a.bin", b"data");
+        // Replaced by another file of the same size.
+        std::fs::remove_file(tmp.path().join("a.bin")).unwrap();
+        std::fs::write(tmp.path().join("a.bin"), b"evil").unwrap();
+        assert!(matches!(
+            root.rename_published(&file, &path("b.bin")),
+            Err(FsError::PublishedChanged(_))
+        ));
+        assert!(!tmp.path().join("b.bin").exists());
+        assert!(matches!(
+            root.published_path(&file),
+            Err(FsError::PublishedChanged(_))
+        ));
+        std::fs::remove_file(tmp.path().join("a.bin")).unwrap();
+        assert!(matches!(
+            root.rename_published(&file, &path("b.bin")),
+            Err(FsError::PublishedMissing(_))
+        ));
+
+        // The published file, changed in size.
+        let file = published(&root, "c.bin", b"data");
+        std::fs::write(tmp.path().join("c.bin"), b"longer").unwrap();
+        assert!(matches!(
+            root.rename_published(&file, &path("d.bin")),
+            Err(FsError::PublishedChanged(_))
+        ));
+    }
+
+    #[test]
+    fn reconciles_each_rename_step() {
+        let (tmp, root) = root();
+        let file = published(&root, "a.bin", b"data");
+        let to = path("b.bin");
+        // Recorded, nothing linked yet.
+        assert_eq!(
+            root.reconcile_rename(&file, &to).unwrap(),
+            RenameCheck::NotRenamed
+        );
+        assert!(tmp.path().join("a.bin").exists());
+        // Linked, old name not yet removed.
+        std::fs::hard_link(tmp.path().join("a.bin"), tmp.path().join("b.bin")).unwrap();
+        assert_eq!(
+            root.reconcile_rename(&file, &to).unwrap(),
+            RenameCheck::Renamed
+        );
+        assert!(!tmp.path().join("a.bin").exists());
+        assert_eq!(std::fs::read(tmp.path().join("b.bin")).unwrap(), b"data");
+        // A file that took the old name meanwhile is left alone.
+        std::fs::write(tmp.path().join("a.bin"), b"user").unwrap();
+        assert_eq!(
+            root.reconcile_rename(&file, &to).unwrap(),
+            RenameCheck::Renamed
+        );
+        assert_eq!(std::fs::read(tmp.path().join("a.bin")).unwrap(), b"user");
+        // An unrelated file at the new name is not the rename.
+        let other = published(&root, "c.bin", b"more");
+        std::fs::write(tmp.path().join("d.bin"), b"user").unwrap();
+        assert_eq!(
+            root.reconcile_rename(&other, &path("d.bin")).unwrap(),
+            RenameCheck::NotRenamed
+        );
+        assert!(tmp.path().join("c.bin").exists());
+    }
+
+    /// Case-insensitive filesystems cannot be made here, so the guard is
+    /// checked directly: the old name goes only while the folder lists the
+    /// new name, spelled exactly, as another entry.
+    #[test]
+    fn the_old_name_stays_unless_the_new_one_is_another_entry() {
+        let (tmp, root) = root();
+        let file = published(&root, "a.bin", b"data");
+        let dir = root.dir.try_clone().unwrap();
+        assert_eq!(listed(&dir, ["a.bin", "A.BIN"]).unwrap(), [true, false]);
+        for new in ["A.BIN", "a.bin"] {
+            root.remove_old_name(&dir, "a.bin", new, &file.identity)
+                .unwrap();
+            assert!(tmp.path().join("a.bin").exists(), "{new}");
+        }
+        std::fs::hard_link(tmp.path().join("a.bin"), tmp.path().join("A.BIN")).unwrap();
+        root.remove_old_name(&dir, "a.bin", "A.BIN", &file.identity)
+            .unwrap();
+        assert!(!tmp.path().join("a.bin").exists());
+        assert_eq!(std::fs::read(tmp.path().join("A.BIN")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn published_paths_are_checked() {
+        let (tmp, root) = root();
+        let file = published(&root, "dir/a.bin", b"data");
+        assert_eq!(
+            root.published_path(&file).unwrap(),
+            tmp.path().join("dir/a.bin")
+        );
+        std::fs::remove_dir_all(tmp.path().join(crate::fs::PRIVATE_DIR)).unwrap();
+        assert!(matches!(
+            root.published_path(&file),
             Err(FsError::SentinelMissing(_))
         ));
     }

@@ -54,6 +54,9 @@ use crate::auth::Grant;
 use crate::error::ApiError;
 use crate::secret;
 
+/// What a signed-in owner's browser may do: everything the owner may.
+pub(crate) const OWNER: &[Permission] = Permission::ALL;
+
 /// The lock file that makes one process the auth directory's user.
 const LOCK_FILE: &str = "auth.lock";
 /// The session cookie over HTTPS. The `__Host-` prefix makes browsers
@@ -235,7 +238,7 @@ impl BrowserAuth {
         if !method.is_safe() {
             check_csrf(headers, &live.csrf)?;
         }
-        Ok((Grant(Arc::from(Permission::ALL)), live.end))
+        Ok((Grant(Arc::from(OWNER)), live.end))
     }
 
     /// Whether setup is still to be done.

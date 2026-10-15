@@ -9,7 +9,8 @@
 //! checkpoints after a restart), T03 (`200` to a range request), T05
 //! (representation changed during resume), T09 (stalled headers and body),
 //! T27 (cancelled generation), and T47 (bounded subscriber replay). The
-//! last tests cover destination roots and the default for new jobs.
+//! last tests cover destination roots and the default for new jobs, and
+//! renaming and removing finished jobs.
 
 mod support;
 
@@ -22,18 +23,19 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use support::{ALL, KIB, ROOT, body, complete, envelope, job, jobs, shutdown, wait_for};
+use wayfetch_engine::EngineOwner;
+use wayfetch_engine::Timeouts;
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
-use wayfetch_engine::{EngineOwner, Timeouts};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::{JobId, RootId};
 use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::domain::version::Revision;
 use wayfetch_protocol::event::{EventKind, ResyncReason};
-use wayfetch_protocol::query::{JobFilter, PageSize, Settings};
+use wayfetch_protocol::query::{JobFilter, JobSummary, PageSize, Settings};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Permission, Query, QueryResult, StreamItem,
     Subscribe,
@@ -1064,6 +1066,311 @@ async fn a_registered_root_stays_permitted_across_restarts() {
     shutdown(owner).await;
 }
 
+// Changes to finished jobs (ADR-16, ADR-23): renaming the published file,
+// removing a job from lists, and reading the link it was submitted with.
+
+fn rename(owner: &EngineOwner, job: &JobSummary, name: &str) -> CommandEnvelope {
+    envelope(
+        owner,
+        Command::Rename {
+            job: job.id,
+            expected_revision: job.revision,
+            name: name.into(),
+        },
+    )
+}
+
+fn remove(owner: &EngineOwner, job: &JobSummary) -> CommandEnvelope {
+    envelope(
+        owner,
+        Command::Remove {
+            job: job.id,
+            expected_revision: job.revision,
+        },
+    )
+}
+
+async fn refused(owner: &EngineOwner, envelope: CommandEnvelope) -> ErrorCode {
+    owner
+        .handle()
+        .execute(envelope, ALL)
+        .await
+        .unwrap_err()
+        .code
+}
+
+async fn counted(owner: &EngineOwner) -> u64 {
+    let query = Query::CountJobs {
+        filter: JobFilter::default(),
+    };
+    match owner.handle().query(query, ALL).await.unwrap() {
+        QueryResult::JobCounts(counts) => counts.stages.values().sum(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_published_file_is_renamed_in_place_without_replacing_anything() {
+    let env = env();
+    for path in ["/a.bin", "/c.bin"] {
+        env.server.put(path, Resource::new(body(3 * KIB)));
+    }
+    let owner = env.start().await;
+    let [a, c] = submit(&owner, &["/a.bin", "/c.bin"]).await[..] else {
+        panic!()
+    };
+    let done = complete(&owner, a).await;
+    complete(&owner, c).await;
+    std::fs::write(env.root.join("taken.bin"), b"user data").unwrap();
+
+    // Taken names, other folders, and names the policy refuses are
+    // refused, and nothing is touched.
+    assert_eq!(
+        refused(&owner, rename(&owner, &done, "taken.bin")).await,
+        ErrorCode::AlreadyExists
+    );
+    assert_eq!(
+        std::fs::read(env.root.join("taken.bin")).unwrap(),
+        b"user data"
+    );
+    for bad in ["", "../a.bin", "sub/a.bin", "a\\b", "what?", ".wayfetch"] {
+        assert_eq!(
+            refused(&owner, rename(&owner, &done, bad)).await,
+            ErrorCode::InvalidRequest,
+            "{bad:?}"
+        );
+    }
+    // Another job's file holds the name, whatever its case.
+    assert_eq!(
+        refused(&owner, rename(&owner, &done, "C.BIN")).await,
+        ErrorCode::AlreadyExists
+    );
+    // Changing only the case is refused: on a case-insensitive
+    // filesystem both names are one file.
+    assert_eq!(
+        refused(&owner, rename(&owner, &done, "A.BIN")).await,
+        ErrorCode::InvalidRequest
+    );
+    assert_eq!(env.published("a.bin"), body(3 * KIB));
+    assert_eq!(job(&owner, a).await, done);
+
+    let change = rename(&owner, &done, "b.bin");
+    let renamed = owner.handle().execute(change.clone(), ALL).await.unwrap();
+    let revision = done.revision.next().unwrap();
+    assert_eq!(
+        renamed,
+        CommandResult::JobUpdated {
+            job: a,
+            revision,
+            changed: true
+        }
+    );
+    assert!(!env.root.join("a.bin").exists());
+    assert_eq!(env.published("b.bin"), body(3 * KIB));
+    let after = job(&owner, a).await;
+    assert_eq!(after.revision, revision);
+    assert_eq!(after.artifact.as_ref().unwrap().path, "b.bin");
+    // A retry replays; the old revision conflicts.
+    assert_eq!(owner.handle().execute(change, ALL).await.unwrap(), renamed);
+    assert_eq!(
+        refused(&owner, rename(&owner, &done, "d.bin")).await,
+        ErrorCode::RevisionConflict
+    );
+    // The same name changes nothing.
+    let same = owner
+        .handle()
+        .execute(rename(&owner, &after, "b.bin"), ALL)
+        .await
+        .unwrap();
+    assert!(matches!(
+        same,
+        CommandResult::JobUpdated { changed: false, .. }
+    ));
+    // The host can open the file at its new name.
+    assert_eq!(
+        owner.handle().published_path(a, ALL).await.unwrap(),
+        env.root.join("b.bin")
+    );
+
+    // The old name is free for a new download.
+    let [again] = submit(&owner, &["/a.bin"]).await[..] else {
+        panic!()
+    };
+    assert_eq!(
+        complete(&owner, again).await.artifact.unwrap().path,
+        "a.bin"
+    );
+
+    // A file replaced outside Wayfetch is neither renamed nor opened.
+    std::fs::remove_file(env.root.join("b.bin")).unwrap();
+    std::fs::write(env.root.join("b.bin"), b"replaced").unwrap();
+    assert_eq!(
+        refused(&owner, rename(&owner, &after, "e.bin")).await,
+        ErrorCode::NotApplicable
+    );
+    assert!(!env.root.join("e.bin").exists());
+    let open = owner.handle().published_path(a, ALL).await.unwrap_err();
+    assert_eq!(open.code, ErrorCode::NotApplicable);
+    shutdown(owner).await;
+
+    // The name survives a restart.
+    let owner = env.start().await;
+    let restarted = job(&owner, a).await;
+    assert_eq!(restarted.artifact.unwrap().path, "b.bin");
+    assert_eq!(restarted.revision, revision);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_completed_jobs_are_renamed_and_opened() {
+    let env = env();
+    let mut stalled = Resource::new(body(32 * KIB));
+    stalled.stall_at = Some(4 * KIB);
+    env.server.put("/s.bin", stalled);
+    let owner = env.start().await;
+    let [s] = submit(&owner, &["/s.bin"]).await[..] else {
+        panic!()
+    };
+    let running = wait_for(&owner, s, |j| j.bytes_done > 0).await;
+    assert_eq!(
+        refused(&owner, rename(&owner, &running, "x.bin")).await,
+        ErrorCode::NotApplicable
+    );
+    let open = owner.handle().published_path(s, ALL).await.unwrap_err();
+    assert_eq!(open.code, ErrorCode::NotApplicable);
+    assert_eq!(
+        refused(&owner, remove(&owner, &running)).await,
+        ErrorCode::NotApplicable
+    );
+    // Renaming needs control.
+    let denied = owner
+        .handle()
+        .execute(rename(&owner, &running, "x.bin"), &[Permission::Read])
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, ErrorCode::PermissionDenied);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removed_jobs_leave_lists_and_counts_but_keep_their_files() {
+    let env = env();
+    env.server.put("/done.bin", Resource::new(body(3 * KIB)));
+    let mut stalled = Resource::new(body(32 * KIB));
+    stalled.stall_at = Some(8 * KIB);
+    env.server.put("/cancelled.bin", stalled);
+    let owner = env.start().await;
+    let ids = submit(&owner, &["/done.bin", "/cancelled.bin", "/missing.bin"]).await;
+    let [done, cancelled, failed] = ids[..] else {
+        panic!()
+    };
+    let finished = complete(&owner, done).await;
+    let partial = wait_for(&owner, cancelled, |j| j.bytes_done == 8 * KIB as u64).await;
+    let cancel = Command::Cancel {
+        job: cancelled,
+        expected_revision: partial.revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, cancel), ALL)
+        .await
+        .unwrap();
+    let cancelled_job = wait_for(&owner, cancelled, |j| j.stage == JobStage::Cancelled).await;
+    let failed_job = wait_for(&owner, failed, |j| j.stage == JobStage::Failed).await;
+    assert_eq!(counted(&owner).await, 3);
+
+    // The submitted link is readable with its own permission only.
+    let source = owner
+        .handle()
+        .query(Query::JobSource { job: done }, ALL)
+        .await
+        .unwrap();
+    assert_eq!(
+        source,
+        QueryResult::JobSource {
+            job: done,
+            url: "https://files.example/done.bin".into()
+        }
+    );
+    let denied = owner
+        .handle()
+        .query(Query::JobSource { job: done }, &[Permission::Read])
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, ErrorCode::PermissionDenied);
+
+    let head = owner.handle().hello().await.unwrap().head;
+    let mut events = owner
+        .handle()
+        .subscribe(Subscribe { after: Some(head) }, ALL)
+        .await
+        .unwrap();
+    let removal = remove(&owner, &finished);
+    let removed = owner.handle().execute(removal.clone(), ALL).await.unwrap();
+    assert_eq!(
+        removed,
+        CommandResult::JobUpdated {
+            job: done,
+            revision: finished.revision,
+            changed: true
+        }
+    );
+    for summary in [&cancelled_job, &failed_job] {
+        owner
+            .handle()
+            .execute(remove(&owner, summary), ALL)
+            .await
+            .unwrap();
+    }
+    let mut gone = Vec::new();
+    while gone.len() < 3 {
+        if let Some(StreamItem::Event(event)) = events.next().await
+            && let EventKind::JobRemoved { job } = event.kind
+        {
+            gone.push(job);
+        }
+    }
+    assert_eq!(gone, [done, cancelled, failed]);
+
+    // Gone from lists, counts, and every request, but not from disk.
+    assert!(jobs(&owner).await.is_empty());
+    assert_eq!(counted(&owner).await, 0);
+    for query in [
+        Query::InspectJob { job: done },
+        Query::JobSource { job: done },
+    ] {
+        let err = owner.handle().query(query, ALL).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+    }
+    assert_eq!(owner.handle().execute(removal, ALL).await.unwrap(), removed);
+    assert_eq!(
+        refused(&owner, remove(&owner, &finished)).await,
+        ErrorCode::NotFound
+    );
+    assert_eq!(
+        refused(&owner, rename(&owner, &finished, "x.bin")).await,
+        ErrorCode::NotFound
+    );
+    assert_eq!(
+        owner
+            .handle()
+            .published_path(done, ALL)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+    assert_eq!(env.published("done.bin"), body(3 * KIB));
+    assert_eq!(env.staging_files(), 1, "the cancelled partial stays");
+    shutdown(owner).await;
+
+    let owner = env.start().await;
+    assert!(jobs(&owner).await.is_empty());
+    assert_eq!(counted(&owner).await, 0);
+    assert_eq!(env.staging_files(), 1);
+    shutdown(owner).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn blocked_jobs_do_not_hold_back_the_jobs_behind_them() {
     let mut env = env();
@@ -1170,10 +1477,12 @@ async fn a_job_submitted_before_the_download_root_is_mounted_is_saved_there() {
     shutdown(owner).await;
 }
 
-/// A hung mount: while it lasts, opening a folder named `stalled` blocks
-/// until [`Hang::release`].
+/// A hung mount: while it lasts, work on a folder named `stalled` blocks
+/// at the failpoint until [`Hang::release`]. [`Hang::start`] blocks opening
+/// the folder.
 #[cfg(feature = "failpoints")]
 struct Hang {
+    point: &'static str,
     entered: tokio::sync::mpsc::UnboundedReceiver<()>,
     gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
 }
@@ -1181,10 +1490,14 @@ struct Hang {
 #[cfg(feature = "failpoints")]
 impl Hang {
     fn start() -> Self {
+        Self::at("root-open-stall")
+    }
+
+    fn at(point: &'static str) -> Self {
         let (entered, rx) = tokio::sync::mpsc::unbounded_channel();
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let held = gate.clone();
-        fail::cfg_callback("root-open-stall", move || {
+        fail::cfg_callback(point, move || {
             let _ = entered.send(());
             let (open, released) = &*held;
             let mut open = open.lock().unwrap();
@@ -1193,7 +1506,11 @@ impl Hang {
             }
         })
         .unwrap();
-        Self { entered: rx, gate }
+        Self {
+            point,
+            entered: rx,
+            gate,
+        }
     }
 
     /// Waits until something is blocked in the folder.
@@ -1204,7 +1521,7 @@ impl Hang {
     }
 
     fn release(&self) {
-        fail::remove("root-open-stall");
+        fail::remove(self.point);
         *self.gate.0.lock().unwrap() = true;
         self.gate.1.notify_all();
     }
@@ -1290,6 +1607,62 @@ async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
             .roots
             .iter()
             .any(|r| r.id == registered.id)
+    );
+
+    // Finding a file to open in a folder that hangs, and cleaning up after
+    // a download there, delay only themselves.
+    let revision = settings(&owner).await.revision;
+    handle
+        .execute(choose(&owner, revision, registered.id), ALL)
+        .await
+        .unwrap();
+    env.server.put("/c.bin", Resource::new(body(5 * KIB)));
+    let [c] = submit(&owner, &["/c.bin"]).await[..] else {
+        panic!()
+    };
+    drop(hang);
+    let mut hang = Hang::start();
+    complete(&owner, c).await;
+    let locating = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.published_path(c, ALL).await }
+    });
+    hang.entered().await;
+    tokio::time::timeout(PROMPT, handle.hello())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(PROMPT, job(&owner, c)).await.unwrap();
+    hang.release();
+    assert_eq!(locating.await.unwrap().unwrap(), chosen.join("c.bin"));
+
+    // While a rename is recorded but has not yet moved the file, looking
+    // the file up, or renaming it again, is refused rather than taking the
+    // rename for one a crash interrupted.
+    drop(hang);
+    let mut hang = Hang::at("rename-recorded");
+    let before = job(&owner, c).await;
+    let renaming = tokio::spawn({
+        let (handle, change) = (handle.clone(), rename(&owner, &before, "c2.bin"));
+        async move { handle.execute(change, ALL).await }
+    });
+    hang.entered().await;
+    let open = tokio::time::timeout(PROMPT, handle.published_path(c, ALL))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(open.code, ErrorCode::Busy);
+    let again = tokio::time::timeout(PROMPT, refused(&owner, rename(&owner, &before, "c3.bin")))
+        .await
+        .unwrap();
+    assert_eq!(again, ErrorCode::Busy);
+    hang.release();
+    renaming.await.unwrap().unwrap();
+    assert!(!chosen.join("c.bin").exists() && !chosen.join("c3.bin").exists());
+    assert_eq!(job(&owner, c).await.artifact.unwrap().path, "c2.bin");
+    assert_eq!(
+        handle.published_path(c, ALL).await.unwrap(),
+        chosen.join("c2.bin")
     );
 
     // A registration still stuck in the folder at shutdown keeps the state

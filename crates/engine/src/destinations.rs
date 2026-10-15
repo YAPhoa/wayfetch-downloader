@@ -29,6 +29,7 @@
 
 use std::any::Any;
 use std::collections::{BTreeMap, HashSet};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -409,13 +410,55 @@ impl Destinations {
     }
 }
 
+/// Keys of work in progress, at most one piece of work per key: one
+/// that is still running when another is asked for is refused, not queued.
+#[derive(Debug)]
+pub(crate) struct Claims<K>(Arc<Mutex<HashSet<K>>>);
+
+impl<K> Clone for Claims<K> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<K> Default for Claims<K> {
+    fn default() -> Self {
+        Self(Arc::default())
+    }
+}
+
+/// A claimed key; dropping it releases the key.
+pub(crate) struct Slot<K: Hash + Eq>(Arc<Mutex<HashSet<K>>>, K);
+
+impl<K: Hash + Eq> Drop for Slot<K> {
+    fn drop(&mut self) {
+        self.0.lock().expect("claim set").remove(&self.1);
+    }
+}
+
+impl<K: Hash + Eq + Clone> Claims<K> {
+    /// Claims `key`, unless work on it is still running.
+    pub(crate) fn claim(&self, key: &K) -> Option<Slot<K>> {
+        self.0
+            .lock()
+            .expect("claim set")
+            .insert(key.clone())
+            .then(|| Slot(self.0.clone(), key.clone()))
+    }
+
+    /// Whether work on `key` is running.
+    pub(crate) fn busy(&self, key: &K) -> bool {
+        self.0.lock().expect("claim set").contains(key)
+    }
+}
+
 /// Blocking filesystem checks of root folders, at most one running per
 /// path: a check that is still running when another is asked for is not
 /// repeated, so a hung mount holds one thread, however often it is asked
 /// about.
 #[derive(Debug, Clone)]
 pub(crate) struct Probes {
-    running: Arc<Mutex<HashSet<PathBuf>>>,
+    running: Claims<PathBuf>,
     /// Held by every check until it ends, so the state directory stays
     /// locked while one may still touch a folder.
     guard: Arc<dyn Any + Send + Sync>,
@@ -427,36 +470,23 @@ impl Default for Probes {
     }
 }
 
-/// A path claimed for filesystem work; dropping it releases the path.
-pub(crate) struct Slot(Arc<Mutex<HashSet<PathBuf>>>, PathBuf);
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        self.0.lock().expect("probe set").remove(&self.1);
-    }
-}
-
 impl Probes {
     /// Checks that hold `guard` while they run.
     pub(crate) fn new(guard: Arc<dyn Any + Send + Sync>) -> Self {
         Self {
-            running: Arc::default(),
+            running: Claims::default(),
             guard,
         }
     }
 
     /// Claims `path`, unless work on it is still running.
-    pub(crate) fn claim(&self, path: &Path) -> Option<Slot> {
-        self.running
-            .lock()
-            .expect("probe set")
-            .insert(path.to_owned())
-            .then(|| Slot(self.running.clone(), path.to_owned()))
+    pub(crate) fn claim(&self, path: &Path) -> Option<Slot<PathBuf>> {
+        self.running.claim(&path.to_owned())
     }
 
     /// Whether work on `path` is running.
     pub(crate) fn busy(&self, path: &Path) -> bool {
-        self.running.lock().expect("probe set").contains(path)
+        self.running.busy(&path.to_owned())
     }
 
     /// Runs filesystem work on a blocking thread, holding the guard until
