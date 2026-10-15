@@ -127,7 +127,7 @@ impl Tokens {
                     .join(",");
                 let text = format!(
                     "# wayfetchd API tokens: one per line, \"<token> <permission>[,...]\".\n\
-                     # Permissions: read, submit, control.\n\
+                     # Permissions: read, submit, control, sources (submitted links).\n\
                      {token} {all}\n"
                 );
                 file.write_all(text.as_bytes())
@@ -278,8 +278,8 @@ mod tests {
         let line = text.lines().find(|l| !l.starts_with('#')).unwrap();
         let (token, scopes) = line.split_once(' ').unwrap();
         assert_eq!(token.len(), 2 * secret::SECRET_BYTES);
-        assert_eq!(scopes, "read,submit,control");
-        assert_eq!(created.grant(token).unwrap().0.len(), 3);
+        assert_eq!(scopes, "read,submit,control,sources");
+        assert_eq!(created.grant(token).unwrap().0.len(), 4);
 
         let (again, fresh) = Tokens::load_or_create(&path).unwrap();
         assert!(!fresh);

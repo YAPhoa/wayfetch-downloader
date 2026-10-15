@@ -18,10 +18,10 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use wayfetch_engine::protocol::ErrorCode;
+use wayfetch_engine::protocol::{ErrorCode, Permission};
 
-use super::BrowserAuth;
 use super::session::Issued;
+use super::{BrowserAuth, OWNER};
 use crate::error::ApiError;
 use crate::routes::{AppState, JsonBody};
 
@@ -42,6 +42,11 @@ pub struct SessionStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     csrf_token: Option<String>,
+    /// What the session may do, when authenticated, so the UI offers only
+    /// what will be allowed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    permissions: Option<&'static [Permission]>,
 }
 
 /// The body of `POST /v1/auth/setup`.
@@ -77,12 +82,14 @@ pub async fn session(
             authenticated: true,
             username: Some(owner.username.clone()),
             csrf_token: Some(live.csrf),
+            permissions: Some(OWNER),
         },
         (_, owner) => SessionStatus {
             setup_required: owner.is_none(),
             authenticated: false,
             username: None,
             csrf_token: None,
+            permissions: None,
         },
     };
     Ok(Json(status).into_response())
@@ -152,6 +159,7 @@ fn signed_in(browser: &BrowserAuth, issued: Issued, username: String) -> Respons
         authenticated: true,
         username: Some(username),
         csrf_token: Some(issued.csrf),
+        permissions: Some(OWNER),
     };
     let mut response = Json(status).into_response();
     response

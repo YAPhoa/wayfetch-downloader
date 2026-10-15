@@ -107,6 +107,7 @@ impl ApiError {
             ErrorCode::NotFound => StatusCode::NOT_FOUND,
             ErrorCode::RevisionConflict
             | ErrorCode::NotApplicable
+            | ErrorCode::AlreadyExists
             | ErrorCode::IdempotencyConflict
             | ErrorCode::WrongInstance => StatusCode::CONFLICT,
             ErrorCode::Busy | ErrorCode::Overloaded | ErrorCode::ShuttingDown => {

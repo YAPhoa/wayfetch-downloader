@@ -152,14 +152,15 @@ pub async fn submit(
     execute(&app, &grant, request.into_envelope()?).await
 }
 
-/// Pauses, resumes, or cancels a job at the revision the client saw.
+/// Pauses, resumes, cancels, renames, or removes a job at the revision the
+/// client saw.
 pub async fn job_command(
     State(app): State<AppState>,
     Extension(grant): Extension<Grant>,
     Path(id): Path<String>,
     JsonBody(request): JsonBody<JobCommandRequest>,
 ) -> ApiResult<CommandResult> {
-    execute(&app, &grant, request.into_envelope(job_id(&id)?)).await
+    execute(&app, &grant, request.into_envelope(job_id(&id)?)?).await
 }
 
 /// The default destination and the roots a client may choose. Paths are
@@ -275,6 +276,16 @@ pub async fn inspect_job(
     Path(id): Path<String>,
 ) -> ApiResult<QueryResult> {
     let query = Query::InspectJob { job: job_id(&id)? };
+    Ok(Json(app.engine.query(query, &grant.0).await?))
+}
+
+/// The link a job was submitted with. Needs the `sources` permission.
+pub async fn job_source(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    Path(id): Path<String>,
+) -> ApiResult<QueryResult> {
+    let query = Query::JobSource { job: job_id(&id)? };
     Ok(Json(app.engine.query(query, &grant.0).await?))
 }
 

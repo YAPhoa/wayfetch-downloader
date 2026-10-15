@@ -359,8 +359,9 @@ impl Store {
     /// `target` as an artifact of `size` bytes, reserving the target. The
     /// job must be publishing, and durable coverage must be exactly
     /// `0..size`: file length is never accepted in place of coverage (T25).
-    /// A target whose case-folded name is already reserved in the root is
-    /// refused with [`StoreError::TargetReserved`].
+    /// A target whose case-folded name is already reserved in the root, by
+    /// a publication or a rename, is refused with
+    /// [`StoreError::TargetReserved`].
     pub fn begin_publication(
         &mut self,
         job: JobId,
@@ -386,7 +387,8 @@ impl Store {
         }
         let size_sql = i64::try_from(size).map_err(|_| StoreError::Corrupt("size"))?;
         let reserved: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM publications WHERE root_id = ?1 AND target_key = ?2)",
+            "SELECT EXISTS (SELECT 1 FROM publications WHERE root_id = ?1 AND target_key = ?2) \
+             OR EXISTS (SELECT 1 FROM renames WHERE root_id = ?1 AND target_key = ?2)",
             params![sql(file.root)?, target.collision_key()],
             |row| row.get(0),
         )?;

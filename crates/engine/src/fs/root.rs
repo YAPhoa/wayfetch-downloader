@@ -111,6 +111,11 @@ impl Root {
         self.id
     }
 
+    /// Where the root was opened.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Checks by path that the root is still the directory that was opened
     /// and still carries its sentinel. A held handle keeps working on a
     /// detached mount, so this runs before anything becomes visible to the

@@ -546,6 +546,8 @@ The client lives in `wayfetch-net`, which implements the engine's `Transport` an
 
 Publication gives the staging file its final name with a hard link, which fails instead of replacing an existing name on every supported platform without a platform-specific rename flag, synchronizes the target directory, and then removes the staging name. A crash between the two leaves two names for one file, which reconciliation recognizes by file identity: device and inode, plus birth time where the filesystem reports it, because a freed inode number can be reused at once. A destination without hard links, or a target below a mount point inside the root, is reported unavailable until the cross-filesystem copy protocol (section 7.7) exists.
 
+Renaming a published file on the user's request (protocol 1.0) follows the same protocol inside the file's folder: a rename record reserves the new name's collision key beside publication targets and keeps the command's idempotency key and fingerprint; the new name is hard-linked, checked against the published file's identity and size, and the folder synchronized before the old name is removed; then one transaction records the new name, advances the job's revision, and stores the command's result. After a crash the record is finished if the new name holds the file and dropped otherwise, so a retry under the same key replays or redoes it. A file whose name no longer holds the published file at its published size was changed outside Wayfetch and is never renamed. Only completed jobs are renamed, never into another folder. A name that differs from the old one only in letter case is refused: on a case-insensitive filesystem both spellings open one directory entry, so linking finds the file already there and removing the old name would remove the file. Reconciliation counts the new name as present, and removes the old one, only when the folder lists both names, spelled exactly, as separate entries. Requests about one job's file (renaming it, looking it up for a host to open) run one at a time and refuse another as busy, and startup reconciliation skips a job a request holds, so a rename in progress is never mistaken for one a crash interrupted.
+
 Once a file job enters `Publishing`, publication is not interrupted by pause or cancel. Those requests return `PublicationInProgress` without changing the job; clients observe the settled outcome and retry only if the request still applies. Publication failures and process crashes still require reconciliation; this rule does not make the filesystem and database atomic.
 
 **Why:** partial-file progress and persistent job state are separate concerns.
@@ -620,6 +622,8 @@ Root IDs are allocated by the engine's store and recorded in each root's sentine
 
 **Decision:** removing a queue record does not imply deleting data. Keep archives by default; cleanup uses explicit artifact IDs, ownership checks, and a distinct permission. Never automatically delete archive inputs after an extraction failure.
 
+"Remove from list" (protocol 1.0, `control` permission) applies to complete, failed, and cancelled jobs only. It marks the job removed, emits `job_removed`, and excludes it from lists, counts, inspection, and later commands; its published file, partial data, staging records, and publication records stay. The link a job was submitted with can carry a signed token, so reading it back (`job_source`) needs a separate `sources` permission rather than `read`.
+
 **Tradeoff:** more disk usage unless the user configures retention. Bounded diagnostic/temp retention is separate from source archive retention.
 
 **Gate:** incomplete extraction, restart, wrong password, or changed destination never destroys input archives.
@@ -666,7 +670,7 @@ Root IDs are allocated by the engine's store and recorded in each root's sentine
 
 **Decision:** durable low-rate state events via an outbox; coalesced ephemeral progress; paginated read models; bounded per-client SSE queues. A slow client gets a resync instruction or disconnect, not unbounded event retention.
 
-A protocol minor version may only add optional fields, which older decoders ignore, and new commands or queries, which older clients never send. Any new value a client must decode from the engine (an event kind, stream item, error code, job stage, failure code, or resync reason) requires a new major version, which the handshake refuses. Add capability negotiation before extending event vocabularies within a major version.
+A protocol minor version may only add optional fields, which older decoders ignore, and new commands or queries, which older clients never send. Any new value a client must decode from the engine (an event kind, stream item, error code, job stage, failure code, or resync reason) requires a new major version, which the handshake refuses. Add capability negotiation before extending event vocabularies within a major version. Protocol 1.0 is the first such bump: it adds the `job_removed` event and the `already_exists` error code, with the `rename` and `remove` commands and the `job_source` query.
 
 **Why:** a remote API needs event/diff delivery, but the queue must not be serialized in full on every UI refresh.
 
