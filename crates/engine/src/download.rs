@@ -12,10 +12,14 @@
 //! * A `recovering` job (active when the engine last stopped) first
 //!   reconciles an interrupted publication, then adopts its staging file
 //!   if the durable bytes can be continued.
+//! * A job the user retried adopts the staging file the retry reserved for
+//!   it, under the coordinator's proof that no earlier task of the job
+//!   still runs, then settles any publication an earlier attempt left
+//!   unfinished, and continues the durable bytes like a recovering job.
 //! * Bytes from several responses are combined only when the stored
 //!   representation is trustworthy and the server reports it unchanged
 //!   (rules 7.5.4 and 7.5.5); otherwise the job is queued again under a new
-//!   generation and starts from zero (rule 7.5.2).
+//!   generation and starts from zero (rule 7.5.2), recording why.
 //! * `verifying` has no checksum to compare for a direct link; publication
 //!   itself requires durable coverage of exactly the artifact's length.
 //!
@@ -33,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::id::JobId;
-use wayfetch_domain::job::{DesiredState, JobError, JobStage};
+use wayfetch_domain::job::{DesiredState, JobError, JobStage, Outcome};
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::BootEpoch;
@@ -43,7 +47,7 @@ use wayfetch_protocol::query::FailureSummary;
 use crate::config::{Limits, Timeouts};
 use crate::destinations::Destination;
 use crate::fs::{FsError, PublicationCheck, RelativePath, Root, StagingFile, StagingRecord};
-use crate::lifecycle::StoreClient;
+use crate::lifecycle::{SoleAttempt, StoreClient};
 use crate::store::{Admission, Partial, Store, StoreError};
 use crate::transfer::lease::Representation;
 use crate::transfer::range::{self, Plan};
@@ -71,8 +75,25 @@ enum Stop {
     /// Park the job with a failure.
     Park(JobStage, FailureCode, String),
     /// Leave the partial and queue the job again under a new generation,
-    /// which starts from zero.
-    Restart,
+    /// which starts from zero, for the reason given.
+    Restart(&'static str),
+}
+
+/// Why a job started again from zero, as shown to the user.
+mod why {
+    pub(super) const NOTHING_SAVED: &str = "no data had been saved yet";
+    pub(super) const GAPS: &str = "the saved data has gaps, so it cannot be continued";
+    pub(super) const UNIDENTIFIED: &str =
+        "the server did not identify the file well enough to continue it safely";
+    pub(super) const FILE_LOST: &str =
+        "the saved partial file was missing, replaced, or shorter than its saved data";
+    pub(super) const CHANGED: &str =
+        "the file on the server changed since the saved data was downloaded";
+    pub(super) const RANGE_IGNORED: &str =
+        "the server sent the whole file instead of the rest, so it was not added to the saved data";
+    pub(super) const NOTHING_LEFT: &str = "the server said nothing was left to send, but the saved data could not be confirmed complete";
+    pub(super) const PUBLICATION_LOST: &str =
+        "the finished file was missing or damaged before it could be saved";
 }
 
 impl From<StoreError> for Stop {
@@ -153,6 +174,8 @@ pub(crate) struct Download {
     /// Held by every blocking file operation (the state-directory lock).
     pub(crate) guard: Arc<dyn Any + Send + Sync>,
     pub(crate) job: Admission,
+    /// No earlier task of the job runs in this process.
+    pub(crate) attempt: SoleAttempt,
 }
 
 impl Download {
@@ -183,7 +206,7 @@ impl Download {
                     now(),
                 ),
                 // Publication cannot be undone into a restart.
-                Stop::Restart if from == JobStage::Publishing => store.record_stage(
+                Stop::Restart(_) if from == JobStage::Publishing => store.record_stage(
                     job,
                     JobStage::Failed,
                     generation,
@@ -194,14 +217,8 @@ impl Download {
                     }),
                     now(),
                 ),
-                _ => {
-                    // Only a resolving, recovering, or verifying job may
-                    // queue again; a transferring one steps back first.
-                    if from == JobStage::Transferring {
-                        store.advance_job(job, JobStage::Resolving, generation, None, now())?;
-                    }
-                    store.advance_job(job, JobStage::Queued, generation, None, now())
-                }
+                Stop::Restart(reason) => store.restart_from_zero(job, generation, reason, now()),
+                Stop::Abandon | Stop::Interrupted => Ok(Outcome::Unchanged),
             })
             .await;
         false
@@ -218,6 +235,8 @@ impl Download {
             if self.job.desired != DesiredState::Running {
                 return Err(Stop::Interrupted);
             }
+        } else if self.settle_retried_publication(&root).await? {
+            return Ok(());
         }
         let continued = match self.continue_partial(&root).await? {
             // Every byte is already durable, for example after a crash
@@ -310,7 +329,7 @@ impl Download {
                     Err(e) if partial_lost(&e) => {
                         self.call(move |s| s.abandon_publication(job, generation))
                             .await??;
-                        return Err(Stop::Restart);
+                        return Err(Stop::Restart(why::PUBLICATION_LOST));
                     }
                     Err(e) => return Err(park_fs(&e)),
                 }
@@ -323,12 +342,73 @@ impl Download {
             PublicationCheck::Lost | PublicationCheck::Damaged => {
                 self.call(move |s| s.abandon_publication(job, generation))
                     .await??;
-                return Err(Stop::Restart);
+                return Err(Stop::Restart(why::PUBLICATION_LOST));
             }
         }
         self.call(move |s| s.complete_publication(job, generation, now()))
             .await??;
         Ok(true)
+    }
+
+    /// Settles a publication an earlier attempt of a retried job left
+    /// unfinished, before anything is transferred or published again.
+    /// Returns `true` if the job is now complete: its file was already
+    /// linked at the target, so it is completed there rather than
+    /// published twice. Otherwise the intent is released and the attempt
+    /// goes on; publishing again never replaces a file.
+    async fn settle_retried_publication(&mut self, root: &Arc<Root>) -> Result<bool, Stop> {
+        let (job, generation) = (self.job.job, self.job.generation);
+        let Some(intent) = self
+            .call(move |store| store.pending_publication(job))
+            .await??
+        else {
+            return Ok(false);
+        };
+        // The check may remove the leftover staging name of a published
+        // file, so the file must be this attempt's first.
+        if let Some(partial) = self.call(move |s| s.latest_staging(job)).await??
+            && partial.record.generation != generation
+        {
+            self.adopt_reserved(&partial).await?;
+        }
+        let check = {
+            let (root, intent) = (root.clone(), intent.clone());
+            self.blocking(move || {
+                root.reconcile_publication(&intent.staging, &intent.target, intent.size)
+            })
+            .await?
+            .map_err(|e| park_fs(&e))?
+        };
+        if check == PublicationCheck::Published {
+            for stage in [
+                JobStage::Transferring,
+                JobStage::Verifying,
+                JobStage::Publishing,
+            ] {
+                self.advance(stage).await?;
+            }
+            self.call(move |s| s.complete_publication(job, generation, now()))
+                .await??;
+            return Ok(true);
+        }
+        self.call(move |s| s.abandon_publication(job, generation))
+            .await??;
+        Ok(false)
+    }
+
+    /// Adopts the staging file a retry reserved for this attempt, if it was
+    /// reserved for this generation; a file it was not reserved for is left
+    /// to cleanup once this attempt registers its own.
+    async fn adopt_reserved(&self, partial: &Partial) -> Result<Option<StagingRecord>, Stop> {
+        let (job, generation, epoch) = (self.job.job, self.job.generation, self.boot_epoch);
+        if self.job.stage != JobStage::Resolving || partial.reserved_for != Some(generation) {
+            return Ok(None);
+        }
+        let attempt = self.attempt.clone();
+        let adopted = self
+            .call(move |s| s.adopt_retained(job, generation, epoch, &attempt))
+            .await??;
+        Ok(Some(adopted))
     }
 
     /// Another file took the intended name: release it, adopt the staging
@@ -353,27 +433,40 @@ impl Download {
     }
 
     /// The job's staging file and durable bytes, if they can be continued:
-    /// the generation's own file (a resumed pause), or after a restart the
-    /// previous run's file, adopted by this generation. A partial that
-    /// cannot be continued queues the job again.
+    /// the generation's own file (a resumed pause), after a restart the
+    /// previous run's file, or after a retry the file the retry reserved,
+    /// adopted by this generation. A partial that cannot be continued
+    /// queues the job again, saying why.
     async fn continue_partial(&mut self, root: &Arc<Root>) -> Result<Option<Continued>, Stop> {
         let (job, generation, epoch) = (self.job.job, self.job.generation, self.boot_epoch);
         let Some(partial) = self.call(move |s| s.latest_staging(job)).await?? else {
             return Ok(None);
         };
         let own = partial.record.generation == generation;
-        if !own && self.job.stage != JobStage::Recovering {
-            // An older generation's file left by a cancel or a restart
-            // from zero is not continued; the file this generation
-            // registers instead abandons it to cleanup.
+        let reserved = partial.reserved_for == Some(generation);
+        if !own && self.job.stage != JobStage::Recovering && !reserved {
+            // An older generation's file left by a restart from zero, or
+            // by a cancel nobody retried, is not continued; the file this
+            // generation registers instead abandons it to cleanup.
+            return Ok(None);
+        }
+        // A retry with nothing saved simply starts; there is nothing to
+        // explain.
+        if reserved && partial.durable_end == 0 {
             return Ok(None);
         }
         let trusted = partial
             .representation
             .as_ref()
             .is_some_and(|r| r.is_trustworthy() || r.length == Some(partial.durable_end));
-        if partial.durable_end == 0 || !partial.contiguous || !trusted {
-            return Err(Stop::Restart);
+        if partial.durable_end == 0 {
+            return Err(Stop::Restart(why::NOTHING_SAVED));
+        }
+        if !partial.contiguous {
+            return Err(Stop::Restart(why::GAPS));
+        }
+        if !trusted {
+            return Err(Stop::Restart(why::UNIDENTIFIED));
         }
         let file = self
             .reopen(root, partial.record.clone(), partial.durable_end)
@@ -382,9 +475,12 @@ impl Download {
             return Ok(Some(Continued { file, partial }));
         }
         drop(file);
-        let adopted = self
-            .call(move |s| s.adopt_staging(job, generation, epoch))
-            .await??;
+        let adopted = if reserved {
+            self.adopt_reserved(&partial).await?.ok_or(Stop::Abandon)?
+        } else {
+            self.call(move |s| s.adopt_staging(job, generation, epoch))
+                .await??
+        };
         let file = self
             .reopen(root, adopted.clone(), partial.durable_end)
             .await?;
@@ -411,7 +507,7 @@ impl Download {
             .await?
         {
             Ok(file) => Ok(file),
-            Err(e) if partial_lost(&e) => Err(Stop::Restart),
+            Err(e) if partial_lost(&e) => Err(Stop::Restart(why::FILE_LOST)),
             Err(e) => Err(park_fs(&e)),
         }
     }
@@ -454,6 +550,9 @@ impl Download {
                 }
             },
         };
+        let changed = stored
+            .as_ref()
+            .is_some_and(|stored| *stored != response.representation);
         let known = stored.as_ref().and_then(|r| r.length);
         let plan = range::plan(requested, response.framing, known)
             .map_err(|e| failed(FailureCode::IntegrityMismatch, e))?;
@@ -480,10 +579,14 @@ impl Download {
             }
             // The server ignored the range, or reports nothing left to send
             // for a partial that is not known to be complete.
-            _ => return Err(Stop::Restart),
+            // A changed file is answered whole when the request was
+            // conditioned on the old one.
+            Plan::RestartFromZero { .. } if changed => return Err(Stop::Restart(why::CHANGED)),
+            Plan::RestartFromZero { .. } => return Err(Stop::Restart(why::RANGE_IGNORED)),
+            Plan::Reconcile { .. } => return Err(Stop::Restart(why::NOTHING_LEFT)),
         };
-        if stored.is_some_and(|stored| stored != response.representation) {
-            return Err(Stop::Restart);
+        if changed {
+            return Err(Stop::Restart(why::CHANGED));
         }
         // One sequential stream must reach the end; requesting the rest of
         // a shorter answer is segmented transfer, which comes later.
@@ -809,6 +912,20 @@ mod tests {
     /// `hello` as `a.bin`; `crash` changes the files as the crash left
     /// them. Returns the recovering job as the next start sees it (T24).
     fn crashed_publishing(crash: impl FnOnce(&Root, &Path, &StagingRecord)) -> Crashed {
+        interrupted_publishing(crash, false)
+    }
+
+    /// [`crashed_publishing`], except that the job failed during
+    /// publication instead, in the same engine start, and the user retried
+    /// it: returns its next attempt, just admitted.
+    fn retried_publishing(crash: impl FnOnce(&Root, &Path, &StagingRecord)) -> Crashed {
+        interrupted_publishing(crash, true)
+    }
+
+    fn interrupted_publishing(
+        crash: impl FnOnce(&Root, &Path, &StagingRecord),
+        retried: bool,
+    ) -> Crashed {
         let state = tempfile::tempdir().unwrap();
         let root_dir = tempfile::tempdir().unwrap();
         let (root_id, instance) = (RootId::from_u64(1).unwrap(), InstanceId::generate());
@@ -862,11 +979,43 @@ mod tests {
         drop(file);
         crash(&root, root_dir.path(), &staging);
 
-        drop(store);
-        let mut store = Store::open(state.path()).unwrap();
-        store.recover_after_restart(now()).unwrap();
+        let (mut store, stage, epoch) = if retried {
+            let failure = FailureSummary {
+                code: FailureCode::DestinationUnavailable,
+                retry_at: None,
+                message: None,
+            };
+            store
+                .record_stage(job, JobStage::Failed, generation, Some(failure), now())
+                .unwrap();
+            let retry = CommandEnvelope {
+                idempotency_key: IdempotencyKey::generate(),
+                target: instance,
+                command: Command::Retry {
+                    job,
+                    expected_revision: store.job_state(job).unwrap().revision(),
+                },
+            };
+            store
+                .execute(&retry, instance, &Default::default(), now())
+                .unwrap();
+            let queued = store.job_state(job).unwrap().generation();
+            store
+                .advance_job(job, JobStage::Resolving, queued, None, now())
+                .unwrap();
+            (store, JobStage::Resolving, BootEpoch::INITIAL)
+        } else {
+            drop(store);
+            let mut store = Store::open(state.path()).unwrap();
+            store.recover_after_restart(now()).unwrap();
+            (
+                store,
+                JobStage::Recovering,
+                BootEpoch::INITIAL.next().unwrap(),
+            )
+        };
         let recovering = store.job_state(job).unwrap();
-        assert_eq!(recovering.stage(), JobStage::Recovering);
+        assert_eq!(recovering.stage(), stage);
         let client = StoreClient::serve(store);
         let download = Download {
             store: client.clone(),
@@ -876,19 +1025,20 @@ mod tests {
                 path: root_dir.path().to_owned(),
             },
             instance,
-            boot_epoch: BootEpoch::INITIAL.next().unwrap(),
+            boot_epoch: epoch,
             limits: Limits::DEFAULT,
             timeouts: Timeouts::DEFAULT,
             cancel: CancellationToken::new(),
             guard: Arc::new(()),
             job: Admission {
                 job,
-                stage: JobStage::Recovering,
+                stage,
                 generation: recovering.generation(),
                 desired: DesiredState::Running,
                 url: URL.into(),
                 root: Some(root_id),
             },
+            attempt: SoleAttempt::assume(job),
         };
         Crashed {
             _state: state,
@@ -964,6 +1114,41 @@ mod tests {
             assert!(done.generation > before, "{name}");
             assert!(done.artifact.is_none(), "{name}");
             assert!(!crashed.root_dir.path().join("a.bin").exists(), "{name}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_retried_job_completes_a_linked_publication_without_publishing_twice() {
+        let mut retried = retried_publishing(|root, _, record| {
+            let file = root.reopen_staging(record, 5).unwrap();
+            root.publish(file, &target(), 5).unwrap();
+        });
+        let done = retried.recover().await;
+        assert_eq!(done.stage, JobStage::Complete);
+        assert_eq!(done.artifact.unwrap().path, "a.bin");
+        assert_eq!(retried.read("a.bin"), b"hello");
+        assert!(!retried.root_dir.path().join("a (1).bin").exists());
+        assert!(!retried.staging_exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_retried_job_publishes_an_unlinked_file_once_without_a_request() {
+        type Crash = fn(&Root, &Path, &StagingRecord);
+        let cases: [(&str, Crash, &str); 2] = [
+            ("not linked", |_, _, _| {}, "a.bin"),
+            (
+                "name taken",
+                |_, dir, _| std::fs::write(dir.join("a.bin"), b"theirs").unwrap(),
+                "a (1).bin",
+            ),
+        ];
+        for (name, crash, at) in cases {
+            let mut retried = retried_publishing(crash);
+            let done = retried.recover().await;
+            assert_eq!(done.stage, JobStage::Complete, "{name}");
+            assert_eq!(done.artifact.unwrap().path, at, "{name}");
+            assert_eq!(retried.read(at), b"hello", "{name}");
+            assert!(!retried.staging_exists(), "{name}");
         }
     }
 

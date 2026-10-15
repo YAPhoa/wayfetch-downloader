@@ -5,7 +5,7 @@
 //! manager does.
 //!
 //! Covered: a download submitted and observed through the shared UI;
-//! pause, resume, and cancel over IPC; a renderer reload mid-transfer;
+//! pause, resume, cancel, and retry over IPC; a renderer reload mid-transfer;
 //! graceful close, relaunch on the same state directory, recovery, and the
 //! final bytes; a second engine refused; stale revisions, wrong-instance
 //! commands, idempotency, resynchronization, a stalled renderer's
@@ -766,6 +766,24 @@ async fn downloads_through_the_shared_ui_and_recovers_after_relaunch() {
         .flatten()
         .any(|(start, _)| start > 0);
     assert!(resumed, "the relaunch resumed from durable bytes");
+
+    // Retry, chosen in the toolbar, continues the download cancelled
+    // before the relaunch from its saved data.
+    let before = server.ranges("/second.bin").len();
+    shell.select("job-2").await;
+    release(&server, "second.bin");
+    shell.act("retry", "job-2").await;
+    shell.wait_for_state("job-2", "Done").await;
+    assert!(
+        dirs.published("second.bin") == body(10 * MIB),
+        "final bytes match"
+    );
+    let retried = server.ranges("/second.bin");
+    assert_eq!(retried.len(), before + 1, "one attempt: {retried:?}");
+    assert!(
+        matches!(retried.last(), Some(Some((start, _))) if *start >= 8 * MIB as u64),
+        "the retry continued from the saved data: {retried:?}"
+    );
     let printed = shell.close().await;
     assert!(
         printed

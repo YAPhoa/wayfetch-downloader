@@ -12,7 +12,7 @@ use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{BootEpoch, Generation, Revision};
 use wayfetch_protocol::command::{InputUrl, SubmitItems};
 use wayfetch_protocol::event::EventKind;
-use wayfetch_protocol::query::{ArtifactSummary, JobFilter, JobSummary, PageSize};
+use wayfetch_protocol::query::{ArtifactSummary, FailureSummary, JobFilter, JobSummary, PageSize};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, IdempotencyKey, InstanceId, Query,
     QueryResult,
@@ -1249,4 +1249,420 @@ fn an_abandoned_rename_leaves_no_record() {
         f.store.begin_rename(&envelope, f.instance, NOW).unwrap(),
         RenameStart::Started(_)
     ));
+}
+
+fn retry_command(f: &mut Fixture, job: JobId) -> Command {
+    Command::Retry {
+        job,
+        expected_revision: f.summary(job).revision,
+    }
+}
+
+/// Fails a transferring job with a transfer failure.
+fn fail(f: &mut Fixture, job: JobId, retry_at: Option<UtcTimestamp>) {
+    let generation = f.summary(job).generation;
+    let mut failure = Failure::new(
+        FailureCode::RequestTimeout,
+        FailureScope::Attempt(AttemptId::from_u64(1).unwrap()),
+    )
+    .unwrap()
+    .with_context(DiagnosticText::new("no data"));
+    if let Some(at) = retry_at {
+        failure = failure.with_earliest_retry(at);
+    }
+    f.store
+        .advance_job(job, JobStage::Failed, generation, Some(failure), NOW)
+        .unwrap();
+}
+
+/// A job that failed after `bytes` were durable in its staging file.
+fn failed_with(f: &mut Fixture, bytes: &[u8]) -> (JobId, Generation) {
+    let (job, generation) = transferring(f, BootEpoch::INITIAL);
+    f.file(job, generation).write_all_at(bytes, 0).unwrap();
+    f.checkpoint(job, generation, &[(0, bytes.len() as u64)])
+        .unwrap();
+    fail(f, job, None);
+    (job, generation)
+}
+
+/// The proof the coordinator gives an admitted job.
+fn sole(job: JobId) -> crate::lifecycle::SoleAttempt {
+    crate::lifecycle::SoleAttempt::assume(job)
+}
+
+#[test]
+#[expect(clippy::single_range_in_vec_init, reason = "lists of one byte range")]
+fn a_retry_hands_its_partial_to_the_next_generation_in_this_process() {
+    let mut f = Fixture::new();
+    let (job, old) = failed_with(&mut f, b"012345");
+    let failed = f.summary(job);
+    let key = IdempotencyKey::generate();
+    let command = retry_command(&mut f, job);
+    let result = f.run(key, command.clone()).unwrap();
+    let retried = f.summary(job);
+    assert_eq!(
+        result,
+        CommandResult::JobUpdated {
+            job,
+            revision: retried.revision,
+            changed: true,
+        }
+    );
+    // The same job, under a new generation, queued, its failure cleared,
+    // its saved data kept.
+    assert_eq!((retried.id, retried.stage), (job, JobStage::Queued));
+    assert_eq!(retried.desired, DesiredState::Running);
+    assert!(retried.generation > failed.generation);
+    assert_eq!(retried.failure, None);
+    assert_eq!(retried.bytes_done, 6);
+    // Repeating the key replays without another attempt.
+    assert_eq!(f.run(key, command), Ok(result));
+    assert_eq!(f.summary(job), retried);
+    // A second retry from the same view conflicts.
+    let stale = Command::Retry {
+        job,
+        expected_revision: failed.revision,
+    };
+    assert_eq!(
+        f.run(IdempotencyKey::generate(), stale),
+        Err(ErrorCode::RevisionConflict)
+    );
+    // The file is reserved, not abandoned, so cleanup leaves it.
+    assert_eq!(cleanup_state(&mut f, job, old), Some(None));
+    assert_eq!(sweep(&mut f), crate::cleanup::Swept::default());
+    let partial = f.store.latest_staging(job).unwrap().unwrap();
+    assert_eq!(partial.reserved_for, Some(retried.generation));
+
+    // Only the reserved generation, admitted, and with the proof for
+    // this job, may adopt it.
+    let current = retried.generation;
+    let epoch = BootEpoch::INITIAL;
+    assert!(matches!(
+        f.store.adopt_retained(job, current, epoch, &sole(job)),
+        Err(StoreError::Staging(_))
+    ));
+    f.advance(job, JobStage::Resolving).unwrap();
+    let other = JobId::from_u64(99).unwrap();
+    assert!(
+        f.store
+            .adopt_retained(job, current, epoch, &sole(other))
+            .is_err()
+    );
+    // The restart rule still refuses a file from this engine start.
+    assert!(f.store.adopt_staging(job, current, epoch).is_err());
+    let adopted = f
+        .store
+        .adopt_retained(job, current, epoch, &sole(job))
+        .unwrap();
+    assert_eq!(adopted.generation, current);
+    assert_eq!(adopted.identity, partial.record.identity);
+    assert_eq!(adopted.name, partial.record.name);
+    let partial = f.store.latest_staging(job).unwrap().unwrap();
+    assert_eq!((partial.durable_end, partial.contiguous), (6, true));
+    assert_eq!(partial.reserved_for, None);
+    // Once only.
+    assert!(
+        f.store
+            .adopt_retained(job, current, epoch, &sole(job))
+            .is_err()
+    );
+
+    // The old generation's late checkpoint and failure are refused; the
+    // new one continues the coverage.
+    let late = f.files[&(job, old)].sync_ranges(vec![6..8]).unwrap();
+    assert!(matches!(
+        f.store.commit_checkpoint(late),
+        Err(StoreError::Job(_))
+    ));
+    let late_failure = FailureSummary {
+        code: FailureCode::RequestTimeout,
+        retry_at: None,
+        message: None,
+    };
+    assert!(
+        f.store
+            .record_stage(job, JobStage::Failed, old, Some(late_failure), NOW)
+            .is_err()
+    );
+    f.advance(job, JobStage::Transferring).unwrap();
+    let file = f.root.reopen_staging(&adopted, 6).unwrap();
+    file.write_all_at(b"67", 6).unwrap();
+    assert_eq!(
+        f.store
+            .commit_checkpoint(file.sync_ranges(vec![6..8]).unwrap())
+            .unwrap(),
+        8
+    );
+    // Cleanup of the old generation finds no record to act on.
+    let stale_record = crate::fs::StagingRecord {
+        generation: old,
+        ..adopted.clone()
+    };
+    assert!(
+        f.store
+            .finish_staging_cleanup(&stale_record, Removal::Removed)
+            .is_err()
+    );
+    assert_eq!(sweep(&mut f), crate::cleanup::Swept::default());
+    assert!(staged(&f, job, old).is_file());
+}
+
+#[test]
+fn only_failed_and_settled_cancelled_jobs_are_retried() {
+    let mut f = Fixture::new();
+    // Queued, transferring, and paused jobs cannot be retried.
+    let queued = f.job();
+    let command = retry_command(&mut f, queued);
+    assert_eq!(
+        f.run(IdempotencyKey::generate(), command),
+        Err(ErrorCode::NotApplicable)
+    );
+    let (active, _) = transferring(&mut f, BootEpoch::INITIAL);
+    let command = retry_command(&mut f, active);
+    assert_eq!(
+        f.run(IdempotencyKey::generate(), command),
+        Err(ErrorCode::NotApplicable)
+    );
+    // A cancel that is still stopping is not settled yet.
+    let expected_revision = f.summary(active).revision;
+    f.run(
+        IdempotencyKey::generate(),
+        Command::Cancel {
+            job: active,
+            expected_revision,
+        },
+    )
+    .unwrap();
+    assert_eq!(f.summary(active).display, DisplayState::Stopping);
+    let command = retry_command(&mut f, active);
+    assert_eq!(
+        f.run(IdempotencyKey::generate(), command),
+        Err(ErrorCode::NotApplicable)
+    );
+    f.advance(active, JobStage::Cancelled).unwrap();
+    let command = retry_command(&mut f, active);
+    f.run(IdempotencyKey::generate(), command).unwrap();
+    assert_eq!(f.summary(active).stage, JobStage::Queued);
+
+    let (paused, _) = transferring(&mut f, BootEpoch::INITIAL);
+    stop(&mut f, paused, false);
+    let command = retry_command(&mut f, paused);
+    assert_eq!(
+        f.run(IdempotencyKey::generate(), command),
+        Err(ErrorCode::NotApplicable)
+    );
+    // Complete and removed jobs cannot either.
+    let done = published(&mut f, "done.bin", b"x");
+    let command = retry_command(&mut f, done.id);
+    assert_eq!(
+        f.run(IdempotencyKey::generate(), command),
+        Err(ErrorCode::NotApplicable)
+    );
+    let (gone, _) = failed_with(&mut f, b"ab");
+    let expected_revision = f.summary(gone).revision;
+    f.run(
+        IdempotencyKey::generate(),
+        Command::Remove {
+            job: gone,
+            expected_revision,
+        },
+    )
+    .unwrap();
+    let retry = Command::Retry {
+        job: gone,
+        expected_revision,
+    };
+    assert_eq!(
+        f.run(IdempotencyKey::generate(), retry),
+        Err(ErrorCode::NotFound)
+    );
+    // Another instance's command is refused.
+    let envelope = CommandEnvelope {
+        idempotency_key: IdempotencyKey::generate(),
+        target: InstanceId::generate(),
+        command: retry_command(&mut f, queued),
+    };
+    assert_eq!(
+        f.store
+            .execute(&envelope, f.instance, &Default::default(), NOW)
+            .unwrap_err()
+            .code,
+        ErrorCode::WrongInstance
+    );
+}
+
+#[test]
+fn a_retry_deadline_still_ahead_is_refused_with_the_failure_kept() {
+    let mut f = Fixture::new();
+    let (job, _) = transferring(&mut f, BootEpoch::INITIAL);
+    let later = UtcTimestamp::from_unix_millis(NOW.unix_millis() + 60_000);
+    fail(&mut f, job, Some(later));
+    let before = f.summary(job);
+    let envelope = CommandEnvelope {
+        idempotency_key: IdempotencyKey::generate(),
+        target: f.instance,
+        command: retry_command(&mut f, job),
+    };
+    let err = f
+        .store
+        .execute(&envelope, f.instance, &Default::default(), NOW)
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotApplicable);
+    assert_eq!(err.retry_at, Some(later));
+    assert_eq!(f.summary(job), before);
+    assert_eq!(before.failure.unwrap().retry_at, Some(later));
+    // The key was not used up, and after the deadline the retry is taken.
+    f.store
+        .execute(&envelope, f.instance, &Default::default(), later)
+        .unwrap();
+    assert_eq!(f.summary(job).stage, JobStage::Queued);
+}
+
+#[test]
+fn a_crash_around_a_retry_keeps_its_partial_for_the_next_attempt() {
+    let mut f = Fixture::new();
+    // Accepted, then the engine stops before the attempt starts: the
+    // reservation survives with the queued job.
+    let (job, old) = failed_with(&mut f, b"0123");
+    let command = retry_command(&mut f, job);
+    f.run(IdempotencyKey::generate(), command).unwrap();
+    let retried = f.summary(job).generation;
+    let mut f = f.reopen();
+    assert_eq!(f.store.recover_after_restart(NOW).unwrap(), 0);
+    assert_eq!(f.summary(job).stage, JobStage::Queued);
+    assert_eq!(sweep(&mut f), crate::cleanup::Swept::default());
+    f.advance(job, JobStage::Resolving).unwrap();
+    let second = BootEpoch::INITIAL.next().unwrap();
+    let adopted = f
+        .store
+        .adopt_retained(job, retried, second, &sole(job))
+        .unwrap();
+    assert_eq!(adopted.generation, retried);
+
+    // Adopted, then the engine stops before transferring: recovery adopts
+    // it by the restart rule, with its coverage.
+    let mut f = f.reopen();
+    f.store.recover_after_restart(NOW).unwrap();
+    let recovering = f.summary(job);
+    assert_eq!(recovering.stage, JobStage::Recovering);
+    let third = second.next().unwrap();
+    assert!(
+        f.store
+            .adopt_staging(job, recovering.generation, second)
+            .is_err()
+    );
+    let again = f
+        .store
+        .adopt_staging(job, recovering.generation, third)
+        .unwrap();
+    assert_eq!(again.identity, adopted.identity);
+    assert_eq!(f.store.latest_staging(job).unwrap().unwrap().durable_end, 4);
+
+    // Admitted under a reservation, then stopped before adopting it:
+    // recovery adopts it too, and the stale reservation is cleared.
+    let (other, _) = failed_with(&mut f, b"ab");
+    let command = retry_command(&mut f, other);
+    f.run(IdempotencyKey::generate(), command).unwrap();
+    f.advance(other, JobStage::Resolving).unwrap();
+    let mut f = f.reopen();
+    f.store.recover_after_restart(NOW).unwrap();
+    let current = f.summary(other).generation;
+    let adopted = f
+        .store
+        .adopt_staging(other, current, third.next().unwrap())
+        .unwrap();
+    assert_eq!(adopted.generation, current);
+    let partial = f.store.latest_staging(other).unwrap().unwrap();
+    assert_eq!((partial.durable_end, partial.reserved_for), (2, None));
+    assert!(staged(&f, job, old).is_file());
+}
+
+#[test]
+fn a_retried_attempt_that_starts_from_zero_abandons_the_partial_and_says_why() {
+    let mut f = Fixture::new();
+    let (job, old) = failed_with(&mut f, b"0123");
+    let command = retry_command(&mut f, job);
+    f.run(IdempotencyKey::generate(), command).unwrap();
+    f.advance(job, JobStage::Resolving).unwrap();
+    let generation = f.summary(job).generation;
+    f.store
+        .restart_from_zero(job, generation, "the file changed", NOW)
+        .unwrap();
+    let restarted = f.summary(job);
+    assert_eq!(restarted.stage, JobStage::Queued);
+    assert!(restarted.generation > generation);
+    assert_eq!(
+        restarted
+            .restart_reason
+            .as_ref()
+            .map(DiagnosticText::as_str),
+        Some("the file changed")
+    );
+    assert!(matches!(
+        f.events().last(),
+        Some(EventKind::JobChanged { job: summary }) if summary.restart_reason.is_some()
+    ));
+    assert_eq!(
+        cleanup_state(&mut f, job, old),
+        Some(Some("pending".into()))
+    );
+    assert_eq!(sweep(&mut f).removed, 1);
+    assert_eq!(f.store.latest_staging(job).unwrap(), None);
+    // The reason stays with a later failure, and a retry clears it.
+    f.advance(job, JobStage::Resolving).unwrap();
+    f.advance(job, JobStage::Transferring).unwrap();
+    fail(&mut f, job, None);
+    assert!(f.summary(job).restart_reason.is_some());
+    let command = retry_command(&mut f, job);
+    f.run(IdempotencyKey::generate(), command).unwrap();
+    assert_eq!(f.summary(job).restart_reason, None);
+
+    // A newer generation's own file abandons a reserved one too.
+    let (other, other_old) = failed_with(&mut f, b"ab");
+    let command = retry_command(&mut f, other);
+    f.run(IdempotencyKey::generate(), command).unwrap();
+    f.advance(other, JobStage::Resolving).unwrap();
+    f.advance(other, JobStage::Transferring).unwrap();
+    f.register(other, BootEpoch::INITIAL);
+    assert_eq!(
+        cleanup_state(&mut f, other, other_old),
+        Some(Some("pending".into()))
+    );
+}
+
+#[test]
+fn a_retried_job_releases_or_completes_an_unfinished_publication() {
+    let mut f = Fixture::new();
+    let (job, generation) = transferring(&mut f, BootEpoch::INITIAL);
+    finished(&mut f, job, generation, b"data");
+    f.store
+        .begin_publication(job, generation, &path("a.bin"), 4, NOW)
+        .unwrap();
+    let failure = FailureSummary {
+        code: FailureCode::IntegrityMismatch,
+        retry_at: None,
+        message: None,
+    };
+    f.store
+        .record_stage(job, JobStage::Failed, generation, Some(failure), NOW)
+        .unwrap();
+    let command = retry_command(&mut f, job);
+    f.run(IdempotencyKey::generate(), command).unwrap();
+    f.advance(job, JobStage::Resolving).unwrap();
+    let current = f.summary(job).generation;
+    f.store
+        .adopt_retained(job, current, BootEpoch::INITIAL, &sole(job))
+        .unwrap();
+    // The intent moved with its file.
+    let intent = f.store.pending_publication(job).unwrap().unwrap();
+    assert_eq!(intent.staging.generation, current);
+    // A retried job may release it before publishing again.
+    f.store.abandon_publication(job, current).unwrap();
+    assert_eq!(f.store.pending_publication(job).unwrap(), None);
+    f.advance(job, JobStage::Transferring).unwrap();
+    f.advance(job, JobStage::Verifying).unwrap();
+    f.advance(job, JobStage::Publishing).unwrap();
+    f.store
+        .begin_publication(job, current, &path("a.bin"), 4, NOW)
+        .unwrap();
 }
