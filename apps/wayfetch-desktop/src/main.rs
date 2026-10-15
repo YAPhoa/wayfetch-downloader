@@ -251,6 +251,8 @@ fn run_on(
             ipc::job_command,
             ipc::update_settings,
             ipc::choose_download_folder,
+            ipc::open_file,
+            ipc::reveal_file,
             ipc::subscribe,
             ipc::acknowledge,
             ipc::unsubscribe,

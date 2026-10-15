@@ -5,6 +5,9 @@
 
 import { expect, test } from '@playwright/test';
 
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import { Daemon, Fixture, MIB, content, freePort } from './harness.js';
 
 const PASSWORD = 'correct horse battery staple';
@@ -170,7 +173,7 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
 
   // Its details, also after a reload of its address.
   await select(page, 'job-1');
-  await expect(page.locator('dd[data-fact="file"]')).toHaveText(TRICKY);
+  await expect(page.locator('dd[data-fact="saved-as"] .path')).toHaveText(`${daemon.root}/${TRICKY}`);
   await page.reload();
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
   await expect(page.locator('dd[data-fact="size"]')).toHaveText('20.0 MiB');
@@ -247,5 +250,178 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
 
   // Everything came from the daemon itself.
   expect(offOrigin).toEqual([]);
+  await context.close();
+});
+
+/**
+ * The open row menu: its items' names, and whether it lies inside the
+ * window.
+ * @param {import('@playwright/test').Page} page
+ */
+async function openMenu(page) {
+  const menu = page.getByRole('menu', { name: 'Download actions' });
+  await expect(menu).toBeVisible();
+  const inside = await menu.evaluate((el) => {
+    const box = el.getBoundingClientRect();
+    const { clientWidth, clientHeight } = document.documentElement;
+    return box.left >= 0 && box.top >= 0 && box.right <= clientWidth && box.bottom <= clientHeight;
+  });
+  expect(inside).toBe(true);
+  // An open menu never makes the page scroll.
+  await expectFitsWindow(page);
+  return menu;
+}
+
+test('everyday controls: settings, the row menu, rename, remove, and copy link', async ({ browser }) => {
+  const context = await browser.newContext();
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: daemon.origin });
+  const page = await context.newPage();
+  await page.goto(daemon.origin);
+  await page.getByLabel('Owner name').fill('owner');
+  await page.getByLabel('Password').fill(PASSWORD);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.locator('.statusbar .status')).toHaveText('Live');
+
+  // The add form says where new downloads go: a folder on the server.
+  await page.getByRole('button', { name: 'Add links' }).click();
+  const destination = page.locator('[data-key="add-destination"]');
+  await expect(destination.locator('.path')).toHaveText(/** @type {string} */ (daemon.root));
+  await expect(destination.getByText('Server path')).toBeVisible();
+
+  // Settings: the permitted server folders, density, and accounts, which
+  // cannot be connected yet.
+  const settingsButton = page.getByRole('button', { name: 'Settings', exact: true });
+  await settingsButton.click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settings).toBeVisible();
+  const archive = settings.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) });
+  await expect(settings.getByRole('radio', { name: new RegExp(`^${daemon.root}`) })).toBeChecked();
+  await expect(settings.getByText('Server path')).toHaveCount(2);
+  const accounts = settings.locator('section', { has: page.getByRole('heading', { name: /Accounts & services/ }) });
+  await expect(accounts.getByText('Not available yet', { exact: true })).toBeVisible();
+  await expect(accounts.getByText(/such as Real-Debrid/)).toBeVisible();
+  await expect(accounts.locator('input, select, textarea, button')).toHaveCount(0);
+  await expectFitsWindow(page);
+  // Row density applies at once.
+  await settings.getByRole('radio', { name: 'Comfortable' }).check();
+  expect(await page.evaluate(() => document.documentElement.dataset.density)).toBe('comfortable');
+  await settings.getByRole('radio', { name: 'Compact' }).check();
+  // A new default is saved with feedback, and closing returns focus.
+  await archive.check();
+  await settings.getByRole('button', { name: 'Save' }).click();
+  await expect(settings.getByText(`Saved. New downloads go to ${daemon.archive}.`)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(settings).toBeHidden();
+  await expect(settingsButton).toBeFocused();
+  await expect(destination.locator('.path')).toHaveText(/** @type {string} */ (daemon.archive));
+
+  // Right-click opens the menu of the row clicked. A browser cannot open
+  // the server's files, so it does not offer to.
+  await row(page, 'job-1').locator('td.host').click({ button: 'right' });
+  let menu = await openMenu(page);
+  await expect(row(page, 'job-1').getByRole('button', { name: /^Actions for / })).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  );
+  await expect(menu.getByRole('menuitem', { name: /Open file|Open containing folder/ })).toHaveCount(0);
+  await menu.getByRole('menuitem', { name: 'Copy source link' }).click();
+  await expect(menu).toBeHidden();
+  await expect(page.getByText(`Copied the link of ${TRICKY}.`)).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+    `${fixture.base}/files/${encodeURIComponent(TRICKY)}`,
+  );
+
+  // Items that do not apply say why.
+  await row(page, 'job-2').click({ button: 'right' });
+  menu = await openMenu(page);
+  await expect(menu.getByRole('menuitem', { name: /^Rename/ })).toHaveAttribute('aria-disabled', 'true');
+  await expect(menu.getByRole('menuitem', { name: /^Rename/ })).toContainText('Once it has finished');
+  await expect(menu.getByRole('menuitem', { name: /^Remove from list/ })).not.toHaveAttribute('aria-disabled');
+  // A press outside closes it.
+  await page.locator('.filters').click({ position: { x: 5, y: 5 } });
+  await expect(menu).toBeHidden();
+
+  // Near the window's corner it still opens inside the window.
+  const corner = await page.evaluate(() => {
+    const { clientWidth, clientHeight } = document.documentElement;
+    const table = /** @type {Element} */ (document.querySelector('.table-scroll')).getBoundingClientRect();
+    return { x: clientWidth - 12, y: Math.min(clientHeight, table.bottom) - 12 };
+  });
+  await page.mouse.click(corner.x, corner.y, { button: 'right' });
+  await openMenu(page);
+  await page.keyboard.press('Escape');
+
+  // A download goes to the new default; the details say where.
+  // Jobs are listed oldest first, so it is on the next page.
+  await add(page, fixture.put('menu.bin', MIB));
+  await page.getByRole('button', { name: 'Next page' }).click();
+  const menuRow = page.locator('tr[data-job]', { has: page.locator('td.name', { hasText: /^menu\.bin$/ }) });
+  await expect(menuRow).toHaveCount(1);
+  const job = await menuRow.getAttribute('data-job');
+  if (!job) throw new Error('no job');
+  await expectState(page, job, 'Done');
+  expect((await daemon.published('menu.bin', daemon.archive)).equals(content(0, MIB))).toBe(true);
+  await select(page, job);
+  await expect(page.locator('dd[data-fact="saves-to"]')).toHaveText(/** @type {string} */ (daemon.archive));
+  await expect(page.locator('dd[data-fact="saved-as"] .path')).toHaveText(`${daemon.archive}/menu.bin`);
+  await page.getByRole('button', { name: 'Close details' }).click();
+
+  // From the keyboard: the row's menu button, arrow keys, Escape back to it.
+  const more = row(page, job).getByRole('button', { name: 'Actions for menu.bin' });
+  await more.focus();
+  await page.keyboard.press('Enter');
+  menu = await openMenu(page);
+  await expect(menu.getByRole('menuitem', { name: 'Rename…' })).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(menu.getByRole('menuitem', { name: 'Copy source link' })).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(menu.getByRole('menuitem', { name: /^Remove from list/ })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeHidden();
+  await expect(more).toBeFocused();
+  // Shift+F10 opens it from the row's link too.
+  await row(page, job).locator('td.name a').focus();
+  await page.keyboard.press('Shift+F10');
+  menu = await openMenu(page);
+
+  // Rename: invalid names and collisions are refused, nothing is replaced.
+  await menu.getByRole('menuitem', { name: 'Rename…' }).click();
+  const rename = page.getByRole('dialog', { name: 'Rename menu.bin' });
+  const name = rename.getByLabel('New file name');
+  await expect(name).toBeFocused();
+  await name.fill('a/b.bin');
+  await rename.getByRole('button', { name: 'Rename' }).click();
+  await expect(rename.getByText('A name cannot contain / or \\.')).toBeVisible();
+  await writeFile(join(/** @type {string} */ (daemon.archive), 'taken.bin'), 'theirs');
+  await name.fill('taken.bin');
+  await rename.getByRole('button', { name: 'Rename' }).click();
+  await expect(rename.getByText('A file with that name is already in the folder.')).toBeVisible();
+  expect((await daemon.published('taken.bin', daemon.archive)).toString()).toBe('theirs');
+  await name.fill('renamed.bin');
+  await rename.getByRole('button', { name: 'Rename' }).click();
+  await expect(rename).toBeHidden();
+  await expect(page.getByText('Renamed menu.bin to renamed.bin.')).toBeVisible();
+  await expect(row(page, job).locator('td.name')).toHaveText('renamed.bin');
+  expect((await daemon.published('renamed.bin', daemon.archive)).equals(content(0, MIB))).toBe(true);
+  await expect(daemon.published('menu.bin', daemon.archive)).rejects.toThrow();
+
+  // Remove from list: the row and its count go, the file stays.
+  // The first test left 52 downloads; this one added a 53rd.
+  await expect(page.getByRole('button', { name: 'All (53)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Done (52)' })).toBeVisible();
+  await row(page, job).getByRole('button', { name: 'Actions for renamed.bin' }).click();
+  menu = await openMenu(page);
+  await menu.getByRole('menuitem', { name: /^Remove from list/ }).click();
+  await expect(row(page, job)).toHaveCount(0);
+  await expect(page.getByText('Removed renamed.bin from the list. Its file stays in its folder.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'All (52)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Done (51)' })).toBeVisible();
+  expect((await daemon.published('renamed.bin', daemon.archive)).equals(content(0, MIB))).toBe(true);
+
+  // The chosen default outlives a reload.
+  await page.reload();
+  await expect(page.locator('.statusbar .status')).toHaveText('Live');
+  await page.getByRole('button', { name: 'Add links' }).click();
+  await expect(destination.locator('.path')).toHaveText(/** @type {string} */ (daemon.archive));
   await context.close();
 });

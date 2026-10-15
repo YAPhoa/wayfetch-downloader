@@ -15,11 +15,14 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/contract.js').JobId} JobId
  * @typedef {import('../client/contract.js').JobAction} JobAction
  * @typedef {import('../client/contract.js').JobStage} JobStage
+ * @typedef {import('../client/contract.js').Permission} Permission
+ * @typedef {import('../client/contract.js').RootId} RootId
  * @typedef {import('../client/generated/SessionStatus.js').SessionStatus} SessionStatus
  * @typedef {import('../client/generated/SetupRequest.js').SetupRequest} SetupRequest
  * @typedef {import('../client/generated/LoginRequest.js').LoginRequest} LoginRequest
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
  * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
+ * @typedef {import('../client/generated/UpdateSettingsRequest.js').UpdateSettingsRequest} UpdateSettingsRequest
  */
 
 /** Server-sent event types, as `wayfetch-api` names them. */
@@ -34,6 +37,13 @@ export class HttpClient {
     this.onUnauthenticated = options.onUnauthenticated ?? (() => {});
     /** @type {string | null} */
     this.csrf = null;
+    /**
+     * What the session may do, as the server last said.
+     * @type {readonly Permission[]}
+     */
+    this.permissions = [];
+    /** The server's paths are on the server, not where the page is. */
+    this.local = false;
   }
 
   // Browser sign-in.
@@ -74,6 +84,7 @@ export class HttpClient {
   async logout() {
     await this.request('POST', '/v1/auth/logout', { auth: false });
     this.csrf = null;
+    this.permissions = [];
   }
 
   /**
@@ -82,6 +93,7 @@ export class HttpClient {
    */
   signedIn(status) {
     this.csrf = status.csrf_token ?? null;
+    this.permissions = status.permissions ?? [];
     return status;
   }
 
@@ -117,9 +129,9 @@ export class HttpClient {
 
   /**
    * @param {JobId} job
-   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number }} request
+   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number, name?: string }} request
    */
-  jobCommand(job, { idempotencyKey, target, action, expectedRevision }) {
+  jobCommand(job, { idempotencyKey, target, action, expectedRevision, name }) {
     /** @type {JobCommandRequest} */
     const body = {
       idempotency_key: idempotencyKey,
@@ -127,7 +139,32 @@ export class HttpClient {
       action,
       expected_revision: expectedRevision,
     };
+    if (name !== undefined) body.name = name;
     return this.request('POST', `/v1/jobs/${encodeURIComponent(job)}/commands`, { body });
+  }
+
+  /** @param {JobId} job */
+  async jobSource(job) {
+    const result = await this.request('GET', `/v1/jobs/${encodeURIComponent(job)}/source`);
+    return String(result.url);
+  }
+
+  settings() {
+    return this.request('GET', '/v1/settings');
+  }
+
+  /**
+   * @param {{ idempotencyKey: string, target: string, expectedRevision: number, defaultRoot: RootId }} request
+   */
+  updateSettings({ idempotencyKey, target, expectedRevision, defaultRoot }) {
+    /** @type {UpdateSettingsRequest} */
+    const body = {
+      idempotency_key: idempotencyKey,
+      target,
+      expected_revision: expectedRevision,
+      default_root: defaultRoot,
+    };
+    return this.request('PUT', '/v1/settings', { body });
   }
 
   /**

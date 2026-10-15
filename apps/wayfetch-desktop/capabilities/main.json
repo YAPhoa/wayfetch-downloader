@@ -9,6 +9,8 @@
     "allow-job-command",
     "allow-update-settings",
     "allow-choose-download-folder",
+    "allow-open-file",
+    "allow-reveal-file",
     "allow-subscribe",
     "allow-acknowledge",
     "allow-unsubscribe"

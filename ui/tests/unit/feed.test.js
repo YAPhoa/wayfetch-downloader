@@ -47,6 +47,24 @@ class FakeClient {
     this.refuse = null;
     this.pageReads = 0;
     this.countReads = 0;
+    /** @type {readonly import('../../src/client/contract.js').Permission[]} */
+    this.permissions = ['read'];
+    this.local = false;
+  }
+
+  /** @returns {Promise<string>} */
+  async jobSource() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<import('../../src/client/contract.js').Settings>} */
+  async settings() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<import('../../src/client/contract.js').CommandResult>} */
+  async updateSettings() {
+    throw new Error('not used');
   }
 
   get live() {

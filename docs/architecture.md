@@ -714,6 +714,8 @@ A protocol minor version may only add optional fields, which older decoders igno
 
 **Tradeoff:** transports require conformance tests and platform integration work. A desktop build using a WebView is not a fully native widget toolkit and its memory still counts. [E13] Only native shell features vary; scheduler/queue behavior cannot fork.
 
+Native shell features are host capabilities on the client (`local`, and optional `chooseDownloadFolder`, `openFile`, `revealFile`), and views offer an action only when the client has it and its permissions allow it. Opening a finished file or its folder takes a job, never a path: the desktop host asks the engine for the job's published file, checked to still be the one it published, and hands that absolute path to the desktop's default handler (`opener`, which runs `xdg-open` with it as one argument). A browser shows server paths as such and offers no open actions. Row density is a per-device view preference, not an engine setting.
+
 **Gate:** the same command scenarios produce matching revisions, errors, and durable outcomes through both transports. Neither renderer can call arbitrary engine internals or write its database.
 
 ### ADR-34 — One owner per store; view lifetime is not job lifetime

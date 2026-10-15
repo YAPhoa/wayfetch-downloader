@@ -329,12 +329,25 @@ wayfetchd run --state-dir /tmp/wf/state --download-root /tmp/wf/downloads \
 ```
 
 The layout is a dense download table for a desktop browser: a toolbar
-(add links, pause, resume, or cancel the selected job, filter by name),
-state filters with job counts on the left, the table (each job's name, the
-host of its link, state, progress, size, speed, and time left), details of
-the selected job below the table, and a status bar with the connection state and a compact or comfortable row
-density. It follows the system's light or dark theme and uses the bundled
-IBM Plex Sans typeface (`ui/src/fonts/`, SIL Open Font License 1.1).
+(add links, pause, resume, or cancel the selected job, filter by name,
+Settings), state filters with job counts on the left, the table (each job's
+name, the host of its link, state, progress, size, speed, and time left),
+details of the selected job below the table (including the folder it saves
+to and, once finished, the file it was saved as), and a status bar with the
+connection state. The add form says which folder new downloads go to. It
+follows the system's light or dark theme and uses the bundled IBM Plex Sans
+typeface (`ui/src/fonts/`, SIL Open Font License 1.1).
+
+Settings chooses the default folder for new downloads among those the
+server permits, shown as server paths (jobs already added keep theirs),
+and the row density, which is kept in this browser. Its Accounts &
+services section is a placeholder: connecting download services is not
+available yet. Each row has a menu, from its "…" button, a right-click, or
+Shift+F10 or the Menu key: rename a finished file in its folder (never
+replacing another file), copy the link it came from (with the `sources`
+permission), pause, resume, or cancel, and remove a finished, failed, or
+cancelled job from the list, which keeps its file. A browser cannot open
+files on the server, so it does not offer to.
 
 The UI adds direct links (one per line), lists jobs a page of 50 at a time in
 the order they were added, shows one job at `/jobs/job-N`, and pauses,
@@ -393,7 +406,10 @@ loses its subscription, and a reload releases them all.
 Settings' "Choose folder…" opens the system's folder dialog from the host;
 the page never sends a path. The engine marks the chosen folder as a
 destination, as `init-root` does, and it stays one across restarts. A
-cancelled dialog, or a folder that cannot be used, changes nothing.
+cancelled dialog, or a folder that cannot be used, changes nothing. A
+finished job's menu also opens its file, or the folder holding it, with
+this computer's default application (`xdg-open`): the page names the job,
+and the host opens only the file the engine published for it.
 
 ## Running in a container
 
