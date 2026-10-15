@@ -5,9 +5,10 @@
 //! skips them, so collecting never creates a job or fetches anything.
 //! Starting a link creates its job and releases the link in one
 //! transaction, and a link has at most one job, so a retried, repeated, or
-//! concurrent start never adds a second download. Each command applies to
-//! the links it can and refuses the rest with a reason; refused links stay
-//! in the list as they were.
+//! concurrent start never adds a second download; a started link stays in
+//! the list with its download until the user removes it. Each command
+//! applies to the links it can and refuses the rest with a reason; refused
+//! links stay in the list as they were.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -96,20 +97,18 @@ pub(super) fn collect(
     destination: Option<RootId>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
-    let held: i64 = tx
+    let listed: i64 = tx
         .query_row(
-            "SELECT COUNT(*) FROM source_links WHERE held = 1",
+            "SELECT COUNT(*) FROM source_links WHERE listed = 1",
             [],
             |r| r.get(0),
         )
         .map_err(StoreError::from)?;
-    let held = usize::try_from(held).map_err(|_| StoreError::Corrupt("link count"))?;
-    if held + items.as_slice().len() > MAX_COLLECTED_LINKS {
+    let listed = usize::try_from(listed).map_err(|_| StoreError::Corrupt("link count"))?;
+    if listed + items.as_slice().len() > MAX_COLLECTED_LINKS {
         return Err(ProtocolError::new(
             ErrorCode::LimitExceeded,
-            &format!(
-                "the Links list holds at most {MAX_COLLECTED_LINKS} links; start or remove some first"
-            ),
+            &format!("the Links list holds at most {MAX_COLLECTED_LINKS} links; remove some first"),
         ));
     }
     let entries: Vec<Entry> = items.as_slice().iter().map(|i| Entry::parse(i)).collect();
@@ -138,8 +137,8 @@ pub(super) fn collect(
     let batch: BatchId = key(tx.last_insert_rowid())?;
     let mut insert = tx
         .prepare(
-            "INSERT INTO source_links (batch_id, ordinal, input_url, held, root_id, invalid, \
-             problem) VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)",
+            "INSERT INTO source_links (batch_id, ordinal, input_url, held, listed, root_id, \
+             invalid, problem) VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6)",
         )
         .map_err(StoreError::from)?;
     let mut invalid = 0u32;
@@ -182,7 +181,7 @@ pub(super) fn collect(
 struct Held {
     batch: i64,
     package: i64,
-    held: bool,
+    listed: bool,
     invalid: bool,
     revision: Revision,
     root: Option<RootId>,
@@ -195,7 +194,7 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
     let Ok(id) = sql(link) else { return Ok(None) };
     let raw = tx
         .query_row(
-            "SELECT s.batch_id, b.package_id, s.held, s.invalid, s.revision, s.root_id, \
+            "SELECT s.batch_id, b.package_id, s.listed, s.invalid, s.revision, s.root_id, \
              s.problem, j.id FROM source_links s JOIN input_batches b ON b.id = s.batch_id \
              LEFT JOIN jobs j ON j.source_link_id = s.id WHERE s.id = ?1",
             [id],
@@ -214,11 +213,11 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
         )
         .optional()?;
     raw.map(
-        |(batch, package, held, invalid, revision, root, problem, job)| {
+        |(batch, package, listed, invalid, revision, root, problem, job)| {
             Ok(Held {
                 batch,
                 package,
-                held,
+                listed,
                 invalid,
                 revision: key(revision)?,
                 root: root.map(key).transpose()?,
@@ -257,15 +256,16 @@ const REMOVED: &str = "This link is no longer in the Links list.";
 const CHANGED: &str = "This link changed since the list was shown. Check it and try again.";
 const STARTED: &str = "This link was already started; it is in Downloads.";
 
-/// Refusals that apply to every command: a link that is gone or no longer
-/// held, or that changed since the client saw it. `None` if it may go on.
-fn refusal(link: &LinkRef, row: &Held) -> Option<(ErrorCode, String)> {
-    if !row.held {
-        return Some(match row.job {
-            Some(_) => (ErrorCode::NotApplicable, STARTED.to_owned()),
-            // Submitted to start at once, and not staged yet.
-            None => (ErrorCode::NotFound, REMOVED.to_owned()),
-        });
+/// Refusals that apply to every command: a link no longer in the list (or
+/// never in it, submitted to start at once), one already started unless
+/// `started` may be acted on, or one that changed since the client saw it.
+/// `None` if it may go on.
+fn refusal(link: &LinkRef, row: &Held, started: bool) -> Option<(ErrorCode, String)> {
+    if !row.listed {
+        return Some((ErrorCode::NotFound, REMOVED.to_owned()));
+    }
+    if row.job.is_some() && !started {
+        return Some((ErrorCode::NotApplicable, STARTED.to_owned()));
     }
     (row.revision != link.revision).then(|| (ErrorCode::RevisionConflict, CHANGED.to_owned()))
 }
@@ -289,7 +289,7 @@ pub(super) fn start(
                 revision: None,
             }));
         }
-        if let Some(refused) = refusal(link, &row) {
+        if let Some(refused) = refusal(link, &row, false) {
             return Ok(Err(refused));
         }
         if row.invalid {
@@ -325,8 +325,9 @@ pub(super) fn start(
     })
 }
 
-/// Removes held links from the list, and batches and packages left with
-/// nothing. A link already gone counts as removed.
+/// Removes links from the list. A link not started goes, with batches and
+/// packages left with nothing; a started one only leaves the list, since
+/// its download keeps its source. A link already gone counts as removed.
 pub(super) fn remove(
     tx: &Transaction<'_>,
     links: &LinkRefs,
@@ -341,12 +342,23 @@ pub(super) fn remove(
         let Some(row) = row else {
             return Ok(Ok(applied));
         };
-        if let Some(refused) = refusal(link, &row) {
+        if !row.listed {
+            return Ok(Ok(applied));
+        }
+        if let Some(refused) = refusal(link, &row, true) {
             return Ok(Err(refused));
         }
-        tx.execute("DELETE FROM source_links WHERE id = ?1", [sql(link.link)?])
+        if row.job.is_some() {
+            tx.execute(
+                "UPDATE source_links SET listed = 0 WHERE id = ?1",
+                [sql(link.link)?],
+            )
             .map_err(StoreError::from)?;
-        batches.insert(row.batch);
+        } else {
+            tx.execute("DELETE FROM source_links WHERE id = ?1", [sql(link.link)?])
+                .map_err(StoreError::from)?;
+            batches.insert(row.batch);
+        }
         Ok(Ok(applied))
     })?;
     for batch in batches {
@@ -373,7 +385,7 @@ pub(super) fn remove(
     Ok(result)
 }
 
-/// Saves held links in `destination` from now on. Other links, jobs, and
+/// Saves links not started yet in `destination` from now on. Other links, jobs, and
 /// the default destination keep theirs.
 pub(super) fn relocate(
     tx: &Transaction<'_>,
@@ -384,7 +396,7 @@ pub(super) fn relocate(
         let Some(row) = row else {
             return Ok(Err((ErrorCode::NotFound, REMOVED.to_owned())));
         };
-        if let Some(refused) = refusal(link, &row) {
+        if let Some(refused) = refusal(link, &row, false) {
             return Ok(Err(refused));
         }
         let mut revision = row.revision;
@@ -407,7 +419,7 @@ pub(super) fn relocate(
     })
 }
 
-/// A page of held links after `after`, oldest first.
+/// A page of listed links after `after`, oldest first.
 pub(super) fn list(
     tx: &Transaction<'_>,
     after: Option<SourceLinkId>,
@@ -423,10 +435,11 @@ pub(super) fn list(
     let mut items = tx
         .prepare(
             "SELECT s.id, s.batch_id, b.created_at, s.revision, s.invalid, s.input_url, \
-             s.root_id, s.problem, r.path FROM source_links s \
+             s.root_id, s.problem, r.path, j.id FROM source_links s \
              JOIN input_batches b ON b.id = s.batch_id \
              LEFT JOIN roots r ON r.id = s.root_id \
-             WHERE s.held = 1 AND s.id > ?1 ORDER BY s.id LIMIT ?2",
+             LEFT JOIN jobs j ON j.source_link_id = s.id \
+             WHERE s.listed = 1 AND s.id > ?1 ORDER BY s.id LIMIT ?2",
         )?
         .query_map(
             params_from_iter([after, i64::from(page_size.get()) + 1]),
@@ -441,11 +454,12 @@ pub(super) fn list(
                     r.get::<_, Option<i64>>(6)?,
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<i64>>(9)?,
                 ))
             },
         )?
         .map(|row| {
-            let (id, batch, created, revision, invalid, text, root, problem, path) = row?;
+            let (id, batch, created, revision, invalid, text, root, problem, path, job) = row?;
             let url = (!invalid).then(|| Url::parse(&text).ok()).flatten();
             if !invalid && url.is_none() {
                 return Err(StoreError::Corrupt("collected link"));
@@ -468,6 +482,7 @@ pub(super) fn list(
                 text: invalid.then(|| shown_text(&text)),
                 destination: root.map(key).transpose()?,
                 destination_path: path,
+                job: job.map(key).transpose()?,
                 problem: problem.as_deref().map(DiagnosticText::new),
             })
         })
@@ -479,7 +494,7 @@ pub(super) fn list(
         None
     };
     let total: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM source_links WHERE held = 1",
+        "SELECT COUNT(*) FROM source_links WHERE listed = 1",
         [],
         |r| r.get(0),
     )?;
@@ -491,13 +506,13 @@ pub(super) fn list(
     })
 }
 
-/// A held link exactly as it was collected.
+/// A listed link exactly as it was collected.
 pub(super) fn source(tx: &Transaction<'_>, link: SourceLinkId) -> Result<String, StoreError> {
     let Ok(id) = sql(link) else {
         return Err(StoreError::NotFound("link"));
     };
     tx.query_row(
-        "SELECT input_url FROM source_links WHERE id = ?1 AND held = 1",
+        "SELECT input_url FROM source_links WHERE id = ?1 AND listed = 1",
         [id],
         |r| r.get(0),
     )

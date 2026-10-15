@@ -171,12 +171,14 @@ is never printed.
 replaces a file, and refuses one changed outside Wayfetch. `remove` takes a
 complete, failed, or cancelled job off lists and counts and keeps its files.
 
-`/v1/inputs` starts downloads at once. Collected links instead wait until
-started or removed, survive restarts, and are never fetched while they wait;
-an entry that is not a link is kept with its problem. A staging command
-reports each link it applied and each it refused, with a reason, so a link
-changed since its `revision` was read, or bound for an unavailable folder,
-stays collected. Each link starts at most one download.
+`/v1/inputs` starts downloads at once. Collected links instead stay listed
+until removed, survive restarts, and are never fetched until started; a
+started link stays listed with its `job`, and an entry that is not a link is
+kept with its problem. A staging command reports each link it applied and
+each it refused, with a reason, so a link changed since its `revision` was
+read, or bound for an unavailable folder, stays collected. Each link starts
+at most one download. Collecting and starting need `submit`; removing or
+moving links, which may be someone else's, needs `control`.
 
 `target` is the instance from `/v1/capabilities` and `idempotency_key` a fresh
 UUID per logical command; a retry with the same key returns the first result.

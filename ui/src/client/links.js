@@ -48,11 +48,13 @@ export function linkName(link) {
 
 /**
  * What a link's status column says. `Not checked` is all that is known
- * about a valid link: collecting never contacts its server.
+ * about a valid link: collecting never contacts its server. A started
+ * link stays listed, added to Downloads, until removed.
  * @param {CollectedLink} link
  * @returns {{ label: string, tone: Tone, detail: string | null }}
  */
 export function linkStatus(link) {
+  if (link.job) return { label: 'Added to Downloads', tone: 'ok', detail: null };
   if (link.check === 'invalid') {
     return { label: 'Invalid link', tone: 'bad', detail: link.problem ?? null };
   }
@@ -61,6 +63,14 @@ export function linkStatus(link) {
     tone: link.problem ? 'warn' : 'calm',
     detail: link.problem ? `Not started: ${link.problem}` : null,
   };
+}
+
+/**
+ * Whether `link` can be started: valid, and not started already.
+ * @param {CollectedLink} link
+ */
+export function startable(link) {
+  return link.check !== 'invalid' && !link.job;
 }
 
 /**
