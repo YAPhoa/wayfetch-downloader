@@ -18,6 +18,7 @@ export const ICONS = {
   pause: 'M4.5 3v8M9.5 3v8',
   resume: 'M4 2.5l7 4.5-7 4.5z',
   cancel: 'M3.5 3.5l7 7M10.5 3.5l-7 7',
+  retry: 'M11.5 7a4.5 4.5 0 1 1-1.4-3.3M11.5 1.5v2.5H9',
   search: 'M6 2.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7M8.6 8.6l3 3',
 };
 

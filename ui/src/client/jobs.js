@@ -31,7 +31,30 @@ export function availableActions(job) {
   }
   if (job.desired === 'paused') actions.push('resume');
   if (job.desired !== 'cancelled' && job.stage !== 'complete') actions.push('cancel');
+  // A cancel still stopping keeps its active stage until it settles.
+  if (job.stage === 'failed' || job.stage === 'cancelled') actions.push('retry');
   return actions;
+}
+
+/**
+ * What Retry will do for `job`, in plain words: it continues the data
+ * already saved when the server still offers the same file, and otherwise
+ * starts over and says why.
+ * @param {JobSummary} job
+ */
+export function retryPlan(job) {
+  return job.bytes_done > 0
+    ? `Continues from the ${formatBytes(job.bytes_done)} saved when it can`
+    : 'Starts the download again';
+}
+
+/**
+ * Why the job's latest attempt started over from zero, if it did.
+ * @param {JobSummary} job
+ */
+export function restartNote(job) {
+  const reason = job.restart_reason;
+  return reason ? `Started over from the beginning: ${reason}.` : undefined;
 }
 
 /**
