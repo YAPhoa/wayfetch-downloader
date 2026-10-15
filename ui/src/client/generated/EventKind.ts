@@ -2,6 +2,7 @@
 import type { BatchId } from "./BatchId.js";
 import type { JobId } from "./JobId.js";
 import type { JobSummary } from "./JobSummary.js";
+import type { Revision } from "./Revision.js";
 
 /**
  * A change recorded in the outbox.
@@ -26,4 +27,8 @@ job: JobSummary, } | { "type": "job_removed",
 /**
  * The job.
  */
-job: JobId, };
+job: JobId, } | { "type": "settings_changed", 
+/**
+ * The settings revision after the change.
+ */
+revision: Revision, };

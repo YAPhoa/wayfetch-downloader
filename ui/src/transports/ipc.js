@@ -15,7 +15,7 @@
 // stream ended, after which the feed resumes from its cursor as it does
 // after a lost HTTP stream.
 
-import { WayfetchError } from '../client/contract.js';
+import { WayfetchError, settingsRequest } from '../client/contract.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -27,6 +27,7 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/contract.js').JobStage} JobStage
  * @typedef {import('../client/contract.js').Permission} Permission
  * @typedef {import('../client/contract.js').RootId} RootId
+ * @typedef {import('../client/contract.js').SettingsChange} SettingsChange
  * @typedef {import('../client/contract.js').RootSummary} RootSummary
  * @typedef {import('../client/contract.js').LinkId} LinkId
  * @typedef {import('../client/contract.js').LinkRef} LinkRef
@@ -35,7 +36,6 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/generated/ProtocolError.js').ProtocolError} ProtocolError
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
  * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
- * @typedef {import('../client/generated/UpdateSettingsRequest.js').UpdateSettingsRequest} UpdateSettingsRequest
  * @typedef {import('../client/generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
  * @typedef {import('../client/generated/CollectRequest.js').CollectRequest} CollectRequest
  * @typedef {import('../client/generated/LinksCommandRequest.js').LinksCommandRequest} LinksCommandRequest
@@ -190,18 +190,9 @@ export class DesktopIpcClient {
     return this.call('query', { query });
   }
 
-  /**
-   * @param {{ idempotencyKey: string, target: string, expectedRevision: number, defaultRoot: RootId }} request
-   */
-  updateSettings({ idempotencyKey, target, expectedRevision, defaultRoot }) {
-    /** @type {UpdateSettingsRequest} */
-    const request = {
-      idempotency_key: idempotencyKey,
-      target,
-      expected_revision: expectedRevision,
-      default_root: defaultRoot,
-    };
-    return this.call('update_settings', { request });
+  /** @param {SettingsChange} change */
+  updateSettings(change) {
+    return this.call('update_settings', { request: settingsRequest(change) });
   }
   /**
    * Stops offering a download folder the user added; its files stay.

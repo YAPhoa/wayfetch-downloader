@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 use wayfetch_domain::id::{BatchId, JobId};
-use wayfetch_domain::version::{BootEpoch, Generation};
+use wayfetch_domain::version::{BootEpoch, Generation, Revision};
 
 use crate::instance::{Hello, InstanceId};
 use crate::query::JobSummary;
@@ -67,6 +67,12 @@ pub enum EventKind {
     JobRemoved {
         /// The job.
         job: JobId,
+    },
+    /// The settings changed: a client reads them again, unless it holds
+    /// unsaved changes, which would now conflict. Added in protocol 2.0.
+    SettingsChanged {
+        /// The settings revision after the change.
+        revision: Revision,
     },
 }
 
