@@ -1,6 +1,6 @@
 // The Settings page: where new downloads are saved, how dense the list
-// is, and, for later, accounts with download services. Only what Wayfetch
-// supports today can be changed here. A menu of sections sits beside the
+// is, and accounts with download services. Only what Wayfetch supports
+// today can be changed here. A menu of sections sits beside the
 // selected section, as in a desktop app's preferences.
 //
 // The default destination is the engine's setting, saved at the revision
@@ -14,10 +14,12 @@
 // that one. The page is part of the Downloads workspace, which keeps
 // following the engine while it is shown.
 
+import { theme } from '../theme.js';
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { browseServerFolders } from './folders.js';
 import { icon } from './icons.js';
+import { pickService } from './services.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -51,11 +53,11 @@ import { icon } from './icons.js';
  */
 export const SECTIONS = [
   { id: 'folder', label: 'Download folder', about: 'Where new downloads are saved.', icon: 'folder' },
-  { id: 'display', label: 'Display', about: 'How the downloads list looks.', icon: 'display' },
+  { id: 'display', label: 'Display', about: 'Appearance and downloads list layout.', icon: 'display' },
   {
     id: 'accounts',
     label: 'Accounts & services',
-    about: 'Accounts with download services, once Wayfetch supports them.',
+    about: 'Download services you can use with an account, such as multi-host services.',
     icon: 'accounts',
   },
 ];
@@ -225,7 +227,7 @@ export class SettingsPage {
   build() {
     const panels = {
       folder: this.destinationSection(),
-      display: this.densitySection(),
+      display: this.displaySection(),
       accounts: accountsSection(),
     };
     show(
@@ -239,7 +241,6 @@ export class SettingsPage {
             { class: 'settings-head' },
             icon(name),
             h('h2', { id: `settings-${id}` }, label),
-            id === 'accounts' && h('span', { class: 'tag' }, 'Not available yet'),
           ),
           h('p', { class: 'hint' }, about),
           panels[id],
@@ -506,6 +507,41 @@ export class SettingsPage {
     return destination;
   }
 
+  /** Appearance and density are applied immediately, on this device. */
+  displaySection() {
+    /** @type {[import('../theme.js').Theme, string][]} */
+    const options = [
+      ['system', 'System'],
+      ['light', 'Light'],
+      ['dark', 'Dark'],
+    ];
+    return h(
+      'div',
+      null,
+      h(
+        'fieldset',
+        null,
+        h('legend', null, 'Theme'),
+        options.map(([value, label]) =>
+          h(
+            'label',
+            { class: 'choice' },
+            h('input', {
+              type: 'radio',
+              name: 'theme',
+              value,
+              checked: (theme?.get() ?? 'system') === value,
+              onchange: () => theme?.set(value),
+            }),
+            h('span', { class: 'choice-text' }, label),
+          ),
+        ),
+      ),
+      h('p', { class: 'hint' }, 'System follows your device’s appearance. Applies at once, on this device only.'),
+      this.densitySection(),
+    );
+  }
+
   /** Row density, applied at once and kept on this device. */
   densitySection() {
     const { context } = this;
@@ -541,20 +577,55 @@ export class SettingsPage {
   }
 }
 
+/** The columns of the accounts table. */
+const ACCOUNT_COLUMNS = ['Service', 'Account', 'Status', 'Expires', 'Traffic left'];
+
 /**
- * Accounts with download services: none can be connected yet, and the
- * section says so rather than offering anything to fill in.
+ * Accounts with download services: a table of the accounts added, none
+ * yet, and a way to add one by picking its service from the catalogue.
+ * Nothing here asks for credentials until an integration exists to use
+ * them.
  */
 function accountsSection() {
+  // Integrations the engine reports; it has none yet, so no account can
+  // be added.
+  /** @type {ReadonlySet<string>} */
+  const integrations = new Set();
   return h(
     'div',
-    { class: 'empty-state' },
-    h('p', null, 'No accounts are connected.'),
+    { class: 'settings-section accounts' },
+    h(
+      'div',
+      { class: 'row' },
+      h(
+        'button',
+        { type: 'button', 'data-key': 'add-account', onclick: () => pickService(integrations) },
+        icon('add'),
+        'Add account…',
+      ),
+    ),
+    h(
+      'div',
+      { class: 'table-scroll' },
+      h(
+        'table',
+        { class: 'accounts-table', 'aria-label': 'Accounts' },
+        h('thead', null, h('tr', null, ACCOUNT_COLUMNS.map((name) => h('th', { scope: 'col' }, name)))),
+        h(
+          'tbody',
+          null,
+          h(
+            'tr',
+            null,
+            h('td', { class: 'empty', colspan: ACCOUNT_COLUMNS.length, 'data-key': 'no-accounts' }, 'No accounts added yet.'),
+          ),
+        ),
+      ),
+    ),
     h(
       'p',
-      null,
-      'This is where you will connect supported download services, such as Real-Debrid, once Wayfetch supports them. ' +
-        'Connecting accounts is not available yet, so Wayfetch downloads only the links you add directly.',
+      { class: 'hint' },
+      'Links you add directly download without an account. To add one, pick its service from the list.',
     ),
   );
 }
