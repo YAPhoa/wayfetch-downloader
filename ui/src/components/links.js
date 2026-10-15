@@ -25,6 +25,7 @@ import {
   count,
   linkName,
   linkStatus,
+  startable,
   matches,
   refusals,
 } from '../client/links.js';
@@ -71,6 +72,7 @@ export const LINKS_PAGE_SIZE = 100;
 export const LINKS_REFRESH = 5000;
 
 const NO_SUBMIT = 'You may only view links';
+const NO_CONTROL = 'You may not change or remove links';
 
 /**
  * What to tell the user about a command refused as a whole.
@@ -123,8 +125,8 @@ export class LinksPage {
     this.timer = undefined;
 
     this.buttons = {
-      start: this.tool('start', 'resume', 'Start selected', () => this.act('start', this.chosen())),
-      move: this.tool('move', 'folder', 'Save to…', () => this.chooseFolder(this.chosen())),
+      start: this.tool('start', 'resume', 'Start selected', () => this.act('start', this.chosen().filter(startable))),
+      move: this.tool('move', 'folder', 'Save to…', () => this.chooseFolder(this.chosen().filter((l) => !l.job))),
       remove: this.tool('remove', 'cancel', 'Remove', () => this.act('remove', this.chosen())),
     };
     const search = h('input', {
@@ -198,6 +200,11 @@ export class LinksPage {
 
   get canSubmit() {
     return this.context.client.permissions.includes('submit');
+  }
+
+  /** Changing or removing links others may have collected needs control. */
+  get canControl() {
+    return this.context.client.permissions.includes('control');
   }
 
   /** Shows the page, reading the list afresh and then now and then. */
@@ -506,22 +513,30 @@ export class LinksPage {
     const n = targets.length;
     const many = n > 1 ? ` ${n} links` : '';
     const allowed = this.canSubmit && !this.busy;
-    const startable = targets.filter((l) => l.check !== 'invalid');
+    const changeable = this.canControl && !this.busy;
+    const starts = targets.filter(startable);
+    const pending = targets.filter((l) => !l.job);
     /** @type {MenuEntry[]} */
     const entries = [
       {
         key: 'start-links',
         label: n > 1 ? `Start${many}` : 'Start download',
-        disabled: !allowed || startable.length === 0,
-        hint: !this.canSubmit ? NO_SUBMIT : startable.length === 0 ? 'Not a valid link' : undefined,
-        run: () => void this.act('start', targets),
+        disabled: !allowed || starts.length === 0,
+        hint: !this.canSubmit
+          ? NO_SUBMIT
+          : pending.length === 0
+            ? 'Already in Downloads'
+            : starts.length === 0
+              ? 'Not a valid link'
+              : undefined,
+        run: () => void this.act('start', starts),
       },
       {
         key: 'move-links',
         label: `Save${many} to…`,
-        disabled: !allowed,
-        hint: !this.canSubmit ? NO_SUBMIT : undefined,
-        run: () => this.chooseFolder(targets),
+        disabled: !changeable || pending.length === 0,
+        hint: !this.canControl ? NO_CONTROL : pending.length === 0 ? 'Already in Downloads' : undefined,
+        run: () => this.chooseFolder(pending),
       },
     ];
     if (n === 1 && this.context.client.permissions.includes('sources')) {
@@ -530,8 +545,8 @@ export class LinksPage {
     entries.push('separator', {
       key: 'remove-links',
       label: `Remove${many || ' link'} from list`,
-      disabled: !allowed,
-      hint: !this.canSubmit ? NO_SUBMIT : 'Nothing is downloaded or deleted',
+      disabled: !changeable,
+      hint: !this.canControl ? NO_CONTROL : 'Nothing is downloaded or deleted',
       danger: true,
       run: () => void this.act('remove', targets),
     });
@@ -560,12 +575,12 @@ export class LinksPage {
     const visible = this.visible;
     const chosen = this.chosen();
     const allowed = this.canSubmit && !this.busy;
-    this.buttons.start.disabled = !allowed || !chosen.some((l) => l.check !== 'invalid');
-    this.buttons.move.disabled = !allowed || chosen.length === 0;
-    this.buttons.remove.disabled = !allowed || chosen.length === 0;
-    for (const button of Object.values(this.buttons)) {
-      if (!this.canSubmit) button.title = NO_SUBMIT;
-    }
+    const changeable = this.canControl && !this.busy;
+    this.buttons.start.disabled = !allowed || !chosen.some(startable);
+    this.buttons.move.disabled = !changeable || !chosen.some((l) => !l.job);
+    this.buttons.remove.disabled = !changeable || chosen.length === 0;
+    if (!this.canSubmit) this.buttons.start.title = NO_SUBMIT;
+    if (!this.canControl) this.buttons.move.title = this.buttons.remove.title = NO_CONTROL;
     this.renderNotice();
     this.renderSummary(chosen);
     this.renderTable(visible);
@@ -613,9 +628,12 @@ export class LinksPage {
       );
       return;
     }
-    const folders = [...new Set(chosen.map((l) => this.linkFolder(l)))];
-    const invalid = chosen.filter((l) => l.check === 'invalid').length;
-    const homeless = chosen.filter((l) => l.check !== 'invalid' && this.removed(l.destination)).length;
+    // Started links already have their folder; the rest say where they go.
+    const pending = chosen.filter((l) => !l.job);
+    const started = chosen.length - pending.length;
+    const folders = [...new Set(pending.map((l) => this.linkFolder(l)))];
+    const invalid = pending.filter((l) => l.check === 'invalid').length;
+    const homeless = pending.filter((l) => l.check !== 'invalid' && this.removed(l.destination)).length;
     const where =
       folders.length === 1
         ? folders[0]
@@ -623,9 +641,10 @@ export class LinksPage {
     show(
       this.summary,
       h('strong', null, `${count(chosen.length, 'link')} selected`),
-      h('span', { class: 'label' }, 'Saving to'),
-      typeof where === 'string' ? h('span', { class: 'path', title: where }, where) : where,
+      folders.length > 0 && h('span', { class: 'label' }, 'Saving to'),
+      folders.length > 0 && (typeof where === 'string' ? h('span', { class: 'path', title: where }, where) : where),
       !this.context.client.local && folders.length === 1 && h('span', { class: 'tag' }, 'Server path'),
+      started > 0 && h('span', null, `${count(started, 'link is', 'links are')} already in Downloads.`),
       invalid > 0 && h('span', { class: 'problem' }, `${count(invalid, 'invalid link')} will not start.`),
       homeless > 0 &&
         h(
@@ -761,7 +780,7 @@ export class LinksPage {
       {
         'data-link': link.id,
         class:
-          [selected && 'selected', link.check === 'invalid' && 'invalid', this.context.menu.owner === link.id && 'menu-open']
+          [selected && 'selected', link.check === 'invalid' && 'invalid', link.job && 'started', this.context.menu.owner === link.id && 'menu-open']
             .filter(Boolean)
             .join(' ') || null,
         onclick: (/** @type {MouseEvent} */ event) => {
@@ -807,7 +826,26 @@ export class LinksPage {
       h(
         'td',
         { class: `link-status tone-${status.tone}`, 'data-check': link.check, title: status.detail },
-        h('span', { class: 'status-label' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), status.label),
+        h(
+          'span',
+          { class: 'status-label' },
+          h('span', { class: 'dot', 'aria-hidden': 'true' }),
+          link.job
+            ? h(
+                'a',
+                {
+                  href: `/jobs/${link.job}`,
+                  'data-key': `link-job-${link.id}`,
+                  onclick: (/** @type {MouseEvent} */ event) => {
+                    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+                    event.preventDefault();
+                    this.context.navigate(`/jobs/${link.job}`);
+                  },
+                },
+                status.label,
+              )
+            : status.label,
+        ),
         status.detail && h('span', { class: 'status-detail' }, status.detail),
       ),
       h(

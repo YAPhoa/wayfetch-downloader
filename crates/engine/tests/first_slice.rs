@@ -2074,9 +2074,11 @@ async fn collected_links_wait_for_review_and_survive_restart() {
     let finished = complete(&owner, id).await;
     assert_eq!(finished.destination, Some(ROOT));
     assert_eq!(env.published("a.bin"), body(5 * KIB));
+    // The started link stays listed with its download until removed.
     let left = links(&owner).await;
-    assert_eq!(left.total, 2);
-    assert_eq!(left.items, vec![c.clone(), b.clone()]);
+    assert_eq!(left.total, 3);
+    assert_eq!(left.items[0].job, Some(id));
+    assert_eq!(left.items[1..], [c.clone(), b.clone()]);
     assert!(
         env.server
             .requests
@@ -2098,6 +2100,12 @@ async fn collected_links_wait_for_review_and_survive_restart() {
     );
     assert_eq!(first.0, second.0);
     assert_eq!(jobs(&owner).await.len(), 2);
+    shutdown(owner).await;
+    let owner = env.start().await;
+    let kept = links(&owner).await;
+    assert_eq!(kept.total, 3);
+    assert_eq!(kept.items[0].job, Some(id));
+    assert_eq!(kept.items[2].job, first.0[0].job);
     shutdown(owner).await;
 }
 
@@ -2195,8 +2203,20 @@ async fn link_destinations_change_only_the_chosen_links() {
     let done = complete(&owner, started[0].job.unwrap()).await;
     assert_eq!(done.destination, Some(media_id));
     assert_eq!(std::fs::read(media.join("a.bin")).unwrap(), body(5 * KIB));
-    assert!(links(&owner).await.items[0].problem.is_none());
+    let started = links(&owner).await.items[0].clone();
+    assert!(started.problem.is_none());
+    // Once started, it keeps its folder.
+    assert_eq!(
+        refused_one(&owner, to_media(&[&started], ROOT)).await,
+        ErrorCode::NotApplicable
+    );
     shutdown(owner).await;
+}
+
+async fn refused_one(owner: &EngineOwner, envelope: CommandEnvelope) -> ErrorCode {
+    let (done, refused) = applied(owner, envelope).await;
+    assert!(done.is_empty(), "{done:?}");
+    refused[0].0
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2220,10 +2240,30 @@ async fn removing_links_removes_only_their_collected_records() {
 
     let remove =
         |links: &[&CollectedLink]| envelope(&owner, Command::RemoveLinks { links: refs(links) });
+    // The list is shared: removing or moving entries needs control.
+    for command in [
+        remove(&[b]),
+        envelope(
+            &owner,
+            Command::MoveLinks {
+                links: refs(&[b]),
+                destination: ROOT,
+            },
+        ),
+    ] {
+        let denied = owner
+            .handle()
+            .execute(command, &[Permission::Read, Permission::Submit])
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, ErrorCode::PermissionDenied);
+    }
+    assert_eq!(links(&owner).await.total, 2);
+    // The started link leaves the list too; its download keeps its source.
+    let a = &links(&owner).await.items[0].clone();
     let (removed, refused_links) = applied(&owner, remove(&[a, b])).await;
-    assert_eq!(removed.len(), 1);
-    assert_eq!(removed[0].link, b.id);
-    assert_eq!(refused_links[0].0, ErrorCode::NotApplicable);
+    assert_eq!(removed.len(), 2);
+    assert!(refused_links.is_empty());
     assert_eq!(links(&owner).await.total, 0);
     // The started download and its file are untouched.
     assert_eq!(job(&owner, id).await.stage, JobStage::Complete);
