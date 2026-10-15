@@ -1,0 +1,285 @@
+//! Destination roots by path, and the user's settings (ADR-17, ADR-29).
+//!
+//! A root's ID is allocated here and written into its sentinel, so the ID
+//! a job records keeps naming the same directory across restarts and
+//! changes to the operator's configuration.
+
+use std::path::{Path, PathBuf};
+
+use rusqlite::{OptionalExtension, Transaction, params};
+use wayfetch_domain::id::RootId;
+use wayfetch_domain::time::UtcTimestamp;
+use wayfetch_domain::version::Revision;
+use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
+
+use super::{Store, StoreError, key, sql};
+
+/// A recorded root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RootRow {
+    pub(crate) id: RootId,
+    pub(crate) path: PathBuf,
+    /// Added by the host on the user's request, so permitted whether or
+    /// not the operator configures it.
+    pub(crate) registered: bool,
+}
+
+/// A path's stored form. Roots must have UTF-8 paths, so a client can be
+/// shown exactly where one is.
+pub(crate) fn path_text(path: &Path) -> Result<&str, StoreError> {
+    path.to_str()
+        .ok_or(StoreError::Root("path is not valid UTF-8"))
+}
+
+fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, bool)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+}
+
+fn decode((id, path, registered): (i64, String, bool)) -> Result<RootRow, StoreError> {
+    Ok(RootRow {
+        id: key(id)?,
+        path: path.into(),
+        registered,
+    })
+}
+
+impl Store {
+    /// Every recorded root, in ID order.
+    pub(crate) fn root_rows(&mut self) -> Result<Vec<RootRow>, StoreError> {
+        let tx = self.read()?;
+        let rows = tx
+            .prepare("SELECT id, path, registered FROM roots ORDER BY id")?
+            .query_map([], read_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter().map(decode).collect()
+    }
+
+    /// The root recorded at `path`.
+    pub(crate) fn root_at(&mut self, path: &Path) -> Result<Option<RootRow>, StoreError> {
+        let path = path_text(path)?;
+        let tx = self.read()?;
+        tx.query_row(
+            "SELECT id, path, registered FROM roots WHERE path = ?1",
+            [path],
+            read_row,
+        )
+        .optional()?
+        .map(decode)
+        .transpose()
+    }
+
+    /// Records the root a sentinel names, found at `path`. Refused if that
+    /// ID is recorded at another path: the root moved, or a sentinel was
+    /// copied, and either way the operator decides.
+    pub(crate) fn adopt_root(
+        &mut self,
+        id: RootId,
+        path: &Path,
+        now: UtcTimestamp,
+    ) -> Result<(), StoreError> {
+        let text = path_text(path)?;
+        let tx = self.write()?;
+        let recorded: Option<String> = tx
+            .query_row("SELECT path FROM roots WHERE id = ?1", [sql(id)?], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        match recorded {
+            Some(recorded) if recorded == text => {}
+            Some(recorded) => return Err(StoreError::RootMoved { id, recorded }),
+            None => {
+                tx.execute(
+                    "INSERT INTO roots (id, path, registered, created_at) VALUES (?1, ?2, 0, ?3)",
+                    params![sql(id)?, text, now.unix_millis()],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A new root ID for `path`, before its sentinel is written.
+    pub(crate) fn allocate_root(
+        &mut self,
+        path: &Path,
+        registered: bool,
+        now: UtcTimestamp,
+    ) -> Result<RootId, StoreError> {
+        let text = path_text(path)?;
+        let tx = self.write()?;
+        tx.execute(
+            "INSERT INTO roots (path, registered, created_at) VALUES (?1, ?2, ?3)",
+            params![text, registered, now.unix_millis()],
+        )?;
+        let id = key(tx.last_insert_rowid())?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Marks root `id` as registered on the user's request.
+    pub(crate) fn register_root(&mut self, id: RootId) -> Result<(), StoreError> {
+        let tx = self.write()?;
+        tx.execute("UPDATE roots SET registered = 1 WHERE id = ?1", [sql(id)?])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Forgets a root allocated for a directory that could not be
+    /// initialized. Nothing can refer to it yet: the coordinator learns of
+    /// a root only once its sentinel is written.
+    pub(crate) fn forget_root(&mut self, id: RootId) -> Result<(), StoreError> {
+        let tx = self.write()?;
+        tx.execute("DELETE FROM roots WHERE id = ?1", [sql(id)?])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The settings revision and the chosen default root, if any.
+    pub(crate) fn settings(&mut self) -> Result<(Revision, Option<RootId>), StoreError> {
+        let tx = self.read()?;
+        settings(&tx)
+    }
+
+    /// Whether a command is recorded under `idempotency_key`, so running
+    /// it again only replays its result.
+    pub(crate) fn has_command(&mut self, idempotency_key: &str) -> Result<bool, StoreError> {
+        let tx = self.read()?;
+        Ok(tx
+            .query_row(
+                "SELECT 1 FROM commands WHERE idempotency_key = ?1",
+                [idempotency_key],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+}
+
+fn settings(tx: &Transaction<'_>) -> Result<(Revision, Option<RootId>), StoreError> {
+    let (revision, root): (i64, Option<i64>) = tx.query_row(
+        "SELECT revision, default_root FROM settings WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((key(revision)?, root.map(key).transpose()?))
+}
+
+/// Chooses the default root at the revision the client saw. The
+/// coordinator has checked that the root is permitted and available.
+pub(super) fn update_settings(
+    tx: &Transaction<'_>,
+    expected: Revision,
+    root: RootId,
+    now: UtcTimestamp,
+) -> Result<CommandResult, ProtocolError> {
+    let (revision, current) = settings(tx)?;
+    if expected != revision {
+        return Err(ProtocolError {
+            current_revision: Some(revision),
+            ..ProtocolError::new(
+                ErrorCode::RevisionConflict,
+                "settings changed since they were read",
+            )
+        });
+    }
+    if current == Some(root) {
+        return Ok(CommandResult::SettingsUpdated {
+            revision,
+            changed: false,
+        });
+    }
+    let next = revision
+        .next()
+        .map_err(|_| StoreError::Corrupt("settings revision"))?;
+    tx.execute(
+        "UPDATE settings SET revision = ?1, default_root = ?2, updated_at = ?3 WHERE id = 1",
+        params![sql(next)?, sql(root)?, now.unix_millis()],
+    )
+    .map_err(StoreError::from)?;
+    Ok(CommandResult::SettingsUpdated {
+        revision: next,
+        changed: true,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        (dir, store)
+    }
+
+    fn now() -> UtcTimestamp {
+        UtcTimestamp::from_unix_millis(1)
+    }
+
+    #[test]
+    fn new_roots_never_take_the_legacy_id() {
+        let (_dir, mut store) = store();
+        let id = store.allocate_root(Path::new("/a"), false, now()).unwrap();
+        assert_eq!(id.get(), 2);
+        // The root earlier versions marked as 1 is recorded from its
+        // sentinel, and later IDs continue past it.
+        store
+            .adopt_root(RootId::from_u64(1).unwrap(), Path::new("/legacy"), now())
+            .unwrap();
+        store
+            .adopt_root(RootId::from_u64(9).unwrap(), Path::new("/b"), now())
+            .unwrap();
+        let next = store.allocate_root(Path::new("/c"), true, now()).unwrap();
+        assert_eq!(next.get(), 10);
+        let rows = store.root_rows().unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.id.get()).collect::<Vec<_>>(),
+            [1, 2, 9, 10]
+        );
+        assert!(rows[3].registered && !rows[0].registered);
+        assert_eq!(store.root_at(Path::new("/b")).unwrap().unwrap().id.get(), 9);
+    }
+
+    #[test]
+    fn a_sentinel_recorded_elsewhere_is_refused() {
+        let (_dir, mut store) = store();
+        let id = store.allocate_root(Path::new("/a"), false, now()).unwrap();
+        store.adopt_root(id, Path::new("/a"), now()).unwrap();
+        assert!(matches!(
+            store.adopt_root(id, Path::new("/copy"), now()),
+            Err(StoreError::RootMoved { recorded, .. }) if recorded == "/a"
+        ));
+        // One path holds one root.
+        assert!(store.allocate_root(Path::new("/a"), false, now()).is_err());
+    }
+
+    #[test]
+    fn settings_are_revision_checked() {
+        let (_dir, mut store) = store();
+        let root = store.allocate_root(Path::new("/a"), false, now()).unwrap();
+        let (first, chosen) = store.settings().unwrap();
+        assert_eq!((first.get(), chosen), (1, None));
+        let tx = store.write().unwrap();
+        let updated = update_settings(&tx, first, root, now()).unwrap();
+        assert_eq!(
+            updated,
+            CommandResult::SettingsUpdated {
+                revision: first.next().unwrap(),
+                changed: true
+            }
+        );
+        let stale = update_settings(&tx, first, root, now()).unwrap_err();
+        assert_eq!(stale.code, ErrorCode::RevisionConflict);
+        assert_eq!(stale.current_revision, first.next().ok());
+        let same = update_settings(&tx, first.next().unwrap(), root, now()).unwrap();
+        assert_eq!(
+            same,
+            CommandResult::SettingsUpdated {
+                revision: first.next().unwrap(),
+                changed: false
+            }
+        );
+        tx.commit().unwrap();
+        assert_eq!(store.settings().unwrap().1, Some(root));
+    }
+}

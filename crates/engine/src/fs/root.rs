@@ -43,7 +43,7 @@ impl Root {
     pub fn initialize(path: &Path, id: RootId, instance: InstanceId) -> Result<(), FsError> {
         let dir = open_root_dir(path)?;
         let expected = Sentinel { instance, root: id };
-        match read_sentinel(&dir, id)? {
+        match read_sentinel(&dir, || FsError::WrongRoot(id))? {
             Some(found) if found == expected => {}
             Some(_) => return Err(FsError::WrongRoot(id)),
             None => {
@@ -74,7 +74,7 @@ impl Root {
     /// check.
     pub fn open(path: &Path, id: RootId, instance: InstanceId) -> Result<Self, FsError> {
         let dir = open_root_dir(path)?;
-        match read_sentinel(&dir, id)? {
+        match read_sentinel(&dir, || FsError::WrongRoot(id))? {
             Some(found) if found == (Sentinel { instance, root: id }) => {}
             Some(_) => return Err(FsError::WrongRoot(id)),
             None => return Err(FsError::SentinelMissing(id)),
@@ -91,6 +91,19 @@ impl Root {
             identity,
             staging,
         })
+    }
+
+    /// The root the directory at `path` is marked as for `instance`, or
+    /// `None` if it carries no sentinel (never initialized, or an empty
+    /// mount point). Fails if the directory is unavailable or carries an
+    /// unreadable sentinel or another instance's. Creates nothing.
+    pub fn identify(path: &Path, instance: InstanceId) -> Result<Option<RootId>, FsError> {
+        let dir = open_root_dir(path)?;
+        match read_sentinel(&dir, || FsError::ForeignSentinel)? {
+            Some(found) if found.instance == instance => Ok(Some(found.root)),
+            Some(_) => Err(FsError::ForeignSentinel),
+            None => Ok(None),
+        }
     }
 
     /// The root's ID.
@@ -123,8 +136,11 @@ fn create_dir(parent: &Dir, name: &str) -> Result<(), FsError> {
     }
 }
 
-/// The sentinel, `None` if absent, or `WrongRoot` if unreadable.
-fn read_sentinel(dir: &Dir, id: RootId) -> Result<Option<Sentinel>, FsError> {
+/// The sentinel, `None` if absent, or `unreadable()` if it does not parse.
+fn read_sentinel(
+    dir: &Dir,
+    unreadable: impl FnOnce() -> FsError,
+) -> Result<Option<Sentinel>, FsError> {
     let bytes = match dir.read(Path::new(PRIVATE_DIR).join(SENTINEL)) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -132,7 +148,7 @@ fn read_sentinel(dir: &Dir, id: RootId) -> Result<Option<Sentinel>, FsError> {
     };
     serde_json::from_slice(&bytes)
         .map(Some)
-        .map_err(|_| FsError::WrongRoot(id))
+        .map_err(|_| unreadable())
 }
 
 #[cfg(test)]
@@ -184,6 +200,26 @@ mod tests {
             Root::open(tmp.path(), id, instance),
             Err(FsError::WrongRoot(_))
         ));
+    }
+
+    #[test]
+    fn identifies_only_this_instances_sentinel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (id, instance) = ids();
+        assert_eq!(Root::identify(tmp.path(), instance).unwrap(), None);
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+        Root::initialize(tmp.path(), id, instance).unwrap();
+        assert_eq!(Root::identify(tmp.path(), instance).unwrap(), Some(id));
+        assert!(matches!(
+            Root::identify(tmp.path(), InstanceId::generate()),
+            Err(FsError::ForeignSentinel)
+        ));
+        std::fs::write(tmp.path().join(PRIVATE_DIR).join(SENTINEL), b"garbage").unwrap();
+        assert!(matches!(
+            Root::identify(tmp.path(), instance),
+            Err(FsError::ForeignSentinel)
+        ));
+        assert!(Root::identify(&tmp.path().join("absent"), instance).is_err());
     }
 
     #[test]

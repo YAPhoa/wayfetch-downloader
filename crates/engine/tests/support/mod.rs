@@ -15,7 +15,7 @@ use tokio::runtime::Handle;
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::transfer::transport::Transport;
 use wayfetch_engine::{
-    EngineBuilder, EngineConfig, EngineOwner, Limits, RootConfig, ShutdownRequest, Timeouts,
+    EngineBuilder, EngineConfig, EngineOwner, Limits, ShutdownRequest, Timeouts,
 };
 use wayfetch_protocol::command::{InputUrl, SubmitItems};
 use wayfetch_protocol::domain::id::{JobId, RootId};
@@ -44,6 +44,8 @@ pub struct Env<S> {
     _tmp: Option<tempfile::TempDir>,
     pub state: PathBuf,
     pub root: PathBuf,
+    /// Further roots the operator configures; `init_root` initializes one.
+    pub roots: Vec<PathBuf>,
     pub server: S,
     transport: Arc<dyn Transport>,
     pub limits: Limits,
@@ -71,6 +73,7 @@ impl<S> Env<S> {
             _tmp: None,
             state,
             root,
+            roots: Vec::new(),
             server,
             transport,
             limits: Limits {
@@ -84,11 +87,9 @@ impl<S> Env<S> {
 
     pub async fn start(&self) -> EngineOwner {
         let mut config = EngineConfig::new(&self.state);
-        config.roots.push(RootConfig {
-            id: ROOT,
-            path: self.root.clone(),
-        });
-        config.download_root = Some(ROOT);
+        config.roots.push(self.root.clone());
+        config.roots.extend(self.roots.iter().cloned());
+        config.download_root = Some(self.root.clone());
         config.limits = self.limits.clone();
         config.timeouts = self.timeouts;
         let owner = EngineBuilder::new(config, Handle::current())
@@ -96,9 +97,18 @@ impl<S> Env<S> {
             .start()
             .await
             .unwrap();
-        // An operator action, once per root and instance.
+        // An operator action, once per root and instance. The engine
+        // identifies the root by its sentinel; ID 1 is the one roots of
+        // earlier versions carry.
         Root::initialize(&self.root, ROOT, owner.identity().instance).unwrap();
         owner
+    }
+
+    /// Initializes `path` as a root of the instance, as `init-root` does,
+    /// while no engine runs, and returns its ID.
+    pub fn init_root(&self, path: &Path) -> RootId {
+        let state = wayfetch_engine::state_dir::StateDir::open(&self.state).unwrap();
+        wayfetch_engine::initialize_root(&state, path).unwrap()
     }
 
     pub fn published(&self, path: &str) -> Vec<u8> {

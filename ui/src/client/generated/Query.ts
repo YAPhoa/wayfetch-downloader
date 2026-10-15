@@ -25,4 +25,4 @@ page_size?: number, } | { "type": "count_jobs",
 /**
  * Which jobs.
  */
-filter?: JobFilter, };
+filter?: JobFilter, } | { "type": "settings", };

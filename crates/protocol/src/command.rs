@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
-use wayfetch_domain::id::{BatchId, JobId, PackageId};
+use wayfetch_domain::id::{BatchId, JobId, PackageId, RootId};
 use wayfetch_domain::version::Revision;
 
 use crate::error::{ErrorCode, ProtocolError};
@@ -219,6 +219,14 @@ pub enum Command {
         /// The job revision the client last saw.
         expected_revision: Revision,
     },
+    /// Choose where jobs submitted from now on are saved. Jobs already
+    /// submitted keep their destination. Added in protocol 0.3.
+    UpdateSettings {
+        /// The settings revision the client last saw.
+        expected_revision: Revision,
+        /// One of the roots the settings list, which must be available.
+        default_root: RootId,
+    },
 }
 
 impl Permission {
@@ -231,7 +239,10 @@ impl Command {
     pub const fn required_permission(&self) -> Permission {
         match self {
             Self::Submit { .. } => Permission::Submit,
-            Self::Pause { .. } | Self::Resume { .. } | Self::Cancel { .. } => Permission::Control,
+            Self::Pause { .. }
+            | Self::Resume { .. }
+            | Self::Cancel { .. }
+            | Self::UpdateSettings { .. } => Permission::Control,
         }
     }
 
@@ -291,6 +302,14 @@ pub enum CommandResult {
         job: JobId,
         /// The job's revision after the command; unchanged if the job was
         /// already in the requested state.
+        revision: Revision,
+        /// Whether the command changed anything.
+        changed: bool,
+    },
+    /// The settings were updated. Added in protocol 0.3.
+    SettingsUpdated {
+        /// The settings revision after the command; unchanged if they
+        /// already said so.
         revision: Revision,
         /// Whether the command changed anything.
         changed: bool,

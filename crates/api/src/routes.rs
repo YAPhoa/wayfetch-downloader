@@ -9,6 +9,8 @@
 //! | `GET /v1/jobs/{id}` | [`Query::InspectJob`] |
 //! | `GET /v1/job-counts` | [`Query::CountJobs`] |
 //! | `POST /v1/jobs/{id}/commands` | [`Command::Pause`], [`Command::Resume`], [`Command::Cancel`] |
+//! | `GET /v1/settings` | [`Query::Settings`]: the default destination and the roots to choose from |
+//! | `PUT /v1/settings` | [`Command::UpdateSettings`] |
 //! | `GET /v1/events` | subscription, as server-sent events |
 //! | `GET /v1/ready` | readiness: lifecycle phase, a handshake, the host's check |
 //!
@@ -36,7 +38,7 @@ use wayfetch_engine::domain::id::{JobId, PackageId};
 use wayfetch_engine::domain::job::JobStage;
 use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::{JobFilter, PageSize};
-use wayfetch_engine::protocol::request::{JobCommandRequest, SubmitRequest};
+use wayfetch_engine::protocol::request::{JobCommandRequest, SubmitRequest, UpdateSettingsRequest};
 use wayfetch_engine::protocol::{
     CommandEnvelope, ErrorCode, EventCursor, Hello, InstanceId, Query, QueryResult, StreamItem,
     Subscribe,
@@ -158,6 +160,25 @@ pub async fn job_command(
     JsonBody(request): JsonBody<JobCommandRequest>,
 ) -> ApiResult<CommandResult> {
     execute(&app, &grant, request.into_envelope(job_id(&id)?)).await
+}
+
+/// The default destination and the roots a client may choose. Paths are
+/// where the roots are on the server.
+pub async fn settings(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+) -> ApiResult<QueryResult> {
+    Ok(Json(app.engine.query(Query::Settings {}, &grant.0).await?))
+}
+
+/// Chooses the default destination at the settings revision the client
+/// saw.
+pub async fn update_settings(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    JsonBody(request): JsonBody<UpdateSettingsRequest>,
+) -> ApiResult<CommandResult> {
+    execute(&app, &grant, request.into_envelope()).await
 }
 
 async fn execute(

@@ -28,4 +28,13 @@ revision: Revision,
 /**
  * Whether the command changed anything.
  */
+changed: boolean, } | { "type": "settings_updated", 
+/**
+ * The settings revision after the command; unchanged if they
+ * already said so.
+ */
+revision: Revision, 
+/**
+ * Whether the command changed anything.
+ */
 changed: boolean, };

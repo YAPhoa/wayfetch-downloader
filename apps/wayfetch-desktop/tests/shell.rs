@@ -10,7 +10,8 @@
 //! final bytes; a second engine refused; stale revisions, wrong-instance
 //! commands, idempotency, resynchronization, a stalled renderer's
 //! subscription ending, and the per-renderer subscription limit and its
-//! cleanup on reload; that the page loads only bundled assets; and that the
+//! cleanup on reload; with the `scripted-picker` feature, a folder chosen
+//! in the host's dialog becoming the destination of new downloads; that the page loads only bundled assets; and that the
 //! host starts no daemon and listens on no TCP port.
 //!
 //! These tests need an X display (`DISPLAY`, for example from `xvfb-run`)
@@ -51,7 +52,7 @@ const WINDOW: usize = 64;
 
 /// A state directory and an initialized download root.
 struct Dirs {
-    _tmp: tempfile::TempDir,
+    tmp: tempfile::TempDir,
     state: PathBuf,
     root: PathBuf,
 }
@@ -70,11 +71,13 @@ impl Dirs {
             .await
             .unwrap();
         assert!(init.status.success(), "{init:?}");
-        Self {
-            _tmp: tmp,
-            state,
-            root,
-        }
+        Self { tmp, state, root }
+    }
+
+    /// Where a build with the `scripted-picker` feature reads the folder
+    /// dialog's answer.
+    fn picker(&self) -> PathBuf {
+        self.tmp.path().join("picker")
     }
 
     fn run_args(&self) -> Vec<String> {
@@ -169,6 +172,7 @@ impl Shell {
             .arg(format!("--port={port}"))
             // Lets Tauri's WebView accept the driver's automation session.
             .env("TAURI_WEBVIEW_AUTOMATION", "true")
+            .env("WAYFETCH_DESKTOP_PICKER", dirs.picker())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
@@ -534,6 +538,7 @@ async fn downloads_through_the_shared_ui_and_recovers_after_relaunch() {
                 await call('plugin:webview|create_webview_window', {}),
                 await call('plugin:fs|read_file', { path: '/etc/passwd' }),
                 await call('plugin:shell|execute', { program: 'sh' }),
+                await call('plugin:dialog|open', { directory: true }),
               ];",
         )
         .await;
@@ -838,6 +843,70 @@ async fn ipc_keeps_the_protocol_semantics() {
             .iter()
             .any(|n| n["type"] == "stopped" && n["clean"] == true)
     );
+}
+
+/// Only a folder the person chose in the host's dialog becomes a
+/// destination; a cancelled dialog or a missing folder changes nothing.
+#[cfg(feature = "scripted-picker")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an X display and WebKitWebDriver"]
+async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
+    let server = Server::http().await;
+    let dirs = Dirs::new().await;
+    let shell = Shell::launch(&dirs).await;
+    let choose = "const choose = () => core.invoke('choose_download_folder')
+                    .catch((e) => ({ code: e.code }));
+                  const settings = async () => (await core.invoke('query',
+                    { query: { type: 'settings' } }));";
+
+    std::fs::write(dirs.picker(), "").unwrap();
+    let cancelled = shell
+        .ipc(&format!(
+            "{choose} return {{ chosen: await choose(), settings: await settings() }};"
+        ))
+        .await;
+    assert_eq!(cancelled["chosen"], Value::Null, "{cancelled}");
+    assert_eq!(cancelled["settings"]["roots"].as_array().unwrap().len(), 1);
+    let revision = cancelled["settings"]["revision"].clone();
+
+    let missing = dirs.tmp.path().join("unplugged");
+    std::fs::write(dirs.picker(), missing.to_str().unwrap()).unwrap();
+    let refused = shell.ipc(&format!("{choose} return await choose();")).await;
+    assert_eq!(refused["code"], "not_applicable", "{refused}");
+    assert!(!missing.exists());
+
+    let folder = dirs.tmp.path().join("chosen");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(dirs.picker(), folder.to_str().unwrap()).unwrap();
+    let url = server.url("/picked.bin");
+    server.put("/picked.bin", Resource::new(body(MIB)));
+    let chosen = shell
+        .ipc(&format!(
+            "{choose}
+             const root = await choose();
+             const hello = await core.invoke('hello');
+             const updated = await core.invoke('update_settings', {{ request: {{
+               idempotency_key: crypto.randomUUID(), target: hello.instance,
+               expected_revision: {revision}, default_root: root.id }} }});
+             return {{ root, updated, settings: await settings() }};"
+        ))
+        .await;
+    assert_eq!(chosen["root"]["path"], folder.to_str().unwrap(), "{chosen}");
+    assert_eq!(chosen["updated"]["type"], "settings_updated");
+    assert_eq!(chosen["settings"]["default_root"], chosen["root"]["id"]);
+    shell.add(&url).await;
+    shell.wait_for_state("job-1", "Done").await;
+    assert_eq!(std::fs::read(folder.join("picked.bin")).unwrap(), body(MIB));
+    shell.close().await;
+
+    // The chosen folder stays a destination, and the default, after a
+    // relaunch.
+    let shell = Shell::launch(&dirs).await;
+    let after = shell
+        .ipc(&format!("{choose} return await settings();"))
+        .await;
+    assert_eq!(after["default_root"], chosen["root"]["id"], "{after}");
+    shell.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

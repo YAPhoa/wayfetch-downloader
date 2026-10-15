@@ -8,12 +8,14 @@
 //! engine level: T01 (sequential file), T02 and T23 (resume from durable
 //! checkpoints after a restart), T03 (`200` to a range request), T05
 //! (representation changed during resume), T09 (stalled headers and body),
-//! T27 (cancelled generation), and T47 (bounded subscriber replay).
+//! T27 (cancelled generation), and T47 (bounded subscriber replay). The
+//! last tests cover destination roots and the default for new jobs.
 
 mod support;
 
 use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,11 +29,15 @@ use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
 use wayfetch_protocol::domain::failure::FailureCode;
-use wayfetch_protocol::domain::id::JobId;
+use wayfetch_protocol::domain::id::{JobId, RootId};
 use wayfetch_protocol::domain::job::JobStage;
+use wayfetch_protocol::domain::version::Revision;
 use wayfetch_protocol::event::{EventKind, ResyncReason};
-use wayfetch_protocol::query::{JobFilter, PageSize};
-use wayfetch_protocol::{Command, Query, QueryResult, StreamItem, Subscribe};
+use wayfetch_protocol::query::{JobFilter, PageSize, Settings};
+use wayfetch_protocol::{
+    Command, CommandEnvelope, CommandResult, ErrorCode, Permission, Query, QueryResult, StreamItem,
+    Subscribe,
+};
 
 /// A file the fake server holds.
 #[derive(Debug, Clone)]
@@ -792,5 +798,268 @@ async fn a_storage_failure_during_recovery_waits_for_the_next_start() {
         .unwrap();
     complete(&owner, id).await;
     assert_eq!(env.published("held.bin"), data);
+    shutdown(owner).await;
+}
+
+// Destinations (ADR-17, ADR-29): the default root for new jobs, and roots
+// a host registers on its user's request.
+
+async fn settings(owner: &EngineOwner) -> Settings {
+    match owner.handle().query(Query::Settings {}, ALL).await.unwrap() {
+        QueryResult::Settings(settings) => settings,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn choose(owner: &EngineOwner, revision: Revision, root: RootId) -> CommandEnvelope {
+    envelope(
+        owner,
+        Command::UpdateSettings {
+            expected_revision: revision,
+            default_root: root,
+        },
+    )
+}
+
+/// A directory beside the environment's download root.
+fn folder(env: &Env, name: &str) -> PathBuf {
+    let path = env.root.parent().unwrap().join(name);
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_default_applies_only_to_later_jobs_and_survives_restart() {
+    let mut env = env();
+    let media = folder(&env, "media");
+    env.roots.push(media.clone());
+    let media_id = env.init_root(&media);
+    assert_ne!(media_id, ROOT);
+    env.server.put("/a.bin", Resource::new(body(5 * KIB)));
+    env.server.put("/b.bin", Resource::new(body(6 * KIB)));
+    let owner = env.start().await;
+    let [a] = submit(&owner, &["/a.bin"]).await[..] else {
+        panic!()
+    };
+    assert_eq!(complete(&owner, a).await.destination, Some(ROOT));
+
+    let before = settings(&owner).await;
+    assert_eq!(before.default_root, Some(ROOT));
+    let listed: Vec<_> = before.roots.iter().map(|r| (r.id, r.available)).collect();
+    assert_eq!(listed, [(ROOT, true), (media_id, true)]);
+    assert_eq!(before.roots[1].path, media.to_str().unwrap());
+
+    let change = choose(&owner, before.revision, media_id);
+    let updated = owner.handle().execute(change.clone(), ALL).await.unwrap();
+    let revision = before.revision.next().unwrap();
+    assert_eq!(
+        updated,
+        CommandResult::SettingsUpdated {
+            revision,
+            changed: true
+        }
+    );
+    // A retry replays the result; a stale revision conflicts.
+    assert_eq!(owner.handle().execute(change, ALL).await.unwrap(), updated);
+    let stale = owner
+        .handle()
+        .execute(choose(&owner, before.revision, ROOT), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(stale.code, ErrorCode::RevisionConflict);
+    assert_eq!(stale.current_revision, Some(revision));
+
+    let [b] = submit(&owner, &["/b.bin"]).await[..] else {
+        panic!()
+    };
+    let done = complete(&owner, b).await;
+    assert_eq!(done.destination, Some(media_id));
+    assert_eq!(done.artifact.unwrap().root, media_id);
+    assert_eq!(std::fs::read(media.join("b.bin")).unwrap(), body(6 * KIB));
+    assert!(!env.root.join("b.bin").exists());
+    // Read permission is enough to see the settings, not to change them.
+    let denied = owner
+        .handle()
+        .execute(choose(&owner, revision, ROOT), &[Permission::Read])
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, ErrorCode::PermissionDenied);
+    shutdown(owner).await;
+
+    let owner = env.start().await;
+    let after = settings(&owner).await;
+    assert_eq!(
+        (after.revision, after.default_root),
+        (revision, Some(media_id))
+    );
+    assert_eq!(job(&owner, a).await.destination, Some(ROOT));
+    assert_eq!(job(&owner, b).await.destination, Some(media_id));
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_and_unavailable_roots_cannot_become_the_default() {
+    let mut env = env();
+    let media = folder(&env, "media");
+    env.roots.push(media.clone());
+    let media_id = env.init_root(&media);
+    let owner = env.start().await;
+    let before = settings(&owner).await;
+
+    let unknown = RootId::from_u64(99).unwrap();
+    let err = owner
+        .handle()
+        .execute(choose(&owner, before.revision, unknown), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotFound);
+
+    // The drive is unmounted: its mount point is an empty directory.
+    let mounted = folder(&env, "media-mounted");
+    std::fs::remove_dir(&mounted).unwrap();
+    std::fs::rename(&media, &mounted).unwrap();
+    std::fs::create_dir(&media).unwrap();
+    let missing = settings(&owner).await;
+    let shown = missing.roots.iter().find(|r| r.id == media_id).unwrap();
+    assert!(!shown.available);
+    assert!(
+        shown
+            .problem
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .contains("not mounted"),
+        "{shown:?}"
+    );
+    let err = owner
+        .handle()
+        .execute(choose(&owner, before.revision, media_id), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotApplicable);
+    // Nothing changed, and the empty mount point was not written to.
+    let after = settings(&owner).await;
+    assert_eq!(
+        (after.revision, after.default_root),
+        (before.revision, Some(ROOT))
+    );
+    assert_eq!(std::fs::read_dir(&media).unwrap().count(), 0);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_keeps_its_root_and_blocks_while_it_is_not_permitted() {
+    let mut env = env();
+    let media = folder(&env, "media");
+    env.roots.push(media.clone());
+    let media_id = env.init_root(&media);
+    let data = body(20 * KIB);
+    let mut resource = Resource::new(data.clone());
+    resource.stall_at = Some(8 * KIB);
+    env.server.put("/kept.bin", resource);
+    let owner = env.start().await;
+    let revision = settings(&owner).await.revision;
+    owner
+        .handle()
+        .execute(choose(&owner, revision, media_id), ALL)
+        .await
+        .unwrap();
+    let [id] = submit(&owner, &["/kept.bin"]).await[..] else {
+        panic!()
+    };
+    wait_for(&owner, id, |j| j.bytes_done == 8 * KIB as u64).await;
+    shutdown(owner).await;
+    env.server.update("/kept.bin", |r| r.stall_at = None);
+
+    // The operator stops configuring the root: the job is not redirected
+    // to the download root, and its partial stays where it is.
+    env.roots.clear();
+    let owner = env.start().await;
+    let blocked = wait_for(&owner, id, |j| j.stage == JobStage::Blocked).await;
+    assert_eq!(
+        blocked.failure.unwrap().code,
+        FailureCode::DestinationUnavailable
+    );
+    assert_eq!(blocked.destination, Some(media_id));
+    assert_eq!(support::staging_files(&media), 1);
+    let listed = settings(&owner).await;
+    assert_eq!(listed.default_root, Some(ROOT));
+    assert!(listed.roots.iter().all(|r| r.id != media_id));
+    shutdown(owner).await;
+
+    // Configured again, the job continues there once resumed.
+    env.roots.push(media.clone());
+    let owner = env.start().await;
+    let blocked = job(&owner, id).await;
+    let pause = Command::Pause {
+        job: id,
+        expected_revision: blocked.revision,
+    };
+    let paused = owner
+        .handle()
+        .execute(envelope(&owner, pause), ALL)
+        .await
+        .unwrap();
+    let CommandResult::JobUpdated { revision, .. } = paused else {
+        panic!("{paused:?}")
+    };
+    let resume = Command::Resume {
+        job: id,
+        expected_revision: revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, resume), ALL)
+        .await
+        .unwrap();
+    complete(&owner, id).await;
+    assert_eq!(std::fs::read(media.join("kept.bin")).unwrap(), data);
+    assert!(!env.root.join("kept.bin").exists());
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_root_stays_permitted_across_restarts() {
+    let env = env();
+    let owner = env.start().await;
+    let handle = owner.handle();
+    let missing = env.root.parent().unwrap().join("missing");
+    let err = handle
+        .register_root(missing.clone(), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotApplicable);
+    assert!(!missing.exists());
+    let err = handle
+        .register_root("relative".into(), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidRequest);
+    let err = handle
+        .register_root(folder(&env, "x"), &[Permission::Read])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
+    assert_eq!(settings(&owner).await.roots.len(), 1);
+
+    let chosen = folder(&env, "chosen");
+    let registered = handle.register_root(chosen.clone(), ALL).await.unwrap();
+    assert!(registered.available);
+    assert_eq!(registered.path, chosen.to_str().unwrap());
+    assert_eq!(
+        handle.register_root(chosen.clone(), ALL).await.unwrap().id,
+        registered.id
+    );
+    shutdown(owner).await;
+
+    // Not configured, yet still a choice after a restart.
+    let owner = env.start().await;
+    let listed = settings(&owner).await;
+    assert!(
+        listed
+            .roots
+            .iter()
+            .any(|r| r.id == registered.id && r.available)
+    );
     shutdown(owner).await;
 }
