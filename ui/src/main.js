@@ -52,15 +52,7 @@ class BrowserShell {
           'section',
           { class: 'card narrow' },
           h('h1', null, 'Browser sign-in is off'),
-          h(
-            'p',
-            null,
-            'This server does not accept browser sign-in. Start wayfetchd with ',
-            h('code', null, '--auth-dir'),
-            ' and ',
-            h('code', null, '--browser-origin'),
-            ' to use this page.',
-          ),
+          h('p', null, 'This server does not accept browser sign-in, so this page cannot be used with it.'),
         ),
       );
     } else if (status.authenticated) {
