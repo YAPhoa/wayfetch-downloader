@@ -2,6 +2,7 @@
 import type { DiagnosticText } from "./DiagnosticText.js";
 import type { ErrorCode } from "./ErrorCode.js";
 import type { Revision } from "./Revision.js";
+import type { UtcTimestamp } from "./UtcTimestamp.js";
 
 /**
  * An error returned to a client.
@@ -18,4 +19,10 @@ message: DiagnosticText,
 /**
  * The record's current revision, for [`ErrorCode::RevisionConflict`].
  */
-current_revision?: Revision | null, };
+current_revision?: Revision | null, 
+/**
+ * When a refused retry may be asked for again, for a job whose
+ * failure has a retry deadline still in the future. Added in protocol
+ * 1.2.
+ */
+retry_at?: UtcTimestamp | null, };
