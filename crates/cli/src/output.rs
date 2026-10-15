@@ -23,8 +23,10 @@ commands:
   list            list all jobs
   inspect JOB     show one job, for example `inspect job-1` or `inspect 1`
   pause JOB       pause a job, keeping its partial data
-  resume JOB      resume a paused or cancelled job
+  resume JOB      resume a paused job
   cancel JOB      stop a job, keeping its partial data
+  retry JOB       start a failed or cancelled job again, continuing its
+                  saved data when possible
   help            show this help
   quit            shut down; unfinished jobs continue on the next start";
 
@@ -71,7 +73,7 @@ pub enum Output<'a> {
         /// Jobs listed.
         count: u64,
     },
-    /// A pause, resume, or cancel was applied.
+    /// A pause, resume, cancel, or retry was applied.
     Updated {
         /// The job.
         job: JobId,
@@ -204,9 +206,13 @@ impl Message for Output<'_> {
 
 impl From<ProtocolError> for Output<'_> {
     fn from(error: ProtocolError) -> Self {
+        let mut message = error.message.to_string();
+        if let Some(at) = error.retry_at {
+            let _ = write!(message, " (retry_at {})", at.unix_millis());
+        }
         Self::Error {
             code: error.code.to_string(),
-            message: error.message.to_string(),
+            message,
         }
     }
 }
@@ -224,6 +230,9 @@ fn job_line(job: &JobSummary) -> String {
         if let Some(message) = &failure.message {
             let _ = write!(line, " {message}");
         }
+    }
+    if let Some(reason) = &job.restart_reason {
+        let _ = write!(line, " (started over: {reason})");
     }
     if let Some(artifact) = &job.artifact {
         let _ = write!(line, " -> {}", artifact.path);
