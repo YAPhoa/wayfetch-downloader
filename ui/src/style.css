@@ -948,9 +948,12 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 .settings-group .choice { align-items: center; padding: 6px 0; }
 .settings-group .choice input { margin: 0; accent-color: var(--accent); }
 .settings-group .choice:has(input:disabled) { cursor: default; }
+/* Icon, path and tag in columns, so a long path wraps beside its icon. */
+.settings-group .choice-text { display: grid; grid-template-columns: auto minmax(0, max-content) 1fr; }
+.settings-group .choice-text .tag { justify-self: start; }
 .settings-group .choice-text .icon { color: var(--muted); }
 .settings-group .choice-text .path { color: var(--ink); }
-.settings-group .choice-text .problem { padding-left: 22px; font-size: 12px; }
+.settings-group .choice-text .problem { grid-column: 2 / -1; font-size: 12px; }
 .settings-group .choice-row:has(input:checked) .choice-text .icon { color: var(--accent); }
 .settings-group .remove-root { min-height: 26px; color: var(--bad); border-color: transparent; background: transparent; }
 .settings-group .remove-root:hover:not(:disabled),
