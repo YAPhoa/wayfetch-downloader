@@ -62,6 +62,12 @@ pub enum EventKind {
         /// Its new state.
         job: JobSummary,
     },
+    /// A job was removed from lists and counts. The client drops its copy.
+    /// Added in protocol 1.0.
+    JobRemoved {
+        /// The job.
+        job: JobId,
+    },
 }
 
 /// A durable event with its position.

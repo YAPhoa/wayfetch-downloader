@@ -25,4 +25,8 @@ page_size?: number, } | { "type": "count_jobs",
 /**
  * Which jobs.
  */
-filter?: JobFilter, } | { "type": "settings", };
+filter?: JobFilter, } | { "type": "settings", } | { "type": "job_source", 
+/**
+ * The job.
+ */
+job: JobId, };

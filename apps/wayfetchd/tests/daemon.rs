@@ -81,7 +81,7 @@ impl Dirs {
         dirs.init_root();
         write_private(
             &dirs.tokens,
-            &format!("{OWNER_TOKEN} read,submit,control\n{READER_TOKEN} read\n"),
+            &format!("{OWNER_TOKEN} read,submit,control,sources\n{READER_TOKEN} read\n"),
         );
         dirs
     }
@@ -465,6 +465,85 @@ async fn the_default_destination_is_chosen_among_server_folders() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn finished_jobs_are_renamed_and_removed_over_http() {
+    let server = Server::https().await;
+    let dirs = Dirs::ready(&server);
+    let daemon = Daemon::start(&dirs).await;
+    let client = daemon.owner();
+    let data = body(1024);
+    server.put("/a.bin", Resource::new(data.clone()));
+    let job = client.submit(&server.url("/a.bin")).await;
+    let done = client.stage(&job, "complete").await;
+    let path = format!("/v1/jobs/{job}/commands");
+
+    // Renaming needs a name, and only a rename takes one.
+    let rename = |name: &str| {
+        client.command(json!({
+            "action": "rename",
+            "expected_revision": done["revision"],
+            "name": name,
+        }))
+    };
+    let nameless =
+        client.command(json!({"action": "rename", "expected_revision": done["revision"]}));
+    assert_eq!(
+        client.post(&path, &nameless).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    std::fs::write(dirs.root.join("taken.bin"), b"user data").unwrap();
+    let (status, error) = client.post(&path, &rename("taken.bin")).await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::CONFLICT, &"already_exists".into())
+    );
+    let (status, error) = client.post(&path, &rename("../b.bin")).await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::BAD_REQUEST, &"invalid_request".into())
+    );
+    let (status, renamed) = client.post(&path, &rename("b.bin")).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["changed"], true);
+    assert_eq!(dirs.published("b.bin"), data);
+    assert!(!dirs.root.join("a.bin").exists());
+    let renamed_job = client.job(&job).await;
+    assert_eq!(renamed_job["artifact"]["path"], "b.bin");
+
+    // The link needs the sources permission.
+    let (status, source) = client.get(&format!("/v1/jobs/{job}/source")).await;
+    assert_eq!(status, StatusCode::OK, "{source}");
+    assert_eq!(source["url"], server.url("/a.bin"));
+    let (status, _) = daemon
+        .client(READER_TOKEN)
+        .get(&format!("/v1/jobs/{job}/source"))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Removing hides the job and keeps its file.
+    let mut events = client.events(None).await;
+    events.until(|e, _| e.event == "hello").await;
+    let remove = client.command(json!({
+        "action": "remove",
+        "expected_revision": renamed_job["revision"],
+    }));
+    let (status, removed) = client.post(&path, &remove).await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    events
+        .until(|e, data| {
+            e.event == "event" && data["kind"] == json!({"type": "job_removed", "job": job})
+        })
+        .await;
+    assert!(client.jobs().await.is_empty());
+    let (_, counts) = client.get("/v1/job-counts").await;
+    assert_eq!(counts["stages"], json!({}));
+    let (status, _) = client.get(&format!("/v1/jobs/{job}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(dirs.published("b.bin"), data);
+
+    daemon.stop("TERM").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn requests_without_a_valid_token_are_refused() {
     let server = Server::https().await;
     let dirs = Dirs::ready(&server);
@@ -568,7 +647,7 @@ async fn a_missing_token_file_is_created_owner_only_and_never_printed() {
     let text = std::fs::read_to_string(&dirs.tokens).unwrap();
     let line = text.lines().find(|l| !l.starts_with('#')).unwrap();
     let (token, scopes) = line.split_once(' ').unwrap();
-    assert_eq!(scopes, "read,submit,control");
+    assert_eq!(scopes, "read,submit,control,sources");
     let (status, _) = daemon.client(token).get("/v1/capabilities").await;
     assert_eq!(status, StatusCode::OK);
 
@@ -1113,6 +1192,10 @@ async fn browsers_set_up_the_owner_sign_in_and_use_the_api() {
     let (_, session) = browser.get("/v1/auth/session").await;
     assert_eq!(session["authenticated"], true);
     assert_eq!(session["csrf_token"], signed_in["csrf_token"]);
+    assert_eq!(
+        session["permissions"],
+        json!(["read", "submit", "control", "sources"])
+    );
     let mut events = browser.events().await;
     events.until(|e, _| e.event == "hello").await;
     let submit = browser

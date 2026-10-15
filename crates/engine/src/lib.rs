@@ -24,6 +24,7 @@ mod destinations;
 mod download;
 pub mod fs;
 pub mod lifecycle;
+mod published;
 pub mod state_dir;
 mod store;
 pub mod subscription;

@@ -128,12 +128,25 @@ pub enum Query {
     /// The user's settings and the destinations they may choose. Added in
     /// protocol 0.3.
     Settings {},
+    /// The link a job was submitted with. Needs
+    /// [`Permission::Sources`], since a link can carry a signed token.
+    /// Added in protocol 1.0.
+    JobSource {
+        /// The job.
+        job: JobId,
+    },
 }
 
 impl Query {
     /// The permission the caller needs.
     pub const fn required_permission(&self) -> Permission {
-        Permission::Read
+        match self {
+            Self::JobSource { .. } => Permission::Sources,
+            Self::InspectJob { .. }
+            | Self::ListJobs { .. }
+            | Self::CountJobs { .. }
+            | Self::Settings {} => Permission::Read,
+        }
     }
 }
 
@@ -279,6 +292,13 @@ pub enum QueryResult {
     JobCounts(JobCounts),
     /// Answer to [`Query::Settings`].
     Settings(Settings),
+    /// Answer to [`Query::JobSource`].
+    JobSource {
+        /// The job.
+        job: JobId,
+        /// The link exactly as it was submitted.
+        url: String,
+    },
 }
 
 #[cfg(test)]
@@ -389,6 +409,13 @@ mod tests {
         let job: JobSummary = from_value(new).unwrap();
         assert_eq!(job.original_host.unwrap().as_str(), "files.example");
         assert_eq!(job.destination, RootId::from_u64(2));
+    }
+
+    #[test]
+    fn sources_need_their_own_permission() {
+        let q: Query = from_value(json!({"type": "job_source", "job": "job-2"})).unwrap();
+        assert_eq!(q.required_permission(), Permission::Sources);
+        assert_eq!(Query::Settings {}.required_permission(), Permission::Read);
     }
 
     #[test]

@@ -24,7 +24,7 @@ import { focusedKey, h, refocus, show } from './dom.js';
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
  * @typedef {import('../client/contract.js').JobSummary} JobSummary
  * @typedef {import('../client/contract.js').JobId} JobId
- * @typedef {import('../client/contract.js').JobAction} JobAction
+ * @typedef {import('../client/contract.js').StateAction} StateAction
  * @typedef {import('../client/contract.js').ProgressSample} ProgressSample
  * @typedef {import('../client/feed.js').FeedStatus} FeedStatus
  * @typedef {import('../client/jobs.js').Tone} Tone
@@ -33,7 +33,7 @@ import { focusedKey, h, refocus, show } from './dom.js';
 /** Jobs per page. */
 export const PAGE_SIZE = 50;
 
-/** @type {Record<JobAction, string>} */
+/** @type {Record<StateAction, string>} */
 const ACTION_LABELS = { pause: 'Pause', resume: 'Resume', cancel: 'Cancel' };
 
 /** @type {Record<FeedStatus, string>} */
@@ -89,7 +89,7 @@ function icon(path) {
   return svg;
 }
 
-/** @type {Record<JobAction | 'add' | 'search' | 'brand', string>} */
+/** @type {Record<StateAction | 'add' | 'search' | 'brand', string>} */
 const ICONS = {
   brand: 'M7 1.5v7.5M4 6l3 3 3-3M2.5 12h9',
   add: 'M7 2v10M2 7h10',
@@ -449,7 +449,7 @@ export class Downloads {
     const job = this.feed.watchedJob;
     const allowed = new Set(job ? availableActions(job) : []);
     for (const button of this.actionButtons) {
-      const action = /** @type {JobAction} */ (button.dataset.action);
+      const action = /** @type {StateAction} */ (button.dataset.action);
       button.disabled = !allowed.has(action);
       const label = ACTION_LABELS[action];
       button.setAttribute('aria-label', job ? `${label} ${job.id}` : label);
@@ -459,7 +459,7 @@ export class Downloads {
   /**
    * Sends one command for the selected job at the revision shown, then
    * re-reads it.
-   * @param {JobAction} action
+   * @param {StateAction} action
    * @param {HTMLButtonElement} button
    */
   async command(action, button) {

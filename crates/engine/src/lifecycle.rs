@@ -60,9 +60,10 @@ use wayfetch_protocol::{
 
 use crate::cleanup;
 use crate::config::{ConfigError, EngineConfig};
-use crate::destinations::{self, Destination, Destinations, Probes};
+use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::fs::Root;
+use crate::published;
 use crate::state_dir::{Identity, StateDir, StateDirError};
 use crate::store::{Admission, Store, StoreError, StoreInfo};
 use crate::subscription::Subscription;
@@ -182,7 +183,10 @@ impl EngineBuilder {
             shutdown_timeout: self.config.shutdown_timeout,
             supervisor: supervisor.clone(),
         };
-        let probes = Probes::new(supervisor.guard());
+        let (probes, sweeps) = (
+            Probes::new(supervisor.guard()),
+            Probes::new(supervisor.guard()),
+        );
         let coordinator = Coordinator {
             identity,
             inbox,
@@ -196,7 +200,11 @@ impl EngineBuilder {
             held: HashSet::new(),
             destinations,
             probes,
+            file_jobs: Claims::default(),
             registering: 0,
+            identifying: false,
+            settings_waiting: Vec::new(),
+            sweeps,
             events,
             published: head,
             pruned_at: Instant::now(),
@@ -389,6 +397,7 @@ enum Request {
         oneshot::Sender<Result<Subscription, ProtocolError>>,
     ),
     RegisterRoot(PathBuf, oneshot::Sender<Result<RootSummary, ProtocolError>>),
+    PublishedPath(JobId, oneshot::Sender<Result<PathBuf, ProtocolError>>),
     /// Runs arbitrary store work, for fault-injection tests.
     #[cfg(test)]
     Run(Box<dyn FnOnce(&mut Store) + Send>, oneshot::Sender<()>),
@@ -490,6 +499,23 @@ impl EngineHandle {
         response.await.map_err(|_| shutting_down())?
     }
 
+    /// Where a listed, complete job's file is on this computer, after
+    /// checking that its folder is mounted and the file is still the one
+    /// Wayfetch published, for a host to open or show it on its user's
+    /// request. Only for hosts that open files where the engine runs, such
+    /// as the desktop app; never sent to a remote client. The file can
+    /// still change after the check.
+    pub async fn published_path(
+        &self,
+        job: JobId,
+        granted: &[Permission],
+    ) -> Result<PathBuf, ProtocolError> {
+        authorize(Permission::Read, granted)?;
+        let (reply, response) = oneshot::channel();
+        self.send(Request::PublishedPath(job, reply))?;
+        response.await.map_err(|_| shutting_down())?
+    }
+
     fn send(&self, request: Request) -> Result<(), ProtocolError> {
         if self.readiness() != Readiness::Ready {
             return Err(shutting_down());
@@ -553,20 +579,22 @@ const ADMIT_BLOCK_BUDGET: usize = 64;
 /// a job the default, since it was meant for none. A job whose root is no longer permitted, or that
 /// has none while the download root cannot be identified, is blocked, and
 /// the jobs behind it are looked at instead; without any download root,
-/// such a job waits. Also returns whether jobs are left to look at because
+/// or while configured roots are being looked for (`identifying`), such a
+/// job waits. Also returns whether jobs are left to look at because
 /// the pass blocked [`ADMIT_BLOCK_BUDGET`] of them.
 fn admit(
     store: &mut Store,
     free: usize,
     excluded: &[JobId],
     roots: &Destinations,
+    identifying: bool,
 ) -> (Vec<(Admission, Destination)>, bool) {
     let fallback = if roots.has_download_root() {
         roots.download_root()
     } else {
         roots.default_root()
     };
-    let unplaced = fallback.is_none() && roots.fallback_pending();
+    let unplaced = fallback.is_none() && roots.fallback_pending() && !identifying;
     let block = |store: &mut Store, job: &Admission, why: &str| {
         let failure = FailureSummary {
             code: FailureCode::DestinationUnavailable,
@@ -681,6 +709,8 @@ enum Internal {
     Finished(JobId, bool),
     /// An admission pass stopped early; admit again.
     Admit,
+    /// Configured roots found by their sentinels.
+    Identified(Vec<(PathBuf, RootId)>),
     /// A folder's registration ended.
     Registered {
         path: PathBuf,
@@ -746,8 +776,16 @@ struct Coordinator {
     destinations: Destinations,
     /// Filesystem checks of root folders.
     probes: Probes,
+    /// Jobs whose published file a request is working on.
+    file_jobs: Claims<JobId>,
     /// Folders being registered.
     registering: usize,
+    /// Whether configured roots are being looked for.
+    identifying: bool,
+    /// Settings queries waiting for that look to end.
+    settings_waiting: Vec<oneshot::Sender<Result<QueryResult, ProtocolError>>>,
+    /// Roots being swept for abandoned staging files.
+    sweeps: Probes,
     /// Live durable events for subscribers.
     events: broadcast::Sender<DurableEvent>,
     /// Position of the last event broadcast.
@@ -758,8 +796,37 @@ struct Coordinator {
 impl Coordinator {
     async fn run(mut self) {
         self.refresh_destinations().await;
-        // A pass a crash interrupted is finished before work starts.
-        self.clean_staging().await;
+        // Cleanup passes and renames a crash interrupted, and looking for
+        // configured roots, are finished before work starts and requests
+        // are answered, unless a folder
+        // does not answer in time; they then finish in the background, and
+        // a job's rename is reconciled before its file is used.
+        let mut pending = self.clean_staging();
+        let files = self.files();
+        let (reconciled, done) = oneshot::channel();
+        self.supervisor.spawn(async move {
+            files.reconcile().await;
+            let _ = reconciled.send(());
+        });
+        pending.push(done);
+        let finished = async {
+            for pass in pending {
+                let _ = pass.await;
+            }
+        };
+        let deadline = tokio::time::sleep(destinations::PROBE_TIMEOUT);
+        tokio::pin!(finished, deadline);
+        // Configured roots are looked for too.
+        let mut ended = false;
+        while !(ended && !self.identifying) {
+            tokio::select! {
+                () = self.supervisor.cancel.cancelled() => return,
+                () = &mut finished, if !ended => ended = true,
+                () = &mut deadline => break,
+                // That work goes through the store.
+                Some(internal) = self.internal.recv() => self.handle_internal(internal).await,
+            }
+        }
         self.changed().await;
         loop {
             tokio::select! {
@@ -782,12 +849,21 @@ impl Coordinator {
                 let head = self.with_store(Store::event_head).await;
                 let _ = reply.send(head.map_err(ProtocolError::from).map(|h| self.hello(h)));
             }
+            Request::Execute(envelope, reply)
+                if matches!(envelope.command, Command::Rename { .. }) =>
+            {
+                self.refresh_destinations().await;
+                let files = self.files();
+                self.answer(reply, async move { files.rename(*envelope).await });
+            }
             Request::Execute(envelope, reply) => {
                 let target = match envelope.command {
                     Command::Pause { job, .. } | Command::Cancel { job, .. } => Some(job),
                     Command::Submit { .. }
                     | Command::Resume { .. }
-                    | Command::UpdateSettings { .. } => None,
+                    | Command::UpdateSettings { .. }
+                    | Command::Rename { .. }
+                    | Command::Remove { .. } => None,
                 };
                 if let Err(e) = self.prepare(&envelope).await {
                     let _ = reply.send(Err(e));
@@ -843,6 +919,11 @@ impl Coordinator {
                 let _ = reply.send(result);
             }
             Request::RegisterRoot(path, reply) => self.register_root(path, reply),
+            Request::PublishedPath(job, reply) => {
+                self.refresh_destinations().await;
+                let files = self.files();
+                self.answer(reply, async move { files.locate(job).await });
+            }
             Request::Subscribe(request, reply) => {
                 let subscription = self.subscribe(request).await;
                 let _ = reply.send(subscription.map_err(ProtocolError::from));
@@ -872,10 +953,31 @@ impl Coordinator {
                 }
                 // The download may have replaced its partial, or the job
                 // may have been queued to start from zero.
-                self.clean_staging().await;
+                self.clean_staging();
             }
             // `changed` below admits.
             Internal::Admit => {}
+            Internal::Identified(found) => {
+                self.identifying = false;
+                let waiting = std::mem::take(&mut self.settings_waiting);
+                if !found.is_empty() {
+                    let mut destinations = self.destinations.clone();
+                    self.destinations = self
+                        .with_store(move |store| {
+                            for (path, id) in found {
+                                // A sentinel naming a root recorded
+                                // elsewhere stays unidentified; the
+                                // operator decides.
+                                let _ = destinations.adopt(store, path, id);
+                            }
+                            destinations
+                        })
+                        .await;
+                }
+                for reply in waiting {
+                    self.answer_settings(reply);
+                }
+            }
             Internal::Registered {
                 path,
                 result,
@@ -922,7 +1024,12 @@ impl Coordinator {
                         )
                     })?;
             }
-            Command::Pause { .. } | Command::Resume { .. } | Command::Cancel { .. } => {}
+            // A job resumed may be waiting for its root to be found.
+            Command::Resume { .. } => self.identify_destinations(),
+            Command::Pause { .. }
+            | Command::Cancel { .. }
+            | Command::Rename { .. }
+            | Command::Remove { .. } => {}
         }
         Ok(())
     }
@@ -935,10 +1042,25 @@ impl Coordinator {
             .await?)
     }
 
-    /// Answers the settings query. Roots are checked off the coordinator,
-    /// so a hung mount delays only this answer.
+    /// Answers the settings query once configured roots being looked for
+    /// are found or given up on, within the probes' deadline.
     async fn settings(&mut self, reply: oneshot::Sender<Result<QueryResult, ProtocolError>>) {
         self.refresh_destinations().await;
+        if !self.identifying {
+            self.answer_settings(reply);
+        } else if self.settings_waiting.len() >= self.config.request_queue.get() {
+            let _ = reply.send(Err(ProtocolError::new(
+                ErrorCode::Busy,
+                "too many settings requests are waiting",
+            )));
+        } else {
+            self.settings_waiting.push(reply);
+        }
+    }
+
+    /// Answers a settings query. Roots are checked off the coordinator, so
+    /// a hung mount delays only this answer.
+    fn answer_settings(&self, reply: oneshot::Sender<Result<QueryResult, ProtocolError>>) {
         let (destinations, probes) = (self.destinations.clone(), self.probes.clone());
         let instance = self.identity.instance;
         self.supervisor.spawn(async move {
@@ -951,6 +1073,31 @@ impl Coordinator {
             available.sort_by_key(|(i, _)| *i);
             let available = available.into_iter().map(|(_, a)| a).collect();
             let _ = reply.send(Ok(QueryResult::Settings(destinations.settings(available))));
+        });
+    }
+
+    /// What a request about published files works with.
+    fn files(&self) -> published::Files {
+        published::Files {
+            store: self.client.clone(),
+            probes: self.probes.clone(),
+            jobs: self.file_jobs.clone(),
+            roots: self.destinations.clone(),
+            instance: self.identity.instance,
+            cancel: self.supervisor.cancel.clone(),
+        }
+    }
+
+    /// Answers a request with `work`, run as an engine task of its own.
+    /// The work stops between its steps at shutdown, so it is waited for
+    /// rather than abandoned mid-step.
+    fn answer<T: Send + 'static>(
+        &self,
+        reply: oneshot::Sender<Result<T, ProtocolError>>,
+        work: impl Future<Output = Result<T, ProtocolError>> + Send + 'static,
+    ) {
+        self.supervisor.spawn(async move {
+            let _ = reply.send(work.await);
         });
     }
 
@@ -988,10 +1135,15 @@ impl Coordinator {
         });
     }
 
-    /// Identifies configured roots not identified yet: from the store, or
-    /// by their sentinels, read off the coordinator within the probes'
-    /// deadline. A folder that does not answer in time is tried again later.
+    /// Identifies configured roots the store records, and starts looking
+    /// for the sentinels of the rest ([`Self::identify_destinations`]).
     async fn refresh_destinations(&mut self) {
+        self.recall_destinations().await;
+        self.identify_destinations();
+    }
+
+    /// Identifies configured roots the store records. No filesystem access.
+    async fn recall_destinations(&mut self) {
         if self.destinations.complete() {
             return;
         }
@@ -1002,45 +1154,61 @@ impl Coordinator {
                 destinations
             })
             .await;
-        let instance = self.identity.instance;
-        let mut checks = tokio::task::JoinSet::new();
-        for path in self.destinations.unidentified() {
-            let probes = self.probes.clone();
-            checks.spawn(async move {
-                let id = probes.identify(&path, instance).await;
-                id.map(|id| (path, id))
-            });
-        }
-        let found: Vec<_> = checks.join_all().await.into_iter().flatten().collect();
-        if found.is_empty() {
-            return;
-        }
-        let mut destinations = self.destinations.clone();
-        self.destinations = self
-            .with_store(move |store| {
-                for (path, id) in found {
-                    // A sentinel naming a root recorded elsewhere stays
-                    // unidentified; the operator decides.
-                    let _ = destinations.adopt(store, path, id);
-                }
-                destinations
-            })
-            .await;
     }
 
-    /// Removes staging files no job generation can reopen from every root
-    /// that opens (see [`cleanup`]). A root that does not open is skipped,
-    /// and a pass that stops early is continued by the next one.
-    async fn clean_staging(&mut self) {
-        let (roots, instance) = (self.destinations.all(), self.identity.instance);
-        self.with_store(move |store| {
-            for root in roots {
-                if let Ok(root) = Root::open(&root.path, root.id, instance) {
-                    let _ = cleanup::sweep(store, &root);
-                }
+    /// Starts reading the sentinels of configured roots not identified
+    /// yet, in a task of its own, within the probes' deadline; one look at
+    /// a time. What it finds arrives as [`Internal::Identified`].
+    fn identify_destinations(&mut self) {
+        if self.identifying || self.destinations.complete() {
+            return;
+        }
+        self.identifying = true;
+        let (paths, probes) = (self.destinations.unidentified(), self.probes.clone());
+        let (store, instance) = (self.client.clone(), self.identity.instance);
+        self.supervisor.spawn(async move {
+            let mut checks = tokio::task::JoinSet::new();
+            for path in paths {
+                let probes = probes.clone();
+                checks.spawn(async move {
+                    let id = probes.identify(&path, instance).await;
+                    id.map(|id| (path, id))
+                });
             }
-        })
-        .await;
+            let found = checks.join_all().await.into_iter().flatten().collect();
+            let _ = store.0.send(Internal::Identified(found)).await;
+        });
+    }
+
+    /// Starts removing staging files no job generation can reopen from
+    /// every root that opens (see [`cleanup`]), a pass per root in a task
+    /// of its own. A root still being swept is skipped, and a pass that
+    /// stops early is continued by the next one. Returns when each pass
+    /// ends.
+    fn clean_staging(&mut self) -> Vec<oneshot::Receiver<()>> {
+        let instance = self.identity.instance;
+        let mut passes = Vec::new();
+        for root in self.destinations.all() {
+            let Some(slot) = self.sweeps.claim(&root.path) else {
+                continue;
+            };
+            let (store, cancel) = (self.client.clone(), self.supervisor.cancel.clone());
+            let (ended, pass) = oneshot::channel();
+            passes.push(pass);
+            let sweeps = self.sweeps.clone();
+            // Stops between its steps at shutdown, never during one.
+            self.supervisor.spawn(async move {
+                let _slot = slot;
+                let opened = sweeps
+                    .blocking(move || Root::open(&root.path, root.id, instance))
+                    .await;
+                if let (Ok(Ok(root)), false) = (opened, cancel.is_cancelled()) {
+                    let _ = cleanup::sweep(&store, &sweeps, &cancel, Arc::new(root)).await;
+                }
+                let _ = ended.send(());
+            });
+        }
+        passes
     }
 
     /// After a state change: start downloads for free slots, broadcast new
@@ -1068,11 +1236,11 @@ impl Coordinator {
         if free == 0 {
             return;
         }
-        self.refresh_destinations().await;
+        self.recall_destinations().await;
         let excluded: Vec<JobId> = self.running.keys().chain(&self.held).copied().collect();
-        let roots = self.destinations.clone();
+        let (roots, identifying) = (self.destinations.clone(), self.identifying);
         let (admitted, more) = self
-            .with_store(move |store| admit(store, free, &excluded, &roots))
+            .with_store(move |store| admit(store, free, &excluded, &roots, identifying))
             .await;
         if more {
             // After the requests already waiting.

@@ -4,4 +4,4 @@
  * Stable error codes. Transports map them to their own status codes (for
  * example HTTP 409 for a conflict) but always carry the code itself.
  */
-export type ErrorCode = "invalid_request" | "limit_exceeded" | "permission_denied" | "not_found" | "revision_conflict" | "not_applicable" | "busy" | "idempotency_conflict" | "wrong_instance" | "incompatible_protocol" | "overloaded" | "shutting_down" | "internal";
+export type ErrorCode = "invalid_request" | "limit_exceeded" | "permission_denied" | "not_found" | "revision_conflict" | "not_applicable" | "busy" | "already_exists" | "idempotency_conflict" | "wrong_instance" | "incompatible_protocol" | "overloaded" | "shutting_down" | "internal";

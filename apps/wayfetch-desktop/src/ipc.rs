@@ -5,9 +5,9 @@
 //! | Command | Engine operation |
 //! |---|---|
 //! | `hello` | handshake: instance, boot epoch, protocol, head, limits |
-//! | `query` | a [`Query`]: list, inspect, or count jobs |
+//! | `query` | a [`Query`]: list, inspect, or count jobs, settings, a job's link |
 //! | `submit` | [`SubmitRequest`] as a submit command |
-//! | `job_command` | [`JobCommandRequest`]: pause, resume, or cancel |
+//! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, rename, or remove |
 //! | `update_settings` | [`UpdateSettingsRequest`]: choose the default destination |
 //! | `choose_download_folder` | the native folder dialog; the chosen folder becomes a permitted destination |
 //! | `subscribe` | an event subscription, delivered on a channel |
@@ -80,7 +80,8 @@ pub async fn submit(desktop: State<'_, Desktop>, request: Value) -> IpcResult<Co
     desktop.engine.execute(envelope, GRANTED).await
 }
 
-/// Pauses, resumes, or cancels a job at the revision the renderer saw.
+/// Pauses, resumes, cancels, renames, or removes a job at the revision the
+/// renderer saw.
 #[tauri::command]
 pub async fn job_command(
     desktop: State<'_, Desktop>,
@@ -88,7 +89,7 @@ pub async fn job_command(
     request: Value,
 ) -> IpcResult<CommandResult> {
     let job: JobId = decode(job)?;
-    let envelope = decode::<JobCommandRequest>(request)?.into_envelope(job);
+    let envelope = decode::<JobCommandRequest>(request)?.into_envelope(job)?;
     desktop.engine.execute(envelope, GRANTED).await
 }
 

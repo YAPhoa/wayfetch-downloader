@@ -39,7 +39,10 @@ use tokio::sync::mpsc;
 use wayfetch_engine::fail;
 use wayfetch_engine::state_dir::{StateDir, StateDirError};
 use wayfetch_net::{CertificateDer, HttpTransport};
+use wayfetch_protocol::command::IdempotencyKey;
+use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::query::JobSummary;
+use wayfetch_protocol::{Command, CommandEnvelope, CommandResult};
 
 type Env = engine_support::Env<Server>;
 
@@ -55,6 +58,8 @@ const CHILD_CA: &str = "WAYFETCH_CHILD_CA";
 const CHILD_URL: &str = "WAYFETCH_CHILD_URL";
 /// `<boundary>:<n>`: stop at the `n`th pass through the boundary.
 const CHILD_STOP: &str = "WAYFETCH_CHILD_STOP";
+/// `<idempotency key> <name>`: once the job is complete, rename its file.
+const CHILD_RENAME: &str = "WAYFETCH_CHILD_RENAME";
 
 /// How long any one wait for the child may take.
 const DEADLINE: Duration = Duration::from_secs(20);
@@ -88,6 +93,7 @@ async fn child_engine() {
         Err(_) => jobs(&owner).await.iter().map(|j| j.id).collect(),
     };
     let [id] = ids[..] else { panic!("one job") };
+    let mut rename = std::env::var(CHILD_RENAME).ok();
     let mut reported = None;
     loop {
         let job = engine_support::job(&owner, id).await;
@@ -95,7 +101,34 @@ async fn child_engine() {
             println!("{REPORT}durable {}", job.bytes_done);
             reported = Some(job.bytes_done);
         }
+        if job.stage == JobStage::Complete
+            && let Some(rename) = rename.take()
+        {
+            let (key, name) = rename.split_once(' ').unwrap();
+            let envelope = renaming(&owner, &job, key.parse().unwrap(), name);
+            // A stopped rename holds the engine; the kill ends it.
+            let handle = owner.handle();
+            tokio::spawn(async move { handle.execute(envelope, engine_support::ALL).await });
+        }
         tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// A rename of `job`'s file to `name` under `key`.
+fn renaming(
+    owner: &wayfetch_engine::EngineOwner,
+    job: &JobSummary,
+    key: uuid::Uuid,
+    name: &str,
+) -> CommandEnvelope {
+    CommandEnvelope {
+        idempotency_key: IdempotencyKey::from_uuid(key),
+        target: owner.identity().instance,
+        command: Command::Rename {
+            job: job.id,
+            expected_revision: job.revision,
+            name: name.into(),
+        },
     }
 }
 
@@ -130,6 +163,17 @@ impl Child {
     /// downloads `path`, or without one resumes the job already there,
     /// stopping at the `n`th pass through `boundary`.
     fn spawn(env: &Env, path: Option<&str>, stop: Option<(&str, usize)>) -> Self {
+        Self::spawn_renaming(env, path, stop, None)
+    }
+
+    /// [`Child::spawn`], renaming the job's file once it is complete under
+    /// an idempotency key to a name.
+    fn spawn_renaming(
+        env: &Env,
+        path: Option<&str>,
+        stop: Option<(&str, usize)>,
+        rename: Option<(uuid::Uuid, &str)>,
+    ) -> Self {
         let ca = env.state.with_file_name("ca.der");
         std::fs::write(&ca, env.server.ca()).unwrap();
         let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
@@ -140,6 +184,7 @@ impl Child {
             .env(CHILD_CA, &ca)
             .env_remove(CHILD_URL)
             .env_remove(CHILD_STOP)
+            .env_remove(CHILD_RENAME)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
@@ -148,6 +193,9 @@ impl Child {
         }
         if let Some((boundary, n)) = stop {
             command.env(CHILD_STOP, format!("{boundary}:{n}"));
+        }
+        if let Some((key, name)) = rename {
+            command.env(CHILD_RENAME, format!("{key} {name}"));
         }
         let mut process = command.spawn().unwrap();
         let mut lines = BufReader::new(process.stdout.take().unwrap()).lines();
@@ -401,6 +449,77 @@ async fn a_file_that_took_the_name_during_a_crash_is_never_overwritten() {
     assert_eq!(env.server.hits("/p.bin"), 1);
     assert_published(&env, &done, "p (1).bin", &data);
     shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_killed_at_any_step_is_finished_or_undone_after_restart() {
+    for (boundary, renamed) in [
+        // The rename is recorded; the file has only its old name.
+        ("rename-before-link", false),
+        // Both names are the file.
+        ("rename-before-unlink", true),
+        // Only the new name is left; the rename is not committed.
+        ("rename-before-commit", true),
+    ] {
+        let env = env().await;
+        let data = body(20 * KIB);
+        env.server.put("/n.bin", Resource::new(data.clone()));
+        let key = uuid::Uuid::new_v4();
+        let mut child = Child::spawn_renaming(
+            &env,
+            Some("/n.bin"),
+            Some((boundary, 1)),
+            Some((key, "m.bin")),
+        );
+        child.until(|c| c.stopped.is_some()).await;
+        child.kill(&env.state).await;
+
+        let owner = env.start().await;
+        let [job] = &jobs(&owner).await[..] else {
+            panic!("one job")
+        };
+        let (name, gone) = if renamed {
+            ("m.bin", "n.bin")
+        } else {
+            ("n.bin", "m.bin")
+        };
+        assert_published(&env, job, name, &data);
+        assert!(!env.root.join(gone).exists(), "{boundary}");
+        // A retry under the same key replays the finished rename, or
+        // renames now if the crash came before the link.
+        let before = if renamed {
+            wayfetch_protocol::domain::version::Revision::from_u64(job.revision.get() - 1).unwrap()
+        } else {
+            job.revision
+        };
+        let retry = renaming(
+            &owner,
+            &JobSummary {
+                revision: before,
+                ..job.clone()
+            },
+            key,
+            "m.bin",
+        );
+        let result = owner
+            .handle()
+            .execute(retry, engine_support::ALL)
+            .await
+            .unwrap();
+        let after = engine_support::job(&owner, job.id).await;
+        assert_eq!(
+            result,
+            CommandResult::JobUpdated {
+                job: job.id,
+                revision: after.revision,
+                changed: true
+            },
+            "{boundary}"
+        );
+        assert_published(&env, &after, "m.bin", &data);
+        assert!(!env.root.join("n.bin").exists());
+        shutdown(owner).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

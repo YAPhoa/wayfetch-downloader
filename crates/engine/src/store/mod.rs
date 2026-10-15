@@ -54,6 +54,7 @@ mod files;
 mod jobs;
 mod outbox;
 mod progress;
+mod renames;
 mod roots;
 #[cfg(test)]
 mod scenarios;
@@ -61,6 +62,7 @@ pub mod schema;
 
 pub use files::Partial;
 pub use jobs::Admission;
+pub use renames::{RenameIntent, RenameStart};
 pub(crate) use roots::path_text;
 
 use std::path::Path;
@@ -120,6 +122,12 @@ pub enum StoreError {
     /// collides with it on a case-insensitive filesystem.
     #[error("target {0} is already reserved")]
     TargetReserved(crate::fs::RelativePath),
+    /// A file name was refused by the filename policy.
+    #[error("invalid file name: {0}")]
+    InvalidName(crate::fs::PathError),
+    /// The record is in the middle of a change. Retry later.
+    #[error("{0}")]
+    Busy(&'static str),
     /// A parked stage was requested without the failure that explains it.
     #[error("moving to {0} requires a failure")]
     MissingFailure(wayfetch_domain::job::JobStage),
@@ -145,7 +153,14 @@ impl From<StoreError> for ProtocolError {
             StoreError::NotFound(what) => {
                 ProtocolError::new(ErrorCode::NotFound, &format!("{what} not found"))
             }
-            StoreError::Root(_) => ProtocolError::new(ErrorCode::InvalidRequest, &err.to_string()),
+            StoreError::Root(_) | StoreError::InvalidName(_) => {
+                ProtocolError::new(ErrorCode::InvalidRequest, &err.to_string())
+            }
+            StoreError::TargetReserved(_) => ProtocolError::new(
+                ErrorCode::AlreadyExists,
+                "another download already has that name",
+            ),
+            StoreError::Busy(why) => ProtocolError::new(ErrorCode::Busy, why),
             StoreError::RootMoved { .. } => {
                 ProtocolError::new(ErrorCode::NotApplicable, &err.to_string())
             }
