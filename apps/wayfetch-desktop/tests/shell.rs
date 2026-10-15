@@ -988,15 +988,67 @@ async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
     shell.add(&url).await;
     shell.wait_for_state("job-1", "Done").await;
     assert_eq!(std::fs::read(folder.join("picked.bin")).unwrap(), body(MIB));
+
+    // The download limit is changed through IPC within the policy, and
+    // refused outside it, as over HTTP.
+    let limit = shell
+        .ipc(&format!(
+            "{choose}
+             const hello = await core.invoke('hello');
+             const change = async (max_active_downloads) => {{
+               const {{ revision }} = await settings();
+               return core.invoke('update_settings', {{ request: {{
+                 idempotency_key: crypto.randomUUID(), target: hello.instance,
+                 expected_revision: revision, max_active_downloads }} }})
+                 .then((r) => r.type, (e) => e.code);
+             }};
+             const initial = (await settings()).max_active_downloads;
+             const set = await change({{ set: 6 }});
+             const saved = (await settings()).max_active_downloads;
+             const zero = await change({{ set: 0 }});
+             const over = await change({{ set: initial.max + 1 }});
+             const empty = await core.invoke('update_settings', {{ request: {{
+               idempotency_key: crypto.randomUUID(), target: hello.instance,
+               expected_revision: (await settings()).revision }} }})
+               .then((r) => r.type, (e) => e.code);
+             return {{ initial, set, saved, zero, over, empty,
+                       after: (await settings()).max_active_downloads }};"
+        ))
+        .await;
+    assert_eq!(limit["initial"]["value"], 4, "{limit}");
+    assert_eq!(limit["initial"]["source"], "built_in", "{limit}");
+    assert_eq!(limit["set"], "settings_updated", "{limit}");
+    assert_eq!(limit["saved"]["value"], 6, "{limit}");
+    assert_eq!(limit["saved"]["saved"], 6, "{limit}");
+    assert_eq!(limit["saved"]["source"], "saved", "{limit}");
+    for refused in ["zero", "over", "empty"] {
+        assert_eq!(limit[refused], "invalid_request", "{refused}: {limit}");
+    }
+    assert_eq!(limit["after"]["value"], 6, "{limit}");
     shell.close().await;
 
     // The chosen folder stays a destination, and the default, after a
-    // relaunch.
+    // relaunch, as does the download limit until the default is chosen.
     let shell = Shell::launch(&dirs).await;
     let after = shell
         .ipc(&format!("{choose} return await settings();"))
         .await;
     assert_eq!(after["default_root"], chosen["root"]["id"], "{after}");
+    assert_eq!(after["max_active_downloads"]["value"], 6, "{after}");
+    let reset = shell
+        .ipc(&format!(
+            "{choose}
+             const hello = await core.invoke('hello');
+             await core.invoke('update_settings', {{ request: {{
+               idempotency_key: crypto.randomUUID(), target: hello.instance,
+               expected_revision: (await settings()).revision,
+               max_active_downloads: 'use_default' }} }});
+             return (await settings()).max_active_downloads;"
+        ))
+        .await;
+    assert_eq!(reset["value"], 4, "{reset}");
+    assert_eq!(reset["source"], "built_in", "{reset}");
+    assert_eq!(reset.get("saved"), None, "{reset}");
     shell.close().await;
 }
 
@@ -1016,7 +1068,9 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
     shell.wait_for_state("job-1", "Downloading").await;
 
     shell.click("[data-key=\"open-settings\"]").await;
-    shell.wait_for(&section_shown("folder", "/settings")).await;
+    shell
+        .wait_for(&section_shown("downloads", "/settings"))
+        .await;
     // Down moves along the sections, with focus drawn; Enter opens one.
     shell
         .wait_for("document.activeElement?.dataset.key === 'settings-title'")
@@ -1025,11 +1079,15 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
     press(&shell, Key::Down).await;
     shell
         .wait_for(
-            "document.activeElement?.dataset.key === 'settings-section-display'
+            "document.activeElement?.dataset.key === 'settings-section-folder'
              && getComputedStyle(document.activeElement).outlineStyle === 'solid'",
         )
         .await;
     press(&shell, Key::Enter).await;
+    shell
+        .wait_for(&section_shown("folder", "/settings/folder"))
+        .await;
+    shell.click("[data-key=\"settings-section-display\"]").await;
     shell
         .wait_for(&section_shown("display", "/settings/display"))
         .await;
