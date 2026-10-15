@@ -43,7 +43,7 @@ wayfetch-downloader/
 │   ├── engine/             # Reusable engine and lifecycle
 │   ├── store/              # Persistence and migrations
 │   ├── net/                # HTTP, sessions, streaming transfers
-│   ├── host/               # What the CLI and daemon hosts share
+│   ├── host/               # What the CLI, daemon, and desktop hosts share
 │   ├── cli/                # Foreground `wayfetch` host
 │   ├── fs/                 # Safe paths, checkpoints, publication
 │   ├── adapters/           # Adapter SDK and provider integrations
@@ -52,8 +52,8 @@ wayfetch-downloader/
 ├── ui/                     # Web UI; package.json has only dev checks
 │   ├── src/components/     # Shared workflow views
 │   ├── src/client/         # WayfetchClient contract, DTOs, event feed
-│   ├── src/transports/     # HTTP/SSE (and later desktop IPC) clients
-│   ├── src/shell/          # Optional native integration
+│   ├── src/transports/     # HTTP/SSE and desktop IPC clients
+│   ├── src/shell/          # Desktop window bootstrap
 │   └── tests/              # Unit and real-browser tests
 ├── tests/
 │   ├── fixtures/
@@ -339,6 +339,42 @@ refuses to parse any string as HTML. The page is revalidated on every load,
 and its scripts, styles, and fonts are served below `/assets/VERSION/`, where
 `VERSION` is a digest of the bundle, and cached for good.
 
+## Running the desktop app
+
+`wayfetch-desktop` is a proof of the desktop host (architecture brief
+sections 11.6 and 11.7): it runs the engine inside its own process and
+shows the same Downloads views as the web UI in a window, using the
+system WebView through [Tauri](https://tauri.app) 2. There is no daemon
+and no listening socket: the page reaches the engine only through a fixed
+set of IPC commands (`apps/wayfetch-desktop/src/ipc.rs`) that carry the
+same JSON as the HTTP API, and its capability
+(`apps/wayfetch-desktop/capabilities/main.json`) grants those commands and
+no Tauri plugin, so the page has no filesystem, shell, or network access.
+The UI files are compiled into the binary from `ui/src` as they are; the
+window's page is `ui/src/shell/desktop.html`, which needs no sign-in.
+
+Only Linux is built and tested so far. Building needs WebKitGTK 4.1 and
+GTK 3 development packages (on Debian or Ubuntu: `libwebkit2gtk-4.1-dev
+libgtk-3-dev libsoup-3.0-dev librsvg2-dev`); running needs WebKitGTK 4.1.
+Installers, a tray, a root picker, and default state paths are not part
+of the proof yet, so the directories are named as for the daemon:
+
+```sh
+cargo build --locked -p wayfetch-desktop
+target/debug/wayfetch-desktop init-root --state-dir /tmp/wf/state /tmp/wf/downloads
+target/debug/wayfetch-desktop run --state-dir /tmp/wf/state --download-root /tmp/wf/downloads
+```
+
+The engine starts before the window opens, so a state directory another
+engine owns (a daemon, the CLI, or another window) is refused with no
+window shown. Closing the window, `SIGINT`, or `SIGTERM` stops the engine
+gracefully and exits; unfinished downloads continue on the next start.
+Reloading the page, or losing its event stream, never affects a download:
+the page reads a new snapshot and follows events from there. The host
+sends each page at most 64 event items it has not acknowledged and holds
+at most 4 subscriptions per page; a page that stops reading for 15 seconds
+loses its subscription, and a reload releases them all.
+
 ## Running in a container
 
 The image holds only `wayfetchd` on a distroless Debian base with the system
@@ -464,7 +500,7 @@ The brief describes intended behavior and acceptance gates, not existing feature
 ### Developer commands
 
 You need `rustup`, Python 3, and a C compiler (the engine builds its bundled
-SQLite). The Rust toolchain is pinned in
+SQLite); the desktop host also needs the WebKitGTK packages above. The Rust toolchain is pinned in
 `rust-toolchain.toml`; `rustup toolchain install` (or the first `cargo` command)
 installs it with rustfmt and Clippy. No JavaScript or desktop tooling is needed
 for the engine or for `wayfetchd`: the web UI is plain JavaScript modules,
@@ -473,8 +509,8 @@ every push and pull request:
 
 ```sh
 cargo fmt --all -- --check                                   # formatting
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-features               # also writes UI types
+cargo clippy --locked --workspace --exclude wayfetch-desktop --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --exclude wayfetch-desktop --all-features  # also writes UI types
 cargo build --locked -p wayfetch-engine                      # engine alone
 python3 scripts/check_dependency_boundaries.py               # crate boundaries
 python3 -m unittest discover -s scripts                       # tests for the check
@@ -502,6 +538,18 @@ feature. Tests with that feature (as in `--all-features` above) write them to
 with the Rust change. CI regenerates them from scratch and fails if they
 differ from the committed files.
 
+The desktop host is a workspace member but not a default member, so plain
+`cargo build` and the commands above leave it out; check it on its own.
+Its window tests drive the real app through `WebKitWebDriver` (Debian and
+Ubuntu package `webkit2gtk-driver`) on an X display, so they are ignored by
+default:
+
+```sh
+cargo clippy --locked -p wayfetch-desktop --all-targets -- -D warnings
+cargo test --locked -p wayfetch-desktop                       # unit tests
+xvfb-run -a cargo test --locked -p wayfetch-desktop --test shell -- --ignored
+```
+
 The container tests need Docker with the Compose plugin, so they are ignored
 by default. They build `wayfetch:local` with `docker build` first, or test
 the image named by `WAYFETCH_IMAGE`:
@@ -513,7 +561,8 @@ cargo test --locked -p wayfetchd --test container -- --ignored
 `scripts/check_dependency_boundaries.py` fails if the domain, protocol, engine,
 net, host, or CLI crates gain a server, desktop, or UI-toolkit dependency (for
 example Axum, Tauri, or GTK) or embed the web UI (`rust-embed`), if the engine-side crates depend on the host
-crate, if the HTTP adapter or daemon gain a desktop dependency, if the domain
+crate, if the HTTP adapter or daemon gain a desktop dependency, if the
+desktop host gains the HTTP adapter, a server framework, or the daemon, if the domain
 and protocol crates depend on the engine, or if the engine depends on the net
 crate. It checks
 every target with all features enabled, so optional dependencies count too. CI
@@ -527,7 +576,14 @@ process, a rerun of their own test binary, and kill it with `SIGKILL` at named
 boundaries from the engine's test-only `failpoints` feature. The CLI tests
 (`crates/cli/tests/session.rs`) drive the built `wayfetch` executable against
 the same fixture servers, and the daemon tests (`apps/wayfetchd/tests/daemon.rs`)
-drive the built `wayfetchd` over its HTTP API. The browser test
+drive the built `wayfetchd` over its HTTP API. The desktop window tests
+(`apps/wayfetch-desktop/tests/shell.rs`) add, pause, resume, and cancel
+downloads through the shared UI in the real window, reload it mid-transfer,
+close it as a window manager does, and relaunch on the same state
+directory to finish the download; they also check a second engine is
+refused, protocol errors and resynchronization over IPC, the subscription
+limits, that the page loads only bundled files and can call no Tauri
+plugin, and that the app starts no daemon and listens on no TCP port. The browser test
 (`ui/tests/e2e/browser.spec.js`) sets up the owner, downloads, pauses,
 resumes, and cancels through the UI, reloads and closes the tab, restarts the
 daemon, and signs out, from a fresh browser profile. The container tests

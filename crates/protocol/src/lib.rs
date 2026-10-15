@@ -9,6 +9,7 @@
 //! * [`instance`]: instance identity, protocol version, and the handshake;
 //! * [`command`]: idempotent mutations and their results;
 //! * [`query`]: bounded, paginated reads;
+//! * [`request`]: command request bodies clients send, shared by transports;
 //! * [`event`]: durable events, progress samples, and resync rules;
 //! * [`error`]: structured errors.
 
@@ -17,6 +18,7 @@ pub mod error;
 pub mod event;
 pub mod instance;
 pub mod query;
+pub mod request;
 
 pub use command::{Command, CommandEnvelope, CommandResult, IdempotencyKey, Permission};
 pub use error::{ErrorCode, ProtocolError};
