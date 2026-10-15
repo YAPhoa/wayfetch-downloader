@@ -1197,6 +1197,31 @@ fn section_shown(section: &str, path: &str) -> String {
     )
 }
 
+/// Where the one Settings button shown is, once it is checked to be at the
+/// right end of its toolbar's first row with nothing scrolling sideways.
+async fn settings_place(shell: &Shell) -> String {
+    let place = shell
+        .js(
+            "const shown = [...document.querySelectorAll('[data-key=\"open-settings\"]')]
+               .filter((el) => el.offsetParent !== null);
+             if (shown.length !== 1) return `${shown.length} Settings buttons`;
+             const box = shown[0].getBoundingClientRect();
+             const toolbar = shown[0].closest('.toolbar');
+             const bar = toolbar.getBoundingClientRect();
+             const brand = toolbar.querySelector('.brand').getBoundingClientRect();
+             const end = bar.right - parseFloat(getComputedStyle(toolbar).paddingRight);
+             const { scrollWidth, clientWidth } = document.documentElement;
+             if (Math.round(end - box.right) !== 0) return 'not at the right end';
+             if (box.top >= brand.bottom) return 'not in the first row';
+             if (scrollWidth > clientWidth) return 'scrolls sideways';
+             return `${box.left},${box.top} ${box.width}x${box.height}`;",
+        )
+        .await;
+    let place = place.as_str().unwrap().to_owned();
+    assert!(place.starts_with(char::is_numeric), "Settings is {place}");
+    place
+}
+
 /// Whether the page fits the window, as it must with a dialog or menu open,
 /// and the element `css` lies inside it.
 async fn fits_window(shell: &Shell, css: &str) {
@@ -1467,6 +1492,9 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
         server.url("/keep.bin"),
         server.url("/start.bin")
     );
+    // Settings keeps one place in the default window, the right end of the
+    // toolbar's first row, in every view.
+    let place = settings_place(&shell).await;
 
     // Collecting fetches nothing and starts no download.
     shell
@@ -1483,6 +1511,14 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
         json!(["keep.bin", "example.com/no-scheme.bin", "start.bin"])
     );
     assert_eq!(server.hits("/keep.bin") + server.hits("/start.bin"), 0);
+    assert_eq!(settings_place(&shell).await, place);
+    shell
+        .click(".workspace > :not([hidden]) [data-key=\"add-links\"]")
+        .await;
+    shell.wait_for("location.pathname === '/add'").await;
+    assert_eq!(settings_place(&shell).await, place);
+    press(&shell, Key::Escape).await;
+    shell.wait_for("location.pathname === '/links'").await;
 
     // The engine keeps them across a relaunch.
     shell.close().await;
