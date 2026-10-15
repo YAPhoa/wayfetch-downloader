@@ -350,12 +350,16 @@ typeface (`ui/src/fonts/`, SIL Open Font License 1.1).
 Settings chooses the default folder for new downloads among those the
 server permits, shown as server paths (jobs already added keep theirs),
 and the row density, which is kept in this browser. Its Accounts &
-services section is a placeholder: connecting download services is not
-available yet. Each row has a menu, from its "…" button, a right-click, or
-Shift+F10 or the Menu key: rename a finished file in its folder (never
-replacing another file), copy the link it came from (with the `sources`
-permission), pause, resume, or cancel, and remove a finished, failed, or
-cancelled job from the list, which keeps its file. A browser cannot open
+services section is a table of the accounts added (none yet). Add
+account opens a searchable catalogue of file hosts, cloud storage and
+multi-host services to pick its service from, led by Real-Debrid, found
+by name, by any of their domains, or by a pasted link. Every entry says
+Not available yet and none can be added; direct links never need an
+account. Each row has a menu, from its "…"
+button, a right-click, or Shift+F10 or the Menu key: rename a finished
+file in its folder (never replacing another file), copy the link it came
+from (with the `sources` permission), pause, resume, or cancel, and remove
+a finished, failed, or cancelled job from the list, which keeps its file. A browser cannot open
 files on the server, so it does not offer to.
 
 The UI adds direct links (one per line), lists jobs a page of 50 at a time in
