@@ -10,7 +10,7 @@
 //! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, rename, or remove |
 //! | `collect_links` | [`CollectRequest`]: collect links for review |
 //! | `links_command` | [`LinksCommandRequest`]: start, remove, or move collected links |
-//! | `update_settings` | [`UpdateSettingsRequest`]: choose the default destination |
+//! | `update_settings` | [`UpdateSettingsRequest`]: change the default destination or a preference |
 //! | `remove_root` | [`RemoveRootRequest`]: stop offering a folder the user added |
 //! | `choose_download_folder` | the native folder dialog; the chosen folder becomes a permitted destination |
 //! | `open_file` | opens a finished job's file with this computer's default application |
@@ -125,8 +125,8 @@ pub async fn links_command(
     desktop.engine.execute(envelope, GRANTED).await
 }
 
-/// Chooses the default destination at the settings revision the renderer
-/// saw.
+/// Changes the default destination or a preference at the settings
+/// revision the renderer saw.
 #[tauri::command]
 pub async fn update_settings(
     desktop: State<'_, Desktop>,

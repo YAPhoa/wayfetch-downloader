@@ -24,13 +24,14 @@ mod destinations;
 mod download;
 pub mod fs;
 pub mod lifecycle;
+mod preferences;
 mod published;
 pub mod state_dir;
 mod store;
 pub mod subscription;
 pub mod transfer;
 
-pub use config::{ConfigError, EngineConfig, Limits, Timeouts};
+pub use config::{ConfigError, EngineConfig, IntegerPolicy, Limits, Policy, Preference, Timeouts};
 pub use destinations::{RootError, initialize_root};
 #[cfg(feature = "failpoints")]
 pub use fail;
