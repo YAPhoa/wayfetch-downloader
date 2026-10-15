@@ -245,7 +245,7 @@ export class Downloads {
       icon('add'),
       'Add links',
     );
-    this.filters = h('nav', { class: 'filters', 'aria-label': 'Filter by state' });
+    this.filters = h('nav', { class: 'filters', 'aria-label': 'Filter by status' });
     this.tableBody = h('tbody');
     this.listStatus = h('p', { class: 'list-status', role: 'status' });
     this.pager = h('nav', { class: 'pager', 'aria-label': 'Pages' });
@@ -914,7 +914,7 @@ export class Downloads {
     const counts = this.feed.counts?.stages;
     show(
       this.filters,
-      h('span', { class: 'filters-title' }, 'States'),
+      h('span', { class: 'filters-title' }, 'Status'),
       GROUPS.map((group) => {
         const count = counts && groupCount(group, counts);
         return h(
