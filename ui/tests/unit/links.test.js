@@ -10,6 +10,7 @@ import {
   linkStatus,
   matches,
   refusals,
+  startable,
 } from '../../src/client/links.js';
 
 /**
@@ -61,6 +62,14 @@ test('a valid link is only ever "Not checked"; its file name is a hint', () => {
   const invalid = link({ check: 'invalid', text: 'example.com/x', problem: 'not a valid URL' });
   assert.equal(linkName(invalid), 'example.com/x');
   assert.deepEqual(linkStatus(invalid), { label: 'Invalid link', tone: 'bad', detail: 'not a valid URL' });
+});
+
+test('a started link stays listed as added to Downloads, and starts no more', () => {
+  const started = link({ host: 'cdn.example', name_hint: 'film.mkv', job: 'job-7' });
+  assert.deepEqual(linkStatus(started), { label: 'Added to Downloads', tone: 'ok', detail: null });
+  assert.equal(startable(started), false);
+  assert.equal(startable(link({ host: 'cdn.example' })), true);
+  assert.equal(startable(link({ check: 'invalid', text: 'x' })), false);
 });
 
 test('links are grouped by batch in list order', () => {

@@ -724,7 +724,10 @@ async fn links_are_collected_reviewed_and_started_over_http() {
     let (status, removed) = client.post("/v1/staging/commands", &remove).await;
     assert_eq!(status, StatusCode::OK, "{removed}");
     assert_eq!(removed["applied"].as_array().unwrap().len(), 2);
-    assert_eq!(client.get("/v1/staging/links").await.1["total"], 0);
+    // The started link stays listed with its download.
+    let (_, left) = client.get("/v1/staging/links").await;
+    assert_eq!(left["total"], 1);
+    assert_eq!(left["items"][0]["job"], job.as_str());
     assert_eq!(client.jobs().await.len(), 1);
     assert_eq!(server.log().len(), 1);
 
