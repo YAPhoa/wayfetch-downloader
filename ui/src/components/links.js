@@ -615,6 +615,7 @@ export class LinksPage {
     }
     const folders = [...new Set(chosen.map((l) => l.destination))];
     const invalid = chosen.filter((l) => l.check === 'invalid').length;
+    const homeless = chosen.filter((l) => l.check !== 'invalid' && this.removed(l.destination)).length;
     const where =
       folders.length === 1
         ? this.folderName(folders[0])
@@ -626,6 +627,12 @@ export class LinksPage {
       typeof where === 'string' ? h('span', { class: 'path', title: where }, where) : where,
       !this.context.client.local && folders.length === 1 && h('span', { class: 'tag' }, 'Server path'),
       invalid > 0 && h('span', { class: 'problem' }, `${count(invalid, 'invalid link')} will not start.`),
+      homeless > 0 &&
+        h(
+          'span',
+          { class: 'problem' },
+          `${count(homeless, 'link')} saving to a removed folder will not start; choose another with Save to.`,
+        ),
       hiddenNote,
     );
   }
@@ -633,7 +640,18 @@ export class LinksPage {
   /** @param {RootId | undefined} id */
   folderName(id) {
     if (id === undefined) return 'the download folder';
-    return this.context.rootPath(id);
+    return this.removed(id) ? 'A removed folder' : this.context.rootPath(id);
+  }
+
+  /**
+   * Whether links saving to `id` lost their folder: it was removed from
+   * the permitted ones after they were collected. They stay, and start
+   * once given another folder.
+   * @param {RootId | undefined} id
+   */
+  removed(id) {
+    const settings = this.context.settings();
+    return id !== undefined && settings !== null && !settings.roots.some((r) => r.id === id);
   }
 
   /** @param {readonly CollectedLink[]} visible */
@@ -789,6 +807,7 @@ export class LinksPage {
         { class: 'folder', title: folder },
         h('span', { class: 'path' }, folder),
         root && !root.available && h('span', { class: 'problem' }, ' (unavailable)'),
+        this.removed(link.destination) && h('span', { class: 'problem' }, ' (choose another)'),
       ),
       h('td', { class: 'row-actions' }, more),
     );
