@@ -298,32 +298,103 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(destination.locator('.path')).toHaveText(/** @type {string} */ (daemon.root));
   await expect(destination.getByText('Server path')).toBeVisible();
 
-  // Settings: the permitted server folders, density, and accounts, which
-  // cannot be connected yet.
+  // A download that is running while Settings is shown.
+  const running = 'while-in-settings.bin';
+  await add(page, fixture.put(running, SIZE, STALL));
+
+  // Settings is a page of its own, opened from the gear: a menu of
+  // sections with the selected one beside it.
   const settingsButton = page.getByRole('button', { name: 'Settings', exact: true });
+  await expect(settingsButton.locator('svg.icon-settings')).toHaveCount(1);
   await settingsButton.click();
-  const settings = page.getByRole('dialog', { name: 'Settings' });
-  await expect(settings).toBeVisible();
-  const archive = settings.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) });
-  await expect(settings.getByRole('radio', { name: new RegExp(`^${daemon.root}`) })).toBeChecked();
-  await expect(settings.getByText('Server path')).toHaveCount(2);
-  const accounts = settings.locator('section', { has: page.getByRole('heading', { name: /Accounts & services/ }) });
+  await expect(page).toHaveURL(`${daemon.origin}/settings`);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeFocused();
+  await expect(page.locator('table.jobs')).toBeHidden();
+  const sections = page.getByRole('navigation', { name: 'Settings sections' });
+  const folderLink = sections.getByRole('link', { name: 'Download folder' });
+  const displayLink = sections.getByRole('link', { name: 'Display' });
+  const accountsLink = sections.getByRole('link', { name: 'Accounts & services' });
+  await expect(folderLink).toHaveAttribute('aria-current', 'page');
+  await expect(displayLink).not.toHaveAttribute('aria-current');
+  const pane = page.locator('.settings-content');
+  // The permitted server folders.
+  await expect(pane.getByRole('heading', { name: 'Download folder' })).toBeVisible();
+  const archive = pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) });
+  await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.root}`) })).toBeChecked();
+  await expect(pane.getByText('Server path')).toHaveCount(2);
+  // Nothing asks for a command line.
+  await expect(page.locator('.settings-page code')).toHaveCount(0);
+  await expectFitsWindow(page);
+  // Row density applies at once.
+  await displayLink.click();
+  await expect(page).toHaveURL(`${daemon.origin}/settings/display`);
+  await expect(displayLink).toHaveAttribute('aria-current', 'page');
+  await expect(folderLink).not.toHaveAttribute('aria-current');
+  await expect(pane.getByRole('heading', { name: 'Download folder' })).toBeHidden();
+  await pane.getByRole('radio', { name: 'Comfortable' }).check();
+  expect(await page.evaluate(() => document.documentElement.dataset.density)).toBe('comfortable');
+  await pane.getByRole('radio', { name: 'Compact' }).check();
+  // From the keyboard: arrows move along the sections, Enter opens one,
+  // and focus is drawn.
+  await displayLink.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(accountsLink).toBeFocused();
+  expect(await accountsLink.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe('solid');
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${daemon.origin}/settings/accounts`);
+  await expect(accountsLink).toHaveAttribute('aria-current', 'page');
+  await expect(accountsLink).toBeFocused();
+  // Accounts cannot be connected yet.
+  const accounts = pane.locator('section', { has: page.getByRole('heading', { name: /Accounts & services/ }) });
   await expect(accounts.getByText('Not available yet', { exact: true })).toBeVisible();
   await expect(accounts.getByText(/such as Real-Debrid/)).toBeVisible();
   await expect(accounts.locator('input, select, textarea, button')).toHaveCount(0);
   await expectFitsWindow(page);
-  // Row density applies at once.
-  await settings.getByRole('radio', { name: 'Comfortable' }).check();
-  expect(await page.evaluate(() => document.documentElement.dataset.density)).toBe('comfortable');
-  await settings.getByRole('radio', { name: 'Compact' }).check();
-  // A new default is saved with feedback, and closing returns focus.
+  // The browser's Back goes to the previous section.
+  await page.goBack();
+  await expect(displayLink).toHaveAttribute('aria-current', 'page');
+  // A new default is saved with feedback.
+  await folderLink.click();
   await archive.check();
-  await settings.getByRole('button', { name: 'Save' }).click();
-  await expect(settings.getByText(`Saved. New downloads go to ${daemon.archive}.`)).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(settings).toBeHidden();
+  await pane.getByRole('button', { name: 'Save' }).click();
+  await expect(pane.getByText(`Saved. New downloads go to ${daemon.archive}.`)).toBeVisible();
+  await expect(pane.getByRole('button', { name: 'Save' })).toBeFocused();
+  // The download kept running meanwhile, and finishes while Settings is shown.
+  expect(await daemon.published(running).then(() => 'published', () => 'not yet')).toBe('not yet');
+  fixture.release(running);
+  await expect
+    .poll(async () => (await daemon.published(running).catch(() => null))?.equals(content(0, SIZE)))
+    .toBe(true);
+  await expect(page.locator('.statusbar .status')).toHaveText('Live');
+  // Narrow windows put the sections above the content, without empty
+  // scrolling.
+  await page.setViewportSize({ width: 480, height: 720 });
+  const stacked = await page.evaluate(() => {
+    const nav = /** @type {Element} */ (document.querySelector('.settings-nav')).getBoundingClientRect();
+    const panel = /** @type {Element} */ (document.querySelector('.settings-content')).getBoundingClientRect();
+    return nav.bottom <= panel.top;
+  });
+  expect(stacked).toBe(true);
+  await expectFitsWindow(page);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  // Back to Downloads, where focus returns to the gear; Escape does the
+  // same from anywhere on the page.
+  await page.getByRole('button', { name: 'Back to Downloads' }).click();
+  await expect(page).toHaveURL(`${daemon.origin}/`);
   await expect(settingsButton).toBeFocused();
+  await destination.getByRole('button', { name: 'Change…' }).click();
+  await expect(page).toHaveURL(`${daemon.origin}/settings/folder`);
+  await expect(folderLink).toHaveAttribute('aria-current', 'page');
+  await page.keyboard.press('Escape');
+  await expect(page).toHaveURL(`${daemon.origin}/`);
+  await expect(destination.getByRole('button', { name: 'Change…' })).toBeFocused();
   await expect(destination.locator('.path')).toHaveText(/** @type {string} */ (daemon.archive));
+  // A section opened directly, as after a reload, shows the same page.
+  await page.goto(`${daemon.origin}/settings/display`);
+  await expect(displayLink).toHaveAttribute('aria-current', 'page');
+  await page.getByRole('button', { name: 'Back to Downloads' }).click();
+  await expect(page.locator('table.jobs')).toBeVisible();
 
   // Right-click opens the menu of the row clicked. A browser cannot open
   // the server's files, so it does not offer to.
@@ -436,16 +507,16 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(daemon.published('menu.bin', daemon.archive)).rejects.toThrow();
 
   // Remove from list: the row and its count go, the file stays.
-  // The first test left 52 downloads; this one added a 53rd.
-  await expect(page.getByRole('button', { name: 'All (53)' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Done (52)' })).toBeVisible();
+  // The first test left 52 downloads; this one added two more.
+  await expect(page.getByRole('button', { name: 'All (54)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Done (53)' })).toBeVisible();
   await row(page, job).getByRole('button', { name: 'Actions for renamed.bin' }).click();
   menu = await openMenu(page);
   await menu.getByRole('menuitem', { name: /^Remove from list/ }).click();
   await expect(row(page, job)).toHaveCount(0);
   await expect(page.getByText('Removed renamed.bin from the list. Its file stays in its folder.')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'All (52)' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Done (51)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'All (53)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Done (52)' })).toBeVisible();
   expect((await daemon.published('renamed.bin', daemon.archive)).equals(content(0, MIB))).toBe(true);
 
   // The chosen default outlives a reload.
