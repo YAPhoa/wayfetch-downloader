@@ -9,6 +9,7 @@
 //! | `submit` | [`SubmitRequest`] as a submit command |
 //! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, rename, or remove |
 //! | `update_settings` | [`UpdateSettingsRequest`]: choose the default destination |
+//! | `remove_root` | [`RemoveRootRequest`]: stop offering a folder the user added |
 //! | `choose_download_folder` | the native folder dialog; the chosen folder becomes a permitted destination |
 //! | `open_file` | opens a finished job's file with this computer's default application |
 //! | `reveal_file` | opens the folder holding a finished job's file |
@@ -41,7 +42,9 @@ use wayfetch_engine::EngineHandle;
 use wayfetch_engine::domain::id::JobId;
 use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::RootSummary;
-use wayfetch_engine::protocol::request::{JobCommandRequest, SubmitRequest, UpdateSettingsRequest};
+use wayfetch_engine::protocol::request::{
+    JobCommandRequest, RemoveRootRequest, SubmitRequest, UpdateSettingsRequest,
+};
 use wayfetch_engine::protocol::{
     ErrorCode, EventCursor, Hello, Permission, ProtocolError, Query, QueryResult, StreamItem,
     Subscribe,
@@ -106,6 +109,14 @@ pub async fn update_settings(
     request: Value,
 ) -> IpcResult<CommandResult> {
     let envelope = decode::<UpdateSettingsRequest>(request)?.into_envelope();
+    desktop.engine.execute(envelope, GRANTED).await
+}
+
+/// Stops offering a folder the user added as a destination; its files
+/// stay where they are.
+#[tauri::command]
+pub async fn remove_root(desktop: State<'_, Desktop>, request: Value) -> IpcResult<CommandResult> {
+    let envelope = decode::<RemoveRootRequest>(request)?.into_envelope();
     desktop.engine.execute(envelope, GRANTED).await
 }
 

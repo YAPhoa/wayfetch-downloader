@@ -127,9 +127,12 @@ wayfetchd run --state-dir /srv/wayfetch/state --download-root /srv/downloads \
 ```
 
 Downloads are saved in the download root until the owner picks another
-default destination in Settings (`PUT /v1/settings`). Clients can pick only
-among folders the operator names: initialize each with `init-root` and pass
-it to `run` with `--root DIR`, once per folder. Changing the default affects
+default destination in Settings (`PUT /v1/settings`). The owner adds more
+folders in Settings ("Add folder…", which lists the server's folders), or
+the operator names them: initialize each with `init-root` and pass it to
+`run` with `--root DIR`, once per folder. Any folder the daemon can open can
+be added, except its state directory, so a token or session with `control`
+decides where new downloads may be written. Changing the default affects
 only downloads added afterwards; earlier ones keep their folder, and one
 whose folder is no longer configured waits, blocked, instead of moving.
 
@@ -153,6 +156,9 @@ is never printed.
 | `GET /v1/jobs/{id}/source` | The link the job was submitted with (needs `sources`) |
 | `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem` |
 | `PUT /v1/settings` | Choose the default: `{"idempotency_key", "target", "expected_revision", "default_root": "root-N"}` (needs `control`) |
+| `GET /v1/folders` | The folders inside `path` (absolute; the top of the filesystem if absent), without hidden ones, at most 1,000 (needs `control`) |
+| `POST /v1/roots` | Add the server folder `{"path"}` as a destination, returning it with its `id` (needs `control`) |
+| `POST /v1/roots/remove` | Stop offering a folder the user added (`{"idempotency_key", "target", "expected_revision", "root"}`); its files stay (needs `control`) |
 | `GET /v1/events` | Server-sent events: `hello`, `event`, `progress`, `resync` |
 | `GET /v1/ready` | Readiness, without a token: `200 {"ready":true}`, or `503` with a `reason` |
 | `GET /v1/auth/session`, `POST /v1/auth/{setup,login,logout}` | Browser sign-in; see [Browser access](#browser-access) |

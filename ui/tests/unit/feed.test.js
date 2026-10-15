@@ -67,6 +67,11 @@ class FakeClient {
     throw new Error('not used');
   }
 
+  /** @returns {Promise<import('../../src/client/contract.js').CommandResult>} */
+  async removeRoot() {
+    throw new Error('not used');
+  }
+
   get live() {
     return this.subscriptions.filter((s) => !s.closed);
   }

@@ -33,6 +33,7 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
  * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
  * @typedef {import('../client/generated/UpdateSettingsRequest.js').UpdateSettingsRequest} UpdateSettingsRequest
+ * @typedef {import('../client/generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
  */
 
 /**
@@ -162,6 +163,20 @@ export class DesktopIpcClient {
       default_root: defaultRoot,
     };
     return this.call('update_settings', { request });
+  }
+  /**
+   * Stops offering a download folder the user added; its files stay.
+   * @param {{ idempotencyKey: string, target: string, expectedRevision: number, root: RootId }} request
+   */
+  removeRoot({ idempotencyKey, target, expectedRevision, root }) {
+    /** @type {RemoveRootRequest} */
+    const request = {
+      idempotency_key: idempotencyKey,
+      target,
+      expected_revision: expectedRevision,
+      root,
+    };
+    return this.call('remove_root', { request });
   }
 
   /**

@@ -22,4 +22,10 @@ available: boolean,
 /**
  * Why it is unavailable, if it is.
  */
-problem?: DiagnosticText | null, };
+problem?: DiagnosticText | null, 
+/**
+ * Whether the user added it, rather than the operator's configuration,
+ * so [`crate::Command::RemoveRoot`] may remove it. Added in protocol
+ * 1.1.
+ */
+added: boolean, };
