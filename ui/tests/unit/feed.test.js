@@ -154,6 +154,21 @@ class FakeClient {
     for (const s of this.live) s.sink.item(item);
     return item;
   }
+
+  /**
+   * Removes a job from lists durably and tells open streams.
+   * @param {JobSummary['id']} id
+   */
+  remove(id) {
+    this.jobs.delete(id);
+    this.head += 1;
+    const item = /** @type {const} */ ({
+      type: 'event',
+      cursor: this.cursor(),
+      kind: { type: 'job_removed', job: id },
+    });
+    for (const s of this.live) s.sink.item(item);
+  }
 }
 
 /** Lets pending promises and timers of zero delay run. */
@@ -223,6 +238,25 @@ test('new jobs join the last page until it is full', async () => {
   client.change('job_changed', job(1, { stage: 'paused' }));
   assert.deepEqual(feed.jobs.map((j) => j.id), ['job-3']);
   assert.equal(feed.held('job-1'), undefined);
+});
+
+test('a removed job leaves the page, the counts, and the inspector', async () => {
+  const client = new FakeClient();
+  for (const n of [1, 2, 3]) client.change('job_added', job(n, { stage: 'complete' }));
+  const feed = await started(client);
+  await feed.watch('job-1');
+  await settle();
+  assert.equal(feed.watchedState, 'ready');
+  const counted = client.countReads;
+  client.remove('job-1');
+  assert.deepEqual(feed.jobs.map((j) => j.id), ['job-2']);
+  assert.equal(feed.watchedJob, null);
+  assert.equal(feed.watchedState, 'missing');
+  await settle();
+  // The next job moves up, and the counts are read again.
+  assert.deepEqual(feed.jobs.map((j) => j.id), ['job-2', 'job-3']);
+  assert.ok(client.countReads > counted);
+  assert.deepEqual(feed.counts?.stages, { complete: 2 });
 });
 
 test('a resync takes a new snapshot and subscribes after it', async () => {

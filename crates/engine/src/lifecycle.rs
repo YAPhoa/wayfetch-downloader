@@ -63,6 +63,7 @@ use crate::config::{ConfigError, EngineConfig};
 use crate::destinations::{self, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::fs::Root;
+use crate::published;
 use crate::state_dir::{Identity, StateDir, StateDirError};
 use crate::store::{Admission, Store, StoreError, StoreInfo};
 use crate::subscription::Subscription;
@@ -388,6 +389,7 @@ enum Request {
         oneshot::Sender<Result<Subscription, ProtocolError>>,
     ),
     RegisterRoot(PathBuf, oneshot::Sender<Result<RootSummary, ProtocolError>>),
+    PublishedPath(JobId, oneshot::Sender<Result<PathBuf, ProtocolError>>),
     /// Runs arbitrary store work, for fault-injection tests.
     #[cfg(test)]
     Run(Box<dyn FnOnce(&mut Store) + Send>, oneshot::Sender<()>),
@@ -486,6 +488,23 @@ impl EngineHandle {
         authorize(Permission::Control, granted)?;
         let (reply, response) = oneshot::channel();
         self.send(Request::RegisterRoot(path, reply))?;
+        response.await.map_err(|_| shutting_down())?
+    }
+
+    /// Where a listed, complete job's file is on this computer, after
+    /// checking that its folder is mounted and the file is still the one
+    /// Wayfetch published, for a host to open or show it on its user's
+    /// request. Only for hosts that open files where the engine runs, such
+    /// as the desktop app; never sent to a remote client. The file can
+    /// still change after the check.
+    pub async fn published_path(
+        &self,
+        job: JobId,
+        granted: &[Permission],
+    ) -> Result<PathBuf, ProtocolError> {
+        authorize(Permission::Read, granted)?;
+        let (reply, response) = oneshot::channel();
+        self.send(Request::PublishedPath(job, reply))?;
         response.await.map_err(|_| shutting_down())?
     }
 
@@ -715,6 +734,9 @@ impl Coordinator {
         self.refresh_destinations().await;
         // A pass a crash interrupted is finished before work starts.
         self.clean_staging().await;
+        let (roots, instance) = (self.destinations.clone(), self.identity.instance);
+        self.with_store(move |store| published::reconcile(store, &roots, instance))
+            .await;
         self.changed().await;
         loop {
             tokio::select! {
@@ -737,12 +759,25 @@ impl Coordinator {
                 let head = self.with_store(Store::event_head).await;
                 let _ = reply.send(head.map_err(ProtocolError::from).map(|h| self.hello(h)));
             }
+            Request::Execute(envelope, reply)
+                if matches!(envelope.command, Command::Rename { .. }) =>
+            {
+                self.refresh_destinations().await;
+                let roots = self.destinations.clone();
+                let result = self
+                    .with_store(move |store| published::rename(store, &roots, instance, &envelope))
+                    .await;
+                let _ = reply.send(result);
+                self.changed().await;
+            }
             Request::Execute(envelope, reply) => {
                 let target = match envelope.command {
                     Command::Pause { job, .. } | Command::Cancel { job, .. } => Some(job),
                     Command::Submit { .. }
                     | Command::Resume { .. }
-                    | Command::UpdateSettings { .. } => None,
+                    | Command::UpdateSettings { .. }
+                    | Command::Rename { .. }
+                    | Command::Remove { .. } => None,
                 };
                 if let Err(e) = self.prepare(&envelope).await {
                     let _ = reply.send(Err(e));
@@ -799,6 +834,16 @@ impl Coordinator {
             }
             Request::RegisterRoot(path, reply) => {
                 let _ = reply.send(self.register_root(path).await);
+                self.changed().await;
+            }
+            Request::PublishedPath(job, reply) => {
+                self.refresh_destinations().await;
+                let roots = self.destinations.clone();
+                let path = self
+                    .with_store(move |store| published::locate(store, &roots, instance, job))
+                    .await;
+                let _ = reply.send(path);
+                // Locating may have finished an interrupted rename.
                 self.changed().await;
             }
             Request::Subscribe(request, reply) => {
@@ -865,7 +910,11 @@ impl Coordinator {
                         )
                     })?;
             }
-            Command::Pause { .. } | Command::Resume { .. } | Command::Cancel { .. } => {}
+            Command::Pause { .. }
+            | Command::Resume { .. }
+            | Command::Cancel { .. }
+            | Command::Rename { .. }
+            | Command::Remove { .. } => {}
         }
         Ok(())
     }

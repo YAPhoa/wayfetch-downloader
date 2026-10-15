@@ -2,7 +2,7 @@
 
 /**
  * @typedef {import('./contract.js').JobSummary} JobSummary
- * @typedef {import('./contract.js').JobAction} JobAction
+ * @typedef {import('./contract.js').StateAction} StateAction
  * @typedef {import('./contract.js').JobStage} JobStage
  * @typedef {import('./contract.js').DisplayState} DisplayState
  * @typedef {import('./contract.js').ProgressSample} ProgressSample
@@ -20,10 +20,10 @@
  * rules (`JobState::request_*`) so a view offers only those. The engine
  * still decides: a job may change before the command arrives.
  * @param {JobSummary} job
- * @returns {JobAction[]}
+ * @returns {StateAction[]}
  */
 export function availableActions(job) {
-  /** @type {JobAction[]} */
+  /** @type {StateAction[]} */
   const actions = [];
   if (job.stage === 'publishing') return actions;
   if (job.desired === 'running' && job.stage !== 'complete' && job.stage !== 'failed') {

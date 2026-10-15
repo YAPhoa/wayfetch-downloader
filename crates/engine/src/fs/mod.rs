@@ -41,6 +41,12 @@
 //! recorded identity and never deletes or overwrites a file it does not own
 //! (T24, T31).
 //!
+//! [`Root::rename_published`] renames a published file the same way: a
+//! no-clobber hard link to the new name in the same folder, checked and
+//! synchronized before the old name is removed, between a rename record
+//! and its completion in the store, with [`Root::reconcile_rename`] for a
+//! crash in between.
+//!
 //! # Platform support
 //!
 //! File identity and directory synchronization are implemented for Unix.
@@ -61,7 +67,7 @@ use std::io;
 pub use path::{
     MAX_COMPONENT_BYTES, MAX_DEPTH, MAX_PATH_BYTES, PRIVATE_DIR, PathError, RelativePath,
 };
-pub use publish::PublicationCheck;
+pub use publish::{PublicationCheck, PublishedFile, RenameCheck};
 pub use root::Root;
 #[cfg(test)]
 pub(crate) use staging::tests::{root as test_root, staging_path};
@@ -135,6 +141,13 @@ pub enum FsError {
         /// The end of its durable coverage.
         needed: u64,
     },
+    /// The published file is no longer at its name.
+    #[error("{0} is no longer in the folder")]
+    PublishedMissing(RelativePath),
+    /// Another file, or the published file at another size, has the
+    /// published file's name: it was replaced or changed outside Wayfetch.
+    #[error("{0} was changed or replaced outside Wayfetch")]
+    PublishedChanged(RelativePath),
     /// The platform lacks a required primitive.
     #[error("{0} is not supported on this platform")]
     Unsupported(&'static str),
@@ -163,9 +176,11 @@ impl FsError {
             Self::Io { source, .. } if source.kind() == io::ErrorKind::PermissionDenied => {
                 FailureCode::PermissionDenied
             }
-            Self::StagingMissing(_) | Self::StagingReplaced(_) | Self::StagingShrunk { .. } => {
-                FailureCode::IntegrityMismatch
-            }
+            Self::StagingMissing(_)
+            | Self::StagingReplaced(_)
+            | Self::StagingShrunk { .. }
+            | Self::PublishedMissing(_)
+            | Self::PublishedChanged(_) => FailureCode::IntegrityMismatch,
             Self::Unsupported(_) => FailureCode::UnsupportedCapability,
             Self::SentinelMissing(_)
             | Self::WrongRoot(_)

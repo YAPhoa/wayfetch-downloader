@@ -18,7 +18,7 @@ use wayfetch_protocol::{
     QueryResult,
 };
 
-use super::{Store, StoreError, outbox};
+use super::{RenameStart, Store, StoreError, outbox};
 use crate::fs::{PublicationCheck, RelativePath, Removal, Root, StagingFile};
 use crate::transfer::lease::Representation;
 
@@ -1116,4 +1116,137 @@ fn a_file_an_unfinished_publication_names_is_never_cleaned_up() {
     let mut f = f.reopen();
     assert_eq!(sweep(&mut f), crate::cleanup::Swept::default());
     assert!(staged(&f, job, generation).is_file());
+}
+
+/// Publishes a fresh job's `bytes` at `at` and returns the completed job.
+fn published(f: &mut Fixture, at: &str, bytes: &[u8]) -> JobSummary {
+    let (job, generation) = transferring(f, BootEpoch::INITIAL);
+    finished(f, job, generation, bytes);
+    let size = bytes.len() as u64;
+    f.store
+        .begin_publication(job, generation, &path(at), size, NOW)
+        .unwrap();
+    let file = f.files.remove(&(job, generation)).unwrap();
+    f.root.publish(file, &path(at), size).unwrap();
+    f.store.complete_publication(job, generation, NOW).unwrap();
+    f.summary(job)
+}
+
+fn rename_envelope(
+    f: &Fixture,
+    key: IdempotencyKey,
+    job: &JobSummary,
+    name: &str,
+) -> CommandEnvelope {
+    CommandEnvelope {
+        idempotency_key: key,
+        target: f.instance,
+        command: Command::Rename {
+            job: job.id,
+            expected_revision: job.revision,
+            name: name.into(),
+        },
+    }
+}
+
+#[test]
+fn an_unfinished_rename_holds_its_name_and_its_key() {
+    let mut f = Fixture::new();
+    let done = published(&mut f, "a.bin", b"hello");
+    let key = IdempotencyKey::generate();
+    let envelope = rename_envelope(&f, key, &done, "b.bin");
+    let RenameStart::Started(intent) = f.store.begin_rename(&envelope, f.instance, NOW).unwrap()
+    else {
+        panic!("not started")
+    };
+    assert_eq!(intent.to, path("b.bin"));
+    assert_eq!(
+        f.store.pending_renames().unwrap(),
+        std::slice::from_ref(&intent)
+    );
+
+    // The new name is reserved against publications and other renames.
+    let (other, generation) = transferring(&mut f, BootEpoch::INITIAL);
+    finished(&mut f, other, generation, b"x");
+    assert!(matches!(
+        f.store
+            .begin_publication(other, generation, &path("B.bin"), 1, NOW),
+        Err(StoreError::TargetReserved(_))
+    ));
+    // The key answers busy for the same command and conflicts otherwise;
+    // the job is busy for another rename and for removal.
+    let busy = f
+        .store
+        .begin_rename(&envelope, f.instance, NOW)
+        .unwrap_err();
+    assert_eq!(busy.code, ErrorCode::Busy);
+    let pause = Command::Pause {
+        job: done.id,
+        expected_revision: done.revision,
+    };
+    assert_eq!(f.run(key, pause), Err(ErrorCode::IdempotencyConflict));
+    let again = rename_envelope(&f, IdempotencyKey::generate(), &done, "c.bin");
+    assert_eq!(
+        f.store
+            .begin_rename(&again, f.instance, NOW)
+            .unwrap_err()
+            .code,
+        ErrorCode::Busy
+    );
+    let remove = Command::Remove {
+        job: done.id,
+        expected_revision: done.revision,
+    };
+    assert_eq!(
+        f.run(IdempotencyKey::generate(), remove),
+        Err(ErrorCode::Busy)
+    );
+    assert!(matches!(
+        f.store.published_file(done.id),
+        Err(StoreError::Busy(_))
+    ));
+
+    // Finishing records the name, the revision, and the command's result,
+    // which a retry replays.
+    let mut f = f.reopen();
+    f.root.rename_published(&intent.file, &intent.to).unwrap();
+    let result = f.store.finish_rename(done.id, NOW).unwrap();
+    let after = f.summary(done.id);
+    assert_eq!(after.artifact.unwrap().path, "b.bin");
+    assert_eq!(
+        result,
+        CommandResult::JobUpdated {
+            job: done.id,
+            revision: after.revision,
+            changed: true
+        }
+    );
+    assert_eq!(
+        f.store.begin_rename(&envelope, f.instance, NOW).unwrap(),
+        RenameStart::Done(result)
+    );
+    assert!(f.store.pending_renames().unwrap().is_empty());
+    // The old name is free again.
+    f.store
+        .begin_publication(other, generation, &path("A.bin"), 1, NOW)
+        .unwrap();
+}
+
+#[test]
+fn an_abandoned_rename_leaves_no_record() {
+    let mut f = Fixture::new();
+    let done = published(&mut f, "a.bin", b"hello");
+    let key = IdempotencyKey::generate();
+    let envelope = rename_envelope(&f, key, &done, "b.bin");
+    assert!(matches!(
+        f.store.begin_rename(&envelope, f.instance, NOW).unwrap(),
+        RenameStart::Started(_)
+    ));
+    f.store.abandon_rename(done.id).unwrap();
+    assert_eq!(f.summary(done.id), done);
+    // The key can be used again.
+    assert!(matches!(
+        f.store.begin_rename(&envelope, f.instance, NOW).unwrap(),
+        RenameStart::Started(_)
+    ));
 }

@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
+export const PROTOCOL = Object.freeze({ major: 1, minor: 0 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -32,6 +32,8 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
  * @typedef {import('./generated/StreamItem.js').StreamItem} StreamItem
  * @typedef {import('./generated/ErrorCode.js').ErrorCode} ErrorCode
  * @typedef {import('./generated/Action.js').Action} JobAction
+ * @typedef {Exclude<JobAction, 'rename' | 'remove'>} StateAction The
+ *   actions that change whether a job runs.
  */
 
 /**

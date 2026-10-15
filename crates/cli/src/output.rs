@@ -147,6 +147,7 @@ impl Message for Output<'_> {
                 EventKind::BatchAccepted { .. } => return None,
                 EventKind::JobAdded { job } => format!("added {}", job_line(job)),
                 EventKind::JobChanged { job } => job_line(job),
+                EventKind::JobRemoved { job } => format!("{job}: removed from the list"),
             },
             Self::Progress(p) => format!(
                 "{} {} at {} B/s",
