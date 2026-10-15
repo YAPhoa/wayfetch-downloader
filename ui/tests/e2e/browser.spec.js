@@ -5,7 +5,7 @@
 
 import { expect, test } from '@playwright/test';
 
-import { writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { Daemon, Fixture, MIB, content, freePort } from './harness.js';
@@ -360,6 +360,87 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await pane.getByRole('button', { name: 'Save' }).click();
   await expect(pane.getByText(`Saved. New downloads go to ${daemon.archive}.`)).toBeVisible();
   await expect(pane.getByRole('button', { name: 'Save' })).toBeFocused();
+  // A server folder is added by browsing to it: the dialog starts at the
+  // selected folder, goes up, to a typed path, and into a folder.
+  const shares = join(/** @type {string} */ (daemon.dir), 'shares');
+  await mkdir(join(shares, 'films'), { recursive: true });
+  await mkdir(join(shares, '.hidden'));
+  await pane.getByRole('button', { name: 'Add folder…' }).click();
+  const folders = page.getByRole('dialog', { name: 'Add a server folder' });
+  const at = folders.getByLabel('Folder', { exact: true });
+  await expect(at).toHaveValue(/** @type {string} */ (daemon.archive));
+  await folders.getByRole('button', { name: 'Up' }).click();
+  await expect(at).toHaveValue(/** @type {string} */ (daemon.dir));
+  await expect(folders.getByRole('button', { name: 'shares' })).toBeVisible();
+  // A folder that could not be listed cannot be added in place of the
+  // one listed before it.
+  const addThis = folders.getByRole('button', { name: 'Add this folder' });
+  await expect(addThis).toBeEnabled();
+  await at.fill(join(shares, 'missing'));
+  await at.press('Enter');
+  await expect(folders.getByText('The folder does not exist.')).toBeVisible();
+  await expect(addThis).toBeDisabled();
+  // Editing the path drops a listing still on its way, and adding waits
+  // until the path typed is listed.
+  const left = /** @type {string} */ (daemon.dir);
+  const slow = `**/v1/folders?path=${encodeURIComponent(left)}`;
+  let held = false;
+  /** @type {() => void} */
+  let answer = () => {};
+  await page.route(slow, async (route) => {
+    held = true;
+    await new Promise((resolve) => {
+      answer = () => resolve(undefined);
+    });
+    await route.continue();
+  });
+  await at.fill(left);
+  await at.press('Enter');
+  await expect.poll(() => held).toBe(true);
+  await expect(addThis).toBeDisabled();
+  await at.fill(shares);
+  const late = page.waitForResponse((response) => response.url().includes(encodeURIComponent(left)));
+  answer();
+  await late;
+  await page.unroute(slow);
+  // The late answer would have been drawn by now.
+  await page.waitForTimeout(200);
+  await expect(at).toHaveValue(shares);
+  await expect(addThis).toBeDisabled();
+  await expect(folders.getByText('Press Go to list this folder before adding it.')).toBeVisible();
+  await at.press('Enter');
+  await expect(folders.getByRole('list', { name: 'Folders inside' }).getByRole('button')).toHaveText(['films']);
+  await expect(addThis).toBeEnabled();
+  await folders.getByRole('button', { name: 'films' }).click();
+  await expect(at).toHaveValue(join(shares, 'films'));
+  await expect(folders.getByText('There are no folders inside.')).toBeVisible();
+  // A path typed over the folder shown is not added in its place.
+  await at.fill(left);
+  await expect(addThis).toBeDisabled();
+  await at.fill(join(shares, 'films'));
+  await expect(addThis).toBeDisabled();
+  await folders.getByRole('button', { name: 'Go' }).click();
+  await expect(addThis).toBeEnabled();
+  await folders.getByRole('button', { name: 'Add this folder' }).click();
+  await expect(folders).toBeHidden();
+  await expect(pane.getByText('Folder added. Save to use it for new downloads.')).toBeVisible();
+  await expect(pane.getByRole('radio', { name: new RegExp(`^${join(shares, 'films')}`) })).toBeChecked();
+  await expect(pane.getByRole('button', { name: 'Add folder…' })).toBeFocused();
+  // Closing without adding changes nothing.
+  await pane.getByRole('button', { name: 'Add folder…' }).click();
+  await page.keyboard.press('Escape');
+  await expect(pane.getByText('No folder was chosen; nothing changed.')).toBeVisible();
+  // Only a folder the user added can be removed; its files stay.
+  const films = join(shares, 'films');
+  await writeFile(join(films, 'kept.bin'), 'kept');
+  await expect(pane.getByRole('button', { name: /^Remove / })).toHaveCount(1);
+  await pane.getByRole('button', { name: `Remove ${films}` }).click();
+  await expect(pane.getByText(`Removed ${films}. Its files stay there;`, { exact: false })).toBeVisible();
+  await expect(pane.getByRole('radio', { name: new RegExp(`^${films}`) })).toHaveCount(0);
+  await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) })).toBeChecked();
+  await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) })).toBeFocused();
+  expect(await readFile(join(films, 'kept.bin'), 'utf8')).toBe('kept');
+  await pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) }).check();
   // The download kept running meanwhile, and finishes while Settings is shown.
   expect(await daemon.published(running).then(() => 'published', () => 'not yet')).toBe('not yet');
   fixture.release(running);

@@ -8,6 +8,7 @@
     "allow-submit",
     "allow-job-command",
     "allow-update-settings",
+    "allow-remove-root",
     "allow-choose-download-folder",
     "allow-open-file",
     "allow-reveal-file",

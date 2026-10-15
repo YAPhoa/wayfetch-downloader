@@ -250,6 +250,7 @@ fn run_on(
             ipc::submit,
             ipc::job_command,
             ipc::update_settings,
+            ipc::remove_root,
             ipc::choose_download_folder,
             ipc::open_file,
             ipc::reveal_file,
