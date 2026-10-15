@@ -39,6 +39,8 @@
   --on-accent: #ffffff;
   --selected: #e3ebf8;
   --hover: #f6f8fb;
+  --filter-hover: #e3e7ee;
+  --filter-selected: #ccd8ea;
   --track: #e3e6ec;
   --run: #1f4fa0;
   --ok: #1d6b3a;
@@ -74,6 +76,8 @@
     --on-accent: #0d1626;
     --selected: #1b2740;
     --hover: #141a21;
+    --filter-hover: #232c38;
+    --filter-selected: #30415c;
     --track: #262d37;
     --run: #7da6ee;
     --ok: #6fcf97;
@@ -349,8 +353,9 @@ code { font-family: ui-monospace, monospace; }
 .filter .dot { color: var(--calm); }
 .filter .filter-label { flex: 1; }
 .filter .count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
-.filter[aria-pressed='true'] { background: var(--selected); font-weight: 600; }
-.filter[aria-pressed='true']:hover { background: var(--selected); }
+.filter:hover:not(:disabled) { background: var(--filter-hover); }
+.filter[aria-pressed='true'] { background: var(--filter-selected); font-weight: 600; }
+.filter[aria-pressed='true']:hover:not(:disabled) { background: var(--filter-selected); }
 
 .list {
   flex: 1;
@@ -629,7 +634,6 @@ dd { margin: 0; overflow-wrap: anywhere; }
 }
 
 .menu-item:focus { background: var(--selected); outline: none; }
-.menu-item:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .menu-item[aria-disabled='true'] { color: var(--muted); cursor: default; }
 .menu-item.danger:not([aria-disabled='true']) { color: var(--bad); }
 .menu-hint { color: var(--muted); font-size: 12px; }
