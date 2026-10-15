@@ -232,9 +232,12 @@ impl Session<'_> {
                 revision,
                 changed,
             },
-            Ok(CommandResult::Submitted { .. } | CommandResult::SettingsUpdated { .. }) => {
-                unexpected().into()
-            }
+            Ok(
+                CommandResult::Submitted { .. }
+                | CommandResult::SettingsUpdated { .. }
+                | CommandResult::LinksCollected { .. }
+                | CommandResult::LinksApplied { .. },
+            ) => unexpected().into(),
             Err(e) => e.into(),
         })
     }
@@ -273,9 +276,12 @@ impl Session<'_> {
             Ok(CommandResult::Submitted { batch, accepted }) => {
                 Output::Submitted { batch, accepted }
             }
-            Ok(CommandResult::JobUpdated { .. } | CommandResult::SettingsUpdated { .. }) => {
-                unexpected().into()
-            }
+            Ok(
+                CommandResult::JobUpdated { .. }
+                | CommandResult::SettingsUpdated { .. }
+                | CommandResult::LinksCollected { .. }
+                | CommandResult::LinksApplied { .. },
+            ) => unexpected().into(),
             Err(e) => e.into(),
         })
     }

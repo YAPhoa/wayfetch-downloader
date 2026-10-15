@@ -18,28 +18,47 @@ use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, InstanceId, ProtocolError,
 };
 
+use super::links::{self, Unusable};
 use super::{Store, StoreError, jobs, key, outbox, renames, roots, sql};
+
+/// What the coordinator knows about destinations when a command runs.
+#[derive(Debug, Clone, Default)]
+pub struct CommandContext {
+    /// The default root at the time. Without one, a batch belongs to the
+    /// operator's download root, which was not identified yet, and is saved
+    /// there once it is.
+    pub destination: Option<RootId>,
+    /// Destinations of links being started that cannot be used, and why.
+    pub unusable: Unusable,
+}
 
 impl Store {
     /// Applies a client command durably. The host has already checked the
-    /// caller's permission, and the coordinator that a settings change
-    /// names a permitted, available root. A submitted batch is saved in
-    /// `destination`, the default root at the time. Without one, its jobs
-    /// belong to the operator's download root, which was not identified
-    /// yet, and are saved there once it is.
+    /// caller's permission, and the coordinator that a settings change or
+    /// a destination chosen for links names a permitted, available root.
+    /// A submitted or collected batch without a chosen destination is
+    /// saved in `context.destination`.
     pub fn execute(
         &mut self,
         envelope: &CommandEnvelope,
         instance: InstanceId,
-        destination: Option<RootId>,
+        context: &CommandContext,
         now: UtcTimestamp,
     ) -> Result<CommandResult, ProtocolError> {
         let tx = self.write()?;
         if let Some(result) = replayed(&tx, envelope, instance)? {
             return Ok(result);
         }
+        let destination = context.destination;
         let result = match &envelope.command {
             Command::Submit { items, package } => submit(&tx, items, *package, destination, now)?,
+            Command::CollectLinks {
+                items,
+                destination: chosen,
+            } => links::collect(&tx, items, chosen.or(destination), now)?,
+            Command::StartLinks { links } => links::start(&tx, links, &context.unusable, now)?,
+            Command::RemoveLinks { links } => links::remove(&tx, links)?,
+            Command::MoveLinks { links, destination } => links::relocate(&tx, links, *destination)?,
             Command::Pause {
                 job,
                 expected_revision,

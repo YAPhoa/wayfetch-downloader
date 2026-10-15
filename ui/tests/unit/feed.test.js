@@ -57,6 +57,26 @@ class FakeClient {
     throw new Error('not used');
   }
 
+  /** @returns {Promise<import('../../src/client/contract.js').LinkPage>} */
+  async listLinks() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<import('../../src/client/contract.js').CommandResult>} */
+  async collectLinks() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<import('../../src/client/contract.js').CommandResult>} */
+  async linksCommand() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<string>} */
+  async linkSource() {
+    throw new Error('not used');
+  }
+
   /** @returns {Promise<import('../../src/client/contract.js').Settings>} */
   async settings() {
     throw new Error('not used');
@@ -87,7 +107,7 @@ class FakeClient {
       boot_epoch: this.epoch,
       protocol: this.protocol,
       head: this.cursor(),
-      limits: { max_page_size: 500, max_submit_items: 1000, max_url_bytes: 8192 },
+      limits: { max_page_size: 500, max_submit_items: 1000, max_url_bytes: 8192, max_collected_links: 10000 },
     };
   }
 
@@ -157,7 +177,7 @@ class FakeClient {
       boot_epoch: this.epoch,
       protocol: this.protocol,
       head: this.cursor(),
-      limits: { max_page_size: 500, max_submit_items: 1000, max_url_bytes: 8192 },
+      limits: { max_page_size: 500, max_submit_items: 1000, max_url_bytes: 8192, max_collected_links: 10000 },
     };
   }
 
@@ -206,11 +226,13 @@ const feeds = [];
  * @param {FakeClient} client
  * @param {number} [pageSize]
  * @param {number} [readDelay]
+ * @param {(kind: import('../../src/client/contract.js').EventKind | null) => void} [onEvent]
  */
-async function started(client, pageSize = 2, readDelay = 0) {
+async function started(client, pageSize = 2, readDelay = 0, onEvent = undefined) {
   const feed = new JobFeed(client, {
     pageSize,
     onChange: () => {},
+    onEvent,
     retryDelays: [0],
     refreshInterval: 1e9,
     readDelay,
@@ -242,6 +264,17 @@ test('follows events after the snapshot and ignores replays', async () => {
     kind: { type: 'job_changed', job: job(1) },
   });
   assert.equal(feed.jobs[0].stage, 'transferring');
+});
+
+test('tells of each new event once, and of each connection', async () => {
+  const client = new FakeClient();
+  /** @type {(string | null)[]} */
+  const told = [];
+  await started(client, 2, 0, (kind) => told.push(kind && kind.type));
+  assert.deepEqual(told, [null]);
+  const added = client.change('job_added', job(1));
+  client.live[0].sink.item(added);
+  assert.deepEqual(told, [null, 'job_added']);
 });
 
 test('new jobs join the last page until it is full', async () => {

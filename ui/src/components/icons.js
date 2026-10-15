@@ -21,9 +21,11 @@ export const ICONS = {
   search: 'M6 2.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7M8.6 8.6l3 3',
 };
 
+/** @typedef {keyof typeof ICONS} IconName */
+
 /**
  * The icon named `name`.
- * @param {keyof typeof ICONS} name
+ * @param {IconName} name
  */
 export function icon(name) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');

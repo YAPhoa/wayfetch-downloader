@@ -36,6 +36,7 @@ import { WayfetchError, serves } from './contract.js';
  * @typedef {import('./contract.js').JobStage} JobStage
  * @typedef {import('./contract.js').EventCursor} EventCursor
  * @typedef {import('./contract.js').StreamItem} StreamItem
+ * @typedef {import('./contract.js').EventKind} EventKind
  * @typedef {import('./contract.js').ProgressSample} ProgressSample
  * @typedef {import('./contract.js').Subscription} Subscription
  *
@@ -124,6 +125,7 @@ export class JobFeed {
    * @param {{
    *   pageSize: number,
    *   onChange: () => void,
+   *   onEvent?: (kind: EventKind | null) => void,
    *   retryDelays?: readonly number[],
    *   refreshInterval?: number,
    *   readDelay?: number,
@@ -133,6 +135,8 @@ export class JobFeed {
     this.client = client;
     this.pageSize = options.pageSize;
     this.onChange = options.onChange;
+    /** Told of each durable event, and of each (re)connection with `null`. */
+    this.onEvent = options.onEvent ?? (() => {});
     this.retryDelays = options.retryDelays ?? RETRY_DELAYS;
     this.refreshInterval = options.refreshInterval ?? REFRESH_INTERVAL;
     const readDelay = options.readDelay ?? READ_DELAY;
@@ -533,6 +537,7 @@ export class JobFeed {
         this.setStatus('live');
         clearInterval(this.refresher);
         this.refresher = setInterval(() => void this.refreshActive(run), this.refreshInterval);
+        this.onEvent(null);
         return;
       case 'event': {
         const cursor = this.cursor;
@@ -540,6 +545,7 @@ export class JobFeed {
         if (item.cursor.position <= cursor.position) return;
         this.cursor = item.cursor;
         const { kind } = item;
+        this.onEvent(kind);
         if (kind.type === 'job_added') this.added(kind.job, item.cursor.position);
         if (kind.type === 'job_added' || kind.type === 'job_changed') {
           const listed = this.page.has(kind.job.id);

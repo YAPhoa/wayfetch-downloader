@@ -8,7 +8,12 @@
 //! | `GET /v1/jobs` | [`Query::ListJobs`] |
 //! | `GET /v1/jobs/{id}` | [`Query::InspectJob`] |
 //! | `GET /v1/job-counts` | [`Query::CountJobs`] |
-//! | `POST /v1/jobs/{id}/commands` | [`Command::Pause`], [`Command::Resume`], [`Command::Cancel`] |
+//! | `POST /v1/jobs/{id}/commands` | [`Command::Pause`], [`Command::Resume`], [`Command::Cancel`], [`Command::Rename`], [`Command::Remove`] |
+//! | `GET /v1/jobs/{id}/source` | [`Query::JobSource`] |
+//! | `GET /v1/staging/links` | [`Query::ListLinks`]: links collected for review |
+//! | `POST /v1/staging/links` | [`Command::CollectLinks`] |
+//! | `POST /v1/staging/commands` | [`Command::StartLinks`], [`Command::RemoveLinks`], [`Command::MoveLinks`] |
+//! | `GET /v1/staging/links/{id}/source` | [`Query::LinkSource`] |
 //! | `GET /v1/settings` | [`Query::Settings`]: the default destination and the roots to choose from |
 //! | `PUT /v1/settings` | [`Command::UpdateSettings`] |
 //! | `GET /v1/folders` | [`EngineHandle::browse_folders`]: folders on the server, to choose one to add |
@@ -37,12 +42,13 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use wayfetch_engine::domain::id::{JobId, PackageId};
+use wayfetch_engine::domain::id::{JobId, PackageId, SourceLinkId};
 use wayfetch_engine::domain::job::JobStage;
 use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::{FolderListing, JobFilter, PageSize, RootSummary};
 use wayfetch_engine::protocol::request::{
-    AddRootRequest, JobCommandRequest, RemoveRootRequest, SubmitRequest, UpdateSettingsRequest,
+    AddRootRequest, CollectRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest,
+    SubmitRequest, UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
     CommandEnvelope, ErrorCode, EventCursor, Hello, InstanceId, Query, QueryResult, StreamItem,
@@ -257,21 +263,23 @@ pub async fn list_jobs(
 ) -> ApiResult<QueryResult> {
     let UrlQuery(params) =
         params.map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid query string"))?;
-    let page_size = match params.page_size {
-        None => PageSize::DEFAULT,
-        Some(raw) => {
-            let n = raw
-                .parse::<u16>()
-                .map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid page_size"))?;
-            PageSize::try_from(n)?
-        }
-    };
     let query = Query::ListJobs {
         filter: job_filter(params.stage.as_deref(), params.package.as_deref())?,
         after: params.after.as_deref().map(job_id).transpose()?,
-        page_size,
+        page_size: page_size(params.page_size.as_deref())?,
     };
     Ok(Json(app.engine.query(query, &grant.0).await?))
+}
+
+/// A `page_size` parameter, or the default.
+fn page_size(raw: Option<&str>) -> Result<PageSize, ApiError> {
+    let Some(raw) = raw else {
+        return Ok(PageSize::DEFAULT);
+    };
+    let n = raw
+        .parse::<u16>()
+        .map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid page_size"))?;
+    Ok(PageSize::try_from(n)?)
 }
 
 /// The query string of `GET /v1/job-counts`.
@@ -333,6 +341,60 @@ pub async fn job_source(
     Path(id): Path<String>,
 ) -> ApiResult<QueryResult> {
     let query = Query::JobSource { job: job_id(&id)? };
+    Ok(Json(app.engine.query(query, &grant.0).await?))
+}
+
+/// Collects links for review without starting them.
+pub async fn collect_links(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    JsonBody(request): JsonBody<CollectRequest>,
+) -> ApiResult<CommandResult> {
+    execute(&app, &grant, request.into_envelope()?).await
+}
+
+/// Starts, removes, or moves collected links at the revisions the client
+/// saw.
+pub async fn links_command(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    JsonBody(request): JsonBody<LinksCommandRequest>,
+) -> ApiResult<CommandResult> {
+    execute(&app, &grant, request.into_envelope()?).await
+}
+
+/// The query string of `GET /v1/staging/links`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkListParams {
+    after: Option<String>,
+    page_size: Option<String>,
+}
+
+/// A page of collected links.
+pub async fn list_links(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    params: Result<UrlQuery<LinkListParams>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult<QueryResult> {
+    let UrlQuery(params) =
+        params.map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid query string"))?;
+    let query = Query::ListLinks {
+        after: params.after.as_deref().map(link_id).transpose()?,
+        page_size: page_size(params.page_size.as_deref())?,
+    };
+    Ok(Json(app.engine.query(query, &grant.0).await?))
+}
+
+/// A collected link as it was entered. Needs the `sources` permission.
+pub async fn link_source(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    Path(id): Path<String>,
+) -> ApiResult<QueryResult> {
+    let query = Query::LinkSource {
+        link: link_id(&id)?,
+    };
     Ok(Json(app.engine.query(query, &grant.0).await?))
 }
 
@@ -432,6 +494,11 @@ fn parse_cursor(text: &str) -> Result<EventCursor, ApiError> {
 
 fn job_id(text: &str) -> Result<JobId, ApiError> {
     JobId::from_str(text).map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid job ID"))
+}
+
+fn link_id(text: &str) -> Result<SourceLinkId, ApiError> {
+    SourceLinkId::from_str(text)
+        .map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid link ID"))
 }
 
 /// A JSON request body, read within the body size limit and the body

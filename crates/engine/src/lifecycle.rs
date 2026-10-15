@@ -65,7 +65,7 @@ use crate::download::Download;
 use crate::fs::Root;
 use crate::published;
 use crate::state_dir::{Identity, StateDir, StateDirError};
-use crate::store::{Admission, Store, StoreError, StoreInfo};
+use crate::store::{Admission, CommandContext, Store, StoreError, StoreInfo, Unusable};
 use crate::subscription::Subscription;
 use crate::transfer::transport::Transport;
 
@@ -882,13 +882,23 @@ impl Coordinator {
                     | Command::UpdateSettings { .. }
                     | Command::Rename { .. }
                     | Command::Remove { .. }
-                    | Command::RemoveRoot { .. } => None,
+                    | Command::RemoveRoot { .. }
+                    | Command::CollectLinks { .. }
+                    | Command::StartLinks { .. }
+                    | Command::RemoveLinks { .. }
+                    | Command::MoveLinks { .. } => None,
                 };
-                if let Err(e) = self.prepare(&envelope).await {
-                    let _ = reply.send(Err(e));
-                    return;
-                }
-                let destination = self.destinations.default_root();
+                let unusable = match self.prepare(&envelope).await {
+                    Ok(unusable) => unusable,
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                        return;
+                    }
+                };
+                let context = CommandContext {
+                    destination: self.destinations.default_root(),
+                    unusable,
+                };
                 let settings = matches!(
                     envelope.command,
                     Command::UpdateSettings { .. } | Command::RemoveRoot { .. }
@@ -899,7 +909,7 @@ impl Coordinator {
                 };
                 let (result, interrupt, current) = self
                     .with_store(move |store| {
-                        let result = store.execute(&envelope, instance, destination, now());
+                        let result = store.execute(&envelope, instance, &context, now());
                         if let Ok(CommandResult::Submitted { .. }) = result {
                             // The batch is durable whatever happens here;
                             // links left unstaged are staged at the next start.
@@ -1045,37 +1055,66 @@ impl Coordinator {
         self.changed().await;
     }
 
-    /// Checks a command before the store runs it. A submit needs every
-    /// configured root identified that can be, so the default is current.
-    /// A settings change must name a permitted root that is available now,
-    /// and only a root the user added can be removed; a retry of either
-    /// already recorded is only replayed.
-    async fn prepare(&mut self, envelope: &CommandEnvelope) -> Result<(), ProtocolError> {
-        match envelope.command {
-            Command::Submit { .. } => self.refresh_destinations().await,
-            Command::UpdateSettings { default_root, .. } => {
+    /// Checks a command before the store runs it. A submit or a collect
+    /// without a chosen destination needs every configured root
+    /// identified that can be, so the default is current. A settings
+    /// change, and a destination chosen for links, must name a permitted
+    /// root that is available now, and only a root the user added can be
+    /// removed. A start of links learns which of their destinations cannot
+    /// be used, which it returns. A retry of a command already recorded is
+    /// only replayed.
+    async fn prepare(&mut self, envelope: &CommandEnvelope) -> Result<Unusable, ProtocolError> {
+        match &envelope.command {
+            Command::Submit { .. }
+            | Command::CollectLinks {
+                destination: None, ..
+            } => self.refresh_destinations().await,
+            Command::UpdateSettings {
+                default_root: root, ..
+            }
+            | Command::CollectLinks {
+                destination: Some(root),
+                ..
+            }
+            | Command::MoveLinks {
+                destination: root, ..
+            } => {
                 if self.replays(envelope).await? {
-                    return Ok(());
+                    return Ok(Unusable::new());
                 }
                 self.refresh_destinations().await;
-                let root = self.destinations.get(default_root).ok_or_else(|| {
-                    ProtocolError::new(ErrorCode::NotFound, "destination not found")
+                self.usable(*root).await.map_err(|problem| match problem {
+                    None => ProtocolError::new(ErrorCode::NotFound, "destination not found"),
+                    Some(problem) => ProtocolError::new(
+                        ErrorCode::NotApplicable,
+                        &format!("the destination is unavailable: {problem}"),
+                    ),
                 })?;
-                self.probes
-                    .check(root, self.identity.instance)
-                    .await
-                    .map_err(|problem| {
-                        ProtocolError::new(
-                            ErrorCode::NotApplicable,
-                            &format!("the destination is unavailable: {problem}"),
-                        )
-                    })?;
+            }
+            Command::StartLinks { links } => {
+                if self.replays(envelope).await? {
+                    return Ok(Unusable::new());
+                }
+                self.refresh_destinations().await;
+                let ids: Vec<_> = links.as_slice().iter().map(|l| l.link).collect();
+                let roots = self.with_store(move |store| store.link_roots(&ids)).await?;
+                let mut unusable = Unusable::new();
+                for root in roots {
+                    if let Err(problem) = self.usable(root).await {
+                        let why = problem.unwrap_or_else(|| {
+                            "it is no longer a permitted destination".to_owned()
+                        });
+                        unusable.insert(root, why);
+                    }
+                }
+                return Ok(unusable);
             }
             // Only a folder the user added can be removed; the store checks
             // the rest.
             Command::RemoveRoot { root, .. } => {
+                let root = *root;
                 if self.replays(envelope).await? {
-                    return Ok(());
+                    return Ok(Unusable::new());
                 }
                 self.refresh_destinations().await;
                 if self.destinations.get(root).is_none() {
@@ -1096,9 +1135,23 @@ impl Coordinator {
             Command::Pause { .. }
             | Command::Cancel { .. }
             | Command::Rename { .. }
-            | Command::Remove { .. } => {}
+            | Command::Remove { .. }
+            | Command::RemoveLinks { .. } => {}
         }
-        Ok(())
+        Ok(Unusable::new())
+    }
+
+    /// Whether root `id` is permitted (`Err(None)` if not) and available
+    /// now (`Err(Some(why))` if not).
+    fn usable(&self, id: RootId) -> impl Future<Output = Result<(), Option<String>>> + use<> {
+        let (root, probes) = (self.destinations.get(id), self.probes.clone());
+        let instance = self.identity.instance;
+        async move {
+            probes
+                .check(root.ok_or(None)?, instance)
+                .await
+                .map_err(Some)
+        }
     }
 
     /// Whether the store holds a result for this command, which it replays.
