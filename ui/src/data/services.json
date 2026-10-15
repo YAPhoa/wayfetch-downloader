@@ -1,0 +1,206 @@
+{
+  "services": [
+    {
+      "id": "real-debrid",
+      "name": "Real-Debrid",
+      "category": "multi_host",
+      "about": "One premium account that downloads links from many file hosts.",
+      "domains": [
+        "real-debrid.com"
+      ],
+      "planned": true
+    },
+    {
+      "id": "alldebrid",
+      "name": "AllDebrid",
+      "category": "multi_host",
+      "about": "Premium account that downloads from many file hosts and streaming sites.",
+      "domains": [
+        "alldebrid.com"
+      ]
+    },
+    {
+      "id": "torbox",
+      "name": "TorBox",
+      "category": "multi_host",
+      "about": "Premium account for file-host links, torrents and Usenet.",
+      "domains": [
+        "torbox.app"
+      ]
+    },
+    {
+      "id": "debrid-link",
+      "name": "Debrid-Link",
+      "category": "multi_host",
+      "about": "Premium account that downloads from many file hosts.",
+      "domains": [
+        "debrid-link.com",
+        "debrid-link.fr"
+      ]
+    },
+    {
+      "id": "linksnappy",
+      "name": "LinkSnappy",
+      "category": "multi_host",
+      "about": "Premium link generator for many file hosts.",
+      "domains": [
+        "linksnappy.com"
+      ]
+    },
+    {
+      "id": "premium-to",
+      "name": "premium.to",
+      "category": "multi_host",
+      "about": "Premium account for file hosts and Usenet.",
+      "domains": [
+        "premium.to"
+      ]
+    },
+    {
+      "id": "1fichier",
+      "name": "1fichier",
+      "category": "file_hosting",
+      "about": "French file host with free and premium downloads.",
+      "domains": [
+        "1fichier.com",
+        "alterupload.com",
+        "cjoint.net",
+        "desfichiers.com",
+        "dfichiers.com",
+        "megadl.fr",
+        "mesfichiers.org",
+        "piecejointe.net",
+        "pjointe.com",
+        "tenvoi.com",
+        "dl4free.com"
+      ]
+    },
+    {
+      "id": "rapidgator",
+      "name": "Rapidgator",
+      "category": "file_hosting",
+      "about": "File host with free and premium downloads.",
+      "domains": [
+        "rapidgator.net",
+        "rg.to"
+      ]
+    },
+    {
+      "id": "ddownload",
+      "name": "Ddownload",
+      "category": "file_hosting",
+      "about": "File host with free and premium downloads.",
+      "domains": [
+        "ddownload.com",
+        "ddl.to"
+      ]
+    },
+    {
+      "id": "katfile",
+      "name": "Katfile",
+      "category": "file_hosting",
+      "about": "File host with free and premium downloads.",
+      "domains": [
+        "katfile.com"
+      ]
+    },
+    {
+      "id": "nitroflare",
+      "name": "NitroFlare",
+      "category": "file_hosting",
+      "about": "File host with free and premium downloads.",
+      "domains": [
+        "nitroflare.com",
+        "nitro.download"
+      ]
+    },
+    {
+      "id": "fikper",
+      "name": "Fikper",
+      "category": "file_hosting",
+      "about": "File host with free and premium downloads.",
+      "domains": [
+        "fikper.com"
+      ]
+    },
+    {
+      "id": "filefactory",
+      "name": "FileFactory",
+      "category": "file_hosting",
+      "about": "Long-running file host with free and premium downloads.",
+      "domains": [
+        "filefactory.com"
+      ]
+    },
+    {
+      "id": "uploadgig",
+      "name": "Uploadgig",
+      "category": "file_hosting",
+      "about": "File host with free and premium downloads.",
+      "domains": [
+        "uploadgig.com"
+      ]
+    },
+    {
+      "id": "mega",
+      "name": "MEGA",
+      "category": "cloud_storage",
+      "about": "End-to-end encrypted cloud storage with shared file and folder links.",
+      "domains": [
+        "mega.nz",
+        "mega.io",
+        "mega.co.nz"
+      ]
+    },
+    {
+      "id": "google-drive",
+      "name": "Google Drive",
+      "category": "cloud_storage",
+      "about": "Google’s cloud storage, with shared file and folder links.",
+      "domains": [
+        "drive.google.com",
+        "docs.google.com",
+        "drive.usercontent.google.com"
+      ]
+    },
+    {
+      "id": "dropbox",
+      "name": "Dropbox",
+      "category": "cloud_storage",
+      "about": "Cloud storage with shared file and folder links.",
+      "domains": [
+        "dropbox.com",
+        "dropboxusercontent.com",
+        "db.tt"
+      ]
+    },
+    {
+      "id": "mediafire",
+      "name": "MediaFire",
+      "category": "cloud_storage",
+      "about": "Cloud storage and file sharing with free and paid plans.",
+      "domains": [
+        "mediafire.com"
+      ]
+    },
+    {
+      "id": "pixeldrain",
+      "name": "Pixeldrain",
+      "category": "cloud_storage",
+      "about": "File storage and sharing with free and paid plans.",
+      "domains": [
+        "pixeldrain.com",
+        "pixeldra.in"
+      ]
+    },
+    {
+      "id": "gofile",
+      "name": "Gofile",
+      "category": "cloud_storage",
+      "about": "File storage and sharing with free and premium accounts.",
+      "domains": [
+        "gofile.io"
+      ]
+    }
+  ]
+}

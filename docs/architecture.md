@@ -1238,6 +1238,8 @@ Four main views: **Add/Staging**, **Downloads**, **Extraction**, and **Accounts/
 
 Display original host, selected provider/account alias, destination, stage, live speed, durable progress where relevant, and retry/challenge status. Provide a focused attempt timeline for diagnosis. Large lists are virtualized/paginated. Never rebuild the entire queue in the browser every second.
 
+The Accounts view lists only the accounts the user added; an account is added by picking its service from a catalogue of curated display metadata, kept as data (`ui/src/data/services.json`, read and checked by `ui/src/components/services.js`), with stable service IDs, a category, and domains for search. It never enables a download route, and it is not adapter matching (ADR-07) or a multi-host coverage list: whether a service can be used, and which hosts a provider covers, come from the engine's implemented integration and the account itself.
+
 A destination picker lists allowed roots and validated subpaths. “Restart extraction elsewhere” is a first-class action with preserved-archive semantics. Destructive actions identify the affected managed artifacts and are not hidden behind “reset.”
 
 **Server ownership of the frontend is mandatory.** Serve `/` and bundled assets alongside `/v1/*`; no separate frontend service is required. Use a root-origin deployment first. All required assets are local and versioned with the release. Serve immutable fingerprinted assets with appropriate caching, but revalidate the HTML/bootstrap so an old UI cannot silently issue incompatible mutations after an upgrade. Avoid a service-worker/offline-cache layer in the initial release unless its invalidation and credential isolation are deliberately tested.
