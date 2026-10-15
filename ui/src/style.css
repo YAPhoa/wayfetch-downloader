@@ -361,6 +361,7 @@ code { font-family: ui-monospace, monospace; }
 
 .notice:empty { display: none; }
 .notice { margin: 0; padding: 6px 16px; color: var(--bad); border-bottom: 1px solid var(--line); }
+.notice.ok { color: var(--ok); }
 
 /* Positioned, so absolutely placed hidden text in the table is clipped by
    this scroller instead of growing the page. */
@@ -545,6 +546,165 @@ dd { margin: 0; overflow-wrap: anywhere; }
 
 .account { display: inline-flex; align-items: center; gap: 12px; }
 .account .message:empty { display: none; }
+
+/* Where new downloads go, in the add panel. */
+
+.destination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0;
+  color: var(--muted);
+}
+
+.destination .path { color: var(--ink); font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.destination .path.unknown { font-family: inherit; color: var(--muted); }
+
+.tag {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tag.current { border-color: var(--accent); color: var(--accent); }
+.problem { color: var(--bad); }
+.hint { margin: 0; color: var(--muted); }
+
+/* Each row's menu button, and the menu itself. */
+
+.jobs .row-actions { width: 1%; padding-top: 0; padding-bottom: 0; text-align: right; }
+
+.jobs button.more {
+  min-height: 26px;
+  padding: 0 6px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.jobs button.more .icon { stroke-width: 3; }
+.jobs tr:hover button.more, .jobs tr.menu-open button.more, .jobs button.more:focus-visible {
+  border-color: var(--control);
+  color: var(--ink);
+}
+
+.jobs tbody tr.menu-open { background: var(--hover); }
+.jobs tbody tr.selected.menu-open { background: var(--selected); }
+
+/* Coarse pointers get a target large enough to touch. */
+@media (pointer: coarse) {
+  .jobs button.more { min-width: 40px; min-height: 40px; border-color: var(--control); }
+}
+
+.menu {
+  position: fixed;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  max-width: calc(100vw - 8px);
+  max-height: calc(100vh - 8px);
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--control);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 18%);
+}
+
+.menu-item {
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.menu-item:focus { background: var(--selected); outline: none; }
+.menu-item:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.menu-item[aria-disabled='true'] { color: var(--muted); cursor: default; }
+.menu-item.danger:not([aria-disabled='true']) { color: var(--bad); }
+.menu-hint { color: var(--muted); font-size: 12px; }
+.menu-separator { height: 1px; margin: 4px 0; background: var(--line); }
+
+@media (pointer: coarse) {
+  .menu-item { min-height: 44px; }
+}
+
+/* Modal dialogs: Settings and Rename. */
+
+.dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 25%);
+}
+
+.dialog::backdrop { background: rgb(0 0 0 / 35%); }
+.dialog[open] { display: flex; flex-direction: column; }
+.dialog.rename { width: min(440px, calc(100vw - 32px)); }
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 16px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line);
+}
+
+.dialog-head h2 { flex: 1; font-size: 14px; overflow-wrap: anywhere; }
+.dialog-head .close { min-height: 28px; padding: 0 8px; border: 0; background: transparent; font-size: 18px; }
+
+.dialog-body {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.dialog form { display: grid; gap: 10px; }
+.dialog .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dialog input[type='text'] { width: 100%; }
+
+.settings-section { display: grid; gap: 10px; }
+.settings-section + .settings-section { padding-top: 16px; border-top: 1px solid var(--line); }
+.settings-section h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; font-weight: 600; }
+
+fieldset { display: grid; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
+legend { padding: 0 0 4px; color: var(--muted); }
+
+.choice { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.choice input { margin: 3px 0 0; }
+.choice-text { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.choice-text .path { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.choice-text .problem { flex-basis: 100%; }
+
+.empty-state {
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  color: var(--muted);
+}
+
+.empty-state p { margin: 0; }
+.empty-state p + p { margin-top: 6px; }
+
+.saved-as { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.saved-as .path, dd[data-fact='saves-to'] { font-family: ui-monospace, monospace; }
 
 /* Narrow windows: the sidebar becomes a row of filters above the list. */
 

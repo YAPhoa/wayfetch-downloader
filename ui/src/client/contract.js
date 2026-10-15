@@ -31,6 +31,10 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 0 });
  * @typedef {import('./generated/ProgressSample.js').ProgressSample} ProgressSample
  * @typedef {import('./generated/StreamItem.js').StreamItem} StreamItem
  * @typedef {import('./generated/ErrorCode.js').ErrorCode} ErrorCode
+ * @typedef {import('./generated/Permission.js').Permission} Permission
+ * @typedef {import('./generated/RootId.js').RootId} RootId
+ * @typedef {import('./generated/RootSummary.js').RootSummary} RootSummary
+ * @typedef {import('./generated/Settings.js').Settings} Settings
  * @typedef {import('./generated/Action.js').Action} JobAction
  * @typedef {Exclude<JobAction, 'rename' | 'remove'>} StateAction The
  *   actions that change whether a job runs.
@@ -47,7 +51,16 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 0 });
 /**
  * What views need from an engine. Every method rejects with a
  * `WayfetchError`.
+ *
+ * `permissions` is what this client may do, so views offer only what the
+ * engine will allow; the engine still decides. `local` says whether the
+ * engine's paths are on the computer showing the page (the desktop app)
+ * or on a server. Only a local host can open files and show the folder
+ * dialog, so only its client has `chooseDownloadFolder`, `openFile`, and
+ * `revealFile`; each takes a job or nothing, never a path.
  * @typedef {{
+ *   permissions: readonly Permission[],
+ *   local: boolean,
  *   hello: () => Promise<Hello>,
  *   listJobs: (request: {
  *     after?: JobId | null,
@@ -62,8 +75,20 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 0 });
  *     target: string,
  *     action: JobAction,
  *     expectedRevision: number,
+ *     name?: string,
+ *   }) => Promise<CommandResult>,
+ *   jobSource: (job: JobId) => Promise<string>,
+ *   settings: () => Promise<Settings>,
+ *   updateSettings: (request: {
+ *     idempotencyKey: string,
+ *     target: string,
+ *     expectedRevision: number,
+ *     defaultRoot: RootId,
  *   }) => Promise<CommandResult>,
  *   subscribe: (after: EventCursor | null, sink: StreamSink) => Subscription,
+ *   chooseDownloadFolder?: () => Promise<RootSummary | null>,
+ *   openFile?: (job: JobId) => Promise<void>,
+ *   revealFile?: (job: JobId) => Promise<void>,
  * }} WayfetchClient
  */
 

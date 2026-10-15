@@ -11,8 +11,12 @@
 //! commands, idempotency, resynchronization, a stalled renderer's
 //! subscription ending, and the per-renderer subscription limit and its
 //! cleanup on reload; with the `scripted-picker` feature, a folder chosen
-//! in the host's dialog becoming the destination of new downloads; that the page loads only bundled assets; and that the
-//! host starts no daemon and listens on no TCP port.
+//! in the host's dialog becoming the destination of new downloads; the
+//! Settings dialog and each row's menu, which opens a finished file or its
+//! folder through the host (a recording `xdg-open` stands in for the
+//! desktop's), renames, and removes from the list; that the page loads
+//! only bundled assets; and that the host starts no daemon and listens on
+//! no TCP port.
 //!
 //! These tests need an X display (`DISPLAY`, for example from `xvfb-run`)
 //! and `WebKitWebDriver` on `PATH`, so they are ignored by default; see
@@ -71,7 +75,30 @@ impl Dirs {
             .await
             .unwrap();
         assert!(init.status.success(), "{init:?}");
+        // What the app hands to the desktop's opener is recorded, not
+        // opened.
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let opener = bin.join("xdg-open");
+        let record = tmp.path().join("opened");
+        std::fs::write(
+            &opener,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&opener, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         Self { tmp, state, root }
+    }
+
+    /// What the app asked the desktop to open, one line each.
+    fn opened(&self) -> Vec<String> {
+        std::fs::read_to_string(self.tmp.path().join("opened"))
+            .map(|text| text.lines().map(String::from).collect())
+            .unwrap_or_default()
     }
 
     /// Where a build with the `scripted-picker` feature reads the folder
@@ -173,6 +200,14 @@ impl Shell {
             // Lets Tauri's WebView accept the driver's automation session.
             .env("TAURI_WEBVIEW_AUTOMATION", "true")
             .env("WAYFETCH_DESKTOP_PICKER", dirs.picker())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    dirs.tmp.path().join("bin").display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
@@ -254,16 +289,29 @@ impl Shell {
         .await;
     }
 
+    /// Clicks the element `css` names, once it exists. The page redraws
+    /// a row when its job changes, so an element found just before a
+    /// redraw is looked up again.
     async fn click(&self, css: &str) {
-        self.client
-            .wait()
-            .at_most(DEADLINE)
-            .for_element(Locator::Css(css))
-            .await
-            .unwrap()
-            .click()
-            .await
-            .unwrap();
+        eventually(|| async {
+            let element = self
+                .client
+                .wait()
+                .at_most(DEADLINE)
+                .for_element(Locator::Css(css))
+                .await
+                .unwrap();
+            match element.click().await {
+                Ok(()) => Some(()),
+                Err(fantoccini::error::CmdError::Standard(e))
+                    if e.error == fantoccini::error::ErrorStatus::StaleElementReference =>
+                {
+                    None
+                }
+                Err(e) => panic!("clicking {css}: {e}"),
+            }
+        })
+        .await;
     }
 
     /// Adds links, one per line, through the toolbar's form, which then
@@ -937,4 +985,164 @@ async fn runs_without_a_daemon_or_listener() {
     assert!(status.success());
     let stopped = notices.wait(0, |n| n["type"] == "stopped").await;
     assert_eq!(stopped["clean"], true);
+}
+
+/// Whether the page fits the window, as it must with a dialog or menu open,
+/// and the element `css` lies inside it.
+async fn fits_window(shell: &Shell, css: &str) {
+    let fits = shell
+        .js(&format!(
+            "const box = document.querySelector('{css}').getBoundingClientRect();
+             const {{ scrollHeight, clientHeight, clientWidth }} = document.documentElement;
+             return scrollHeight === clientHeight && box.left >= 0 && box.top >= 0
+               && box.right <= clientWidth && box.bottom <= clientHeight;"
+        ))
+        .await;
+    assert_eq!(fits, json!(true), "{css} does not fit the window");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an X display and WebKitWebDriver"]
+async fn the_row_menu_opens_renames_and_removes_through_the_host() {
+    let server = Server::http().await;
+    let dirs = Dirs::new().await;
+    let shell = Shell::launch(&dirs).await;
+    server.put("/desk.bin", Resource::new(body(MIB)));
+    shell.add(&server.url("/desk.bin")).await;
+    shell.wait_for_state("job-1", "Done").await;
+    let menu = ".menu:not([hidden])";
+
+    // Settings: this computer's folders, which the host's dialog can add
+    // to, and nothing labelled as a server path.
+    shell.click("[data-key=\"open-settings\"]").await;
+    shell
+        .wait_for("document.querySelector('dialog.settings form.destination-form')")
+        .await;
+    fits_window(&shell, "dialog.settings").await;
+    let settings = shell
+        .js("const d = document.querySelector('dialog.settings');
+             return { choose: [...d.querySelectorAll('button')].some((b) => b.textContent === 'Choose folder…'),
+                      server: d.textContent.includes('Server path'),
+                      accounts: d.textContent.includes('Not available yet') }")
+        .await;
+    assert_eq!(
+        settings,
+        json!({"choose": true, "server": false, "accounts": true})
+    );
+    shell
+        .client
+        .find(Locator::Css("dialog.settings"))
+        .await
+        .unwrap()
+        .send_keys(&char::from(Key::Escape).to_string())
+        .await
+        .unwrap();
+    shell
+        .wait_for("!document.querySelector('dialog') && document.activeElement?.dataset.key === 'open-settings'")
+        .await;
+
+    // A right-click on the row opens its menu inside the window, with the
+    // host's file actions.
+    shell
+        .js(
+            "const cell = document.querySelector('tr[data-job=\"job-1\"] td.host');
+             const box = cell.getBoundingClientRect();
+             cell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true,
+               button: 2, clientX: box.left + 5, clientY: box.top + 5 }));",
+        )
+        .await;
+    shell
+        .wait_for(&format!("document.querySelector('{menu}')"))
+        .await;
+    fits_window(&shell, menu).await;
+    shell.click("[data-key=\"menu-item-open-file\"]").await;
+    let file = dirs.root.join("desk.bin");
+    eventually(|| async { (dirs.opened() == [file.display().to_string()]).then_some(()) }).await;
+
+    // The row's button opens it too; the folder is opened, not a path the
+    // page chose.
+    shell.click("[data-key=\"menu-job-1\"]").await;
+    shell.click("[data-key=\"menu-item-reveal-file\"]").await;
+    eventually(|| async { (dirs.opened().len() == 2).then_some(()) }).await;
+    assert_eq!(dirs.opened()[1], dirs.root.display().to_string());
+
+    // From the keyboard: Enter opens it on its first item, arrows move,
+    // Escape closes it and returns focus to the button.
+    let more = shell
+        .client
+        .find(Locator::Css("[data-key=\"menu-job-1\"]"))
+        .await
+        .unwrap();
+    shell
+        .js("document.querySelector('[data-key=\"menu-job-1\"]').focus()")
+        .await;
+    more.send_keys(&char::from(Key::Enter).to_string())
+        .await
+        .unwrap();
+    shell
+        .wait_for("document.activeElement?.dataset.key === 'menu-item-open-file'")
+        .await;
+    let item = shell
+        .client
+        .find(Locator::Css("[data-key=\"menu-item-open-file\"]"))
+        .await
+        .unwrap();
+    item.send_keys(&char::from(Key::Down).to_string())
+        .await
+        .unwrap();
+    shell
+        .wait_for("document.activeElement?.dataset.key === 'menu-item-reveal-file'")
+        .await;
+    let item = shell
+        .client
+        .find(Locator::Css("[data-key=\"menu-item-reveal-file\"]"))
+        .await
+        .unwrap();
+    item.send_keys(&char::from(Key::Escape).to_string())
+        .await
+        .unwrap();
+    shell
+        .wait_for(&format!(
+            "!document.querySelector('{menu}') && document.activeElement?.dataset.key === 'menu-job-1'"
+        ))
+        .await;
+
+    // Rename in place.
+    shell.click("[data-key=\"menu-job-1\"]").await;
+    shell.click("[data-key=\"menu-item-rename\"]").await;
+    let name = shell
+        .client
+        .find(Locator::Css("#rename-name"))
+        .await
+        .unwrap();
+    name.clear().await.unwrap();
+    name.send_keys("desk-renamed.bin").await.unwrap();
+    name.send_keys(&char::from(Key::Enter).to_string())
+        .await
+        .unwrap();
+    shell
+        .wait_for("document.querySelector('tr[data-job=\"job-1\"] td.name')?.textContent === 'desk-renamed.bin'")
+        .await;
+    assert_eq!(dirs.published("desk-renamed.bin"), body(MIB));
+    assert!(!file.exists());
+
+    // Remove from the list: the row goes, the file stays.
+    shell.click("[data-key=\"menu-job-1\"]").await;
+    shell.click("[data-key=\"menu-item-remove\"]").await;
+    shell
+        .wait_for("!document.querySelector('tr[data-job=\"job-1\"]')")
+        .await;
+    assert_eq!(dirs.published("desk-renamed.bin"), body(MIB));
+
+    // The host opens only jobs the engine lists, never a path.
+    let refused = shell
+        .ipc("const open = (job) => core.invoke('open_file', { job }).then(() => 'opened', (e) => e.code);
+              return [await open('job-1'), await open('/etc/passwd'), await open('job-99')];")
+        .await;
+    assert_eq!(
+        refused,
+        json!(["not_found", "invalid_request", "not_found"])
+    );
+    assert_eq!(dirs.opened().len(), 2);
+    shell.close().await;
 }
