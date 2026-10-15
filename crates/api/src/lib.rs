@@ -200,6 +200,7 @@ impl Api {
             .route("/v1/folders", get(routes::folders))
             .route("/v1/roots", post(routes::add_root))
             .route("/v1/roots/remove", post(routes::remove_root))
+            .merge(account_routes())
             .route("/v1/events", get(routes::events))
             .route_layer(middleware::from_fn_with_state(
                 state.clone(),
@@ -238,4 +239,26 @@ impl Api {
         );
         drained
     }
+}
+
+/// The account routes. Their answers are never cached: a sign-in carries
+/// the code the person enters at the provider.
+fn account_routes() -> Router<routes::AppState> {
+    Router::new()
+        .route("/v1/accounts", get(routes::accounts))
+        .route(
+            "/v1/accounts/authorizations",
+            post(routes::authorize_account),
+        )
+        .route(
+            "/v1/accounts/authorizations/{id}",
+            get(routes::authorization),
+        )
+        .route(
+            "/v1/accounts/authorizations/{id}/cancel",
+            post(routes::cancel_authorization),
+        )
+        .route("/v1/accounts/{id}/commands", post(routes::account_command))
+        .route("/v1/accounts/{id}/refresh", post(routes::refresh_account))
+        .layer(middleware::map_response(browser::routes::no_store))
 }

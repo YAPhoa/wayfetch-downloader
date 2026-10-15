@@ -19,8 +19,17 @@
 //! | `GET /v1/folders` | [`EngineHandle::browse_folders`]: folders on the server, to choose one to add |
 //! | `POST /v1/roots` | [`EngineHandle::register_root`]: permits a server folder as a destination |
 //! | `POST /v1/roots/remove` | [`EngineHandle::execute`]: stops offering a folder the user added |
+//! | `GET /v1/accounts` | [`Query::Accounts`]: the vault, the services Wayfetch can sign in to, and the accounts added |
+//! | `POST /v1/accounts/authorizations` | [`Command::AuthorizeAccount`]: starts signing an account in |
+//! | `GET /v1/accounts/authorizations/{id}` | [`Query::Authorization`] |
+//! | `POST /v1/accounts/authorizations/{id}/cancel` | [`EngineHandle::cancel_authorization`] |
+//! | `POST /v1/accounts/{id}/commands` | [`Command::SetAccountEnabled`], [`Command::RemoveAccount`] |
+//! | `POST /v1/accounts/{id}/refresh` | [`EngineHandle::refresh_account`]: checks it with its provider |
 //! | `GET /v1/events` | subscription, as server-sent events |
 //! | `GET /v1/ready` | readiness: lifecycle phase, a handshake, the host's check |
+//!
+//! Every account route needs the `accounts` permission, which no other
+//! permission implies. No route takes or returns a provider credential.
 //!
 //! Responses carry the protocol's own result and error types, so the JSON
 //! is the same that desktop IPC carries. Commands name an idempotency key
@@ -42,13 +51,15 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use wayfetch_engine::domain::id::{JobId, PackageId, SourceLinkId};
+use wayfetch_engine::domain::id::{AccountId, JobId, PackageId, SourceLinkId};
 use wayfetch_engine::domain::job::JobStage;
+use wayfetch_engine::protocol::account::{AccountSummary, Authorization, AuthorizationId};
 use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::{FolderListing, JobFilter, PageSize, RootSummary};
 use wayfetch_engine::protocol::request::{
-    AddRootRequest, CollectRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest,
-    SubmitRequest, UpdateSettingsRequest,
+    AccountCommandRequest, AddRootRequest, AuthorizeAccountRequest, CollectRequest,
+    JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
+    UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
     CommandEnvelope, ErrorCode, EventCursor, Hello, InstanceId, Query, QueryResult, StreamItem,
@@ -233,6 +244,67 @@ pub async fn remove_root(
     JsonBody(request): JsonBody<RemoveRootRequest>,
 ) -> ApiResult<CommandResult> {
     execute(&app, &grant, request.into_envelope()).await
+}
+
+/// The account vault, the services Wayfetch can sign in to, and the
+/// accounts added, as last checked. Contacts no provider.
+pub async fn accounts(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+) -> ApiResult<QueryResult> {
+    Ok(Json(app.engine.query(Query::Accounts {}, &grant.0).await?))
+}
+
+/// Starts signing an account in, or signing an existing one in again.
+pub async fn authorize_account(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    JsonBody(request): JsonBody<AuthorizeAccountRequest>,
+) -> ApiResult<CommandResult> {
+    execute(&app, &grant, request.into_envelope()?).await
+}
+
+/// A sign-in: waiting for the person's approval, or how it ended.
+pub async fn authorization(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    Path(id): Path<String>,
+) -> ApiResult<QueryResult> {
+    let query = Query::Authorization {
+        id: authorization_id(&id)?,
+    };
+    Ok(Json(app.engine.query(query, &grant.0).await?))
+}
+
+/// Cancels a sign-in still waiting for approval.
+pub async fn cancel_authorization(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    Path(id): Path<String>,
+) -> ApiResult<Authorization> {
+    let id = authorization_id(&id)?;
+    Ok(Json(app.engine.cancel_authorization(id, &grant.0).await?))
+}
+
+/// Enables, disables, or removes an account at the revision the client
+/// saw.
+pub async fn account_command(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    Path(id): Path<String>,
+    JsonBody(request): JsonBody<AccountCommandRequest>,
+) -> ApiResult<CommandResult> {
+    execute(&app, &grant, request.into_envelope(account_id(&id)?)).await
+}
+
+/// Checks an account with its provider now, and answers with it.
+pub async fn refresh_account(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    Path(id): Path<String>,
+) -> ApiResult<AccountSummary> {
+    let id = account_id(&id)?;
+    Ok(Json(app.engine.refresh_account(id, &grant.0).await?))
 }
 
 async fn execute(
@@ -494,6 +566,16 @@ fn parse_cursor(text: &str) -> Result<EventCursor, ApiError> {
 
 fn job_id(text: &str) -> Result<JobId, ApiError> {
     JobId::from_str(text).map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid job ID"))
+}
+
+fn account_id(text: &str) -> Result<AccountId, ApiError> {
+    AccountId::from_str(text)
+        .map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid account ID"))
+}
+
+fn authorization_id(text: &str) -> Result<AuthorizationId, ApiError> {
+    AuthorizationId::from_str(text)
+        .map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid sign-in ID"))
 }
 
 fn link_id(text: &str) -> Result<SourceLinkId, ApiError> {

@@ -1,0 +1,24 @@
+[package]
+name = "wayfetch-adapters"
+description = "Provider integrations for the Wayfetch Downloader engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+wayfetch-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+zeroize = "1.9.1"
+
+[dev-dependencies]
+httparse.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+wayfetch-net.workspace = true
+
+[lints]
+workspace = true
