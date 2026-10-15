@@ -109,6 +109,11 @@ impl Client {
             .await
     }
 
+    pub async fn put(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+        self.send(self.request(reqwest::Method::PUT, path).json(body))
+            .await
+    }
+
     /// A command body for this daemon's instance with a fresh key.
     pub fn command(&self, fields: Value) -> Value {
         let mut body = json!({

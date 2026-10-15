@@ -81,7 +81,7 @@ impl Fixture {
             command,
         };
         self.store
-            .execute(&envelope, self.instance, NOW)
+            .execute(&envelope, self.instance, None, NOW)
             .map_err(|e| e.code)
     }
 
@@ -187,7 +187,10 @@ fn rejected_commands_leave_no_record() {
         target: InstanceId::generate(),
         command: submit_command(&["https://a.example/1"], None),
     };
-    let err = f.store.execute(&envelope, f.instance, NOW).unwrap_err();
+    let err = f
+        .store
+        .execute(&envelope, f.instance, None, NOW)
+        .unwrap_err();
     assert_eq!(err.code, ErrorCode::WrongInstance);
 }
 
@@ -833,7 +836,7 @@ fn admission_reads_only_free_slots_recovering_first() {
     let mut f = f.reopen();
     f.store.recover_after_restart(NOW).unwrap();
 
-    let ready = f.store.admissible(2, &[]).unwrap();
+    let ready = f.store.admissible(2, &[], true).unwrap();
     let picked: Vec<_> = ready.iter().map(|a| (a.job, a.stage)).collect();
     assert_eq!(
         picked,
@@ -842,10 +845,10 @@ fn admission_reads_only_free_slots_recovering_first() {
     assert_eq!(ready[1].url, "https://files.example/a.bin");
     assert_eq!(ready[0].generation, f.summary(second).generation);
     // Running jobs are skipped, and nothing is read without a free slot.
-    let ready = f.store.admissible(2, &[second]).unwrap();
+    let ready = f.store.admissible(2, &[second], true).unwrap();
     let picked: Vec<_> = ready.iter().map(|a| a.job).collect();
     assert_eq!(picked, vec![first, third]);
-    assert!(f.store.admissible(0, &[]).unwrap().is_empty());
+    assert!(f.store.admissible(0, &[], true).unwrap().is_empty());
 }
 
 #[test]

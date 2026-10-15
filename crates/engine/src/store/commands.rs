@@ -8,7 +8,7 @@
 //! is rolled back and leaves no record, so its key can be retried.
 
 use rusqlite::{OptionalExtension, Transaction, params};
-use wayfetch_domain::id::{JobId, PackageId};
+use wayfetch_domain::id::{JobId, PackageId, RootId};
 use wayfetch_domain::job::{JobError, JobState, Outcome};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_protocol::command::{CommandFingerprint, IdempotencyRecord, Replay, SubmitItems};
@@ -17,15 +17,20 @@ use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, InstanceId, ProtocolError,
 };
 
-use super::{Store, StoreError, jobs, key, outbox, sql};
+use super::{Store, StoreError, jobs, key, outbox, roots, sql};
 
 impl Store {
     /// Applies a client command durably. The host has already checked the
-    /// caller's permission.
+    /// caller's permission, and the coordinator that a settings change
+    /// names a permitted, available root. A submitted batch is saved in
+    /// `destination`, the default root at the time. Without one, its jobs
+    /// belong to the operator's download root, which was not identified
+    /// yet, and are saved there once it is.
     pub fn execute(
         &mut self,
         envelope: &CommandEnvelope,
         instance: InstanceId,
+        destination: Option<RootId>,
         now: UtcTimestamp,
     ) -> Result<CommandResult, ProtocolError> {
         if envelope.target != instance {
@@ -46,7 +51,7 @@ impl Store {
             };
         }
         let result = match &envelope.command {
-            Command::Submit { items, package } => submit(&tx, items, *package, now)?,
+            Command::Submit { items, package } => submit(&tx, items, *package, destination, now)?,
             Command::Pause {
                 job,
                 expected_revision,
@@ -59,6 +64,10 @@ impl Store {
                 job,
                 expected_revision,
             } => request(&tx, *job, now, |s| s.request_cancel(*expected_revision))?,
+            Command::UpdateSettings {
+                expected_revision,
+                default_root,
+            } => roots::update_settings(&tx, *expected_revision, *default_root, now)?,
         };
         let result_json =
             serde_json::to_string(&result).map_err(|_| StoreError::Corrupt("command result"))?;
@@ -105,6 +114,7 @@ fn submit(
     tx: &Transaction<'_>,
     items: &SubmitItems,
     package: Option<PackageId>,
+    destination: Option<RootId>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, StoreError> {
     let package = match package {
@@ -129,8 +139,14 @@ fn submit(
     let accepted =
         u32::try_from(items.as_slice().len()).map_err(|_| StoreError::Corrupt("input count"))?;
     tx.execute(
-        "INSERT INTO input_batches (package_id, input_count, created_at) VALUES (?1, ?2, ?3)",
-        params![package, accepted, now.unix_millis()],
+        "INSERT INTO input_batches (package_id, input_count, root_id, created_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            package,
+            accepted,
+            destination.map(sql).transpose()?,
+            now.unix_millis()
+        ],
     )?;
     let batch = key(tx.last_insert_rowid())?;
     let mut insert =

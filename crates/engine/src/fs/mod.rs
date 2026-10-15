@@ -3,7 +3,8 @@
 //!
 //! # Roots are capabilities
 //!
-//! An operator configures roots by [`RootId`] and path. The engine opens a
+//! An operator configures roots by path, and the engine's store gives each
+//! a stable [`RootId`] that its sentinel records. The engine opens a
 //! [`Root`] once and from then on reaches files only through that open
 //! directory handle with [`RelativePath`]s, using `cap-std`, which resolves
 //! every path inside the handle: `..`, absolute paths, and symlinks that
@@ -106,6 +107,9 @@ pub enum FsError {
     /// unreadable.
     #[error("{0} carries the sentinel of another root or instance")]
     WrongRoot(RootId),
+    /// The directory carries an unreadable sentinel or another instance's.
+    #[error("the folder is marked for another Wayfetch instance")]
+    ForeignSentinel,
     /// The directory at the root's path is no longer the one opened.
     #[error("{0} was replaced or remounted after it was opened")]
     RootReplaced(RootId),
@@ -165,6 +169,7 @@ impl FsError {
             Self::Unsupported(_) => FailureCode::UnsupportedCapability,
             Self::SentinelMissing(_)
             | Self::WrongRoot(_)
+            | Self::ForeignSentinel
             | Self::RootReplaced(_)
             | Self::Path(_)
             | Self::TargetExists(_)

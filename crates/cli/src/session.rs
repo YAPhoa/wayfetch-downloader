@@ -232,7 +232,9 @@ impl Session<'_> {
                 revision,
                 changed,
             },
-            Ok(CommandResult::Submitted { .. }) => unexpected().into(),
+            Ok(CommandResult::Submitted { .. } | CommandResult::SettingsUpdated { .. }) => {
+                unexpected().into()
+            }
             Err(e) => e.into(),
         })
     }
@@ -271,7 +273,9 @@ impl Session<'_> {
             Ok(CommandResult::Submitted { batch, accepted }) => {
                 Output::Submitted { batch, accepted }
             }
-            Ok(CommandResult::JobUpdated { .. }) => unexpected().into(),
+            Ok(CommandResult::JobUpdated { .. } | CommandResult::SettingsUpdated { .. }) => {
+                unexpected().into()
+            }
             Err(e) => e.into(),
         })
     }

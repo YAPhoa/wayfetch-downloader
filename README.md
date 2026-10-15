@@ -126,6 +126,13 @@ wayfetchd run --state-dir /srv/wayfetch/state --download-root /srv/downloads \
     --token-file /srv/wayfetch/api-tokens
 ```
 
+Downloads are saved in the download root until the owner picks another
+default destination in Settings (`PUT /v1/settings`). Clients can pick only
+among folders the operator names: initialize each with `init-root` and pass
+it to `run` with `--root DIR`, once per folder. Changing the default affects
+only downloads added afterwards; earlier ones keep their folder, and one
+whose folder is no longer configured waits, blocked, instead of moving.
+
 It listens on `127.0.0.1:7878` unless `--listen` says otherwise; anything
 beyond loopback has no TLS of its own and belongs behind an authenticated TLS
 reverse proxy. Every request needs `Authorization: Bearer TOKEN`. The token file
@@ -142,6 +149,8 @@ is never printed.
 | `GET /v1/jobs/{id}` | One job |
 | `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
 | `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel", "expected_revision"}` |
+| `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem` |
+| `PUT /v1/settings` | Choose the default: `{"idempotency_key", "target", "expected_revision", "default_root": "root-N"}` (needs `control`) |
 | `GET /v1/events` | Server-sent events: `hello`, `event`, `progress`, `resync` |
 | `GET /v1/ready` | Readiness, without a token: `200 {"ready":true}`, or `503` with a `reason` |
 | `GET /v1/auth/session`, `POST /v1/auth/{setup,login,logout}` | Browser sign-in; see [Browser access](#browser-access) |
@@ -356,8 +365,8 @@ window's page is `ui/src/shell/desktop.html`, which needs no sign-in.
 Only Linux is built and tested so far. Building needs WebKitGTK 4.1 and
 GTK 3 development packages (on Debian or Ubuntu: `libwebkit2gtk-4.1-dev
 libgtk-3-dev libsoup-3.0-dev librsvg2-dev`); running needs WebKitGTK 4.1.
-Installers, a tray, a root picker, and default state paths are not part
-of the proof yet, so the directories are named as for the daemon:
+Installers, a tray, and default state paths are not part of the proof
+yet, so the directories are named as for the daemon:
 
 ```sh
 cargo build --locked -p wayfetch-desktop
@@ -374,6 +383,11 @@ the page reads a new snapshot and follows events from there. The host
 sends each page at most 64 event items it has not acknowledged and holds
 at most 4 subscriptions per page; a page that stops reading for 15 seconds
 loses its subscription, and a reload releases them all.
+
+Settings' "Choose folder…" opens the system's folder dialog from the host;
+the page never sends a path. The engine marks the chosen folder as a
+destination, as `init-root` does, and it stays one across restarts. A
+cancelled dialog, or a folder that cannot be used, changes nothing.
 
 ## Running in a container
 

@@ -9,6 +9,7 @@ import type { JobId } from "./JobId.js";
 import type { JobStage } from "./JobStage.js";
 import type { PackageId } from "./PackageId.js";
 import type { Revision } from "./Revision.js";
+import type { RootId } from "./RootId.js";
 
 /**
  * A job's client-visible state. Durable fields only; live transfer rate is
@@ -64,4 +65,10 @@ artifact?: ArtifactSummary | null,
  * serves it. Never the whole link, which can carry a signed token.
  * Added in protocol 0.2; absent from events recorded before it.
  */
-original_host?: HostName | null, };
+original_host?: HostName | null, 
+/**
+ * The root the job saves its file in, fixed when it was submitted or,
+ * for a job submitted before it could be, when it first started.
+ * Absent until then. Added in protocol 0.3.
+ */
+destination?: RootId | null, };
