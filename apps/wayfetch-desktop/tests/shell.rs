@@ -11,8 +11,9 @@
 //! commands, idempotency, resynchronization, a stalled renderer's
 //! subscription ending, and the per-renderer subscription limit and its
 //! cleanup on reload; with the `scripted-picker` feature, a folder chosen
-//! in the host's dialog becoming the destination of new downloads; the
-//! Settings dialog and each row's menu, which opens a finished file or its
+//! in the host's dialog becoming the destination of new downloads, also
+//! from the Settings page while a download keeps running; the Settings
+//! page and each row's menu, which opens a finished file or its
 //! folder through the host (a recording `xdg-open` stands in for the
 //! desktop's), renames, and removes from the list; that the page loads
 //! only bundled assets; and that the host starts no daemon and listens on
@@ -957,6 +958,94 @@ async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
     shell.close().await;
 }
 
+/// The Settings page from the keyboard and the mouse: sections switch,
+/// a folder chosen in the host's dialog is saved, a running download goes
+/// on meanwhile, and Back returns to Downloads; a narrow window stacks the
+/// sections above the content without scrolling.
+#[cfg(feature = "scripted-picker")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an X display and WebKitWebDriver"]
+async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
+    let server = Server::http().await;
+    let dirs = Dirs::new().await;
+    let shell = Shell::launch(&dirs).await;
+    let url = stalled(&server, "running.bin", SIZE, STALL);
+    shell.add(&url).await;
+    shell.wait_for_state("job-1", "Downloading").await;
+
+    shell.click("[data-key=\"open-settings\"]").await;
+    shell.wait_for(&section_shown("folder", "/settings")).await;
+    // Down moves along the sections, with focus drawn; Enter opens one.
+    shell
+        .wait_for("document.activeElement?.dataset.key === 'settings-title'")
+        .await;
+    press(&shell, Key::Tab).await;
+    press(&shell, Key::Down).await;
+    shell
+        .wait_for(
+            "document.activeElement?.dataset.key === 'settings-section-display'
+             && getComputedStyle(document.activeElement).outlineStyle === 'solid'",
+        )
+        .await;
+    press(&shell, Key::Enter).await;
+    shell
+        .wait_for(&section_shown("display", "/settings/display"))
+        .await;
+    fits_window(&shell, ".settings-content").await;
+
+    // A folder chosen in the host's dialog, then saved.
+    let folder = dirs.tmp.path().join("chosen-from-page");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(dirs.picker(), folder.to_str().unwrap()).unwrap();
+    shell.click("[data-key=\"settings-section-folder\"]").await;
+    shell.click("[data-key=\"settings-choose\"]").await;
+    shell
+        .wait_for(
+            "document.querySelector('.destination-form .message')?.textContent
+               === 'Folder added. Save to use it for new downloads.'",
+        )
+        .await;
+    shell.click("[data-key=\"settings-save\"]").await;
+    let saved = json!(format!("Saved. New downloads go to {}.", folder.display()));
+    shell
+        .wait_for(&format!(
+            "document.querySelector('.destination-form .message')?.textContent === {saved}
+             && document.activeElement?.dataset.key === 'settings-save'"
+        ))
+        .await;
+
+    // The download went on meanwhile, into the folder it started in.
+    release(&server, "running.bin");
+    eventually(|| async {
+        std::fs::read(dirs.root.join("running.bin"))
+            .ok()
+            .filter(|bytes| bytes.len() == SIZE)
+    })
+    .await;
+
+    // A narrow window stacks the sections above the content.
+    shell.client.set_window_size(480, 640).await.unwrap();
+    shell
+        .wait_for(
+            "document.querySelector('.settings-nav').getBoundingClientRect().bottom
+               <= document.querySelector('.settings-content').getBoundingClientRect().top",
+        )
+        .await;
+    fits_window(&shell, ".settings-nav").await;
+
+    // Back to Downloads, with focus on the gear.
+    shell.click("[data-key=\"settings-back\"]").await;
+    shell
+        .wait_for(&format!(
+            "location.pathname === '/' && document.activeElement?.dataset.key === 'open-settings'
+             && document.querySelector('[data-key=\"add-destination\"] .path')?.textContent === {}",
+            json!(folder.display().to_string())
+        ))
+        .await;
+    shell.wait_for_state("job-1", "Done").await;
+    shell.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs an X display"]
 async fn runs_without_a_daemon_or_listener() {
@@ -987,6 +1076,27 @@ async fn runs_without_a_daemon_or_listener() {
     assert_eq!(stopped["clean"], true);
 }
 
+/// Types `key` into the focused element.
+async fn press(shell: &Shell, key: Key) {
+    shell
+        .client
+        .active_element()
+        .await
+        .unwrap()
+        .send_keys(&char::from(key).to_string())
+        .await
+        .unwrap();
+}
+
+/// An expression true once Settings shows `section` alone, at `path`.
+fn section_shown(section: &str, path: &str) -> String {
+    format!(
+        "location.pathname === '{path}'
+         && document.querySelector('.settings-link[aria-current=\"page\"]')?.dataset.section === '{section}'
+         && [...document.querySelectorAll('.settings-panel')].every((p) => p.checkVisibility() === (p.dataset.section === '{section}'))"
+    )
+}
+
 /// Whether the page fits the window, as it must with a dialog or menu open,
 /// and the element `css` lies inside it.
 async fn fits_window(shell: &Shell, css: &str) {
@@ -1012,54 +1122,43 @@ async fn the_row_menu_opens_renames_and_removes_through_the_host() {
     shell.wait_for_state("job-1", "Done").await;
     let menu = ".menu:not([hidden])";
 
-    // Settings: this computer's folders, which the host's dialog can add
-    // to, and nothing labelled as a server path.
+    // Settings: a page of this computer's folders, which the host's dialog
+    // can add to, and nothing labelled as a server path.
     shell.click("[data-key=\"open-settings\"]").await;
     shell
-        .wait_for("document.querySelector('dialog.settings form.destination-form')")
+        .wait_for(
+            "location.pathname === '/settings'
+             && document.querySelector('.settings-page form.destination-form')",
+        )
         .await;
-    fits_window(&shell, "dialog.settings").await;
+    fits_window(&shell, ".settings-content").await;
     let settings = shell
-        .js("const d = document.querySelector('dialog.settings');
-             return { choose: [...d.querySelectorAll('button')].some((b) => b.textContent === 'Choose folder…'),
-                      server: d.textContent.includes('Server path'),
-                      accounts: d.textContent.includes('Not available yet') }")
+        .js("const p = document.querySelector('.settings-page');
+             return { choose: [...p.querySelectorAll('button')].some((b) => b.textContent === 'Choose folder…'),
+                      server: p.textContent.includes('Server path'),
+                      dialog: document.querySelector('dialog') !== null,
+                      focused: document.activeElement?.dataset.key }")
         .await;
     assert_eq!(
         settings,
-        json!({"choose": true, "server": false, "accounts": true})
+        json!({"choose": true, "server": false, "dialog": false, "focused": "settings-title"})
     );
+    // Sections switch in place, and Escape goes back to Downloads with
+    // focus on the gear.
     shell
-        .client
-        .find(Locator::Css("dialog.settings"))
-        .await
-        .unwrap()
-        .send_keys(&char::from(Key::Escape).to_string())
-        .await
-        .unwrap();
-    shell
-        .wait_for("!document.querySelector('dialog') && document.activeElement?.dataset.key === 'open-settings'")
+        .click("[data-key=\"settings-section-accounts\"]")
         .await;
-
-    // The webview's own menu (Reload, Inspect Element) stays out of the
-    // window, except in a text field and over selected text.
-    let native = shell
-        .js(
-            "const offered = (el) => el.dispatchEvent(new MouseEvent('contextmenu',
-               { bubbles: true, cancelable: true, button: 2 }));
-             const heading = document.querySelector('thead th');
-             const page = offered(heading);
-             const field = offered(document.querySelector('input[type=\"search\"]'));
-             getSelection().selectAllChildren(heading);
-             const selected = offered(heading);
-             getSelection().removeAllRanges();
-             return { page, field, selected };",
+    shell
+        .wait_for(&section_shown("accounts", "/settings/accounts"))
+        .await;
+    fits_window(&shell, ".settings-content").await;
+    press(&shell, Key::Escape).await;
+    shell
+        .wait_for(
+            "location.pathname === '/' && !document.querySelector('.settings-page').checkVisibility()
+             && document.activeElement?.dataset.key === 'open-settings'",
         )
         .await;
-    assert_eq!(
-        native,
-        json!({"page": false, "field": true, "selected": true})
-    );
 
     // A right-click on the row opens its menu inside the window, with the
     // host's file actions.

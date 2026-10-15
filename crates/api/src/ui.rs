@@ -266,7 +266,7 @@ mod tests {
     #[tokio::test]
     async fn browser_paths_get_the_revalidated_entry_page() {
         let ui = bundle("<script src=\"{{assets}}/main.js\"></script>");
-        for path in ["/", "/jobs/job-1", "/login?next=x"] {
+        for path in ["/", "/jobs/job-1", "/settings/display", "/login?next=x"] {
             let (status, response) = get(&ui, Method::GET, path).await;
             assert_eq!(status, StatusCode::OK, "{path}");
             let headers = response.headers();
