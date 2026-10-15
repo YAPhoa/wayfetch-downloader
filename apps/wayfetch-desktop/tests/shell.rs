@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use engine_support::body;
+use fantoccini::key::Key;
 use fantoccini::{Client, ClientBuilder, Locator};
 use serde_json::{Value, json};
 use support::{Resource, Server};
@@ -261,8 +262,9 @@ impl Shell {
             .unwrap();
     }
 
-    /// Adds a link through the toolbar's form.
-    async fn add(&self, url: &str) {
+    /// Adds links, one per line, through the toolbar's form, which then
+    /// says `added`.
+    async fn add_many(&self, urls: &str, added: &str) {
         let open = self
             .js("return document.querySelector('textarea[name=\"urls\"]')?.checkVisibility() ?? false")
             .await;
@@ -275,12 +277,27 @@ impl Shell {
             .await
             .unwrap();
         links.clear().await.unwrap();
-        links.send_keys(url).await.unwrap();
+        // One line at a time: WebKitWebDriver drops a newline inside typed
+        // text.
+        for (i, url) in urls.lines().enumerate() {
+            if i > 0 {
+                links
+                    .send_keys(&char::from(Key::Enter).to_string())
+                    .await
+                    .unwrap();
+            }
+            links.send_keys(url).await.unwrap();
+        }
         self.click("#add-links button[type=\"submit\"]").await;
-        self.wait_for(
-            "document.querySelector('#add-links .message')?.textContent === 'Added 1 download.'",
-        )
+        self.wait_for(&format!(
+            "document.querySelector('#add-links .message')?.textContent === '{added}'"
+        ))
         .await;
+    }
+
+    /// Adds a link through the toolbar's form.
+    async fn add(&self, url: &str) {
+        self.add_many(url, "Added 1 download.").await;
     }
 
     /// Selects a job, so the toolbar acts on it.
@@ -578,6 +595,28 @@ async fn downloads_through_the_shared_ui_and_recovers_after_relaunch() {
     shell.select("job-2").await;
     shell.act("cancel", "job-2").await;
     shell.wait_for_state("job-2", "Cancelled").await;
+
+    // A long list scrolls inside the table; the page itself never does.
+    let many: Vec<_> = (0..50)
+        .map(|i| {
+            let path = format!("/many-{i}.bin");
+            server.put(&path, Resource::new(body(1024)));
+            server.url(&path)
+        })
+        .collect();
+    shell
+        .add_many(&many.join("\n"), "Added 50 downloads.")
+        .await;
+    shell
+        .wait_for("document.querySelectorAll('tr[data-job]').length === 50")
+        .await;
+    let sizes = shell
+        .js("const table = document.querySelector('.table-scroll');
+             return [document.documentElement.scrollHeight, document.documentElement.clientHeight,
+                     table.scrollHeight > table.clientHeight];")
+        .await;
+    assert_eq!(sizes[0], sizes[1], "the page fits the window: {sizes}");
+    assert_eq!(sizes[2], true, "the table scrolls: {sizes}");
 
     // The engine runs in the app's own process. The only TCP listener is
     // the inspector server WebKitWebDriver asked the WebView to open for
