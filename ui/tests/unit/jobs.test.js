@@ -137,6 +137,10 @@ test('file kinds come from the extension, including compound ones', () => {
   assert.equal(fileKind('download-1'), 'File with no extension');
   assert.equal(fileKind('.bashrc'), 'File with no extension');
   assert.equal(fileKind('odd.n%me'), 'File');
+  // Names of Object.prototype members are not kinds.
+  assert.equal(fileKind('a.constructor'), 'File');
+  assert.equal(fileKind('a.__proto__'), 'File');
+  assert.equal(fileKind('a.tar.__proto__'), 'File');
 });
 
 test('links are shown without credentials, query, or fragment', () => {

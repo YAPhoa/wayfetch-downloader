@@ -360,8 +360,8 @@ export function fileKind(name) {
   if (parts.length < 2 || (parts.length === 2 && parts[0] === '')) return 'File with no extension';
   const double = parts.slice(-2).join('.');
   const extension = /** @type {string} */ (parts.at(-1));
-  if (parts.length > 2 && KINDS[double]) return KINDS[double];
-  if (KINDS[extension]) return KINDS[extension];
+  if (parts.length > 2 && Object.hasOwn(KINDS, double)) return KINDS[double];
+  if (Object.hasOwn(KINDS, extension)) return KINDS[extension];
   return /^[a-z0-9]{1,10}$/.test(extension) ? `${extension.toUpperCase()} file` : 'File';
 }
 
