@@ -18,6 +18,14 @@ serde_json.workspace = true
 # window needs: no tray, no dynamic capabilities, assets always embedded.
 tauri = { version = "2.12.4", default-features = false, features = ["wry", "compression", "x11", "custom-protocol"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+# The native folder dialog, with the GTK 3 backend the WebView already
+# links; no XDG portal or D-Bus stack (see src/picker.rs).
+rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
+
+[features]
+# Replaces the folder dialog with a scripted answer, for the real-window
+# tests only; no build ships with it.
+scripted-picker = []
 
 [dev-dependencies]
 wayfetch-net.workspace = true

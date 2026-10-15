@@ -29,8 +29,9 @@ tokio-util = { workspace = true, features = ["rt"] }
 fail = { version = "0.5.1", optional = true }
 
 [features]
-# Named crash-injection boundaries for process-kill tests (architecture brief
-# section 13.2). Test-only: no host enables it.
+# Named fault-injection points: crash boundaries for process-kill tests
+# (architecture brief section 13.2) and a hung folder. Test-only: no host
+# enables it.
 failpoints = ["dep:fail", "fail/failpoints"]
 # TypeScript declarations of the protocol's wire types, for the UI.
 ts = ["wayfetch-protocol/ts"]

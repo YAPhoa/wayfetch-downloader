@@ -1,6 +1,7 @@
 //! The `wayfetchd` executable driven as a subprocess over its HTTP API,
 //! against the local HTTPS fixture: the bundled web UI; the complete
-//! submit, list, inspect, pause, resume, and cancel workflow;
+//! submit, list, inspect, pause, resume, and cancel workflow; choosing the
+//! default destination among the server's folders;
 //! authentication and scoped tokens; server-sent events that resume from
 //! `Last-Event-ID` or say to resynchronize; downloads that continue after
 //! every client disconnects; request and stream bounds; graceful shutdown
@@ -50,6 +51,8 @@ struct Dirs {
     tmp: tempfile::TempDir,
     state: PathBuf,
     root: PathBuf,
+    /// Further roots, passed with `--root`.
+    roots: Vec<PathBuf>,
     tokens: PathBuf,
     browser: bool,
 }
@@ -61,6 +64,7 @@ impl Dirs {
         let dirs = Self {
             state: tmp.path().join("state"),
             root: tmp.path().join("downloads"),
+            roots: Vec::new(),
             tokens: tmp.path().join("tokens"),
             browser: false,
             tmp,
@@ -83,11 +87,16 @@ impl Dirs {
     }
 
     fn init_root(&self) {
+        self.init(&self.root);
+    }
+
+    /// Runs `init-root` for `root`.
+    fn init(&self, root: &std::path::Path) {
         let out = std::process::Command::new(BIN)
             .arg("init-root")
             .arg("--state-dir")
             .arg(&self.state)
-            .arg(&self.root)
+            .arg(root)
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
@@ -173,6 +182,9 @@ impl Daemon {
             .args(["--listen", listen, "--json"])
             .args(["--allow-network", "127.0.0.1/32", "--ca-cert"])
             .arg(dirs.ca());
+        for root in &dirs.roots {
+            command.arg("--root").arg(root);
+        }
         if dirs.browser {
             command
                 .arg("--auth-dir")
@@ -374,6 +386,82 @@ async fn the_complete_workflow_over_http() {
     );
 
     daemon.stop("INT").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_default_destination_is_chosen_among_server_folders() {
+    let server = Server::https().await;
+    let mut dirs = Dirs::ready(&server);
+    let media = dirs.tmp.path().join("media");
+    std::fs::create_dir(&media).unwrap();
+    dirs.init(&media);
+    dirs.roots.push(media.clone());
+    let daemon = Daemon::start(&dirs).await;
+    let client = daemon.owner();
+
+    // Readers see the folders as paths on the server.
+    let (status, settings) = daemon.client(READER_TOKEN).get("/v1/settings").await;
+    assert_eq!(status, StatusCode::OK, "{settings}");
+    assert_eq!(settings["type"], "settings");
+    let roots = settings["roots"].as_array().unwrap();
+    let paths: Vec<_> = roots.iter().map(|r| r["path"].as_str().unwrap()).collect();
+    assert_eq!(
+        paths,
+        [dirs.root.to_str().unwrap(), media.to_str().unwrap()]
+    );
+    assert!(roots.iter().all(|r| r["available"] == true), "{settings}");
+    assert_eq!(settings["default_root"], roots[0]["id"]);
+    let media_id = roots[1]["id"].clone();
+
+    let choose = |revision: &Value, root: &Value| {
+        client.command(json!({"expected_revision": revision, "default_root": root}))
+    };
+    let change = choose(&settings["revision"], &media_id);
+    let (status, _) = daemon
+        .client(READER_TOKEN)
+        .put("/v1/settings", &change)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, updated) = client.put("/v1/settings", &change).await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["type"], "settings_updated");
+    assert_eq!(updated["changed"], true);
+    assert_eq!(
+        client.put("/v1/settings", &change).await,
+        (status, updated.clone())
+    );
+    let (status, error) = client
+        .put(
+            "/v1/settings",
+            &choose(&updated["revision"], &"root-99".into()),
+        )
+        .await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::NOT_FOUND, &"not_found".into())
+    );
+    // Only a root ID names a destination, never a path.
+    let (status, _) = client
+        .put(
+            "/v1/settings",
+            &choose(&updated["revision"], &"/etc".into()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let data = body(MIB);
+    server.put("/to-media.bin", Resource::new(data.clone()));
+    let id = client.submit(&server.url("/to-media.bin")).await;
+    let done = client.stage(&id, "complete").await;
+    assert_eq!(done["destination"], media_id);
+    assert_eq!(std::fs::read(media.join("to-media.bin")).unwrap(), data);
+    daemon.stop("TERM").await;
+
+    let daemon = Daemon::start(&dirs).await;
+    let (_, settings) = daemon.owner().get("/v1/settings").await;
+    assert_eq!(settings["default_root"], media_id);
+    assert_eq!(settings["revision"], updated["revision"]);
+    daemon.stop("TERM").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

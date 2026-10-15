@@ -7,7 +7,7 @@
 //! test T62).
 
 use serde::Deserialize;
-use wayfetch_domain::id::{JobId, PackageId};
+use wayfetch_domain::id::{JobId, PackageId, RootId};
 use wayfetch_domain::version::Revision;
 
 use crate::command::{Command, CommandEnvelope, IdempotencyKey, InputUrl, SubmitItems};
@@ -110,6 +110,36 @@ impl JobCommandRequest {
     }
 }
 
+/// Chooses the default destination at the settings revision the client
+/// saw.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct UpdateSettingsRequest {
+    /// Identifies the command across retries.
+    pub idempotency_key: IdempotencyKey,
+    /// The instance the client believes it is talking to.
+    pub target: InstanceId,
+    /// The settings revision the client last saw.
+    pub expected_revision: Revision,
+    /// Where jobs submitted from now on are saved.
+    pub default_root: RootId,
+}
+
+impl UpdateSettingsRequest {
+    /// The command envelope.
+    pub fn into_envelope(self) -> CommandEnvelope {
+        CommandEnvelope {
+            idempotency_key: self.idempotency_key,
+            target: self.target,
+            command: Command::UpdateSettings {
+                expected_revision: self.expected_revision,
+                default_root: self.default_root,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +189,30 @@ mod tests {
                 expected_revision: Revision::from_u64(3).unwrap()
             }
         );
+    }
+
+    #[test]
+    fn settings_requests_name_a_root_and_revision() {
+        let request: UpdateSettingsRequest = serde_json::from_value(json!({
+            "idempotency_key": IdempotencyKey::generate(),
+            "target": InstanceId::generate(),
+            "expected_revision": 1,
+            "default_root": "root-4",
+        }))
+        .unwrap();
+        assert_eq!(
+            request.into_envelope().command,
+            Command::UpdateSettings {
+                expected_revision: Revision::from_u64(1).unwrap(),
+                default_root: RootId::from_u64(4).unwrap(),
+            }
+        );
+        let path = serde_json::from_value::<UpdateSettingsRequest>(json!({
+            "idempotency_key": IdempotencyKey::generate(),
+            "target": InstanceId::generate(),
+            "expected_revision": 1,
+            "default_root": "/etc",
+        }));
+        assert!(path.is_err());
     }
 }

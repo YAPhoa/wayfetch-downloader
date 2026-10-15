@@ -8,30 +8,36 @@
 //! engine level: T01 (sequential file), T02 and T23 (resume from durable
 //! checkpoints after a restart), T03 (`200` to a range request), T05
 //! (representation changed during resume), T09 (stalled headers and body),
-//! T27 (cancelled generation), and T47 (bounded subscriber replay).
+//! T27 (cancelled generation), and T47 (bounded subscriber replay). The
+//! last tests cover destination roots and the default for new jobs.
 
 mod support;
 
 use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use support::{ALL, KIB, ROOT, body, complete, envelope, job, jobs, shutdown, wait_for};
-use wayfetch_engine::EngineOwner;
-use wayfetch_engine::Timeouts;
+use wayfetch_engine::fs::Root;
 use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
+use wayfetch_engine::{EngineOwner, Timeouts};
 use wayfetch_protocol::domain::failure::FailureCode;
-use wayfetch_protocol::domain::id::JobId;
+use wayfetch_protocol::domain::id::{JobId, RootId};
 use wayfetch_protocol::domain::job::JobStage;
+use wayfetch_protocol::domain::version::Revision;
 use wayfetch_protocol::event::{EventKind, ResyncReason};
-use wayfetch_protocol::query::{JobFilter, PageSize};
-use wayfetch_protocol::{Command, Query, QueryResult, StreamItem, Subscribe};
+use wayfetch_protocol::query::{JobFilter, PageSize, Settings};
+use wayfetch_protocol::{
+    Command, CommandEnvelope, CommandResult, ErrorCode, Permission, Query, QueryResult, StreamItem,
+    Subscribe,
+};
 
 /// A file the fake server holds.
 #[derive(Debug, Clone)]
@@ -793,4 +799,535 @@ async fn a_storage_failure_during_recovery_waits_for_the_next_start() {
     complete(&owner, id).await;
     assert_eq!(env.published("held.bin"), data);
     shutdown(owner).await;
+}
+
+// Destinations (ADR-17, ADR-29): the default root for new jobs, and roots
+// a host registers on its user's request.
+
+async fn settings(owner: &EngineOwner) -> Settings {
+    match owner.handle().query(Query::Settings {}, ALL).await.unwrap() {
+        QueryResult::Settings(settings) => settings,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn choose(owner: &EngineOwner, revision: Revision, root: RootId) -> CommandEnvelope {
+    envelope(
+        owner,
+        Command::UpdateSettings {
+            expected_revision: revision,
+            default_root: root,
+        },
+    )
+}
+
+/// A directory beside the environment's download root.
+fn folder(env: &Env, name: &str) -> PathBuf {
+    let path = env.root.parent().unwrap().join(name);
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_default_applies_only_to_later_jobs_and_survives_restart() {
+    let mut env = env();
+    let media = folder(&env, "media");
+    env.roots.push(media.clone());
+    let media_id = env.init_root(&media);
+    assert_ne!(media_id, ROOT);
+    env.server.put("/a.bin", Resource::new(body(5 * KIB)));
+    env.server.put("/b.bin", Resource::new(body(6 * KIB)));
+    let owner = env.start().await;
+    let [a] = submit(&owner, &["/a.bin"]).await[..] else {
+        panic!()
+    };
+    assert_eq!(complete(&owner, a).await.destination, Some(ROOT));
+
+    let before = settings(&owner).await;
+    assert_eq!(before.default_root, Some(ROOT));
+    let listed: Vec<_> = before.roots.iter().map(|r| (r.id, r.available)).collect();
+    assert_eq!(listed, [(ROOT, true), (media_id, true)]);
+    assert_eq!(before.roots[1].path, media.to_str().unwrap());
+
+    let change = choose(&owner, before.revision, media_id);
+    let updated = owner.handle().execute(change.clone(), ALL).await.unwrap();
+    let revision = before.revision.next().unwrap();
+    assert_eq!(
+        updated,
+        CommandResult::SettingsUpdated {
+            revision,
+            changed: true
+        }
+    );
+    // A retry replays the result; a stale revision conflicts.
+    assert_eq!(owner.handle().execute(change, ALL).await.unwrap(), updated);
+    let stale = owner
+        .handle()
+        .execute(choose(&owner, before.revision, ROOT), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(stale.code, ErrorCode::RevisionConflict);
+    assert_eq!(stale.current_revision, Some(revision));
+
+    let [b] = submit(&owner, &["/b.bin"]).await[..] else {
+        panic!()
+    };
+    let done = complete(&owner, b).await;
+    assert_eq!(done.destination, Some(media_id));
+    assert_eq!(done.artifact.unwrap().root, media_id);
+    assert_eq!(std::fs::read(media.join("b.bin")).unwrap(), body(6 * KIB));
+    assert!(!env.root.join("b.bin").exists());
+    // Read permission is enough to see the settings, not to change them.
+    let denied = owner
+        .handle()
+        .execute(choose(&owner, revision, ROOT), &[Permission::Read])
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, ErrorCode::PermissionDenied);
+    shutdown(owner).await;
+
+    let owner = env.start().await;
+    let after = settings(&owner).await;
+    assert_eq!(
+        (after.revision, after.default_root),
+        (revision, Some(media_id))
+    );
+    assert_eq!(job(&owner, a).await.destination, Some(ROOT));
+    assert_eq!(job(&owner, b).await.destination, Some(media_id));
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_and_unavailable_roots_cannot_become_the_default() {
+    let mut env = env();
+    let media = folder(&env, "media");
+    env.roots.push(media.clone());
+    let media_id = env.init_root(&media);
+    let owner = env.start().await;
+    let before = settings(&owner).await;
+
+    let unknown = RootId::from_u64(99).unwrap();
+    let err = owner
+        .handle()
+        .execute(choose(&owner, before.revision, unknown), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotFound);
+
+    // The drive is unmounted: its mount point is an empty directory.
+    let mounted = folder(&env, "media-mounted");
+    std::fs::remove_dir(&mounted).unwrap();
+    std::fs::rename(&media, &mounted).unwrap();
+    std::fs::create_dir(&media).unwrap();
+    let missing = settings(&owner).await;
+    let shown = missing.roots.iter().find(|r| r.id == media_id).unwrap();
+    assert!(!shown.available);
+    assert!(
+        shown
+            .problem
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .contains("not mounted"),
+        "{shown:?}"
+    );
+    let err = owner
+        .handle()
+        .execute(choose(&owner, before.revision, media_id), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotApplicable);
+    // Nothing changed, and the empty mount point was not written to.
+    let after = settings(&owner).await;
+    assert_eq!(
+        (after.revision, after.default_root),
+        (before.revision, Some(ROOT))
+    );
+    assert_eq!(std::fs::read_dir(&media).unwrap().count(), 0);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_keeps_its_root_and_blocks_while_it_is_not_permitted() {
+    let mut env = env();
+    let media = folder(&env, "media");
+    env.roots.push(media.clone());
+    let media_id = env.init_root(&media);
+    let data = body(20 * KIB);
+    let mut resource = Resource::new(data.clone());
+    resource.stall_at = Some(8 * KIB);
+    env.server.put("/kept.bin", resource);
+    let owner = env.start().await;
+    let revision = settings(&owner).await.revision;
+    owner
+        .handle()
+        .execute(choose(&owner, revision, media_id), ALL)
+        .await
+        .unwrap();
+    let [id] = submit(&owner, &["/kept.bin"]).await[..] else {
+        panic!()
+    };
+    wait_for(&owner, id, |j| j.bytes_done == 8 * KIB as u64).await;
+    shutdown(owner).await;
+    env.server.update("/kept.bin", |r| r.stall_at = None);
+
+    // The operator stops configuring the root: the job is not redirected
+    // to the download root, and its partial stays where it is.
+    env.roots.clear();
+    let owner = env.start().await;
+    let blocked = wait_for(&owner, id, |j| j.stage == JobStage::Blocked).await;
+    assert_eq!(
+        blocked.failure.unwrap().code,
+        FailureCode::DestinationUnavailable
+    );
+    assert_eq!(blocked.destination, Some(media_id));
+    assert_eq!(support::staging_files(&media), 1);
+    let listed = settings(&owner).await;
+    assert_eq!(listed.default_root, Some(ROOT));
+    assert!(listed.roots.iter().all(|r| r.id != media_id));
+    shutdown(owner).await;
+
+    // Configured again, the job continues there once resumed.
+    env.roots.push(media.clone());
+    let owner = env.start().await;
+    let blocked = job(&owner, id).await;
+    let pause = Command::Pause {
+        job: id,
+        expected_revision: blocked.revision,
+    };
+    let paused = owner
+        .handle()
+        .execute(envelope(&owner, pause), ALL)
+        .await
+        .unwrap();
+    let CommandResult::JobUpdated { revision, .. } = paused else {
+        panic!("{paused:?}")
+    };
+    let resume = Command::Resume {
+        job: id,
+        expected_revision: revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, resume), ALL)
+        .await
+        .unwrap();
+    complete(&owner, id).await;
+    assert_eq!(std::fs::read(media.join("kept.bin")).unwrap(), data);
+    assert!(!env.root.join("kept.bin").exists());
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_root_stays_permitted_across_restarts() {
+    let env = env();
+    let owner = env.start().await;
+    let handle = owner.handle();
+    let missing = env.root.parent().unwrap().join("missing");
+    let err = handle
+        .register_root(missing.clone(), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotApplicable);
+    assert!(!missing.exists());
+    let err = handle
+        .register_root("relative".into(), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidRequest);
+    let err = handle
+        .register_root(folder(&env, "x"), &[Permission::Read])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
+    assert_eq!(settings(&owner).await.roots.len(), 1);
+
+    let chosen = folder(&env, "chosen");
+    let registered = handle.register_root(chosen.clone(), ALL).await.unwrap();
+    assert!(registered.available);
+    assert_eq!(registered.path, chosen.to_str().unwrap());
+    assert_eq!(
+        handle.register_root(chosen.clone(), ALL).await.unwrap().id,
+        registered.id
+    );
+    shutdown(owner).await;
+
+    // Not configured, yet still a choice after a restart.
+    let owner = env.start().await;
+    let listed = settings(&owner).await;
+    assert!(
+        listed
+            .roots
+            .iter()
+            .any(|r| r.id == registered.id && r.available)
+    );
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn blocked_jobs_do_not_hold_back_the_jobs_behind_them() {
+    let mut env = env();
+    env.limits.active_files = NonZeroUsize::new(2).unwrap();
+    let media = folder(&env, "media");
+    env.roots.push(media.clone());
+    let media_id = env.init_root(&media);
+    for name in ["/a.bin", "/b.bin"] {
+        let mut resource = Resource::new(body(20 * KIB));
+        resource.stall_at = Some(8 * KIB);
+        env.server.put(name, resource);
+    }
+    env.server.put("/c.bin", Resource::new(body(5 * KIB)));
+    let owner = env.start().await;
+    let revision = settings(&owner).await.revision;
+    owner
+        .handle()
+        .execute(choose(&owner, revision, media_id), ALL)
+        .await
+        .unwrap();
+    let held = submit(&owner, &["/a.bin", "/b.bin"]).await;
+    for id in &held {
+        wait_for(&owner, *id, |j| j.bytes_done == 8 * KIB as u64).await;
+    }
+    owner
+        .handle()
+        .execute(choose(&owner, revision.next().unwrap(), ROOT), ALL)
+        .await
+        .unwrap();
+    // Both slots are taken, so it waits.
+    let [later] = submit(&owner, &["/c.bin"]).await[..] else {
+        panic!()
+    };
+    assert_eq!(job(&owner, later).await.stage, JobStage::Queued);
+    shutdown(owner).await;
+
+    // The jobs in front lose their root and fill every slot the first
+    // admission pass looks at; the one behind them still starts.
+    env.roots.clear();
+    let owner = env.start().await;
+    for id in held {
+        wait_for(&owner, id, |j| j.stage == JobStage::Blocked).await;
+    }
+    assert_eq!(complete(&owner, later).await.destination, Some(ROOT));
+    assert_eq!(env.published("c.bin"), body(5 * KIB));
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_submitted_before_the_download_root_is_mounted_is_saved_there() {
+    let mut env = env();
+    let media = folder(&env, "media");
+    env.roots.push(media.clone());
+    let media_id = env.init_root(&media);
+    env.server.put("/early.bin", Resource::new(body(5 * KIB)));
+    // The download root's drive is not mounted yet, and nothing was chosen,
+    // so there is no default: the job belongs to the download root.
+    let owner = env.start_uninitialized().await;
+    assert_eq!(settings(&owner).await.default_root, None);
+    let [id] = submit(&owner, &["/early.bin"]).await[..] else {
+        panic!()
+    };
+    let blocked = wait_for(&owner, id, |j| j.stage == JobStage::Blocked).await;
+    assert_eq!(blocked.destination, None);
+
+    // Another folder becomes the default before the drive is mounted.
+    let revision = settings(&owner).await.revision;
+    owner
+        .handle()
+        .execute(choose(&owner, revision, media_id), ALL)
+        .await
+        .unwrap();
+    Root::initialize(&env.root, ROOT, owner.identity().instance).unwrap();
+    let paused = owner
+        .handle()
+        .execute(
+            envelope(
+                &owner,
+                Command::Pause {
+                    job: id,
+                    expected_revision: blocked.revision,
+                },
+            ),
+            ALL,
+        )
+        .await
+        .unwrap();
+    let CommandResult::JobUpdated { revision, .. } = paused else {
+        panic!("{paused:?}")
+    };
+    let resume = Command::Resume {
+        job: id,
+        expected_revision: revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, resume), ALL)
+        .await
+        .unwrap();
+    // It still goes where it was meant to.
+    assert_eq!(complete(&owner, id).await.destination, Some(ROOT));
+    assert_eq!(env.published("early.bin"), body(5 * KIB));
+    assert!(!media.join("early.bin").exists());
+    shutdown(owner).await;
+}
+
+/// A hung mount: while it lasts, opening a folder named `stalled` blocks
+/// until [`Hang::release`].
+#[cfg(feature = "failpoints")]
+struct Hang {
+    entered: tokio::sync::mpsc::UnboundedReceiver<()>,
+    gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+}
+
+#[cfg(feature = "failpoints")]
+impl Hang {
+    fn start() -> Self {
+        let (entered, rx) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let held = gate.clone();
+        fail::cfg_callback("root-open-stall", move || {
+            let _ = entered.send(());
+            let (open, released) = &*held;
+            let mut open = open.lock().unwrap();
+            while !*open {
+                open = released.wait(open).unwrap();
+            }
+        })
+        .unwrap();
+        Self { entered: rx, gate }
+    }
+
+    /// Waits until something is blocked in the folder.
+    async fn entered(&mut self) {
+        tokio::time::timeout(Duration::from_secs(10), self.entered.recv())
+            .await
+            .unwrap();
+    }
+
+    fn release(&self) {
+        fail::remove("root-open-stall");
+        *self.gate.0.lock().unwrap() = true;
+        self.gate.1.notify_all();
+    }
+}
+
+#[cfg(feature = "failpoints")]
+impl Drop for Hang {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// The engine answers within this while a folder hangs.
+#[cfg(feature = "failpoints")]
+const PROMPT: Duration = Duration::from_secs(1);
+
+/// The only test of the hung folder, since the failpoint is process-wide.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
+    let mut env = env();
+    env.server.put("/a.bin", Resource::new(body(5 * KIB)));
+    env.server.put("/b.bin", Resource::new(body(5 * KIB)));
+    let configured = folder(&env, "configured/stalled");
+    env.roots.push(configured);
+    let mut hang = Hang::start();
+
+    // A configured folder that never answers costs startup at most one
+    // probe deadline, and is then skipped while its check is stuck.
+    let owner = env.start().await;
+    hang.entered().await;
+    let handle = owner.handle();
+    let [a] = submit(&owner, &["/a.bin"]).await[..] else {
+        panic!()
+    };
+    assert_eq!(complete(&owner, a).await.destination, Some(ROOT));
+    tokio::time::timeout(PROMPT, handle.hello())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Registering a folder that hangs blocks only that registration.
+    let chosen = folder(&env, "chosen/stalled");
+    let registering = tokio::spawn({
+        let (handle, chosen) = (handle.clone(), chosen.clone());
+        async move { handle.register_root(chosen, ALL).await }
+    });
+    hang.entered().await;
+    tokio::time::timeout(PROMPT, handle.hello())
+        .await
+        .unwrap()
+        .unwrap();
+    let listed = tokio::time::timeout(PROMPT, settings(&owner))
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .roots
+            .iter()
+            .all(|r| r.path != chosen.to_str().unwrap())
+    );
+    let [b] = tokio::time::timeout(PROMPT, submit(&owner, &["/b.bin"]))
+        .await
+        .unwrap()[..]
+    else {
+        panic!()
+    };
+    complete(&owner, b).await;
+    // The same folder again is refused rather than queued behind it.
+    let again = tokio::time::timeout(PROMPT, handle.register_root(chosen.clone(), ALL))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(again.code, ErrorCode::Busy);
+
+    // Once the folder answers, the registration finishes.
+    hang.release();
+    let registered = registering.await.unwrap().unwrap();
+    assert_eq!(registered.path, chosen.to_str().unwrap());
+    assert!(
+        settings(&owner)
+            .await
+            .roots
+            .iter()
+            .any(|r| r.id == registered.id)
+    );
+
+    // A registration still stuck in the folder at shutdown keeps the state
+    // directory locked until the folder answers, and then stops without
+    // writing to it, so no later owner of the directory races it.
+    drop(hang);
+    let mut hang = Hang::start();
+    let late = folder(&env, "late/stalled");
+    let registering = tokio::spawn({
+        let (handle, late) = (handle.clone(), late.clone());
+        async move { handle.register_root(late, ALL).await }
+    });
+    // The configured folder's next check hangs too; waits for both.
+    hang.entered().await;
+    let _ = tokio::time::timeout(Duration::from_millis(500), hang.entered()).await;
+    use wayfetch_engine::ShutdownRequest;
+    use wayfetch_engine::state_dir::{StateDir, StateDirError};
+    let report = owner
+        .shutdown(ShutdownRequest {
+            // Past the probe deadline, so only the registration is left.
+            timeout: Some(Duration::from_secs(3)),
+        })
+        .await;
+    assert!(!report.clean && !report.state_dir_released, "{report:?}");
+    assert!(matches!(
+        StateDir::open(&env.state),
+        Err(StateDirError::Locked(_))
+    ));
+    hang.release();
+    let stopped = registering.await.unwrap().unwrap_err();
+    assert_eq!(stopped.code, ErrorCode::ShuttingDown);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while StateDir::open(&env.state).is_err() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the lock was never released"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(std::fs::read_dir(&late).unwrap().next().is_none());
 }
