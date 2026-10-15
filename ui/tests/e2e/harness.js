@@ -260,7 +260,7 @@ export async function freePort() {
 
 /**
  * A `wayfetchd` with its own state directory, download root, a second
- * permitted folder, token file, auth directory, and credential key,
+ * permitted folder, token file (with the credential key beside it), and auth directory,
  * serving browsers on a fixed loopback port across restarts, with
  * Real-Debrid's API at `realDebrid` if given.
  */
@@ -305,7 +305,6 @@ export class Daemon {
         '--auth-dir', /** @type {string} */ (this.auth),
         '--dev-insecure-loopback',
         '--allow-network', '127.0.0.1/32',
-        '--credential-key', join(/** @type {string} */ (this.dir), 'credential.key'),
         ...(this.realDebrid ? ['--real-debrid-endpoint', this.realDebrid] : []),
         '--json',
       ],
