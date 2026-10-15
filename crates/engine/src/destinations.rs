@@ -3,9 +3,10 @@
 //! and 8.6, ADR-17 and ADR-29).
 //!
 //! * A root is permitted while the operator configures its path, or after
-//!   a host registered it on its user's explicit request, such as a folder
-//!   chosen in the desktop app's native picker. Nothing a client sends can
-//!   add one: clients choose among permitted roots by ID.
+//!   it was registered on its user's explicit request: a folder chosen in
+//!   the desktop app's native picker, or a server folder the owner chose in
+//!   the browser after listing folders ([`browse`]). Jobs and settings name
+//!   roots only by ID. A folder holding the state directory is refused.
 //! * Each root's ID is allocated by the store and written into its
 //!   sentinel ([`initialize_root`]). A configured path the store has not
 //!   seen is identified from its sentinel, so a root earlier versions
@@ -39,7 +40,7 @@ use wayfetch_domain::id::RootId;
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
-use wayfetch_protocol::query::{RootSummary, Settings};
+use wayfetch_protocol::query::{FolderListing, MAX_LISTED_FOLDERS, RootSummary, Settings};
 use wayfetch_protocol::{ErrorCode, InstanceId, ProtocolError};
 
 use crate::config::EngineConfig;
@@ -195,13 +196,15 @@ pub(crate) fn initialize(
 /// A filesystem step cannot be interrupted, so the registration waits for
 /// it, holding the state directory, and starts nothing after `cancel`
 /// fires: no other engine can open the directory while a step may still
-/// write to the folder.
+/// write to the folder. The state directory itself, or a folder inside
+/// it, is refused.
 pub(crate) async fn register(
     store: &StoreClient,
     probes: &Probes,
     cancel: &CancellationToken,
     path: PathBuf,
     instance: InstanceId,
+    state_dir: PathBuf,
 ) -> Result<RootId, ProtocolError> {
     check_path(&path)?;
     let _slot = probes.claim(&path).ok_or_else(|| {
@@ -212,6 +215,16 @@ pub(crate) async fn register(
     })?;
     let stopped = || ProtocolError::new(ErrorCode::ShuttingDown, "engine is not running");
     let running = || (!cancel.is_cancelled()).then_some(()).ok_or_else(stopped);
+    let inside = {
+        let path = path.clone();
+        probes.blocking(move || within(&path, &state_dir)).await?
+    };
+    if inside {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidRequest,
+            "the folder holds Wayfetch's own state and cannot be a destination",
+        ));
+    }
     let known = {
         let path = path.clone();
         store
@@ -246,6 +259,98 @@ pub(crate) async fn register(
         .call(move |store| settle(store, id, allocated, true, initialized))
         .await
         .ok_or_else(stopped)??)
+}
+
+/// Whether `path` is `dir` or inside it, as written or once links are
+/// resolved. Blocking.
+fn within(path: &Path, dir: &Path) -> bool {
+    let resolved = |p: &Path| std::fs::canonicalize(p).ok();
+    path.starts_with(dir)
+        || matches!((resolved(path), resolved(dir)), (Some(path), Some(dir)) if path.starts_with(&dir))
+}
+
+/// The folders inside the folder at `path`, the top of the filesystem if
+/// `None`, for the owner to choose one to register. Read on a blocking
+/// thread with a deadline, like a root check ([`Probes`]), so a hung mount
+/// is reported as not responding.
+pub(crate) async fn browse(
+    probes: &Probes,
+    path: Option<PathBuf>,
+) -> Result<FolderListing, ProtocolError> {
+    let path = path.unwrap_or_else(|| PathBuf::from("/"));
+    if !path.is_absolute() {
+        return Err(RootError::Relative(path).into());
+    }
+    let owned = path.clone();
+    probes
+        .timed(&path, move || list_folders(&owned))
+        .await
+        .unwrap_or_else(|| {
+            Err(ProtocolError::new(
+                ErrorCode::Busy,
+                "the folder is not responding",
+            ))
+        })
+}
+
+/// [`browse`]'s blocking part. Stops reading after
+/// [`MAX_LISTED_FOLDERS`], so a huge folder costs a bounded listing.
+fn list_folders(path: &Path) -> Result<FolderListing, ProtocolError> {
+    let path = std::fs::canonicalize(path).map_err(|e| unreadable(&e))?;
+    let text = |p: &Path| {
+        path_text(p).map(str::to_owned).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::NotApplicable,
+                "the folder's path is not valid UTF-8",
+            )
+        })
+    };
+    let mut folders = Vec::new();
+    let mut truncated = false;
+    for entry in std::fs::read_dir(&path).map_err(|e| unreadable(&e))? {
+        let Ok(entry) = entry else { continue };
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        // A link to a folder is listed as one.
+        let folder = entry
+            .file_type()
+            .is_ok_and(|kind| kind.is_dir() || (kind.is_symlink() && entry.path().is_dir()));
+        if name.starts_with('.') || !folder {
+            continue;
+        }
+        if folders.len() == MAX_LISTED_FOLDERS {
+            truncated = true;
+            break;
+        }
+        folders.push(name);
+    }
+    folders.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
+    Ok(FolderListing {
+        parent: path.parent().map(text).transpose()?,
+        path: text(&path)?,
+        folders,
+        truncated,
+    })
+}
+
+/// Why a folder could not be listed, in words for its owner.
+fn unreadable(err: &std::io::Error) -> ProtocolError {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => {
+            ProtocolError::new(ErrorCode::NotFound, "the folder does not exist")
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            ProtocolError::new(ErrorCode::NotApplicable, "Wayfetch may not read the folder")
+        }
+        std::io::ErrorKind::NotADirectory => {
+            ProtocolError::new(ErrorCode::NotApplicable, "that is not a folder")
+        }
+        _ => ProtocolError::new(
+            ErrorCode::NotApplicable,
+            &format!("the folder cannot be read: {err}"),
+        ),
+    }
 }
 
 /// The permitted roots and the default, kept by the coordinator.

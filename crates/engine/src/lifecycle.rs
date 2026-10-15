@@ -52,7 +52,7 @@ use wayfetch_protocol::command::MAX_SUBMIT_ITEMS;
 use wayfetch_protocol::event::{
     DurableEvent, EventCursor, ResyncReason, Retained, SubscriptionStart,
 };
-use wayfetch_protocol::query::{FailureSummary, RootSummary};
+use wayfetch_protocol::query::{FailureSummary, FolderListing, RootSummary};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Hello, InstanceId, Permission,
     ProtocolError, ProtocolVersion, Query, QueryResult, Subscribe, TransportLimits,
@@ -397,6 +397,10 @@ enum Request {
         oneshot::Sender<Result<Subscription, ProtocolError>>,
     ),
     RegisterRoot(PathBuf, oneshot::Sender<Result<RootSummary, ProtocolError>>),
+    BrowseFolders(
+        Option<PathBuf>,
+        oneshot::Sender<Result<FolderListing, ProtocolError>>,
+    ),
     PublishedPath(JobId, oneshot::Sender<Result<PathBuf, ProtocolError>>),
     /// Runs arbitrary store work, for fault-injection tests.
     #[cfg(test)]
@@ -483,11 +487,11 @@ impl EngineHandle {
     }
 
     /// Permits the existing directory `path` as a destination on the
-    /// user's explicit request, such as a folder chosen in a native picker,
-    /// initializing it as a root unless it already is one. The root stays
-    /// permitted across restarts; choosing it as the default is a separate
-    /// settings change. Hosts call this only for a path their user chose
-    /// themselves, never for one a client sent. Idempotent.
+    /// user's explicit request, such as a folder chosen in a native picker
+    /// or a server folder the owner chose in the browser, initializing it
+    /// as a root unless it already is one. The root stays permitted across
+    /// restarts; choosing it as the default is a separate settings change.
+    /// The state directory, or a folder inside it, is refused. Idempotent.
     pub async fn register_root(
         &self,
         path: PathBuf,
@@ -496,6 +500,20 @@ impl EngineHandle {
         authorize(Permission::Control, granted)?;
         let (reply, response) = oneshot::channel();
         self.send(Request::RegisterRoot(path, reply))?;
+        response.await.map_err(|_| shutting_down())?
+    }
+
+    /// The folders inside the folder at `path` on the engine's host (the
+    /// top of the filesystem if `None`), for the owner to choose one to
+    /// register ([`Self::register_root`]). Needs the same permission.
+    pub async fn browse_folders(
+        &self,
+        path: Option<PathBuf>,
+        granted: &[Permission],
+    ) -> Result<FolderListing, ProtocolError> {
+        authorize(Permission::Control, granted)?;
+        let (reply, response) = oneshot::channel();
+        self.send(Request::BrowseFolders(path, reply))?;
         response.await.map_err(|_| shutting_down())?
     }
 
@@ -919,6 +937,13 @@ impl Coordinator {
                 let _ = reply.send(result);
             }
             Request::RegisterRoot(path, reply) => self.register_root(path, reply),
+            Request::BrowseFolders(path, reply) => {
+                let probes = self.probes.clone();
+                self.answer(
+                    reply,
+                    async move { destinations::browse(&probes, path).await },
+                );
+            }
             Request::PublishedPath(job, reply) => {
                 self.refresh_destinations().await;
                 let files = self.files();
@@ -1117,9 +1142,11 @@ impl Coordinator {
         let (instance, cancel) = (self.identity.instance, self.supervisor.cancel.clone());
         // Not abandoned on cancellation: it stops between steps instead,
         // and a hung step keeps the engine from shutting down cleanly.
+        let state_dir = self.config.state_dir.clone();
         self.supervisor.spawn(async move {
             let result =
-                destinations::register(&store, &probes, &cancel, path.clone(), instance).await;
+                destinations::register(&store, &probes, &cancel, path.clone(), instance, state_dir)
+                    .await;
             if cancel.is_cancelled() {
                 let _ = reply.send(Err(shutting_down()));
                 return;

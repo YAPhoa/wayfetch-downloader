@@ -259,6 +259,28 @@ pub struct RootSummary {
     pub problem: Option<DiagnosticText>,
 }
 
+/// The most folders a [`FolderListing`] names.
+pub const MAX_LISTED_FOLDERS: usize = 1000;
+
+/// The folders directly inside a folder on the engine's host, for choosing
+/// one to add as a destination. Hidden folders (named with a leading dot)
+/// and names that are not valid UTF-8 are left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct FolderListing {
+    /// The folder, as an absolute path with links and `..` resolved.
+    pub path: String,
+    /// The folder containing it; absent at the top of the filesystem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub parent: Option<String>,
+    /// The names of the folders inside it, in a case-insensitive order: at
+    /// most [`MAX_LISTED_FOLDERS`].
+    pub folders: Vec<String>,
+    /// Whether more folders were left out than the listing holds.
+    pub truncated: bool,
+}
+
 /// The user's settings. Added in protocol 0.3.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]

@@ -464,6 +464,73 @@ async fn the_default_destination_is_chosen_among_server_folders() {
     daemon.stop("TERM").await;
 }
 
+/// `GET /v1/folders` for `path`, with the path encoded as a query.
+fn folders_at(path: &std::path::Path) -> String {
+    let mut url = reqwest::Url::parse("http://local/v1/folders").unwrap();
+    url.query_pairs_mut()
+        .append_pair("path", path.to_str().unwrap());
+    format!("{}?{}", url.path(), url.query().unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
+    let server = Server::https().await;
+    let dirs = Dirs::ready(&server);
+    let daemon = Daemon::start(&dirs).await;
+    let client = daemon.owner();
+    let parent = dirs.tmp.path().join("shares");
+    std::fs::create_dir_all(parent.join("films")).unwrap();
+    std::fs::create_dir_all(parent.join(".cache")).unwrap();
+
+    // Browsing and adding need `control`.
+    let reader = daemon.client(READER_TOKEN);
+    assert_eq!(
+        reader.get(&folders_at(&parent)).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let add = json!({ "path": parent.join("films") });
+    assert_eq!(
+        reader.post("/v1/roots", &add).await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    let (status, listing) = client.get(&folders_at(&parent)).await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    let real = std::fs::canonicalize(&parent).unwrap();
+    assert_eq!(listing["path"], real.to_str().unwrap());
+    assert_eq!(listing["folders"], json!(["films"]));
+    assert_eq!(listing["truncated"], false);
+    let (status, error) = client.get(&folders_at(&parent.join("missing"))).await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::NOT_FOUND, &"not_found".into())
+    );
+    let (status, _) = client.get("/v1/folders?path=relative").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, root) = client.post("/v1/roots", &add).await;
+    assert_eq!(status, StatusCode::OK, "{root}");
+    assert_eq!(root["available"], true);
+    let (_, settings) = client.get("/v1/settings").await;
+    assert!(
+        settings["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == root["id"]),
+        "{settings}"
+    );
+    // The daemon's own state cannot become a destination.
+    let (status, error) = client
+        .post("/v1/roots", &json!({ "path": dirs.state }))
+        .await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::BAD_REQUEST, &"invalid_request".into())
+    );
+    daemon.stop("TERM").await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn finished_jobs_are_renamed_and_removed_over_http() {
     let server = Server::https().await;

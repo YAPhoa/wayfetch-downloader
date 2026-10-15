@@ -11,6 +11,8 @@
 //! | `POST /v1/jobs/{id}/commands` | [`Command::Pause`], [`Command::Resume`], [`Command::Cancel`] |
 //! | `GET /v1/settings` | [`Query::Settings`]: the default destination and the roots to choose from |
 //! | `PUT /v1/settings` | [`Command::UpdateSettings`] |
+//! | `GET /v1/folders` | [`EngineHandle::browse_folders`]: folders on the server, to choose one to add |
+//! | `POST /v1/roots` | [`EngineHandle::register_root`]: permits a server folder as a destination |
 //! | `GET /v1/events` | subscription, as server-sent events |
 //! | `GET /v1/ready` | readiness: lifecycle phase, a handshake, the host's check |
 //!
@@ -37,8 +39,10 @@ use tokio_util::sync::CancellationToken;
 use wayfetch_engine::domain::id::{JobId, PackageId};
 use wayfetch_engine::domain::job::JobStage;
 use wayfetch_engine::protocol::command::CommandResult;
-use wayfetch_engine::protocol::query::{JobFilter, PageSize};
-use wayfetch_engine::protocol::request::{JobCommandRequest, SubmitRequest, UpdateSettingsRequest};
+use wayfetch_engine::protocol::query::{FolderListing, JobFilter, PageSize, RootSummary};
+use wayfetch_engine::protocol::request::{
+    AddRootRequest, JobCommandRequest, SubmitRequest, UpdateSettingsRequest,
+};
 use wayfetch_engine::protocol::{
     CommandEnvelope, ErrorCode, EventCursor, Hello, InstanceId, Query, QueryResult, StreamItem,
     Subscribe,
@@ -180,6 +184,38 @@ pub async fn update_settings(
     JsonBody(request): JsonBody<UpdateSettingsRequest>,
 ) -> ApiResult<CommandResult> {
     execute(&app, &grant, request.into_envelope()).await
+}
+
+/// The query string of `GET /v1/folders`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FolderParams {
+    /// An absolute path; the top of the filesystem if absent.
+    path: Option<String>,
+}
+
+/// The folders inside a folder on the server, for the owner to choose one
+/// to add as a destination. Needs the `control` permission.
+pub async fn folders(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    params: Result<UrlQuery<FolderParams>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult<FolderListing> {
+    let UrlQuery(params) =
+        params.map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "invalid query string"))?;
+    let path = params.path.map(std::path::PathBuf::from);
+    Ok(Json(app.engine.browse_folders(path, &grant.0).await?))
+}
+
+/// Permits a folder on the server as a destination. Needs the `control`
+/// permission.
+pub async fn add_root(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    JsonBody(request): JsonBody<AddRootRequest>,
+) -> ApiResult<RootSummary> {
+    let path = std::path::PathBuf::from(request.path);
+    Ok(Json(app.engine.register_root(path, &grant.0).await?))
 }
 
 async fn execute(

@@ -5,7 +5,7 @@
 
 import { expect, test } from '@playwright/test';
 
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { Daemon, Fixture, MIB, content, freePort } from './harness.js';
@@ -360,6 +360,37 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await pane.getByRole('button', { name: 'Save' }).click();
   await expect(pane.getByText(`Saved. New downloads go to ${daemon.archive}.`)).toBeVisible();
   await expect(pane.getByRole('button', { name: 'Save' })).toBeFocused();
+  // A server folder is added by browsing to it: the dialog starts at the
+  // selected folder, goes up, to a typed path, and into a folder.
+  const shares = join(/** @type {string} */ (daemon.dir), 'shares');
+  await mkdir(join(shares, 'films'), { recursive: true });
+  await mkdir(join(shares, '.hidden'));
+  await pane.getByRole('button', { name: 'Add folder…' }).click();
+  const folders = page.getByRole('dialog', { name: 'Add a server folder' });
+  const at = folders.getByLabel('Folder', { exact: true });
+  await expect(at).toHaveValue(/** @type {string} */ (daemon.archive));
+  await folders.getByRole('button', { name: 'Up' }).click();
+  await expect(at).toHaveValue(/** @type {string} */ (daemon.dir));
+  await expect(folders.getByRole('button', { name: 'shares' })).toBeVisible();
+  await at.fill(join(shares, 'missing'));
+  await at.press('Enter');
+  await expect(folders.getByText('The folder does not exist.')).toBeVisible();
+  await at.fill(shares);
+  await at.press('Enter');
+  await expect(folders.getByRole('list', { name: 'Folders inside' }).getByRole('button')).toHaveText(['films']);
+  await folders.getByRole('button', { name: 'films' }).click();
+  await expect(at).toHaveValue(join(shares, 'films'));
+  await expect(folders.getByText('There are no folders inside.')).toBeVisible();
+  await folders.getByRole('button', { name: 'Add this folder' }).click();
+  await expect(folders).toBeHidden();
+  await expect(pane.getByText('Folder added. Save to use it for new downloads.')).toBeVisible();
+  await expect(pane.getByRole('radio', { name: new RegExp(`^${join(shares, 'films')}`) })).toBeChecked();
+  await expect(pane.getByRole('button', { name: 'Add folder…' })).toBeFocused();
+  // Closing without adding changes nothing.
+  await pane.getByRole('button', { name: 'Add folder…' }).click();
+  await page.keyboard.press('Escape');
+  await expect(pane.getByText('No folder was chosen; nothing changed.')).toBeVisible();
+  await pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) }).check();
   // The download kept running meanwhile, and finishes while Settings is shown.
   expect(await daemon.published(running).then(() => 'published', () => 'not yet')).toBe('not yet');
   fixture.release(running);

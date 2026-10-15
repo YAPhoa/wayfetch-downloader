@@ -688,6 +688,38 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .dialog .row, .settings-section .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .dialog input[type='text'] { width: 100%; }
 
+/* Choosing a server folder to add. */
+
+.dialog.folders { width: min(620px, calc(100vw - 32px)); }
+.folder-browser .row { flex-wrap: nowrap; align-items: end; }
+.folder-field { flex: 1; min-width: 0; }
+.folder-field input { width: 100%; font-family: ui-monospace, monospace; }
+
+.folder-list {
+  display: flex;
+  flex-direction: column;
+  height: min(320px, 45vh);
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.folder-item {
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.folder-item .icon { color: var(--muted); }
+.folder-item:focus-visible { outline-offset: -2px; }
+
 fieldset { display: grid; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
 legend { padding: 0 0 4px; color: var(--muted); }
 

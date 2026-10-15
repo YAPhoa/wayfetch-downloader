@@ -14,6 +14,7 @@
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { focusedKey, h, refocus, show } from './dom.js';
+import { browseServerFolders } from './folders.js';
 import { icon } from './icons.js';
 
 /**
@@ -21,6 +22,7 @@ import { icon } from './icons.js';
  * @typedef {import('../client/contract.js').Hello} Hello
  * @typedef {import('../client/contract.js').Settings} Settings
  * @typedef {import('../client/contract.js').RootId} RootId
+ * @typedef {import('../client/contract.js').RootSummary} RootSummary
  * @typedef {'compact' | 'comfortable'} Density
  * @typedef {'folder' | 'display' | 'accounts'} Section
  */
@@ -278,9 +280,25 @@ export class SettingsPage {
         { type: 'submit', class: 'primary', 'data-key': 'settings-save', disabled: !canChange },
         'Save',
       );
+      // The desktop app adds a folder through its own dialog; a browser
+      // lists the server's folders.
+      const { chooseDownloadFolder, browseFolders, addFolder } = client;
+      /** @type {[string, () => Promise<RootSummary | null>] | null} */
+      const adding = chooseDownloadFolder
+        ? ['Choose folder…', () => chooseDownloadFolder.call(client)]
+        : browseFolders && addFolder
+          ? [
+              'Add folder…',
+              () =>
+                browseServerFolders(
+                  { browseFolders: browseFolders.bind(client), addFolder: addFolder.bind(client) },
+                  settings.roots.find((r) => r.id === selected)?.path ?? null,
+                ),
+            ]
+          : null;
       const choose =
         canChange &&
-        client.chooseDownloadFolder &&
+        adding &&
         h(
           'button',
           {
@@ -288,14 +306,11 @@ export class SettingsPage {
             'data-key': 'settings-choose',
             onclick: async (/** @type {MouseEvent} */ event) => {
               const button = /** @type {HTMLButtonElement} */ (event.currentTarget);
-              const picker = /** @type {() => Promise<import('../client/contract.js').RootSummary | null>} */ (
-                client.chooseDownloadFolder
-              );
               working = focusedKey(destination);
               button.disabled = true;
               show(message, '');
               try {
-                const root = await picker.call(client);
+                const root = await adding[1]();
                 if (root === null) {
                   show(message, 'No folder was chosen; nothing changed.');
                   return;
@@ -310,7 +325,7 @@ export class SettingsPage {
               }
             },
           },
-          'Choose folder…',
+          adding[0],
         );
       const form = h(
         'form',

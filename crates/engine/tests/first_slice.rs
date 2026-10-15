@@ -1021,6 +1021,66 @@ async fn a_job_keeps_its_root_and_blocks_while_it_is_not_permitted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_owner_lists_server_folders_to_choose_one_to_register() {
+    let env = env();
+    let owner = env.start().await;
+    let handle = owner.handle();
+    let base = folder(&env, "browse");
+    for name in ["beta", "Alpha", ".hidden", "gamma"] {
+        std::fs::create_dir(base.join(name)).unwrap();
+    }
+    std::fs::write(base.join("file.txt"), b"not a folder").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(base.join("gamma"), base.join("linked")).unwrap();
+
+    // Only folders, without hidden ones, in a case-insensitive order; a
+    // path given with `..` is resolved.
+    let listing = handle
+        .browse_folders(Some(base.join("beta").join("..")), ALL)
+        .await
+        .unwrap();
+    let base_text = std::fs::canonicalize(&base).unwrap();
+    assert_eq!(listing.path, base_text.to_str().unwrap());
+    assert_eq!(
+        listing.parent.as_deref(),
+        base_text.parent().unwrap().to_str()
+    );
+    let expected: &[&str] = if cfg!(unix) {
+        &["Alpha", "beta", "gamma", "linked"]
+    } else {
+        &["Alpha", "beta", "gamma"]
+    };
+    assert_eq!(listing.folders, expected);
+    assert!(!listing.truncated);
+    // The top of the filesystem when no folder is named.
+    let top = handle.browse_folders(None, ALL).await.unwrap();
+    assert_eq!(top.parent, None);
+
+    for (path, code) in [
+        (base.join("missing"), ErrorCode::NotFound),
+        (base.join("file.txt"), ErrorCode::NotApplicable),
+        (PathBuf::from("relative"), ErrorCode::InvalidRequest),
+    ] {
+        let err = handle.browse_folders(Some(path), ALL).await.unwrap_err();
+        assert_eq!(err.code, code, "{err}");
+    }
+    let err = handle
+        .browse_folders(Some(base.clone()), &[Permission::Read, Permission::Submit])
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PermissionDenied);
+
+    // The state directory, or a folder inside it, cannot be a destination.
+    for refused in [env.state.clone(), env.state.join("..").join("state")] {
+        let err = handle.register_root(refused, ALL).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest, "{err}");
+    }
+    let registered = handle.register_root(base.join("Alpha"), ALL).await.unwrap();
+    assert!(registered.available);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_registered_root_stays_permitted_across_restarts() {
     let env = env();
     let owner = env.start().await;

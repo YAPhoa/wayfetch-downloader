@@ -191,6 +191,8 @@ impl Api {
                 "/v1/settings",
                 get(routes::settings).put(routes::update_settings),
             )
+            .route("/v1/folders", get(routes::folders))
+            .route("/v1/roots", post(routes::add_root))
             .route("/v1/events", get(routes::events))
             .route_layer(middleware::from_fn_with_state(
                 state.clone(),

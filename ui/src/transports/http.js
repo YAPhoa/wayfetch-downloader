@@ -23,6 +23,7 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
  * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
  * @typedef {import('../client/generated/UpdateSettingsRequest.js').UpdateSettingsRequest} UpdateSettingsRequest
+ * @typedef {import('../client/generated/AddRootRequest.js').AddRootRequest} AddRootRequest
  */
 
 /** Server-sent event types, as `wayfetch-api` names them. */
@@ -165,6 +166,25 @@ export class HttpClient {
       default_root: defaultRoot,
     };
     return this.request('PUT', '/v1/settings', { body });
+  }
+
+  /**
+   * The folders inside `path` on the server, or at its top if `null`.
+   * @param {string | null} path
+   */
+  browseFolders(path) {
+    const query = path === null ? '' : `?${new URLSearchParams({ path })}`;
+    return this.request('GET', `/v1/folders${query}`);
+  }
+
+  /**
+   * Adds the server folder at `path` as a download folder.
+   * @param {string} path
+   */
+  addFolder(path) {
+    /** @type {AddRootRequest} */
+    const body = { path };
+    return this.request('POST', '/v1/roots', { body });
   }
 
   /**

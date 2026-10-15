@@ -172,6 +172,17 @@ impl UpdateSettingsRequest {
     }
 }
 
+/// Permits a folder on the engine's host as a destination, by its path.
+/// The path is checked and the folder initialized by the engine; choosing
+/// it as the default is a separate settings change.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct AddRootRequest {
+    /// The folder, as an absolute path.
+    pub path: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
