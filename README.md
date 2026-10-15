@@ -193,18 +193,16 @@ read, or bound for an unavailable folder, stays collected. Each link starts
 at most one download. Collecting and starting need `submit`; removing or
 moving links, which may be someone else's, needs `control`.
 
-**Provider accounts.** Accounts need a key file that encrypts their
-credentials: `--credential-key FILE`, on storage other than the state
-directory (the database never holds the key). If the file does not exist
-when the first account is added, `wayfetchd` creates it, owner-only, holding
-32 random bytes as 64 hex digits; you can also create it yourself (`openssl
-rand -hex 32 > FILE; chmod 600 FILE`). Keep it with the state directory's
-backups but apart from it. Once an account is stored, `wayfetchd` never
-creates a new key: if the file is missing, readable by others, or a
-different key, accounts show as locked with the reason, and you can restore
-the file and restart, or remove the accounts and sign in again. Downloads
-without an account keep working either way, and without `--credential-key`
-accounts cannot be added at all. Real-Debrid is the only service so far.
+**Provider accounts.** Account credentials are encrypted with a key file,
+`credential-key` beside the token file, which `wayfetchd` creates
+owner-only (32 random bytes as 64 hex digits) when the first account is
+added, so there is nothing to set up; `--credential-key FILE` puts it
+elsewhere. The database never holds the key, so keep the key out of the
+state directory and back it up alongside it. Once an account is stored,
+`wayfetchd` never creates a new key: if the file is missing, readable by
+others, or a different key, accounts show as locked with the reason, and you
+can restore the file and restart, or remove the accounts and sign in again.
+Downloads without an account keep working either way. Real-Debrid is the only service so far.
 Signing in uses its device flow: the request answers with a code and a
 Real-Debrid page where you enter it, and no password or token ever passes
 through the API. Responses never carry stored credentials, and account
@@ -589,9 +587,9 @@ in `compose.yaml`:
               "--browser-origin", "https://wayfetch.example.lan"]
 ```
 
-To sign in to provider accounts, also add `"--credential-key",
-"/tokens/credential-key"`: the key then lives in the token mount, not with
-the state, and is created there when the first account is added.
+The key that encrypts provider account sign-ins is created as
+`$WAYFETCH_TOKENS/credential-key`, beside the token file and apart from the
+state; back it up with the state directory.
 
 The setup secret is then `$WAYFETCH_TOKENS/auth/setup-secret` on the host,
 and owner reset runs with the container stopped:

@@ -1602,9 +1602,8 @@ async fn accounts_are_signed_in_and_managed_over_http() {
              {LIMITED_TOKEN} read,submit,control,sources\n"
         ),
     );
-    let key = dirs.tmp.path().join("credential.key");
-    dirs.args
-        .extend(["--credential-key".into(), key.clone().into()]);
+    // No --credential-key: the daemon keeps its key beside the token file.
+    let key = dirs.tokens.with_file_name("credential-key");
     dirs.args
         .extend(["--real-debrid-endpoint".into(), provider.base().into()]);
     let daemon = Daemon::start(&dirs).await;
@@ -1711,6 +1710,12 @@ async fn accounts_are_signed_in_and_managed_over_http() {
 
     // The account and its credentials survive a restart.
     daemon.stop("TERM").await;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the key is owner-only");
+        assert_eq!(std::fs::read_to_string(&key).unwrap().trim().len(), 64);
+    }
     for (path, bytes) in files_under(&dirs.state) {
         assert_no_rd_secret(&path.display().to_string(), &bytes);
     }

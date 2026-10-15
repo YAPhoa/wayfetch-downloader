@@ -160,6 +160,17 @@ struct RunArgs {
     json: bool,
 }
 
+impl RunArgs {
+    /// Keeps the credential key beside the token file unless one was
+    /// given: with the server's other secrets, apart from the state
+    /// directory, so accounts need no setup.
+    fn default_credential_key(&mut self) {
+        if self.engine.credential_key.is_none() {
+            self.engine.credential_key = Some(self.token_file.with_file_name("credential-key"));
+        }
+    }
+}
+
 /// What the daemon prints.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -293,7 +304,8 @@ fn main() -> ExitCode {
 }
 
 /// Serves until a signal, then drains the API and stops the engine.
-async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
+async fn run(mut args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
+    args.default_credential_key();
     let printer = Printer::new(args.json, terminal);
     // A closed output never stops the daemon; it only loses its log.
     let print = |notice: &Notice| {
@@ -480,6 +492,35 @@ mod tests {
         assert_eq!(ui.version().len(), 16);
         assert!(UiFiles::get("main.js").is_some());
         assert!(UiFiles::iter().all(|path| !path.ends_with(".gitkeep") && !path.ends_with(".ts")));
+    }
+
+    #[test]
+    fn the_credential_key_defaults_to_beside_the_token_file() {
+        let run = [
+            "wayfetchd",
+            "run",
+            "--state-dir",
+            "/srv/state",
+            "--download-root",
+            "/srv/downloads",
+            "--token-file",
+            "/srv/secrets/api-tokens",
+        ];
+        let key = |extra: &[&str]| {
+            let Command::Run(mut args) = Cli::try_parse_from(run.iter().chain(extra))
+                .unwrap()
+                .command
+            else {
+                panic!("not run");
+            };
+            args.default_credential_key();
+            args.engine.credential_key.unwrap()
+        };
+        assert_eq!(key(&[]), PathBuf::from("/srv/secrets/credential-key"));
+        assert_eq!(
+            key(&["--credential-key", "/keys/wayfetch"]),
+            PathBuf::from("/keys/wayfetch")
+        );
     }
 
     #[test]
