@@ -15,7 +15,10 @@
 //! from the Settings page while a download keeps running; the Settings
 //! page and each row's menu, which opens a finished file or its
 //! folder through the host (a recording `xdg-open` stands in for the
-//! desktop's), renames, and removes from the list; that the page loads
+//! desktop's), renames, and removes from the list; links collected for
+//! review on the Add links page fetching nothing, outliving a relaunch, and only the chosen
+//! ones starting, with the row menu from the keyboard and a narrow
+//! window; that the page loads
 //! only bundled assets; and that the host starts no daemon and listens on
 //! no TCP port.
 //!
@@ -315,18 +318,16 @@ impl Shell {
         .await;
     }
 
-    /// Adds links, one per line, through the toolbar's form, which then
-    /// says `added`.
-    async fn add_many(&self, urls: &str, added: &str) {
-        let open = self
-            .js("return document.querySelector('textarea[name=\"urls\"]')?.checkVisibility() ?? false")
+    /// Collects links, one per line, through Add links; the Links page
+    /// then says `collected`.
+    async fn collect(&self, urls: &str, collected: &str) {
+        self.click(".workspace > :not([hidden]) [data-key=\"add-links\"]")
             .await;
-        if open != json!(true) {
-            self.click("button[aria-controls=\"add-links\"]").await;
-        }
         let links = self
             .client
-            .find(Locator::Css("textarea[name=\"urls\"]"))
+            .wait()
+            .at_most(DEADLINE)
+            .for_element(Locator::Css("#collect-links"))
             .await
             .unwrap();
         links.clear().await.unwrap();
@@ -341,16 +342,39 @@ impl Shell {
             }
             links.send_keys(url).await.unwrap();
         }
-        self.click("#add-links button[type=\"submit\"]").await;
+        self.click(".add-page button[type=\"submit\"]").await;
         self.wait_for(&format!(
-            "document.querySelector('#add-links .message')?.textContent === '{added}'"
+            "location.pathname === '/links'
+             && document.querySelector('.links-page .notice > span')?.textContent === {}",
+            json!(collected)
         ))
         .await;
     }
 
-    /// Adds a link through the toolbar's form.
+    /// Collects `count` links and starts them from the Links page, then
+    /// goes back to Downloads.
+    async fn add_many(&self, urls: &str, count: usize) {
+        let (links, downloads) = match count {
+            1 => ("1 link".to_owned(), "1 download".to_owned()),
+            n => (format!("{n} links"), format!("{n} downloads")),
+        };
+        self.collect(urls, &format!("Collected {links} for review."))
+            .await;
+        self.click(".links-page tbody.batch:last-of-type .batch-head input")
+            .await;
+        self.click(".links-page [data-key=\"links-start\"]:not([disabled])")
+            .await;
+        self.wait_for(&format!(
+            "document.querySelector('.links-page .notice > span')?.textContent.startsWith('Started {downloads}.')"
+        ))
+        .await;
+        self.click("[data-key=\"open-downloads\"]").await;
+        self.wait_for("location.pathname === '/'").await;
+    }
+
+    /// Adds a link: collected, then started.
     async fn add(&self, url: &str) {
-        self.add_many(url, "Added 1 download.").await;
+        self.add_many(url, 1).await;
     }
 
     /// Selects a job, so the toolbar acts on it.
@@ -658,16 +682,16 @@ async fn downloads_through_the_shared_ui_and_recovers_after_relaunch() {
             server.url(&path)
         })
         .collect();
-    shell
-        .add_many(&many.join("\n"), "Added 50 downloads.")
-        .await;
+    shell.add_many(&many.join("\n"), 50).await;
     shell
         .wait_for("document.querySelectorAll('tr[data-job]').length === 50")
         .await;
     let sizes = shell
-        .js("const table = document.querySelector('.table-scroll');
+        .js(
+            "const table = document.querySelector('.downloads-view .table-scroll');
              return [document.documentElement.scrollHeight, document.documentElement.clientHeight,
-                     table.scrollHeight > table.clientHeight];")
+                     table.scrollHeight > table.clientHeight];",
+        )
         .await;
     assert_eq!(sizes[0], sizes[1], "the page fits the window: {sizes}");
     assert_eq!(sizes[2], true, "the table scrolls: {sizes}");
@@ -1059,14 +1083,28 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
         .await;
     fits_window(&shell, ".settings-nav").await;
 
-    // Back to Downloads, with focus on the gear.
+    // Back to Downloads, with focus on the gear; links are now collected
+    // for the chosen folder.
     shell.click("[data-key=\"settings-back\"]").await;
     shell
+        .wait_for(
+            "location.pathname === '/' && document.activeElement?.dataset.key === 'open-settings'",
+        )
+        .await;
+    shell
+        .click(".workspace > :not([hidden]) [data-key=\"add-links\"]")
+        .await;
+    shell
         .wait_for(&format!(
-            "location.pathname === '/' && document.activeElement?.dataset.key === 'open-settings'
-             && document.querySelector('[data-key=\"add-destination\"] .path')?.textContent === {}",
+            "document.querySelector('#collect-destination option:checked')?.textContent === {}",
             json!(folder.display().to_string())
         ))
+        .await;
+    press(&shell, Key::Escape).await;
+    shell
+        .wait_for(
+            "location.pathname === '/' && document.activeElement?.dataset.key === 'add-links'",
+        )
         .await;
     shell.wait_for_state("job-1", "Done").await;
     shell.close().await;
@@ -1315,5 +1353,134 @@ async fn the_row_menu_opens_renames_and_removes_through_the_host() {
         json!(["not_found", "invalid_request", "not_found"])
     );
     assert_eq!(dirs.opened().len(), 3);
+    shell.close().await;
+}
+
+/// Clicks the checkbox of the collected link named `name`.
+async fn tick(shell: &Shell, name: &str) {
+    let ticked = shell
+        .js(&format!(
+            "const row = [...document.querySelectorAll('.links-page tr[data-link]')]
+               .find((r) => r.querySelector('td.name').textContent === {});
+             row?.querySelector('input[type=checkbox]').click();
+             return Boolean(row);",
+            json!(name)
+        ))
+        .await;
+    assert_eq!(ticked, json!(true), "no collected link named {name}");
+}
+
+/// The names of the collected links shown.
+async fn collected(shell: &Shell) -> Value {
+    shell
+        .js("return [...document.querySelectorAll('.links-page tr[data-link] td.name')].map((c) => c.textContent);")
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an X display and WebKitWebDriver"]
+async fn collected_links_wait_until_the_chosen_ones_start() {
+    let server = Server::http().await;
+    let dirs = Dirs::new().await;
+    server.put("/keep.bin", Resource::new(body(MIB)));
+    server.put("/start.bin", Resource::new(body(MIB)));
+    let shell = Shell::launch(&dirs).await;
+    let links = format!(
+        "{}\nexample.com/no-scheme.bin\n{}",
+        server.url("/keep.bin"),
+        server.url("/start.bin")
+    );
+
+    // Collecting fetches nothing and starts no download.
+    shell
+        .collect(
+            &links,
+            "Collected 2 links for review. 1 entry is not a valid link; it is marked below.",
+        )
+        .await;
+    shell
+        .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 3")
+        .await;
+    assert_eq!(
+        collected(&shell).await,
+        json!(["keep.bin", "example.com/no-scheme.bin", "start.bin"])
+    );
+    assert_eq!(server.hits("/keep.bin") + server.hits("/start.bin"), 0);
+
+    // The engine keeps them across a relaunch.
+    shell.close().await;
+    let shell = Shell::launch(&dirs).await;
+    assert_eq!(
+        shell
+            .js("return document.querySelectorAll('tr[data-job]').length")
+            .await,
+        0
+    );
+    shell
+        .click(".workspace > :not([hidden]) [data-key=\"view-links\"]")
+        .await;
+    shell
+        .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 3")
+        .await;
+
+    // From the keyboard: the invalid entry's menu, which cannot start it,
+    // removes it.
+    shell
+        .js("[...document.querySelectorAll('.links-page tr.invalid input')][0].focus();")
+        .await;
+    shell
+        .client
+        .active_element()
+        .await
+        .unwrap()
+        .send_keys(&format!(
+            "{}{}",
+            char::from(Key::Shift),
+            char::from(Key::F10)
+        ))
+        .await
+        .unwrap();
+    shell
+        .wait_for("document.querySelector('.menu:not([hidden])')")
+        .await;
+    let start = shell
+        .js("return document.querySelector('[data-key=\"menu-item-start-links\"]').getAttribute('aria-disabled');")
+        .await;
+    assert_eq!(start, json!("true"));
+    press(&shell, Key::End).await;
+    press(&shell, Key::Enter).await;
+    shell
+        .wait_for("document.querySelector('.links-page .notice > span')?.textContent === 'Removed 1 link from the list.'")
+        .await;
+
+    // Only the chosen link starts; the other stays, unfetched.
+    tick(&shell, "start.bin").await;
+    shell
+        .wait_for("document.querySelector('.selection-summary strong')?.textContent === '1 link selected'")
+        .await;
+    shell
+        .click(".links-page [data-key=\"links-start\"]:not([disabled])")
+        .await;
+    shell
+        .wait_for("document.querySelector('.links-page .notice > span')?.textContent.startsWith('Started 1 download.')")
+        .await;
+    assert_eq!(collected(&shell).await, json!(["keep.bin"]));
+    eventually(|| async {
+        std::fs::read(dirs.root.join("start.bin"))
+            .ok()
+            .filter(|bytes| bytes.len() == MIB)
+    })
+    .await;
+    assert_eq!(server.hits("/keep.bin"), 0);
+
+    // A narrow window keeps the views in reach without sideways scrolling.
+    shell.client.set_window_size(480, 640).await.unwrap();
+    shell
+        .wait_for("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        .await;
+    shell
+        .click(".workspace > :not([hidden]) [data-key=\"view-downloads\"]")
+        .await;
+    shell.wait_for_state("job-1", "Done").await;
     shell.close().await;
 }

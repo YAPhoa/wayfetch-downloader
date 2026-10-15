@@ -16,4 +16,8 @@ max_submit_items: number,
 /**
  * Maximum bytes of one input URL.
  */
-max_url_bytes: number, };
+max_url_bytes: number, 
+/**
+ * Maximum links waiting in the collected list. Added in protocol 1.1.
+ */
+max_collected_links: number, };

@@ -37,6 +37,13 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 1 });
  * @typedef {import('./generated/Settings.js').Settings} Settings
  * @typedef {import('./generated/FolderListing.js').FolderListing} FolderListing
  * @typedef {import('./generated/Action.js').Action} JobAction
+ * @typedef {import('./generated/SourceLinkId.js').SourceLinkId} LinkId
+ * @typedef {import('./generated/CollectedLink.js').CollectedLink} CollectedLink
+ * @typedef {import('./generated/LinkPage.js').LinkPage} LinkPage
+ * @typedef {import('./generated/LinkRef.js').LinkRef} LinkRef
+ * @typedef {import('./generated/LinksAction.js').LinksAction} LinksAction
+ * @typedef {import('./generated/RefusedLink.js').RefusedLink} RefusedLink
+ * @typedef {import('./generated/EventKind.js').EventKind} EventKind
  * @typedef {Exclude<JobAction, 'rename' | 'remove'>} StateAction The
  *   actions that change whether a job runs.
  */
@@ -73,6 +80,21 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 1 });
  *   inspectJob: (job: JobId) => Promise<JobSnapshot>,
  *   countJobs: () => Promise<JobCounts>,
  *   submit: (request: { idempotencyKey: string, target: string, items: string[] }) => Promise<CommandResult>,
+ *   listLinks: (request: { after?: LinkId | null, pageSize: number }) => Promise<LinkPage>,
+ *   collectLinks: (request: {
+ *     idempotencyKey: string,
+ *     target: string,
+ *     items: string[],
+ *     destination?: RootId | null,
+ *   }) => Promise<CommandResult>,
+ *   linksCommand: (request: {
+ *     idempotencyKey: string,
+ *     target: string,
+ *     action: LinksAction,
+ *     links: LinkRef[],
+ *     destination?: RootId,
+ *   }) => Promise<CommandResult>,
+ *   linkSource: (link: LinkId) => Promise<string>,
  *   jobCommand: (job: JobId, request: {
  *     idempotencyKey: string,
  *     target: string,

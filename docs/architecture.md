@@ -608,6 +608,8 @@ Root IDs are allocated by the engine's store and recorded in each root's sentine
 
 **Gate:** the same durable command path serves browser UI, desktop UI, CLI, and authorized agent requests. Starting an embedded engine requires no HTTP listener.
 
+Collected links (protocol 1.1, `submit` permission) separate collecting from downloading. Collecting stores each entry as a held source link in a new input batch and package, with the batch's chosen destination, and contacts no server; an entry that is not an HTTP(S) URL is kept without any credentials it holds, with its problem, and listed without its query or fragment. A held link is never staged as a job. Starting promotes the named links in one transaction, each at the revision the client showed: an unusable root, an invalid entry, or a changed revision refuses that link only, with a reason, and leaves it held. A link maps to at most one job (`jobs.source_link_id` is unique), and the command's result is stored under its idempotency key, so retries, double submissions, concurrent clients, and restarts cannot duplicate a job. Removing deletes only held links and then any batch and package left empty; moving changes the chosen links' root and no setting. The engine checks the root's permission and availability before collecting to it, moving to it, or starting from it. Held links are capped (10,000), as are links per command (`max_submit_items`) and list pages.
+
 ### ADR-22 — Safe declarative rules, not embedded arbitrary scripts
 
 **Decision:** support versioned predicates and actions for package, destination, priority, filtering, and naming. Dry-run rules with an explanation trace. Metadata substitutions are escaped and validated after expansion. No environment-variable access by default.
@@ -670,7 +672,7 @@ Root IDs are allocated by the engine's store and recorded in each root's sentine
 
 **Decision:** durable low-rate state events via an outbox; coalesced ephemeral progress; paginated read models; bounded per-client SSE queues. A slow client gets a resync instruction or disconnect, not unbounded event retention.
 
-A protocol minor version may only add optional fields, which older decoders ignore, and new commands or queries, which older clients never send. Any new value a client must decode from the engine (an event kind, stream item, error code, job stage, failure code, or resync reason) requires a new major version, which the handshake refuses. Add capability negotiation before extending event vocabularies within a major version. Protocol 1.0 is the first such bump: it adds the `job_removed` event and the `already_exists` error code, with the `rename` and `remove` commands and the `job_source` query. Protocol 1.1 adds the `remove_root` command and the optional `added` field on a settings root.
+A protocol minor version may only add optional fields, which older decoders ignore, and new commands or queries, which older clients never send. Any new value a client must decode from the engine (an event kind, stream item, error code, job stage, failure code, or resync reason) requires a new major version, which the handshake refuses. Add capability negotiation before extending event vocabularies within a major version. Protocol 1.0 is the first such bump: it adds the `job_removed` event and the `already_exists` error code, with the `rename` and `remove` commands and the `job_source` query. Protocol 1.1 is a minor version: it adds the `remove_root` command and the optional `added` field on a settings root, the collected-links commands (`collect_links`, `start_links`, `remove_links`, `move_links`) and queries (`list_links`, `link_source`) and an optional transport limit, and no event kind or error code; collecting emits the existing `batch_accepted` and starting the existing `job_added`. `submit` is unchanged, so a 1.0 submission client keeps working.
 
 **Why:** a remote API needs event/diff delivery, but the queue must not be serialized in full on every UI refresh.
 
@@ -1212,7 +1214,7 @@ A comparison with another download manager requires an independently recorded ru
 |---|---|
 | `POST /v1/inputs` | Idempotent bounded ingestion; returns durable batch ID |
 | `GET /v1/inputs/{id}` | Paginated discovery/checking results and mixed-status summary |
-| `POST /v1/staging/commit` | Confirm selected staged items; duplicates/conflicts reported |
+| `POST /v1/staging/links`, `POST /v1/staging/commands` | Collect links for review; start, remove, or move selected collected links, reporting each refused one (protocol 1.1) |
 | `GET /v1/jobs` | Keyset pagination, stable filters/order, summary fields only |
 | `GET /v1/job-counts` | Jobs per stage under the same filters, with the `as_of` cursor; no job rows |
 | `POST /v1/jobs/{id}/commands` | Version-checked start/pause/cancel/retry/destination changes |

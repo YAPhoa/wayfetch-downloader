@@ -265,6 +265,26 @@ pub(super) fn remove_root(
             ),
         ));
     }
+    let collected: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM source_links WHERE root_id = ?1 AND held = 1",
+            [root],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)?;
+    if collected > 0 {
+        let noun = if collected == 1 {
+            "link is"
+        } else {
+            "links are"
+        };
+        return Err(ProtocolError::new(
+            ErrorCode::NotApplicable,
+            &format!(
+                "{collected} collected {noun} set to save to this folder; start, move, or remove them first"
+            ),
+        ));
+    }
     let next = revision
         .next()
         .map_err(|_| StoreError::Corrupt("settings revision"))?;

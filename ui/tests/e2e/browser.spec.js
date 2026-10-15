@@ -61,16 +61,36 @@ async function select(page, job) {
 }
 
 /**
+ * Collects `text` through Add links, then starts its batch from the Links
+ * page and goes back to Downloads.
  * @param {import('@playwright/test').Page} page
- * @param {string} url
- * @param {string} [added]
+ * @param {string} text
+ * @param {number} [count]
  */
-async function add(page, url, added = 'Added 1 download.') {
-  const links = page.getByLabel('Links to download, one per line');
-  if (!(await links.isVisible())) await page.getByRole('button', { name: 'Add links' }).click();
-  await links.fill(url);
-  await page.getByRole('button', { name: 'Add', exact: true }).click();
-  await expect(page.getByText(added)).toBeVisible();
+async function add(page, text, count = 1) {
+  const links = count === 1 ? '1 link' : `${count} links`;
+  await collect(page, text, `Collected ${links} for review.`);
+  await page.locator('tbody.batch').last().locator('.batch-head input[type="checkbox"]').check();
+  await expect(page.locator('.selection-summary strong')).toHaveText(`${links} selected`);
+  await page.getByRole('button', { name: 'Start selected' }).click();
+  await expect(page.getByText(`Started ${count === 1 ? '1 download' : `${count} downloads`}.`)).toBeVisible();
+  await page.getByRole('button', { name: 'View downloads' }).click();
+  await expect(page).toHaveURL(`${daemon.origin}/`);
+}
+
+/**
+ * Pastes `text` into Add links and collects it, landing on the Links page.
+ * @param {import('@playwright/test').Page} page
+ * @param {string} text
+ * @param {string} collected what the page then says
+ */
+async function collect(page, text, collected) {
+  await page.getByRole('button', { name: 'Add links' }).click();
+  await expect(page).toHaveURL(`${daemon.origin}/add`);
+  await page.getByLabel('Links, one per line').fill(text);
+  await page.getByRole('button', { name: 'Collect links' }).click();
+  await expect(page).toHaveURL(`${daemon.origin}/links`);
+  await expect(page.getByText(collected)).toBeVisible();
 }
 
 /**
@@ -126,9 +146,6 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
 
   // A download that stalls after two checkpoints.
   await add(page, fixture.put(TRICKY, SIZE, STALL));
-  await page.getByRole('button', { name: 'Close', exact: true }).click();
-  await expect(page.getByLabel('Links to download, one per line')).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Add links' })).toHaveAttribute('aria-expanded', 'false');
   await expectState(page, 'job-1', 'Downloading');
   await expect(row(page, 'job-1').locator('.bytes')).toHaveText(/^1[67]\.\d MiB of 20\.0 MiB$/);
 
@@ -222,10 +239,10 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
 
   // A long list scrolls inside the table, not the page.
   const many = Array.from({ length: 50 }, (_, i) => fixture.put(`many-${i}.bin`, 1024));
-  await add(page, many.join('\n'), 'Added 50 downloads.');
+  await add(page, many.join('\n'), 50);
   await expect(page.locator('tr[data-job]')).toHaveCount(50);
   await expectFitsWindow(page);
-  const table = page.locator('.table-scroll');
+  const table = page.locator('.downloads-view .table-scroll');
   expect(await table.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
 
   // Text from downloads stayed text.
@@ -292,11 +309,16 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.locator('.statusbar .status')).toHaveText('Live');
 
-  // The add form says where new downloads go: a folder on the server.
-  await page.getByRole('button', { name: 'Add links' }).click();
-  const destination = page.locator('[data-key="add-destination"]');
-  await expect(destination.locator('.path')).toHaveText(/** @type {string} */ (daemon.root));
-  await expect(destination.getByText('Server path')).toBeVisible();
+  // Add links says where links will be saved: by default, the default
+  // folder, on the server.
+  const addLinks = page.getByRole('button', { name: 'Add links' });
+  const addPage = page.locator('.add-page');
+  const destination = addPage.locator('#collect-destination option:checked');
+  await addLinks.click();
+  await expect(destination).toHaveText(/** @type {string} */ (daemon.root));
+  await expect(addPage.getByText('Server path')).toBeVisible();
+  await addPage.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page).toHaveURL(`${daemon.origin}/`);
 
   // A download that is running while Settings is shown.
   const running = 'while-in-settings.bin';
@@ -310,7 +332,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(page).toHaveURL(`${daemon.origin}/settings`);
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeFocused();
-  await expect(page.locator('table.jobs')).toBeHidden();
+  await expect(page.locator('.downloads-view table.jobs')).toBeHidden();
   const sections = page.getByRole('navigation', { name: 'Settings sections' });
   const folderLink = sections.getByRole('link', { name: 'Download folder' });
   const displayLink = sections.getByRole('link', { name: 'Display' });
@@ -464,18 +486,21 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await page.getByRole('button', { name: 'Back to Downloads' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/`);
   await expect(settingsButton).toBeFocused();
-  await destination.getByRole('button', { name: 'Change…' }).click();
-  await expect(page).toHaveURL(`${daemon.origin}/settings/folder`);
+  await settingsButton.click();
   await expect(folderLink).toHaveAttribute('aria-current', 'page');
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(`${daemon.origin}/`);
-  await expect(destination.getByRole('button', { name: 'Change…' })).toBeFocused();
-  await expect(destination.locator('.path')).toHaveText(/** @type {string} */ (daemon.archive));
+  await expect(settingsButton).toBeFocused();
+  // Links are now saved to the new default.
+  await addLinks.click();
+  await expect(destination).toHaveText(/** @type {string} */ (daemon.archive));
+  await page.keyboard.press('Escape');
+  await expect(addPage).toBeHidden();
   // A section opened directly, as after a reload, shows the same page.
   await page.goto(`${daemon.origin}/settings/display`);
   await expect(displayLink).toHaveAttribute('aria-current', 'page');
   await page.getByRole('button', { name: 'Back to Downloads' }).click();
-  await expect(page.locator('table.jobs')).toBeVisible();
+  await expect(page.locator('.downloads-view table.jobs')).toBeVisible();
 
   // Right-click opens the menu of the row clicked. A browser cannot open
   // the server's files, so it does not offer to.
@@ -603,7 +628,154 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   // The chosen default outlives a reload.
   await page.reload();
   await expect(page.locator('.statusbar .status')).toHaveText('Live');
+  await addLinks.click();
+  await expect(destination).toHaveText(/** @type {string} */ (daemon.archive));
+  await context.close();
+});
+
+test('collected links wait on the Links page until chosen ones are started', async ({ browser }) => {
+  const context = await browser.newContext();
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: daemon.origin });
+  const page = await context.newPage();
+  await page.goto(daemon.origin);
+  await page.getByLabel('Owner name').fill('owner');
+  await page.getByLabel('Password').fill(PASSWORD);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.locator('.statusbar .status')).toHaveText('Live');
+  const all = page.getByRole('button', { name: /^All \(/ });
+  await expect(all).toHaveAttribute('aria-label', /\(\d+\)$/);
+  const jobsBefore = Number(/\((\d+)\)$/.exec((await all.getAttribute('aria-label')) ?? '')?.[1]);
+
+  // The views are tabs in the toolbar, reached from the keyboard.
+  const views = page.getByRole('navigation', { name: 'Views' });
+  await expect(views.getByRole('link', { name: 'Downloads' })).toHaveAttribute('aria-current', 'page');
+  await views.getByRole('link', { name: 'Links' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${daemon.origin}/links`);
+  await expect(views.getByRole('link', { name: 'Links' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByText('No links collected.')).toBeVisible();
+
+  // Add links is a page of its own. Leaving it collects nothing, and
+  // keeps what was typed.
+  const first = fixture.put('review-a.bin', MIB);
+  const signed = `${fixture.put('review-b.bin', MIB)}?token=secret`;
+  const text = `${first}\nexample.com/missing-scheme.bin\n${signed}`;
+  const addPage = page.locator('.add-page');
   await page.getByRole('button', { name: 'Add links' }).click();
-  await expect(destination.locator('.path')).toHaveText(/** @type {string} */ (daemon.archive));
+  await expect(page).toHaveURL(`${daemon.origin}/add`);
+  await expect(page.getByRole('heading', { name: 'Add links', level: 1 })).toBeVisible();
+  await expect(page.getByLabel('Links, one per line')).toBeFocused();
+  await expect(addPage.getByText('Nothing is downloaded or checked until you start them there.')).toBeVisible();
+  await page.getByLabel('Links, one per line').fill(text);
+  await page.keyboard.press('Escape');
+  await expect(page).toHaveURL(`${daemon.origin}/links`);
+  await page.getByRole('button', { name: 'Add links' }).click();
+  await expect(page.getByLabel('Links, one per line')).toHaveValue(text);
+  await addPage.getByRole('button', { name: 'Back to Links' }).click();
+  await expect(page.getByText('No links collected.')).toBeVisible();
+
+  // Collecting keeps the valid links and marks the invalid entry; nothing
+  // is checked or downloaded.
+  await collect(page, text, 'Collected 2 links for review. 1 entry is not a valid link; it is marked below.');
+  await expect(views.getByRole('link', { name: 'Links (3)' })).toBeVisible();
+  const linkRow = (/** @type {string} */ name) =>
+    page.locator('tr[data-link]', { has: page.locator('td.name', { hasText: new RegExp(`^${name}$`) }) });
+  await expect(linkRow('review-a.bin').locator('td.link-status')).toHaveText('Not checked');
+  await expect(linkRow('review-a.bin').locator('td.host')).toHaveText('127.0.0.1');
+  await expect(linkRow('review-a.bin').locator('td.num')).toHaveText('Unknown');
+  await expect(linkRow('example\\.com/missing-scheme\\.bin').locator('td.link-status')).toContainText('Invalid link');
+  await expect(linkRow('review-b.bin')).toHaveCount(1);
+  await expect(page.locator('.links-page')).not.toContainText('secret');
+  expect(fixture.requested.filter((name) => name === 'review-a.bin' || name === 'review-b.bin')).toEqual([]);
+  // Focus is on the new batch, for selecting it from the keyboard.
+  await expect(page.locator('.batch-head input')).toBeFocused();
+
+  // They outlive a reload; the engine holds them.
+  await page.reload();
+  await expect(linkRow('review-a.bin')).toHaveCount(1);
+  await expect(linkRow('example\\.com/missing-scheme\\.bin')).toHaveCount(1);
+
+  // Filtering never acts on what it hides.
+  const start = page.getByRole('button', { name: 'Start selected' });
+  await linkRow('review-a.bin').getByRole('checkbox').check();
+  await expect(page.locator('.selection-summary')).toContainText('1 link selected');
+  await expect(page.locator('.selection-summary .path')).toHaveText(/** @type {string} */ (daemon.archive));
+  await page.getByLabel('Filter links').fill('review-b');
+  await expect(linkRow('review-a.bin')).toHaveCount(0);
+  await expect(page.getByText('1 selected link hidden by the filter is left out.')).toBeVisible();
+  await expect(start).toBeDisabled();
+  await page.getByRole('checkbox', { name: 'Select all links shown' }).check();
+  await expect(page.locator('.selection-summary strong')).toHaveText('1 link selected');
+  await page.getByRole('checkbox', { name: 'Select all links shown' }).uncheck();
+  await page.getByLabel('Filter links').fill('');
+
+  // A new folder for the selected link only: the default stays.
+  await page.getByRole('button', { name: 'Save to…' }).click();
+  const move = page.getByRole('dialog', { name: 'Change where links are saved' });
+  await move.getByRole('radio', { name: new RegExp(`^${daemon.root}`) }).check();
+  await move.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText(`1 link will be saved to ${daemon.root}.`)).toBeVisible();
+  await expect(linkRow('review-a.bin').locator('td.folder')).toHaveText(/** @type {string} */ (daemon.root));
+  await expect(linkRow('review-b.bin').locator('td.folder')).toHaveText(/** @type {string} */ (daemon.archive));
+  await page.getByRole('button', { name: 'Add links' }).click();
+  await expect(addPage.locator('#collect-destination option:checked')).toHaveText(
+    /** @type {string} */ (daemon.archive),
+  );
+  await addPage.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page).toHaveURL(`${daemon.origin}/links`);
+  await expect(page.getByRole('button', { name: 'Add links' })).toBeFocused();
+
+  // The row menu, from the keyboard: an invalid link cannot start, and
+  // can be removed.
+  await linkRow('example\\.com/missing-scheme\\.bin').getByRole('checkbox').focus();
+  await page.keyboard.press('Shift+F10');
+  let menu = page.getByRole('menu', { name: 'Link actions' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: /^Start download/ })).toHaveAttribute('aria-disabled', 'true');
+  await expect(menu.getByRole('menuitem', { name: /^Start download/ })).toContainText('Not a valid link');
+  await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  await expect(linkRow('example\\.com/missing-scheme\\.bin')).toHaveCount(0);
+  await expect(page.getByText('Removed 1 link from the list.')).toBeVisible();
+
+  // Copy link gives the whole link, token and all.
+  await linkRow('review-b.bin').locator('td.host').click({ button: 'right' });
+  menu = page.getByRole('menu', { name: 'Link actions' });
+  await menu.getByRole('menuitem', { name: 'Copy link' }).click();
+  await expect(page.getByText('Copied the link of review-b.bin.')).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(signed);
+
+  // Only the selected link starts, in its own folder.
+  await expect(start).toBeEnabled();
+  await start.click();
+  await expect(page.getByText('Started 1 download.')).toBeVisible();
+  await expect(linkRow('review-a.bin')).toHaveCount(0);
+  await expect(linkRow('review-b.bin')).toHaveCount(1);
+  await expect(views.getByRole('link', { name: 'Links (1)' })).toBeVisible();
+  await expect
+    .poll(async () => (await daemon.published('review-a.bin', daemon.root).catch(() => null))?.equals(content(0, MIB)))
+    .toBe(true);
+
+  // Narrow windows and the dark theme: no sideways page scrolling, and
+  // the toolbar still offers every view.
+  await page.setViewportSize({ width: 420, height: 760 });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(
+    true,
+  );
+  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(15, 19, 24)');
+  await expect(views.getByRole('link', { name: 'Downloads' })).toBeVisible();
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.emulateMedia({ colorScheme: 'light' });
+
+  // The rest are removed: nothing is downloaded, and Downloads has the one
+  // started.
+  await linkRow('review-b.bin').getByRole('checkbox').check();
+  await page.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(page.getByText('No links collected.')).toBeVisible();
+  await expect(views.getByRole('link', { name: 'Links', exact: true })).toBeVisible();
+  await views.getByRole('link', { name: 'Downloads' }).click();
+  await expect(page.getByRole('button', { name: `All (${jobsBefore + 1})` })).toBeVisible();
+  await expect(daemon.published('review-b.bin', daemon.archive)).rejects.toThrow();
   await context.close();
 });
