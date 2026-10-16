@@ -150,6 +150,7 @@ impl Message for Output<'_> {
                 EventKind::JobAdded { job } => format!("added {}", job_line(job)),
                 EventKind::JobChanged { job } => job_line(job),
                 EventKind::JobRemoved { job } => format!("{job}: removed from the list"),
+                EventKind::SettingsChanged { .. } => "settings changed".to_owned(),
             },
             Self::Progress(p) => format!(
                 "{} {} at {} B/s",

@@ -6,7 +6,7 @@
 // a reload. A response that says the session is gone calls
 // `onUnauthenticated`, so the shell can ask the user to sign in again.
 
-import { WayfetchError } from '../client/contract.js';
+import { WayfetchError, settingsRequest } from '../client/contract.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -17,6 +17,7 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/contract.js').JobStage} JobStage
  * @typedef {import('../client/contract.js').Permission} Permission
  * @typedef {import('../client/contract.js').RootId} RootId
+ * @typedef {import('../client/contract.js').SettingsChange} SettingsChange
  * @typedef {import('../client/contract.js').LinkId} LinkId
  * @typedef {import('../client/contract.js').LinkRef} LinkRef
  * @typedef {import('../client/contract.js').LinksAction} LinksAction
@@ -25,7 +26,6 @@ import { WayfetchError } from '../client/contract.js';
  * @typedef {import('../client/generated/LoginRequest.js').LoginRequest} LoginRequest
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
  * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
- * @typedef {import('../client/generated/UpdateSettingsRequest.js').UpdateSettingsRequest} UpdateSettingsRequest
  * @typedef {import('../client/generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
  * @typedef {import('../client/generated/AddRootRequest.js').AddRootRequest} AddRootRequest
  * @typedef {import('../client/generated/CollectRequest.js').CollectRequest} CollectRequest
@@ -191,18 +191,9 @@ export class HttpClient {
     return this.request('GET', '/v1/settings');
   }
 
-  /**
-   * @param {{ idempotencyKey: string, target: string, expectedRevision: number, defaultRoot: RootId }} request
-   */
-  updateSettings({ idempotencyKey, target, expectedRevision, defaultRoot }) {
-    /** @type {UpdateSettingsRequest} */
-    const body = {
-      idempotency_key: idempotencyKey,
-      target,
-      expected_revision: expectedRevision,
-      default_root: defaultRoot,
-    };
-    return this.request('PUT', '/v1/settings', { body });
+  /** @param {SettingsChange} change */
+  updateSettings(change) {
+    return this.request('PUT', '/v1/settings', { body: settingsRequest(change) });
   }
   /**
    * Stops offering a download folder the user added; its files stay.

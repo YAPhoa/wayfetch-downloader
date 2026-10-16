@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 1, minor: 2 });
+export const PROTOCOL = Object.freeze({ major: 2, minor: 0 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -35,6 +35,9 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 2 });
  * @typedef {import('./generated/RootId.js').RootId} RootId
  * @typedef {import('./generated/RootSummary.js').RootSummary} RootSummary
  * @typedef {import('./generated/Settings.js').Settings} Settings
+ * @typedef {import('./generated/BoundedSetting.js').BoundedSetting} BoundedSetting
+ * @typedef {import('./generated/PreferenceChange.js').PreferenceChange} PreferenceChange
+ * @typedef {import('./generated/UpdateSettingsRequest.js').UpdateSettingsRequest} UpdateSettingsRequest
  * @typedef {import('./generated/FolderListing.js').FolderListing} FolderListing
  * @typedef {import('./generated/Action.js').Action} JobAction
  * @typedef {import('./generated/SourceLinkId.js').SourceLinkId} LinkId
@@ -104,12 +107,7 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 2 });
  *   }) => Promise<CommandResult>,
  *   jobSource: (job: JobId) => Promise<string>,
  *   settings: () => Promise<Settings>,
- *   updateSettings: (request: {
- *     idempotencyKey: string,
- *     target: string,
- *     expectedRevision: number,
- *     defaultRoot: RootId,
- *   }) => Promise<CommandResult>,
+ *   updateSettings: (change: SettingsChange) => Promise<CommandResult>,
  *   removeRoot: (request: {
  *     idempotencyKey: string,
  *     target: string,
@@ -124,6 +122,31 @@ export const PROTOCOL = Object.freeze({ major: 1, minor: 2 });
  *   addFolder?: (path: string) => Promise<RootSummary>,
  * }} WayfetchClient
  */
+
+/**
+ * A settings change at the revision the client saw: each setting given is
+ * changed, all or none.
+ * @typedef {{
+ *   idempotencyKey: string,
+ *   target: string,
+ *   expectedRevision: number,
+ *   defaultRoot?: RootId,
+ *   maxActiveDownloads?: PreferenceChange,
+ * }} SettingsChange
+ */
+
+/**
+ * The request both transports send for `change`.
+ * @param {SettingsChange} change
+ * @returns {UpdateSettingsRequest}
+ */
+export function settingsRequest({ idempotencyKey, target, expectedRevision, defaultRoot, maxActiveDownloads }) {
+  /** @type {UpdateSettingsRequest} */
+  const request = { idempotency_key: idempotencyKey, target, expected_revision: expectedRevision };
+  if (defaultRoot !== undefined) request.default_root = defaultRoot;
+  if (maxActiveDownloads !== undefined) request.max_active_downloads = maxActiveDownloads;
+  return request;
+}
 
 /**
  * @typedef {ErrorCode | 'unauthenticated' | 'unavailable' | 'incompatible_client'} WayfetchErrorCode

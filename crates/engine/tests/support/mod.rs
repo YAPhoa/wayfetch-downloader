@@ -15,7 +15,7 @@ use tokio::runtime::Handle;
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::transfer::transport::Transport;
 use wayfetch_engine::{
-    EngineBuilder, EngineConfig, EngineOwner, Limits, ShutdownRequest, Timeouts,
+    EngineBuilder, EngineConfig, EngineOwner, Limits, Policy, ShutdownRequest, Timeouts,
 };
 use wayfetch_protocol::command::{InputUrl, SubmitItems};
 use wayfetch_protocol::domain::id::{JobId, RootId};
@@ -50,6 +50,7 @@ pub struct Env<S> {
     transport: Arc<dyn Transport>,
     pub limits: Limits,
     pub timeouts: Timeouts,
+    pub policy: Policy,
 }
 
 impl<S> Env<S> {
@@ -82,6 +83,7 @@ impl<S> Env<S> {
                 ..Limits::DEFAULT
             },
             timeouts: Timeouts::DEFAULT,
+            policy: Policy::DEFAULT,
         }
     }
 
@@ -103,6 +105,7 @@ impl<S> Env<S> {
         config.download_root = Some(self.root.clone());
         config.limits = self.limits.clone();
         config.timeouts = self.timeouts;
+        config.policy = self.policy;
         EngineBuilder::new(config, Handle::current())
             .transport(self.transport.clone())
             .start()

@@ -21,7 +21,7 @@ use wayfetch_engine::protocol::{
     QueryResult, StreamItem,
 };
 use wayfetch_engine::{EngineHandle, ShutdownRequest, Subscription};
-use wayfetch_host::{Printer, Signals, Started, Terminal};
+use wayfetch_host::{NoServer, Printer, Signals, Started, Terminal};
 
 use crate::RunArgs;
 use crate::input::{self, Line};
@@ -37,7 +37,8 @@ pub async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String>
     // Registered before the engine starts, so a signal during startup
     // still leads to a graceful shutdown.
     let mut signals = Signals::new()?;
-    let started = wayfetch_host::start_engine(&args.engine).await?;
+    let (settings, _) = args.engine.load::<NoServer>()?;
+    let started = wayfetch_host::start_engine(settings).await?;
     let root_problem = started.root_problem();
     let Started { owner, .. } = started;
     let session = Session {

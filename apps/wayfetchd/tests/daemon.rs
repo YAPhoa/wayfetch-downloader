@@ -136,7 +136,12 @@ struct Finished {
 impl Daemon {
     /// Starts a daemon on `dirs` and waits until it serves.
     async fn start(dirs: &Dirs) -> Self {
-        let mut process = Self::command(dirs).spawn().unwrap();
+        Self::spawn(Self::command(dirs)).await
+    }
+
+    /// Starts `command` and waits until it serves.
+    async fn spawn(mut command: Command) -> Self {
+        let mut process = command.spawn().unwrap();
         let mut out = BufReader::new(process.stdout.take().unwrap()).lines();
         let (send, lines) = mpsc::unbounded_channel();
         tokio::spawn(async move {
@@ -461,6 +466,137 @@ async fn the_default_destination_is_chosen_among_server_folders() {
     let (_, settings) = daemon.owner().get("/v1/settings").await;
     assert_eq!(settings["default_root"], media_id);
     assert_eq!(settings["revision"], updated["revision"]);
+    daemon.stop("TERM").await;
+}
+
+/// A configuration file for `dirs`: storage and the token file in the
+/// file, by paths relative to it, and `policy` as `[downloads.max_active]`.
+fn configure(dirs: &Dirs, policy: &str) -> PathBuf {
+    let config = dirs.tmp.path().join("wayfetch.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version = 1\n\n[storage]\nstate_dir = \"state\"\ndownload_root = \"downloads\"\n\n\
+             [server]\ntoken_file = \"tokens\"\n\n[downloads.max_active]\n{policy}\n"
+        ),
+    )
+    .unwrap();
+    config
+}
+
+/// `wayfetchd run` with only `config` and what tests need besides.
+fn configured(dirs: &Dirs, config: &std::path::Path) -> Command {
+    let mut command = Command::new(BIN);
+    command
+        .arg("run")
+        .arg("--config")
+        .arg(config)
+        .args(["--listen", "127.0.0.1:0", "--json"])
+        .args(["--allow-network", "127.0.0.1/32", "--ca-cert"])
+        .arg(dirs.ca())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_configuration_file_sets_up_the_daemon_and_its_download_policy() {
+    let server = Server::https().await;
+    let dirs = Dirs::new(&server);
+    write_private(
+        &dirs.tokens,
+        &format!("{OWNER_TOKEN} read,submit,control,sources\n{READER_TOKEN} read\n"),
+    );
+    // A missing file named explicitly is refused before anything starts.
+    let missing = std::process::Command::new(BIN)
+        .args(["run", "--config"])
+        .arg(dirs.tmp.path().join("missing.toml"))
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("missing.toml"),
+        "{missing:?}"
+    );
+    assert!(!dirs.state.exists());
+
+    let config = configure(&dirs, "default = 2\nmax = 8");
+    let init = std::process::Command::new(BIN)
+        .arg("init-root")
+        .arg("--config")
+        .arg(&config)
+        .arg(&dirs.root)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{init:?}");
+    let daemon = Daemon::spawn(configured(&dirs, &config)).await;
+    let client = daemon.owner();
+    let (_, settings) = client.get("/v1/settings").await;
+    assert_eq!(
+        settings["max_active_downloads"],
+        json!({"value": 2, "source": "server", "default": 2, "min": 1, "max": 8,
+               "locked": false, "conflict": false}),
+        "{settings}"
+    );
+    assert_eq!(
+        settings["roots"][0]["path"],
+        dirs.root.to_str().unwrap(),
+        "{settings}"
+    );
+    let set = |revision: &Value, value: u64| {
+        client.command(json!({
+            "expected_revision": revision,
+            "max_active_downloads": {"set": value},
+        }))
+    };
+    let (status, error) = client
+        .put("/v1/settings", &set(&settings["revision"], 9))
+        .await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::BAD_REQUEST, &"invalid_request".into())
+    );
+    let (status, _) = daemon
+        .client(READER_TOKEN)
+        .put("/v1/settings", &set(&settings["revision"], 6))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, updated) = client
+        .put("/v1/settings", &set(&settings["revision"], 6))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let (_, settings) = client.get("/v1/settings").await;
+    assert_eq!(settings["max_active_downloads"]["value"], 6);
+    assert_eq!(settings["max_active_downloads"]["source"], "saved");
+    daemon.stop("TERM").await;
+
+    // Locked by the operator: the saved value is kept but not used, and
+    // changes are refused.
+    configure(&dirs, "default = 3\nlocked = true");
+    let daemon = Daemon::spawn(configured(&dirs, &config)).await;
+    let client = daemon.owner();
+    let (_, settings) = client.get("/v1/settings").await;
+    let limit = &settings["max_active_downloads"];
+    assert_eq!(
+        (
+            &limit["value"],
+            &limit["saved"],
+            &limit["locked"],
+            &limit["conflict"]
+        ),
+        (&json!(3), &json!(6), &json!(true), &json!(true)),
+        "{settings}"
+    );
+    let (status, error) = client
+        .put("/v1/settings", &set(&settings["revision"], 3))
+        .await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::CONFLICT, &"not_applicable".into()),
+        "{error}"
+    );
     daemon.stop("TERM").await;
 }
 

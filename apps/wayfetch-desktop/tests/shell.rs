@@ -275,7 +275,12 @@ impl Shell {
 
     /// Waits until `expression` is truthy in the page.
     async fn wait_for(&self, expression: &str) {
+        let deadline = tokio::time::Instant::now() + DEADLINE;
         eventually(|| async {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "waiting for {expression}"
+            );
             let value = self
                 .client
                 .execute(&format!("return Boolean({expression})"), vec![])
@@ -320,7 +325,7 @@ impl Shell {
 
     /// Collects links, one per line, through Add links; the Links page
     /// then says `collected`.
-    async fn collect(&self, urls: &str, collected: &str) {
+    async fn collect(&self, urls: &str, collected: &str) -> String {
         self.click(".workspace > :not([hidden]) [data-key=\"add-links\"]")
             .await;
         let links = self
@@ -349,6 +354,15 @@ impl Shell {
             json!(collected)
         ))
         .await;
+        // Collection navigates before its list query finishes. Wait for
+        // the new batch to be rendered and focused, not an older last row.
+        self.wait_for("document.activeElement?.dataset.key?.startsWith('select-batch-')")
+            .await;
+        self.js("return document.activeElement.dataset.key")
+            .await
+            .as_str()
+            .unwrap()
+            .to_owned()
     }
 
     /// Collects `count` links and starts them from the Links page, then
@@ -358,9 +372,10 @@ impl Shell {
             1 => ("1 link".to_owned(), "1 download".to_owned()),
             n => (format!("{n} links"), format!("{n} downloads")),
         };
-        self.collect(urls, &format!("Collected {links} for review."))
+        let batch = self
+            .collect(urls, &format!("Collected {links} for review."))
             .await;
-        self.click(".links-page tbody.batch:last-of-type .batch-head input")
+        self.click(&format!(".links-page input[data-key=\"{batch}\"]"))
             .await;
         self.click(".links-page [data-key=\"links-start\"]:not([disabled])")
             .await;
@@ -988,15 +1003,67 @@ async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
     shell.add(&url).await;
     shell.wait_for_state("job-1", "Done").await;
     assert_eq!(std::fs::read(folder.join("picked.bin")).unwrap(), body(MIB));
+
+    // The download limit is changed through IPC within the policy, and
+    // refused outside it, as over HTTP.
+    let limit = shell
+        .ipc(&format!(
+            "{choose}
+             const hello = await core.invoke('hello');
+             const change = async (max_active_downloads) => {{
+               const {{ revision }} = await settings();
+               return core.invoke('update_settings', {{ request: {{
+                 idempotency_key: crypto.randomUUID(), target: hello.instance,
+                 expected_revision: revision, max_active_downloads }} }})
+                 .then((r) => r.type, (e) => e.code);
+             }};
+             const initial = (await settings()).max_active_downloads;
+             const set = await change({{ set: 6 }});
+             const saved = (await settings()).max_active_downloads;
+             const zero = await change({{ set: 0 }});
+             const over = await change({{ set: initial.max + 1 }});
+             const empty = await core.invoke('update_settings', {{ request: {{
+               idempotency_key: crypto.randomUUID(), target: hello.instance,
+               expected_revision: (await settings()).revision }} }})
+               .then((r) => r.type, (e) => e.code);
+             return {{ initial, set, saved, zero, over, empty,
+                       after: (await settings()).max_active_downloads }};"
+        ))
+        .await;
+    assert_eq!(limit["initial"]["value"], 4, "{limit}");
+    assert_eq!(limit["initial"]["source"], "built_in", "{limit}");
+    assert_eq!(limit["set"], "settings_updated", "{limit}");
+    assert_eq!(limit["saved"]["value"], 6, "{limit}");
+    assert_eq!(limit["saved"]["saved"], 6, "{limit}");
+    assert_eq!(limit["saved"]["source"], "saved", "{limit}");
+    for refused in ["zero", "over", "empty"] {
+        assert_eq!(limit[refused], "invalid_request", "{refused}: {limit}");
+    }
+    assert_eq!(limit["after"]["value"], 6, "{limit}");
     shell.close().await;
 
     // The chosen folder stays a destination, and the default, after a
-    // relaunch.
+    // relaunch, as does the download limit until the default is chosen.
     let shell = Shell::launch(&dirs).await;
     let after = shell
         .ipc(&format!("{choose} return await settings();"))
         .await;
     assert_eq!(after["default_root"], chosen["root"]["id"], "{after}");
+    assert_eq!(after["max_active_downloads"]["value"], 6, "{after}");
+    let reset = shell
+        .ipc(&format!(
+            "{choose}
+             const hello = await core.invoke('hello');
+             await core.invoke('update_settings', {{ request: {{
+               idempotency_key: crypto.randomUUID(), target: hello.instance,
+               expected_revision: (await settings()).revision,
+               max_active_downloads: 'use_default' }} }});
+             return (await settings()).max_active_downloads;"
+        ))
+        .await;
+    assert_eq!(reset["value"], 4, "{reset}");
+    assert_eq!(reset["source"], "built_in", "{reset}");
+    assert_eq!(reset.get("saved"), None, "{reset}");
     shell.close().await;
 }
 
@@ -1016,7 +1083,9 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
     shell.wait_for_state("job-1", "Downloading").await;
 
     shell.click("[data-key=\"open-settings\"]").await;
-    shell.wait_for(&section_shown("folder", "/settings")).await;
+    shell
+        .wait_for(&section_shown("downloads", "/settings"))
+        .await;
     // Down moves along the sections, with focus drawn; Enter opens one.
     shell
         .wait_for("document.activeElement?.dataset.key === 'settings-title'")
@@ -1025,11 +1094,15 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
     press(&shell, Key::Down).await;
     shell
         .wait_for(
-            "document.activeElement?.dataset.key === 'settings-section-display'
+            "document.activeElement?.dataset.key === 'settings-section-folder'
              && getComputedStyle(document.activeElement).outlineStyle === 'solid'",
         )
         .await;
     press(&shell, Key::Enter).await;
+    shell
+        .wait_for(&section_shown("folder", "/settings/folder"))
+        .await;
+    shell.click("[data-key=\"settings-section-display\"]").await;
     shell
         .wait_for(&section_shown("display", "/settings/display"))
         .await;
@@ -1566,5 +1639,66 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
         .click(".workspace > :not([hidden]) [data-key=\"view-downloads\"]")
         .await;
     shell.wait_for_state("job-1", "Done").await;
+    shell.close().await;
+}
+
+/// A refresh between pointer-down and pointer-up must keep the pressed
+/// control connected, so the WebView delivers its click/change event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an X display and WebKitWebDriver"]
+async fn refreshing_tables_keeps_pointer_interactions_intact() {
+    let server = Server::http().await;
+    let dirs = Dirs::new().await;
+    let shell = Shell::launch(&dirs).await;
+    server.put("/click.bin", Resource::new(body(1024)));
+    // Own a shared UI instance so the test can force a refresh at the
+    // precise pointer boundary, using the real engine and IPC transport.
+    let setup = shell
+        .ipc(
+            "const { Downloads } = await import('/components/downloads.js');
+      window.testWorkspace = new Downloads(client, { onSignedOut() {} });
+      document.querySelector('#app').replaceChildren(testWorkspace.element);
+      testWorkspace.start(); return true;",
+        )
+        .await;
+    assert_eq!(setup, true, "{setup}");
+    shell
+        .wait_for("document.querySelector('.statusbar .status')?.textContent === 'Live'")
+        .await;
+    let batch = shell
+        .collect(&server.url("/click.bin"), "Collected 1 link for review.")
+        .await;
+    shell
+        .js("window.connectedDuringRefresh = null;
+      document.addEventListener('pointerdown', (e) => {
+        const page = testWorkspace.linksPage;
+        page.links = page.links.map(link => ({ ...link }));
+        page.render();
+        window.connectedDuringRefresh = e.target.isConnected;
+      }, { once: true, capture: true }); return true;")
+        .await;
+    shell.click(&format!("input[data-key=\"{batch}\"]")).await;
+    assert_eq!(shell.js("return window.connectedDuringRefresh").await, true);
+    shell
+        .wait_for("!document.querySelector('[data-key=\"links-start\"]').disabled")
+        .await;
+    shell.click("[data-key=\"links-start\"]").await;
+    shell.wait_for("document.querySelector('.links-page .notice > span')?.textContent === 'Started 1 download.'").await;
+    shell.click("[data-key=\"open-downloads\"]").await;
+    shell.wait_for_state("job-1", "Done").await;
+    shell
+        .js("window.connectedDuringRefresh = null;
+      document.addEventListener('pointerdown', (e) => {
+        const view = testWorkspace;
+        const held = view.feed.page.get('job-1');
+        view.feed.page.set('job-1', { ...held, job: { ...held.job } });
+        view.renderList();
+        window.connectedDuringRefresh = e.target.isConnected;
+      }, { once: true, capture: true }); return true;")
+        .await;
+    shell.click("tr[data-job=\"job-1\"] td.name a").await;
+    assert_eq!(shell.js("return window.connectedDuringRefresh").await, true);
+    shell.wait_for("location.pathname === '/jobs/job-1'").await;
+    shell.js("testWorkspace.stop(); return true;").await;
     shell.close().await;
 }
