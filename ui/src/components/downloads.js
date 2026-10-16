@@ -39,6 +39,7 @@ import { icon } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu } from './menu.js';
 import { SETTINGS_PATH, SettingsPage, sectionPath, settingsSection } from './settings.js';
+import { toolbar } from './toolbar.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -113,11 +114,6 @@ function commandFailed(error) {
 function jobFromPath(path) {
   const match = /^\/jobs\/(job-[1-9][0-9]*)$/.exec(path);
   return match ? /** @type {JobId} */ (match[1]) : null;
-}
-
-/** The app's name, at the start of a toolbar. */
-function brand() {
-  return h('span', { class: 'brand' }, icon('brand'), 'Wayfetch');
 }
 
 /** @param {Tone} tone */
@@ -293,7 +289,6 @@ export class Downloads {
       navigate: (path) => this.navigate(path),
       back: () => this.navigate(this.viewPath),
       backLabel: () => this.backLabel(),
-      brand: brand(),
     });
     this.addPage = new AddLinksPage({
       client,
@@ -308,7 +303,7 @@ export class Downloads {
       onSignedOut: () => this.signedOut(),
       back: () => this.navigate(this.viewPath),
       backLabel: () => this.backLabel(),
-      brand: brand(),
+      settingsButton: this.settingsButton(),
     });
     /** The menu of commands for collected links. */
     this.linksMenu = new Menu('Link actions', () => this.linksPage.markMenu());
@@ -593,30 +588,34 @@ export class Downloads {
   toolbar(tools, search) {
     const views = h('nav', { class: 'views', 'aria-label': 'Views' });
     this.viewSwitchers.push(views);
+    return toolbar(
+      [
+        h(
+          'button',
+          { type: 'button', class: 'primary', 'data-key': 'add-links', onclick: () => this.navigate(ADD_PATH) },
+          icon('add'),
+          'Add links',
+        ),
+        views,
+        tools,
+        search,
+      ],
+      this.settingsButton(),
+    );
+  }
+
+  /** Opens Settings, at the end of each page's toolbar but its own. */
+  settingsButton() {
     return h(
-      'header',
-      { class: 'toolbar' },
-      brand(),
-      h(
-        'button',
-        { type: 'button', class: 'primary', 'data-key': 'add-links', onclick: () => this.navigate(ADD_PATH) },
-        icon('add'),
-        'Add links',
-      ),
-      views,
-      tools,
-      search,
-      h(
-        'button',
-        {
-          type: 'button',
-          class: 'tool settings-button',
-          'data-key': 'open-settings',
-          onclick: () => this.openSettings(),
-        },
-        icon('settings'),
-        'Settings',
-      ),
+      'button',
+      {
+        type: 'button',
+        class: 'tool settings-button',
+        'data-key': 'open-settings',
+        onclick: () => this.openSettings(),
+      },
+      icon('settings'),
+      'Settings',
     );
   }
 

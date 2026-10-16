@@ -16,6 +16,7 @@ import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { count, entries, entriesProblem } from '../client/links.js';
 import { h, show } from './dom.js';
 import { icon } from './icons.js';
+import { toolbar } from './toolbar.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -37,7 +38,7 @@ import { icon } from './icons.js';
  *   onSignedOut: () => void,
  *   back: () => void,
  *   backLabel: () => string,
- *   brand: Node,
+ *   settingsButton: Node,
  * }} AddContext
  */
 
@@ -150,17 +151,17 @@ export class AddLinksPage {
           }
         },
       },
-      h(
-        'header',
-        { class: 'toolbar' },
-        context.brand,
-        h(
-          'button',
-          { type: 'button', class: 'tool back', 'data-key': 'add-back', onclick: () => context.back() },
-          icon('back'),
-          this.backLabel,
-        ),
-        this.title,
+      toolbar(
+        [
+          h(
+            'button',
+            { type: 'button', class: 'tool back', 'data-key': 'add-back', onclick: () => context.back() },
+            icon('back'),
+            this.backLabel,
+          ),
+          this.title,
+        ],
+        context.settingsButton,
       ),
       h('main', { class: 'add-content' }, h('section', { class: 'add-panel', 'aria-labelledby': 'add-title' }, form)),
     );
