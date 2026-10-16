@@ -23,25 +23,29 @@
 //!   stall every request. Checks
 //!   run on blocking threads with a deadline, at most one per path at a
 //!   time ([`Probes`]), so a hung mount costs one blocked thread and is
-//!   reported as not responding. Registering a folder runs as its own
+//!   reported as not responding. An availability check asked for while
+//!   another of the same root runs shares its answer, so clients reading
+//!   the settings at once, as they do after a change, see the same. Registering a folder runs as its own
 //!   task ([`register`]) that uses the store only between its filesystem
 //!   steps. Filesystem work cannot be interrupted, so it holds the state
 //!   directory until it ends, and shutdown waits for it or reports it.
 
 use std::any::Any;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use wayfetch_domain::id::RootId;
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
-use wayfetch_protocol::query::{FolderListing, MAX_LISTED_FOLDERS, RootSummary, Settings};
+use wayfetch_protocol::query::{
+    BoundedSetting, FolderListing, MAX_LISTED_FOLDERS, RootSummary, Settings,
+};
 use wayfetch_protocol::{ErrorCode, InstanceId, ProtocolError};
 
 use crate::config::EngineConfig;
@@ -384,7 +388,7 @@ impl Destinations {
     /// The registered roots and the settings, from the store. Configured
     /// paths are identified by [`Destinations::refresh`]. Blocking.
     pub(crate) fn load(store: &mut Store, config: &EngineConfig) -> Result<Self, StoreError> {
-        let (revision, chosen) = store.settings()?;
+        let saved = store.settings()?;
         let known = store
             .root_rows()?
             .into_iter()
@@ -401,8 +405,8 @@ impl Destinations {
                 .chain(&config.download_root)
                 .cloned()
                 .collect(),
-            revision,
-            chosen,
+            revision: saved.revision,
+            chosen: saved.default_root,
         })
     }
 
@@ -527,8 +531,13 @@ impl Destinations {
     }
 
     /// The settings, with each root's availability from `probe`.
-    pub(crate) fn settings(&self, available: Vec<Result<(), String>>) -> Settings {
+    pub(crate) fn settings(
+        &self,
+        available: Vec<Result<(), String>>,
+        max_active_downloads: BoundedSetting,
+    ) -> Settings {
         Settings {
+            max_active_downloads,
             revision: self.revision,
             default_root: self.default_root(),
             roots: self
@@ -589,6 +598,10 @@ impl<K: Hash + Eq + Clone> Claims<K> {
     }
 }
 
+/// Availability checks under way, by path: each receiver gets the check's
+/// answer once it ends.
+type Checks = Mutex<HashMap<PathBuf, watch::Receiver<Option<Result<(), String>>>>>;
+
 /// Blocking filesystem checks of root folders, at most one running per
 /// path: a check that is still running when another is asked for is not
 /// repeated, so a hung mount holds one thread, however often it is asked
@@ -599,6 +612,8 @@ impl<K: Hash + Eq + Clone> Claims<K> {
 #[derive(Debug, Clone)]
 pub(crate) struct Probes {
     running: Claims<PathBuf>,
+    /// Availability checks under way, by path, for later ones to share.
+    checks: Arc<Checks>,
     /// Held by every check until it ends, so the state directory stays
     /// locked while one may still touch a folder.
     guard: Arc<dyn Any + Send + Sync>,
@@ -617,6 +632,7 @@ impl Probes {
     pub(crate) fn new(guard: Arc<dyn Any + Send + Sync>) -> Self {
         Self {
             running: Claims::default(),
+            checks: Arc::default(),
             guard,
             named: Arc::new(Semaphore::new(MAX_NAMED_FOLDER_WORK)),
         }
@@ -688,20 +704,50 @@ impl Probes {
         tokio::time::timeout(PROBE_TIMEOUT, check).await.ok()?.ok()
     }
 
-    /// Whether `root` opens and carries its sentinel.
+    /// Whether `root` opens and carries its sentinel. While another check
+    /// of the same path runs, its answer is shared.
     pub(crate) async fn check(
         &self,
         root: Destination,
         instance: InstanceId,
     ) -> Result<(), String> {
+        const NOT_RESPONDING: &str = "the folder is not responding";
         let path = root.path.clone();
-        self.timed(&path, move || {
-            Root::open(&root.path, root.id, instance)
-                .map(drop)
-                .map_err(|e| unavailable(&e))
-        })
-        .await
-        .unwrap_or_else(|| Err("the folder is not responding".to_owned()))
+        let (answer, mut waiting) = {
+            let mut checks = self.checks.lock().unwrap_or_else(|e| e.into_inner());
+            match checks.get(&path) {
+                Some(running) => (None, running.clone()),
+                None => {
+                    let (answer, running) = watch::channel(None);
+                    checks.insert(path.clone(), running.clone());
+                    (Some(answer), running)
+                }
+            }
+        };
+        let Some(answer) = answer else {
+            return match waiting.wait_for(Option::is_some).await {
+                Ok(answer) => answer
+                    .clone()
+                    .unwrap_or_else(|| Err(NOT_RESPONDING.to_owned())),
+                // The check was given up on before it answered.
+                Err(_) => Err(NOT_RESPONDING.to_owned()),
+            };
+        };
+        // Forgotten when this check ends, or is given up on.
+        let _running = Running {
+            checks: &self.checks,
+            path: &path,
+        };
+        let result = self
+            .timed(&path, move || {
+                Root::open(&root.path, root.id, instance)
+                    .map(drop)
+                    .map_err(|e| unavailable(&e))
+            })
+            .await
+            .unwrap_or_else(|| Err(NOT_RESPONDING.to_owned()));
+        answer.send_replace(Some(result.clone()));
+        result
     }
 
     /// The root the sentinel at `path` names, `None` if there is none or
@@ -712,6 +758,21 @@ impl Probes {
             .await?
             .ok()
             .flatten()
+    }
+}
+
+/// An availability check under way, forgotten when dropped.
+struct Running<'a> {
+    checks: &'a Checks,
+    path: &'a Path,
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.checks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(self.path);
     }
 }
 
@@ -896,6 +957,48 @@ mod tests {
         assert_eq!(probes.identify(&path, f.instance).await, None);
         drop(slot);
         assert_eq!(probes.identify(&path, f.instance).await, Some(root.id));
+    }
+
+    #[tokio::test]
+    async fn a_check_asked_for_while_another_runs_shares_its_answer() {
+        let f = fixture();
+        let path = f.dir("shared");
+        let root = Destination {
+            id: RootId::from_u64(6).unwrap(),
+            path: path.clone(),
+        };
+        let probes = Probes::default();
+        // A check of the root is under way.
+        let (answer, running) = watch::channel(None);
+        probes.checks.lock().unwrap().insert(path.clone(), running);
+        let waiting = tokio::spawn({
+            let (probes, root) = (probes.clone(), root.clone());
+            async move { probes.check(root, f.instance).await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiting.is_finished());
+        answer.send_replace(Some(Err("shared".to_owned())));
+        assert_eq!(waiting.await.unwrap(), Err("shared".to_owned()));
+        // One given up on answers that it is not responding.
+        let (answer, running) = watch::channel(None);
+        probes.checks.lock().unwrap().insert(path.clone(), running);
+        let waiting = tokio::spawn({
+            let (probes, root) = (probes.clone(), root.clone());
+            async move { probes.check(root, f.instance).await }
+        });
+        drop(answer);
+        assert!(
+            waiting
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("not responding")
+        );
+        // Once it ends, the next check runs afresh.
+        probes.checks.lock().unwrap().clear();
+        let err = probes.check(root, f.instance).await.unwrap_err();
+        assert!(err.contains("not initialized"), "{err}");
+        assert!(probes.checks.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

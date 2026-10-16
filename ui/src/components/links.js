@@ -111,6 +111,7 @@ export class LinksPage {
     this.earlier = [];
     /** @type {Set<LinkId>} */
     this.selected = new Set();
+    this.tableState = '';
     /** Filter text, lower case. */
     this.query = '';
     /** The outcome of the last command or read. */
@@ -683,6 +684,12 @@ export class LinksPage {
 
   /** @param {readonly CollectedLink[]} visible */
   renderTable(visible) {
+    // Polling and settings reads often return the same table. Keep its
+    // controls connected so a refresh cannot interrupt a checkbox click.
+    // Only the current, bounded page is retained.
+    const tableState = JSON.stringify([visible, [...this.selected], this.context.settings()?.roots, new Date().toDateString()]);
+    if (tableState === this.tableState) return;
+    this.tableState = tableState;
     const chosen = visible.filter((l) => this.selected.has(l.id)).length;
     this.selectAll.checked = visible.length > 0 && chosen === visible.length;
     this.selectAll.indeterminate = chosen > 0 && chosen < visible.length;

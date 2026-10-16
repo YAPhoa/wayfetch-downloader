@@ -20,6 +20,10 @@
 //!
 //! `wayfetchd ready` asks a running daemon whether it is ready, for a
 //! container health check: it starts no engine and reads no token.
+//!
+//! `--config FILE` reads settings from a TOML file at startup; its
+//! `[server]` section holds the listener and browser settings, which only
+//! this host has (see `wayfetch_host::config`).
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -37,7 +41,7 @@ use wayfetch_api::{
 };
 use wayfetch_engine::protocol::InstanceId;
 use wayfetch_engine::{ShutdownReport, ShutdownRequest};
-use wayfetch_host::{EngineArgs, InitRootArgs, Message, Printer, Signals, Terminal};
+use wayfetch_host::{EngineArgs, InitRootArgs, Loaded, Message, Printer, Signals, Terminal};
 
 /// Loopback only, so nothing beyond this machine reaches the API unless
 /// the operator says so.
@@ -108,27 +112,97 @@ struct ResetOwnerArgs {
 struct BrowserArgs {
     /// Owner-only directory for the browser owner account and its setup
     /// secret; created if missing. Browser sign-in needs it and a browser
-    /// origin.
+    /// origin. Replaces `server.auth_dir`.
     #[arg(long, value_name = "DIR")]
     auth_dir: Option<PathBuf>,
     /// An origin browsers use to reach the daemon, such as
     /// `https://wayfetch.example.lan`: the HTTPS reverse proxy's address,
-    /// which must pass the `Host` header through. Repeatable.
-    #[arg(long = "browser-origin", value_name = "URL", requires = "auth_dir")]
+    /// which must pass the `Host` header through. Needs an auth directory.
+    /// Repeatable; adds to `server.browser_origins`.
+    #[arg(long = "browser-origin", value_name = "URL")]
     origins: Vec<Url>,
     /// Development only: browser sign-in over plain HTTP on loopback, with
-    /// cookies that lack `Secure`. Needs a loopback `--listen`; the
-    /// origins default to its address and `localhost`.
-    #[arg(long, requires = "auth_dir")]
+    /// cookies that lack `Secure`. Needs a loopback `--listen` and an auth
+    /// directory; the origins default to its address and `localhost`.
+    #[arg(long)]
     dev_insecure_loopback: bool,
 }
 
-impl BrowserArgs {
-    fn config(&self) -> Option<BrowserConfig> {
-        Some(BrowserConfig {
-            auth_dir: self.auth_dir.clone()?,
-            origins: self.origins.clone(),
-            insecure_loopback: self.dev_insecure_loopback,
+/// `[server]` in the configuration file: the listener and browser access,
+/// which only this host has. Paths resolve against the file's directory.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerFile {
+    /// As `--listen`.
+    listen: Option<SocketAddr>,
+    /// As `--token-file`.
+    token_file: Option<PathBuf>,
+    /// As `--auth-dir`.
+    auth_dir: Option<PathBuf>,
+    /// As `--browser-origin`.
+    #[serde(default)]
+    browser_origins: Vec<Url>,
+}
+
+/// The server settings: the command line applied over `[server]`.
+#[derive(Debug)]
+struct Server {
+    listen: SocketAddr,
+    token_file: PathBuf,
+    browser: Option<BrowserConfig>,
+}
+
+impl RunArgs {
+    fn server(&self, loaded: Option<&Loaded<ServerFile>>) -> Result<Server, String> {
+        let empty = ServerFile::default();
+        let file = loaded
+            .and_then(|l| l.file.server.as_ref())
+            .unwrap_or(&empty);
+        let from_file = |path: &Option<PathBuf>| {
+            path.as_deref()
+                .zip(loaded)
+                .map(|(path, loaded)| loaded.path(path))
+        };
+        let token_file = match (&self.token_file, from_file(&file.token_file)) {
+            (Some(path), _) => path.clone(),
+            (None, Some(path)) => path,
+            (None, None) => {
+                return Err("no token file: pass --token-file or set server.token_file".to_owned());
+            }
+        };
+        let auth_dir = self
+            .browser
+            .auth_dir
+            .clone()
+            .or_else(|| from_file(&file.auth_dir));
+        let origins: Vec<Url> = file
+            .browser_origins
+            .iter()
+            .chain(&self.browser.origins)
+            .cloned()
+            .collect();
+        let browser = match auth_dir {
+            Some(auth_dir) => Some(BrowserConfig {
+                auth_dir,
+                origins,
+                insecure_loopback: self.browser.dev_insecure_loopback,
+            }),
+            None if !origins.is_empty() || self.browser.dev_insecure_loopback => {
+                return Err(
+                    "browser sign-in needs an auth directory: pass --auth-dir or set \
+                     server.auth_dir"
+                        .to_owned(),
+                );
+            }
+            None => None,
+        };
+        Ok(Server {
+            listen: self
+                .listen
+                .or(file.listen)
+                .unwrap_or_else(|| DEFAULT_LISTEN.parse().expect("a socket address")),
+            token_file,
+            browser,
         })
     }
 }
@@ -144,15 +218,16 @@ struct ReadyArgs {
 struct RunArgs {
     #[command(flatten)]
     engine: EngineArgs,
-    /// Address to serve the API on. Loopback by default; anything else
-    /// should sit behind an authenticated TLS reverse proxy.
-    #[arg(long, value_name = "ADDR", default_value = DEFAULT_LISTEN)]
-    listen: SocketAddr,
+    /// Address to serve the API on: 127.0.0.1:7878 unless configured.
+    /// Anything but loopback should sit behind an authenticated TLS
+    /// reverse proxy. Replaces `server.listen`.
+    #[arg(long, value_name = "ADDR")]
+    listen: Option<SocketAddr>,
     /// File of API bearer tokens, one `<token> <permission>[,...]` per
     /// line, readable only by its owner. Created with one token holding
-    /// every permission if missing.
+    /// every permission if missing. Replaces `server.token_file`.
     #[arg(long, value_name = "FILE")]
-    token_file: PathBuf,
+    token_file: Option<PathBuf>,
     #[command(flatten)]
     browser: BrowserArgs,
     /// Print one JSON object per line instead of text.
@@ -301,29 +376,32 @@ async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
     };
     let mut signals = Signals::new()?;
     let ui = ui_assets().map_err(|e| e.to_string())?;
-    let (tokens, created) = Tokens::load_or_create(&args.token_file).map_err(|e| e.to_string())?;
+    let (settings, loaded) = args.engine.load::<ServerFile>()?;
+    let server = args.server(loaded.as_ref())?;
+    let (tokens, created) =
+        Tokens::load_or_create(&server.token_file).map_err(|e| e.to_string())?;
     if created {
         print(&Notice::TokenFileCreated {
-            path: args.token_file.clone(),
+            path: server.token_file.clone(),
         });
     }
     // Bound before the engine starts, so a taken address fails fast and
     // leaves the state directory untouched.
-    let listener = tokio::net::TcpListener::bind(args.listen)
+    let listener = tokio::net::TcpListener::bind(server.listen)
         .await
-        .map_err(|e| format!("cannot listen on {}: {e}", args.listen))?;
+        .map_err(|e| format!("cannot listen on {}: {e}", server.listen))?;
     let address = listener
         .local_addr()
-        .map_err(|e| format!("cannot listen on {}: {e}", args.listen))?;
+        .map_err(|e| format!("cannot listen on {}: {e}", server.listen))?;
     // Also before the engine: a bad origin or a busy auth directory
     // leaves the state directory untouched.
-    let browser = args
+    let browser = server
         .browser
-        .config()
-        .map(|config| BrowserAuth::open(&config, address))
+        .as_ref()
+        .map(|config| BrowserAuth::open(config, address))
         .transpose()
         .map_err(|e| e.to_string())?;
-    let started = wayfetch_host::start_engine(&args.engine).await?;
+    let started = wayfetch_host::start_engine(settings).await?;
     let instance = started.owner.identity().instance;
     if let Some(reason) = started.root_problem() {
         print(&Notice::RootUnavailable { reason });
@@ -425,53 +503,59 @@ fn probe(args: &ReadyArgs) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
-    #[test]
-    fn the_api_listens_on_loopback_by_default() {
-        let cli = Cli::try_parse_from([
-            "wayfetchd",
-            "run",
-            "--state-dir",
-            "s",
-            "--download-root",
-            "d",
-            "--token-file",
-            "t",
-        ])
-        .unwrap();
+    const RUN: [&str; 6] = [
+        "run",
+        "--state-dir",
+        "s",
+        "--download-root",
+        "d",
+        "--token-file",
+    ];
+
+    fn run_args(extra: &[&str]) -> RunArgs {
+        let cli = Cli::try_parse_from(["wayfetchd"].iter().chain(extra)).unwrap();
         let Command::Run(args) = cli.command else {
             panic!("not run");
         };
-        assert!(args.listen.ip().is_loopback());
+        args
+    }
+
+    fn parse(extra: &[&str]) -> RunArgs {
+        run_args(
+            &RUN.iter()
+                .chain(&["t"])
+                .chain(extra)
+                .copied()
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn the_api_listens_on_loopback_by_default() {
+        assert!(parse(&[]).server(None).unwrap().listen.ip().is_loopback());
     }
 
     #[test]
     fn browser_options_need_an_auth_directory() {
-        let run = [
-            "run",
-            "--state-dir",
-            "s",
-            "--download-root",
-            "d",
-            "--token-file",
-            "t",
-        ];
-        let parse =
-            |extra: &[&str]| Cli::try_parse_from(["wayfetchd"].iter().chain(&run).chain(extra));
-        assert!(parse(&["--browser-origin", "https://wayfetch.example.lan"]).is_err());
-        assert!(parse(&["--dev-insecure-loopback"]).is_err());
-        let Command::Run(args) = parse(&["--auth-dir", "a", "--dev-insecure-loopback"])
-            .unwrap()
-            .command
-        else {
-            panic!("not run");
-        };
-        assert!(args.browser.config().unwrap().insecure_loopback);
-        let Command::Run(args) = parse(&[]).unwrap().command else {
-            panic!("not run");
-        };
-        assert!(args.browser.config().is_none(), "browser access is opt-in");
+        for extra in [
+            &["--browser-origin", "https://wayfetch.example.lan"][..],
+            &["--dev-insecure-loopback"],
+        ] {
+            let refused = parse(extra).server(None).unwrap_err();
+            assert!(refused.contains("auth directory"), "{refused}");
+        }
+        let server = parse(&["--auth-dir", "a", "--dev-insecure-loopback"])
+            .server(None)
+            .unwrap();
+        assert!(server.browser.unwrap().insecure_loopback);
+        assert!(
+            parse(&[]).server(None).unwrap().browser.is_none(),
+            "browser access is opt-in"
+        );
     }
 
     #[test]
@@ -484,14 +568,82 @@ mod tests {
 
     #[test]
     fn a_token_file_is_required() {
-        let missing = Cli::try_parse_from([
-            "wayfetchd",
+        let refused = run_args(&RUN[..5]).server(None).unwrap_err();
+        assert!(refused.contains("token file"), "{refused}");
+    }
+
+    #[test]
+    fn the_command_line_replaces_server_settings_and_adds_origins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("wayfetch.toml");
+        std::fs::write(
+            &config,
+            r#"
+schema_version = 1
+
+[storage]
+state_dir = "state"
+download_root = "downloads"
+
+[server]
+listen = "127.0.0.1:9000"
+token_file = "tokens"
+auth_dir = "auth"
+browser_origins = ["https://wayfetch.example.lan"]
+"#,
+        )
+        .unwrap();
+        let config = config.to_str().unwrap();
+        let args = run_args(&["run", "--config", config]);
+        let (engine, loaded) = args.engine.load::<ServerFile>().unwrap();
+        let dir = wayfetch_host::absolute(tmp.path()).unwrap();
+        assert_eq!(engine.state_dir(), dir.join("state"));
+        let server = args.server(loaded.as_ref()).unwrap();
+        assert_eq!(server.listen, "127.0.0.1:9000".parse().unwrap());
+        assert_eq!(server.token_file, dir.join("tokens"));
+        let browser = server.browser.unwrap();
+        assert_eq!(browser.auth_dir, dir.join("auth"));
+        assert_eq!(browser.origins.len(), 1);
+
+        let args = run_args(&[
             "run",
-            "--state-dir",
-            "s",
-            "--download-root",
-            "d",
+            "--config",
+            config,
+            "--listen",
+            "127.0.0.1:9001",
+            "--token-file",
+            "other",
+            "--browser-origin",
+            "https://other.example.lan",
         ]);
-        assert!(missing.is_err());
+        let (_, loaded) = args.engine.load::<ServerFile>().unwrap();
+        let server = args.server(loaded.as_ref()).unwrap();
+        assert_eq!(server.listen, "127.0.0.1:9001".parse().unwrap());
+        assert_eq!(server.token_file, PathBuf::from("other"));
+        assert_eq!(server.browser.unwrap().origins.len(), 2);
+    }
+
+    #[test]
+    fn the_example_configuration_is_valid() {
+        let example = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/wayfetch.example.toml"
+        );
+        let args = run_args(&["run", "--config", example]);
+        let (engine, loaded) = args.engine.load::<ServerFile>().unwrap();
+        assert_eq!(engine.state_dir(), Path::new("/srv/wayfetch/state"));
+        let server = args.server(loaded.as_ref()).unwrap();
+        assert!(server.listen.ip().is_loopback());
+        assert_eq!(server.browser.unwrap().origins.len(), 1);
+    }
+
+    #[test]
+    fn unknown_server_settings_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("wayfetch.toml");
+        std::fs::write(&config, "schema_version = 1\n[server]\nlisten_on = \"x\"\n").unwrap();
+        let args = run_args(&["run", "--config", config.to_str().unwrap()]);
+        let refused = args.engine.load::<ServerFile>().unwrap_err();
+        assert!(refused.contains("listen_on"), "{refused}");
     }
 }

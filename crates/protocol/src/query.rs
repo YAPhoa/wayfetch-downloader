@@ -324,6 +324,53 @@ pub struct Settings {
     pub default_root: Option<RootId>,
     /// The destinations a client may choose, in ID order.
     pub roots: Vec<RootSummary>,
+    /// Most downloads transferring at once, engine-wide. Added in protocol
+    /// 2.0.
+    pub max_active_downloads: BoundedSetting,
+}
+
+/// An engine preference with a whole-number value, as the operator's
+/// policy and the user's saved choice resolve it. Added in protocol 2.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct BoundedSetting {
+    /// The value in effect.
+    pub value: u64,
+    /// Where `value` comes from.
+    pub source: SettingSource,
+    /// The value without a saved preference: the operator's configured
+    /// default, else the built-in one. Choosing "use the default" applies
+    /// it.
+    pub default: u64,
+    /// The user's saved preference, if any. It is kept when the policy
+    /// changes, even if the policy no longer allows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub saved: Option<u64>,
+    /// Smallest value the policy permits.
+    pub min: u64,
+    /// Largest value the policy permits.
+    pub max: u64,
+    /// Whether the operator fixed the value: it cannot be changed here,
+    /// and `value` is the configured one.
+    pub locked: bool,
+    /// Whether the saved preference is outside the policy, so `value` is
+    /// the nearest permitted value instead (the configured one when
+    /// locked).
+    pub conflict: bool,
+}
+
+/// Where an engine preference's value comes from. Added in protocol 2.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum SettingSource {
+    /// Wayfetch's own default.
+    BuiltIn,
+    /// The server's configuration: a configured default, or a fixed value.
+    Server,
+    /// The user's saved preference.
+    Saved,
 }
 
 /// What is known about a collected link. Added in protocol 1.1.
@@ -576,6 +623,16 @@ mod tests {
                 problem: Some(DiagnosticText::new("missing")),
                 added: true,
             }],
+            max_active_downloads: BoundedSetting {
+                value: 8,
+                source: SettingSource::Saved,
+                default: 4,
+                saved: Some(8),
+                min: 1,
+                max: 16,
+                locked: false,
+                conflict: false,
+            },
         });
         assert_eq!(
             serde_json::to_value(&settings).unwrap(),
@@ -584,6 +641,10 @@ mod tests {
                 "revision": 3,
                 "default_root": "root-2",
                 "roots": [{"id": "root-2", "path": "/media", "available": false, "problem": "missing", "added": true}],
+                "max_active_downloads": {
+                    "value": 8, "source": "saved", "default": 4, "saved": 8,
+                    "min": 1, "max": 16, "locked": false, "conflict": false,
+                },
             })
         );
         // A 1.0 engine's roots carry no `added`: none can be removed.

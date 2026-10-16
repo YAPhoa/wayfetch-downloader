@@ -18,9 +18,12 @@
 //! files no job generation can reopen (see the cleanup module).
 //!
 //! The coordinator serializes every state change. It admits recovering,
-//! then queued jobs while fewer than `limits.active_files` downloads run,
-//! reading only as many from the database as it has free slots; each runs
-//! as a download task whose store calls come back to the coordinator.
+//! then queued jobs while fewer downloads run than the effective most
+//! downloads at once (the operator's policy applied to the user's saved
+//! preference), reading only as many from the database as it has free
+//! slots; each runs as a download task whose store calls come back to the
+//! coordinator. Lowering that limit never stops a running download: new
+//! ones wait until fewer run than the new limit.
 //! A pause or cancel stops the job's task, and the coordinator settles the
 //! job once it has. After each change it broadcasts the new durable events
 //! to subscribers through a ring of `limits.event_buffer` events.
@@ -52,22 +55,22 @@ use wayfetch_protocol::command::MAX_SUBMIT_ITEMS;
 use wayfetch_protocol::event::{
     DurableEvent, EventCursor, ResyncReason, Retained, SubscriptionStart,
 };
-use wayfetch_protocol::query::{FailureSummary, FolderListing, RootSummary};
+use wayfetch_protocol::query::{BoundedSetting, FailureSummary, FolderListing, RootSummary};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Hello, InstanceId, Permission,
     ProtocolError, ProtocolVersion, Query, QueryResult, Subscribe, TransportLimits,
 };
 
 use crate::cleanup;
-use crate::config::{ConfigError, EngineConfig};
+use crate::config::{ConfigError, EngineConfig, Preference};
 use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::fs::Root;
-use crate::published;
 use crate::state_dir::{Identity, StateDir, StateDirError};
 use crate::store::{Admission, CommandContext, Store, StoreError, StoreInfo, Unusable};
 use crate::subscription::Subscription;
 use crate::transfer::transport::Transport;
+use crate::{preferences, published};
 
 /// How often history past retention is pruned while running.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
@@ -143,7 +146,7 @@ impl EngineBuilder {
     pub async fn start(self) -> Result<EngineOwner, StartError> {
         self.config.validate()?;
         let config = self.config.clone();
-        let (state_dir, store, head, destinations) = self
+        let (state_dir, store, head, destinations, max_active) = self
             .runtime
             .spawn_blocking(move || -> Result<_, StartError> {
                 let state_dir = StateDir::open(&config.state_dir)?;
@@ -153,7 +156,8 @@ impl EngineBuilder {
                 prune(&mut store, &config.limits)?;
                 let head = store.event_head()?;
                 let destinations = Destinations::load(&mut store, &config)?;
-                Ok((state_dir, store, head, destinations))
+                let max_active = store.settings()?.max_active_downloads;
+                Ok((state_dir, store, head, destinations, max_active))
             })
             .await??;
         let identity = state_dir.identity();
@@ -162,7 +166,9 @@ impl EngineBuilder {
         let (requests, inbox) = mpsc::channel(self.config.request_queue.get());
         // Each download waits for its one store call, so this never fills
         // beyond the number of downloads plus their completions.
-        let (internal_tx, internal) = mpsc::channel(self.config.limits.active_files.get() * 2);
+        let most_downloads =
+            usize::try_from(self.config.policy.max_active_downloads.max).unwrap_or(usize::MAX);
+        let (internal_tx, internal) = mpsc::channel(most_downloads.saturating_mul(2));
         let (events, _) = broadcast::channel(self.config.limits.event_buffer.get());
         let supervisor = Supervisor {
             runtime: self.runtime,
@@ -199,6 +205,7 @@ impl EngineBuilder {
             running: HashMap::new(),
             held: HashSet::new(),
             destinations,
+            max_active,
             probes,
             file_jobs: Claims::default(),
             registering: 0,
@@ -600,6 +607,18 @@ const ADMIT_BLOCK_BUDGET: usize = 64;
 /// or while configured roots are being looked for (`identifying`), such a
 /// job waits. Also returns whether jobs are left to look at because
 /// the pass blocked [`ADMIT_BLOCK_BUDGET`] of them.
+/// Why a destination cannot be chosen: it is not permitted (`None`), or
+/// not available now.
+fn unusable_destination(problem: Option<String>) -> ProtocolError {
+    match problem {
+        None => ProtocolError::new(ErrorCode::NotFound, "destination not found"),
+        Some(problem) => ProtocolError::new(
+            ErrorCode::NotApplicable,
+            &format!("the destination is unavailable: {problem}"),
+        ),
+    }
+}
+
 fn admit(
     store: &mut Store,
     free: usize,
@@ -824,6 +843,8 @@ struct Coordinator {
     held: HashSet<JobId>,
     /// Permitted roots and the default.
     destinations: Destinations,
+    /// The user's saved most downloads at once, if any.
+    max_active: Option<u64>,
     /// Filesystem checks of root folders.
     probes: Probes,
     /// Jobs whose published file a request is working on.
@@ -975,8 +996,12 @@ impl Coordinator {
                     })
                     .await;
                 let (current, gone) = current;
-                if let Some((revision, chosen)) = current {
-                    self.destinations.set_settings(revision, chosen);
+                if let Some(saved) = current {
+                    self.destinations
+                        .set_settings(saved.revision, saved.default_root);
+                    // A lower limit takes effect as downloads end; a higher
+                    // one admits at once, in `changed` below.
+                    self.max_active = saved.max_active_downloads;
                 }
                 if let Some(root) = gone {
                     self.destinations.remove(root);
@@ -1112,9 +1137,32 @@ impl Coordinator {
                 destination: None, ..
             } => self.refresh_destinations().await,
             Command::UpdateSettings {
-                default_root: root, ..
+                default_root,
+                max_active_downloads,
+                ..
+            } => {
+                if self.replays(envelope).await? {
+                    return Ok(Unusable::new());
+                }
+                if default_root.is_none() && max_active_downloads.is_none() {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidRequest,
+                        "the settings change changes nothing",
+                    ));
+                }
+                if let Some(change) = *max_active_downloads {
+                    preferences::check(
+                        Preference::MAX_ACTIVE_DOWNLOADS,
+                        &self.config.policy.max_active_downloads,
+                        change,
+                    )?;
+                }
+                if let Some(root) = *default_root {
+                    self.refresh_destinations().await;
+                    self.usable(root).await.map_err(unusable_destination)?;
+                }
             }
-            | Command::CollectLinks {
+            Command::CollectLinks {
                 destination: Some(root),
                 ..
             }
@@ -1125,13 +1173,7 @@ impl Coordinator {
                     return Ok(Unusable::new());
                 }
                 self.refresh_destinations().await;
-                self.usable(*root).await.map_err(|problem| match problem {
-                    None => ProtocolError::new(ErrorCode::NotFound, "destination not found"),
-                    Some(problem) => ProtocolError::new(
-                        ErrorCode::NotApplicable,
-                        &format!("the destination is unavailable: {problem}"),
-                    ),
-                })?;
+                self.usable(*root).await.map_err(unusable_destination)?;
             }
             Command::StartLinks { links } => {
                 if self.replays(envelope).await? {
@@ -1184,6 +1226,15 @@ impl Coordinator {
         Ok(Unusable::new())
     }
 
+    /// What applies for the most downloads at once.
+    fn max_active_downloads(&self) -> BoundedSetting {
+        preferences::resolve(
+            Preference::MAX_ACTIVE_DOWNLOADS,
+            &self.config.policy.max_active_downloads,
+            self.max_active,
+        )
+    }
+
     /// Whether root `id` is permitted (`Err(None)` if not) and available
     /// now (`Err(Some(why))` if not).
     fn usable(&self, id: RootId) -> impl Future<Output = Result<(), Option<String>>> + use<> {
@@ -1226,6 +1277,7 @@ impl Coordinator {
     fn answer_settings(&self, reply: oneshot::Sender<Result<QueryResult, ProtocolError>>) {
         let (destinations, probes) = (self.destinations.clone(), self.probes.clone());
         let instance = self.identity.instance;
+        let max_active_downloads = self.max_active_downloads();
         self.supervisor.spawn(async move {
             let mut checks = tokio::task::JoinSet::new();
             for (i, root) in destinations.all().into_iter().enumerate() {
@@ -1235,7 +1287,8 @@ impl Coordinator {
             let mut available = checks.join_all().await;
             available.sort_by_key(|(i, _)| *i);
             let available = available.into_iter().map(|(_, a)| a).collect();
-            let _ = reply.send(Ok(QueryResult::Settings(destinations.settings(available))));
+            let settings = destinations.settings(available, max_active_downloads);
+            let _ = reply.send(Ok(QueryResult::Settings(settings)));
         });
     }
 
@@ -1392,12 +1445,8 @@ impl Coordinator {
         let Some(transport) = self.transport.clone() else {
             return;
         };
-        let free = self
-            .config
-            .limits
-            .active_files
-            .get()
-            .saturating_sub(self.running.len());
+        let limit = usize::try_from(self.max_active_downloads().value).unwrap_or(usize::MAX);
+        let free = limit.saturating_sub(self.running.len());
         if free == 0 {
             return;
         }

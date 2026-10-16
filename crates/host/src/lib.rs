@@ -1,14 +1,15 @@
 //! What every Wayfetch Downloader application host composes the same way
 //! (architecture brief section 4.3, "application host"): the operator's
-//! state-directory, root, and network options, explicit root
-//! initialization, engine startup with the HTTP transport, process
-//! signals, and non-blocking terminal output.
+//! configuration file and state-directory, root, and network options,
+//! explicit root initialization, engine startup with the HTTP transport,
+//! process signals, and non-blocking terminal output.
 //!
 //! Hosts differ only in how they talk to people: `wayfetch` reads standard
 //! input, `wayfetchd` serves HTTP, and `wayfetch-desktop` shows the shared
 //! UI in a window over in-process IPC. Neither initializes a root implicitly,
 //! and both leave persistence, scheduling, and recovery to the engine.
 
+pub mod config;
 mod signals;
 mod terminal;
 
@@ -18,12 +19,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Args;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::state_dir::StateDir;
 use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner};
 use wayfetch_net::ipnet::IpNet;
 use wayfetch_net::{CertificateDer, HttpConfig, HttpTransport};
 
+pub use config::{Loaded, NoServer};
 pub use signals::Signals;
 pub use terminal::{Closed, DRAIN, Message, Printer, Terminal};
 
@@ -34,13 +37,39 @@ pub const RUNTIME_RELEASE: Duration = Duration::from_secs(1);
 /// Largest CA certificate file accepted.
 const MAX_CA_FILE_BYTES: u64 = 1024 * 1024;
 
-/// The state directory option.
+/// The configuration file and state directory options.
 #[derive(Debug, Args)]
 pub struct StateArgs {
+    /// Read settings from this TOML configuration file at startup. Options
+    /// given on the command line replace its values; repeatable ones add
+    /// to its lists. It must exist.
+    #[arg(long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
     /// The engine's state directory. Its parent must exist; one engine owns
-    /// it at a time.
+    /// it at a time. Replaces `storage.state_dir`.
     #[arg(long, value_name = "DIR")]
-    pub state_dir: PathBuf,
+    pub state_dir: Option<PathBuf>,
+}
+
+impl StateArgs {
+    /// Reads the configuration file, if one is named.
+    pub fn load<S: DeserializeOwned>(&self) -> Result<Option<Loaded<S>>, String> {
+        self.config.as_deref().map(config::load).transpose()
+    }
+
+    /// The state directory: the command line's, else the file's.
+    fn state_dir<S>(&self, loaded: Option<&Loaded<S>>) -> Result<PathBuf, String> {
+        match (
+            &self.state_dir,
+            loaded.and_then(|l| l.file.storage.state_dir.as_ref()),
+        ) {
+            (Some(dir), _) => absolute(dir),
+            (None, Some(dir)) => Ok(dir.clone()),
+            (None, None) => {
+                Err("no state directory: pass --state-dir or set storage.state_dir".to_owned())
+            }
+        }
+    }
 }
 
 /// Arguments of `init-root`.
@@ -61,23 +90,98 @@ pub struct EngineArgs {
     #[command(flatten)]
     pub state: StateArgs,
     /// The download root, initialized with `init-root`: where downloads are
-    /// saved until the owner chooses another default.
+    /// saved until the owner chooses another default. Replaces
+    /// `storage.download_root`.
     #[arg(long, value_name = "DIR")]
-    pub download_root: PathBuf,
+    pub download_root: Option<PathBuf>,
     /// Another folder the owner may choose as the default destination,
-    /// initialized with `init-root`. Repeatable.
+    /// initialized with `init-root`. Repeatable; adds to `storage.roots`.
     #[arg(long = "root", value_name = "DIR")]
     pub roots: Vec<PathBuf>,
     /// Also allow downloads from this non-public network, for example
     /// `192.168.1.0/24` for a local server. Only public addresses are
-    /// reachable by default. Repeatable.
+    /// reachable by default. Repeatable; adds to
+    /// `network.allow_networks`.
     #[arg(long, value_name = "CIDR")]
     pub allow_network: Vec<IpNet>,
     /// Also trust this certificate authority (PEM or DER) for HTTPS, in
     /// addition to the platform's roots. Certificate verification cannot be
-    /// turned off. Repeatable.
+    /// turned off. Repeatable; adds to `network.ca_certs`.
     #[arg(long, value_name = "FILE")]
     pub ca_cert: Vec<PathBuf>,
+}
+
+/// What a host runs its engine with: the command line applied over the
+/// configuration file, checked.
+#[derive(Debug)]
+pub struct EngineSettings {
+    config: EngineConfig,
+    http: HttpConfig,
+    root: PathBuf,
+}
+
+impl EngineSettings {
+    /// The engine's state directory.
+    pub fn state_dir(&self) -> &Path {
+        &self.config.state_dir
+    }
+}
+
+impl EngineArgs {
+    /// Reads the configuration file, if one is named, and applies the
+    /// command line over it. `S` is the host's own `[server]` section;
+    /// the file is returned for it.
+    pub fn load<S: DeserializeOwned>(&self) -> Result<(EngineSettings, Option<Loaded<S>>), String> {
+        let loaded = self.state.load::<S>()?;
+        let settings = self.settings(loaded.as_ref())?;
+        Ok((settings, loaded))
+    }
+
+    fn settings<S>(&self, loaded: Option<&Loaded<S>>) -> Result<EngineSettings, String> {
+        let file = loaded.map(|l| &l.file);
+        let storage = file.map(|f| &f.storage);
+        let root = match (
+            &self.download_root,
+            storage.and_then(|s| s.download_root.as_ref()),
+        ) {
+            (Some(root), _) => absolute(root)?,
+            (None, Some(root)) => root.clone(),
+            (None, None) => {
+                return Err(
+                    "no download root: pass --download-root or set storage.download_root"
+                        .to_owned(),
+                );
+            }
+        };
+        let mut config = EngineConfig::new(self.state.state_dir(loaded)?);
+        config.roots.push(root.clone());
+        let file_roots = storage.map(|s| s.roots.as_slice()).unwrap_or_default();
+        let cli_roots = self.roots.iter().map(|r| absolute(r));
+        for extra in file_roots.iter().cloned().map(Ok).chain(cli_roots) {
+            let extra = extra?;
+            if !config.roots.contains(&extra) {
+                config.roots.push(extra);
+            }
+        }
+        config.download_root = Some(root.clone());
+        if let Some(file) = file {
+            config::apply(file, &mut config)?;
+        }
+        let mut http = HttpConfig::default();
+        let network = file.map(|f| &f.network);
+        http.egress.allowed_networks.extend(
+            network
+                .iter()
+                .flat_map(|n| &n.allow_networks)
+                .chain(&self.allow_network)
+                .copied(),
+        );
+        let file_cas = network.iter().flat_map(|n| n.ca_certs.iter().cloned());
+        for path in file_cas.chain(self.ca_cert.iter().cloned()) {
+            http.extra_roots.extend(read_ca(&path)?);
+        }
+        Ok(EngineSettings { config, http, root })
+    }
 }
 
 /// Runs `future` to completion on a new [`runtime`], then [`release`]s it.
@@ -111,7 +215,10 @@ pub fn release(runtime: tokio::runtime::Runtime) {
 /// directory's lock, so it is refused while an engine owns it. Returns the
 /// root's absolute path.
 pub fn init_root(args: &InitRootArgs) -> Result<PathBuf, String> {
-    let state = StateDir::open(&absolute(&args.state.state_dir)?).map_err(|e| e.to_string())?;
+    // Only the state directory matters here, whichever host the file is for.
+    let loaded = args.state.load::<IgnoredAny>()?;
+    let state_dir = args.state.state_dir(loaded.as_ref())?;
+    let state = StateDir::open(&state_dir).map_err(|e| e.to_string())?;
     let root = absolute(&args.root)?;
     wayfetch_engine::initialize_root(&state, &root)
         .map_err(|e| format!("cannot initialize {}: {e}", root.display()))?;
@@ -153,40 +260,15 @@ impl Started {
 
 /// Starts an engine on the current runtime with the HTTP transport, the
 /// production network defaults, and only the exceptions the operator named.
-pub async fn start_engine(args: &EngineArgs) -> Result<Started, String> {
-    let state_dir = absolute(&args.state.state_dir)?;
-    let root = absolute(&args.download_root)?;
-    let transport = HttpTransport::new(http_config(args)?)
-        .map_err(|e| format!("cannot configure HTTP: {e}"))?;
-    let mut config = EngineConfig::new(state_dir);
-    config.roots.push(root.clone());
-    for extra in &args.roots {
-        let extra = absolute(extra)?;
-        if !config.roots.contains(&extra) {
-            config.roots.push(extra);
-        }
-    }
-    config.download_root = Some(root.clone());
+pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
+    let EngineSettings { config, http, root } = settings;
+    let transport = HttpTransport::new(http).map_err(|e| format!("cannot configure HTTP: {e}"))?;
     let owner = EngineBuilder::new(config, tokio::runtime::Handle::current())
         .transport(Arc::new(transport))
         .start()
         .await
         .map_err(|e| e.to_string())?;
     Ok(Started { owner, root })
-}
-
-/// Transport settings: the production defaults, plus only the exceptions
-/// the operator named.
-fn http_config(args: &EngineArgs) -> Result<HttpConfig, String> {
-    let mut config = HttpConfig::default();
-    config
-        .egress
-        .allowed_networks
-        .extend(args.allow_network.iter().copied());
-    for path in &args.ca_cert {
-        config.extra_roots.extend(read_ca(path)?);
-    }
-    Ok(config)
 }
 
 /// The certificates in a PEM file, or the single certificate in a DER file.
@@ -239,6 +321,91 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    #[derive(clap::Parser)]
+    struct Run {
+        #[command(flatten)]
+        engine: EngineArgs,
+    }
+
+    fn engine_args(args: &[&str]) -> EngineArgs {
+        use clap::Parser;
+        Run::try_parse_from(["run"].iter().chain(args))
+            .unwrap()
+            .engine
+    }
+
+    #[test]
+    fn the_command_line_replaces_file_values_and_adds_to_its_lists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("wayfetch.toml");
+        std::fs::write(
+            &config,
+            r#"
+schema_version = 1
+[storage]
+state_dir = "state"
+download_root = "downloads"
+roots = ["media"]
+[network]
+allow_networks = ["10.0.0.0/8"]
+[downloads.max_active]
+max = 8
+"#,
+        )
+        .unwrap();
+        let config = config.to_str().unwrap();
+        let dir = absolute(tmp.path()).unwrap();
+
+        let (settings, _) = engine_args(&["--config", config])
+            .load::<NoServer>()
+            .unwrap();
+        assert_eq!(settings.state_dir(), dir.join("state"));
+        assert_eq!(settings.root, dir.join("downloads"));
+        assert_eq!(
+            settings.config.roots,
+            [dir.join("downloads"), dir.join("media")]
+        );
+        assert_eq!(settings.config.policy.max_active_downloads.max, 8);
+        assert_eq!(settings.http.egress.allowed_networks.len(), 1);
+
+        let elsewhere = dir.join("elsewhere");
+        let (settings, _) = engine_args(&[
+            "--config",
+            config,
+            "--state-dir",
+            elsewhere.to_str().unwrap(),
+            "--root",
+            "/srv/more",
+            "--allow-network",
+            "192.168.0.0/16",
+        ])
+        .load::<NoServer>()
+        .unwrap();
+        assert_eq!(settings.state_dir(), elsewhere);
+        assert_eq!(
+            settings.config.roots,
+            [dir.join("downloads"), dir.join("media"), "/srv/more".into()]
+        );
+        assert_eq!(settings.http.egress.allowed_networks.len(), 2);
+    }
+
+    #[test]
+    fn without_a_file_the_command_line_must_name_the_directories() {
+        let refused = engine_args(&["--download-root", "d"])
+            .load::<NoServer>()
+            .unwrap_err();
+        assert!(refused.contains("--state-dir"), "{refused}");
+        let refused = engine_args(&["--state-dir", "s"])
+            .load::<NoServer>()
+            .unwrap_err();
+        assert!(refused.contains("--download-root"), "{refused}");
+        let (settings, loaded) = engine_args(&["--state-dir", "s", "--download-root", "d"])
+            .load::<NoServer>()
+            .unwrap();
+        assert!(loaded.is_none());
+        assert_eq!(settings.config.policy, wayfetch_engine::Policy::DEFAULT);
     }
 
     #[test]

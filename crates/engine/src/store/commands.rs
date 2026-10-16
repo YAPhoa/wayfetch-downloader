@@ -78,7 +78,14 @@ impl Store {
             Command::UpdateSettings {
                 expected_revision,
                 default_root,
-            } => roots::update_settings(&tx, *expected_revision, *default_root, now)?,
+                max_active_downloads,
+            } => roots::update_settings(
+                &tx,
+                *expected_revision,
+                *default_root,
+                *max_active_downloads,
+                now,
+            )?,
             Command::Remove {
                 job,
                 expected_revision,
