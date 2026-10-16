@@ -31,6 +31,7 @@ use common::{
 };
 use engine_support::body;
 use eventsource_stream::Eventsource;
+use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use support::{Resource, Server};
@@ -981,7 +982,10 @@ async fn a_missing_token_file_is_created_owner_only_and_never_printed() {
     let text = std::fs::read_to_string(&dirs.tokens).unwrap();
     let line = text.lines().find(|l| !l.starts_with('#')).unwrap();
     let (token, scopes) = line.split_once(' ').unwrap();
-    assert_eq!(scopes, "read,submit,control,sources,accounts");
+    assert_eq!(
+        scopes,
+        "read,submit,control,sources,accounts,provider_downloads"
+    );
     let (status, _) = daemon.client(token).get("/v1/capabilities").await;
     assert_eq!(status, StatusCode::OK);
 
@@ -1528,7 +1532,14 @@ async fn browsers_set_up_the_owner_sign_in_and_use_the_api() {
     assert_eq!(session["csrf_token"], signed_in["csrf_token"]);
     assert_eq!(
         session["permissions"],
-        json!(["read", "submit", "control", "sources", "accounts"])
+        json!([
+            "read",
+            "submit",
+            "control",
+            "sources",
+            "accounts",
+            "provider_downloads"
+        ])
     );
     let mut events = browser.events().await;
     events.until(|e, _| e.event == "hello").await;
@@ -1758,7 +1769,7 @@ async fn accounts_are_signed_in_and_managed_over_http() {
     assert_eq!(listed["vault"], "ready");
     assert_eq!(
         listed["services"],
-        json!([{"service": "real-debrid", "method": "device_code", "downloads": false}])
+        json!([{"service": "real-debrid", "method": "device_code", "downloads": true}])
     );
     assert_eq!(listed["accounts"], json!([]));
 
@@ -1911,5 +1922,192 @@ async fn accounts_are_signed_in_and_managed_over_http() {
     }
     for (path, bytes) in files_under(&dirs.state) {
         assert_no_rd_secret(&path.display().to_string(), &bytes);
+    }
+}
+
+/// Signs `client` in to the Real-Debrid stand-in and returns the account.
+async fn sign_in(client: &Client, alias: &str) -> String {
+    let sign_in = client.command(json!({"service": "real-debrid", "alias": alias}));
+    let (status, started) = client.post("/v1/accounts/authorizations", &sign_in).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let id = started["id"].as_str().unwrap().to_owned();
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    loop {
+        let (_, current) = client
+            .get(&format!("/v1/accounts/authorizations/{id}"))
+            .await;
+        if current["state"] != "pending" {
+            assert_eq!(current["state"], "completed", "{current}");
+            return current["account"].as_str().unwrap().to_owned();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{current}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn links_are_downloaded_through_a_real_debrid_account_over_http() {
+    const MANAGER_TOKEN: &str = "manager-0123456789abcdef0123456789abcdef";
+    const DOWNLOADER_TOKEN: &str = "downloader-0123456789abcdef0123456789abc";
+    let server = Server::https().await;
+    let provider = rd::Server::start().await;
+    let data = body(256 * 1024);
+    server.put("/served.bin", Resource::new(data.clone()));
+    // The generated link redirects to the file on another origin.
+    provider.with(|rd| {
+        rd.redirect = Some(server.url("/served.bin"));
+        rd.filesize = data.len() as u64;
+    });
+    let mut dirs = Dirs::new(&server);
+    dirs.init_root();
+    write_private(
+        &dirs.tokens,
+        &format!(
+            "{OWNER_TOKEN} read,submit,control,sources,accounts,provider_downloads\n\
+             {MANAGER_TOKEN} read,submit,control,sources,accounts\n\
+             {DOWNLOADER_TOKEN} read,submit,provider_downloads\n"
+        ),
+    );
+    dirs.args.extend([
+        "--provider-endpoint".into(),
+        format!("real-debrid={}", provider.base()).into(),
+    ]);
+    let daemon = Daemon::start(&dirs).await;
+    let client = daemon.owner();
+    let account = sign_in(&client, "Main").await;
+    let mut events = client.events(None).await;
+
+    let original = "https://hoster.example/file/abc";
+    let blocked = "https://hoster.example/file/blocked";
+    let collect = client.command(json!({"items": [original, blocked]}));
+    let (status, collected) = client.post("/v1/staging/links", &collect).await;
+    assert_eq!(status, StatusCode::OK, "{collected}");
+    let (_, listed) = client.get("/v1/staging/links").await;
+    let (_, accounts) = client.get("/v1/accounts").await;
+    assert_eq!(
+        provider.hits(rd::UNRESTRICT_PATH),
+        0,
+        "collecting and listing"
+    );
+    assert_eq!(accounts["accounts"][0]["id"], account.as_str());
+    let refs = |l: &Value| vec![json!({"link": l["id"], "revision": l["revision"]})];
+    let (first, second) = (&listed["items"][0], &listed["items"][1]);
+    assert_eq!(first["name_hint"], "abc");
+
+    // Managing accounts does not grant downloading through them.
+    let manager = daemon.client(MANAGER_TOKEN);
+    let routed =
+        manager.command(json!({"action": "start", "links": refs(first), "account": account}));
+    let (status, error) = manager.post("/v1/staging/commands", &routed).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+    assert_eq!(error["code"], "permission_denied");
+    let (_, left) = client.get("/v1/staging/links").await;
+    assert_eq!(left["total"], 2, "a refused start keeps the links");
+    assert!(client.jobs().await.is_empty());
+    assert_eq!(provider.hits(rd::UNRESTRICT_PATH), 0);
+
+    // Downloading through one needs no right to see or manage accounts.
+    let downloader = daemon.client(DOWNLOADER_TOKEN);
+    assert_eq!(
+        downloader.get("/v1/accounts").await.0,
+        StatusCode::FORBIDDEN
+    );
+    let start =
+        downloader.command(json!({"action": "start", "links": refs(first), "account": account}));
+    let (status, started) = downloader.post("/v1/staging/commands", &start).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let job = started["applied"][0]["job"].as_str().unwrap().to_owned();
+    // Replaying the command creates nothing more and asks nothing again.
+    assert_eq!(
+        downloader.post("/v1/staging/commands", &start).await.1,
+        started
+    );
+    let done = client.stage(&job, "complete").await;
+    assert_eq!(dirs.published("Synthetic File.bin"), data);
+    assert_eq!(
+        done["route"],
+        json!({"service": "real-debrid", "account": account})
+    );
+    assert_eq!(provider.hits(rd::UNRESTRICT_PATH), 1);
+    let unrestricted = provider
+        .log()
+        .into_iter()
+        .find(|r| r.path == rd::UNRESTRICT_PATH)
+        .unwrap();
+    assert_eq!(unrestricted.form["link"], original);
+    // The bearer goes to the API only: neither the generated host nor
+    // where it redirects receives credentials.
+    for request in provider.log() {
+        if request.path.starts_with("/d/") {
+            assert_eq!(request.authorization, None, "{}", request.path);
+        }
+    }
+    let served = server.log();
+    assert_eq!(served.len(), 1);
+    assert_eq!(served[0].header("authorization"), None);
+
+    // A generated link that redirects where egress does not allow fails
+    // without reaching it, and never falls back to a direct download.
+    provider.with(|rd| rd.redirect = Some("http://169.254.169.254/latest/".into()));
+    let start =
+        client.command(json!({"action": "start", "links": refs(second), "account": account}));
+    let (status, started) = client.post("/v1/staging/commands", &start).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let refused = started["applied"][0]["job"].as_str().unwrap().to_owned();
+    let failed = client
+        .wait(&refused, |job| {
+            !matches!(
+                job["stage"].as_str(),
+                Some("queued" | "resolving" | "transferring")
+            )
+        })
+        .await;
+    assert_ne!(failed["stage"], "complete", "{failed}");
+    assert!(
+        failed.to_string().contains("not allowed"),
+        "says why: {failed}"
+    );
+    assert_eq!(server.log().len(), 1);
+    assert!(!dirs.root.join("Synthetic File (1).bin").exists());
+
+    // Nothing a client, the event history, the output or the state
+    // directory holds carries the generated link or a credential.
+    let views = [
+        client.get("/v1/jobs").await.1.to_string(),
+        client.job(&job).await.to_string(),
+        client.job(&refused).await.to_string(),
+        client.get("/v1/staging/links").await.1.to_string(),
+    ];
+    for view in &views {
+        assert!(!view.contains(rd::SIGNATURE), "{view}");
+        assert!(!view.contains("/d/1/"), "{view}");
+        assert_no_rd_secret("a client view", view.as_bytes());
+    }
+    let mut seen = String::new();
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(500), events.0.next()).await
+    {
+        seen.push_str(&event.unwrap().data);
+    }
+    assert!(seen.contains(&job), "{seen}");
+    assert!(!seen.contains(rd::SIGNATURE), "{seen}");
+    assert_no_rd_secret("the events", seen.as_bytes());
+    let finished = {
+        daemon.signal("TERM");
+        daemon.finish().await
+    };
+    assert!(finished.status.success(), "{}", finished.stderr);
+    let output = format!("{}{:?}", finished.stderr, finished.lines);
+    assert!(!output.contains(rd::SIGNATURE), "{output}");
+    assert_no_rd_secret("the daemon's output", output.as_bytes());
+    for (path, bytes) in files_under(&dirs.state) {
+        let shown = path.display().to_string();
+        assert_no_rd_secret(&shown, &bytes);
+        assert!(
+            !bytes
+                .windows(rd::SIGNATURE.len())
+                .any(|w| w == rd::SIGNATURE.as_bytes()),
+            "the generated link in {shown}"
+        );
     }
 }

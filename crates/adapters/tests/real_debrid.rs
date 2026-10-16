@@ -396,12 +396,12 @@ async fn free_accounts_have_no_expiry() {
 }
 
 #[test]
-fn downloads_are_not_claimed() {
+fn downloads_are_supported() {
     let support = RealDebrid::new(
         Arc::new(HttpTransport::new(HttpConfig::default()).unwrap()),
         Endpoint::official(OFFICIAL_API),
     )
     .support();
-    assert!(!support.downloads);
+    assert!(support.downloads);
     assert_eq!(support.service.as_str(), "real-debrid");
 }

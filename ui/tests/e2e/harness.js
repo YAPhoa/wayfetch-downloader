@@ -152,11 +152,15 @@ export const RD_SECRETS = Object.freeze({
   refresh: 'synthetic-refresh-',
 });
 export const RD_USER_CODE = 'ABCD-1234';
+/** What every link the stand-in generates carries, which grants the download. */
+export const RD_SIGNATURE = 'synthetic-download-signature';
 
 /**
  * A plain-HTTP stand-in for Real-Debrid's API on 127.0.0.1, following its
- * documented device flow and `GET /rest/1.0/user`. A sign-in is approved
- * on the second poll; every value is synthetic.
+ * documented device flow, `GET /rest/1.0/user`, `POST
+ * /rest/1.0/unrestrict/link`, and `GET /rest/1.0/downloads`, and serving
+ * the links it generates. A sign-in is approved on the second poll; every
+ * value is synthetic.
  */
 export class RealDebridFixture {
   constructor() {
@@ -169,6 +173,15 @@ export class RealDebridFixture {
     this.username = 'synthetic-user';
     /** Requests by path, in order. @type {string[]} */
     this.requested = [];
+    /** Links generated, by the original link asked for. @type {{ link: string, path: string }[]} */
+    this.generated = [];
+    /** The file each generated link serves. */
+    this.size = 3 * MIB + 7;
+    this.filename = 'Through the Provider.bin';
+    /** Unrestrict requests whose answer is lost: the connection drops before it. */
+    this.lose = 0;
+    /** Authorization headers that reached generated links. @type {(string | undefined)[]} */
+    this.downloadAuth = [];
     this.server = createServer((request, response) => void this.serve(request, response));
   }
 
@@ -229,6 +242,41 @@ export class RealDebridFixture {
         answer(200, { access_token: this.access, expires_in: 3600, token_type: 'Bearer', refresh_token: this.refresh });
         return;
       }
+      case '/rest/1.0/unrestrict/link':
+      case '/rest/1.0/downloads': {
+        if (this.access === null || request.headers.authorization !== `Bearer ${this.access}`) {
+          answer(401, { error: 'bad_token', error_code: 8 });
+          return;
+        }
+        const download = (/** @type {number} */ n) => ({
+          id: `SYNTH${n}`,
+          filename: this.filename,
+          mimeType: 'application/octet-stream',
+          filesize: this.size,
+          link: this.generated[n - 1].link,
+          host: 'hoster.example',
+          chunks: 16,
+          download: `${origin}${this.generated[n - 1].path}?sig=${RD_SIGNATURE}-${n}`,
+          generated: new Date().toISOString(),
+        });
+        if (url.pathname === '/rest/1.0/downloads') {
+          if (this.generated.length === 0) {
+            response.writeHead(204).end();
+            return;
+          }
+          answer(200, this.generated.map((_, i) => download(i + 1)).reverse());
+          return;
+        }
+        if (this.lose > 0) {
+          this.lose -= 1;
+          request.socket.destroy();
+          return;
+        }
+        const link = form.get('link') ?? '';
+        this.generated.push({ link, path: `/d/${this.generated.length + 1}/${encodeURIComponent(this.filename)}` });
+        answer(200, download(this.generated.length));
+        return;
+      }
       case '/rest/1.0/user':
         if (this.access === null || request.headers.authorization !== `Bearer ${this.access}`) {
           answer(401, { error: 'bad_token', error_code: 8 });
@@ -237,6 +285,12 @@ export class RealDebridFixture {
         answer(200, { id: 4242, username: this.username, type: 'premium', premium: 30 * 86400 });
         return;
       default:
+        if (this.generated.some((g) => g.path === url.pathname)) {
+          this.downloadAuth.push(request.headers.authorization);
+          response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': this.size });
+          response.end(content(0, this.size));
+          return;
+        }
         answer(404, { error: 'unknown_ressource', error_code: 7 });
     }
   }

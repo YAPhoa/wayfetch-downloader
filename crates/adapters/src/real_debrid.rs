@@ -1,5 +1,5 @@
-//! Real-Debrid account sign-in and status (architecture brief sections
-//! 3.11 and 8.3).
+//! Real-Debrid accounts: sign-in, status, and downloads through them
+//! (architecture brief sections 3.11, 6.4, and 8.3).
 //!
 //! Signing in uses Real-Debrid's documented OAuth 2.0 device flow for
 //! open-source applications (<https://api.real-debrid.com/>, section
@@ -14,7 +14,7 @@
 //!
 //! Status checks read `GET /rest/1.0/user`, refreshing the access token
 //! first when it has expired or Real-Debrid answers 401. Downloading
-//! through Real-Debrid (unrestricting links) is not implemented here.
+//! through an account is in [`downloads`].
 //!
 //! Every stored credential records the API origin it was issued by, and is
 //! only ever sent back there.
@@ -27,7 +27,7 @@ use url::Url;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
     AccountProvider, ApiClient, ApiMethod, ApiResponse, Checked, DeviceAuthorization, PollOutcome,
-    Profile, ProviderError,
+    Profile, ProviderError, Reconciled, Unrestricted, WithCredentials,
 };
 use wayfetch_engine::domain::name::ProviderId;
 use wayfetch_engine::domain::time::UtcTimestamp;
@@ -36,6 +36,8 @@ use wayfetch_engine::transfer::writer::BoxFuture;
 use zeroize::Zeroize;
 
 use crate::common::{Api, Endpoint, form, millis, now_millis, serialize};
+
+mod downloads;
 
 /// The service's ID, as in the UI's catalogue.
 pub const SERVICE: &str = "real-debrid";
@@ -431,7 +433,7 @@ impl AccountProvider for RealDebrid {
         ServiceSupport {
             service: self.service.clone(),
             method: AuthorizationMethod::DeviceCode,
-            downloads: false,
+            downloads: true,
         }
     }
 
@@ -448,6 +450,23 @@ impl AccountProvider for RealDebrid {
 
     fn check<'a>(&'a self, credential: &'a Secret) -> BoxFuture<'a, Checked> {
         Box::pin(self.check(credential))
+    }
+
+    fn unrestrict<'a>(
+        &'a self,
+        credential: &'a Secret,
+        link: &'a Url,
+    ) -> BoxFuture<'a, WithCredentials<Unrestricted>> {
+        Box::pin(self.unrestrict(credential, link))
+    }
+
+    fn find_generated<'a>(
+        &'a self,
+        credential: &'a Secret,
+        link: &'a Url,
+        since: UtcTimestamp,
+    ) -> BoxFuture<'a, WithCredentials<Reconciled>> {
+        Box::pin(self.find_generated(credential, link, since))
     }
 }
 

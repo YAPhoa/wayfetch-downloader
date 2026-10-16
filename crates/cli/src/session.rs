@@ -206,6 +206,7 @@ impl Session<'_> {
                 self.control(first, words, |job, expected_revision| Command::Retry {
                     job,
                     expected_revision,
+                    repeat_provider_operation: false,
                 })
                 .await
             }

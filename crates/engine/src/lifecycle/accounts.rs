@@ -30,6 +30,7 @@ use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, ProtocolError, QueryResult,
 };
 
+use super::resolve::{Lane, LaneWork};
 use super::{Coordinator, Internal, now};
 use crate::accounts::Secret;
 use crate::accounts::provider::{
@@ -49,7 +50,7 @@ pub(super) const MAX_CHECKS: usize = 8;
 /// Requests waiting for one account's check.
 const MAX_WAITERS: usize = 16;
 /// Deadline for one provider call, refreshes included.
-const PROVIDER_DEADLINE: Duration = Duration::from_secs(60);
+pub(super) const PROVIDER_DEADLINE: Duration = Duration::from_secs(60);
 /// The longest an authorization waits, whatever the provider says.
 const MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
 /// Bounds on the provider's polling interval.
@@ -101,12 +102,14 @@ struct Starting {
 /// The coordinator's account state.
 pub(super) struct AccountService {
     providers: Vec<Arc<dyn AccountProvider>>,
-    vault: Vault,
+    pub(super) vault: Vault,
     key_path: Option<PathBuf>,
     flows: HashMap<AuthorizationId, Flow>,
     by_key: HashMap<IdempotencyKey, AuthorizationId>,
     starting: HashMap<IdempotencyKey, Starting>,
     checks: HashMap<AccountId, Vec<Reply<AccountSummary>>>,
+    /// Each account's provider calls, one at a time.
+    pub(super) lanes: HashMap<AccountId, Lane>,
 }
 
 impl AccountService {
@@ -123,10 +126,11 @@ impl AccountService {
             by_key: HashMap::new(),
             starting: HashMap::new(),
             checks: HashMap::new(),
+            lanes: HashMap::new(),
         }
     }
 
-    fn provider(&self, service: &ProviderId) -> Option<Arc<dyn AccountProvider>> {
+    pub(super) fn provider(&self, service: &ProviderId) -> Option<Arc<dyn AccountProvider>> {
         self.providers
             .iter()
             .find(|p| p.service() == service)
@@ -653,19 +657,17 @@ impl Coordinator {
 
     /// Checks an account with its provider, refreshing its credentials if
     /// needed. Requests for an account already being checked wait for that
-    /// check instead of starting another.
+    /// check instead of starting another; a check waits for the account's
+    /// other provider calls to finish, so it reads their credentials.
     pub(super) async fn refresh_account(
         &mut self,
         account: AccountId,
         reply: Reply<AccountSummary>,
     ) {
-        let keys = match self.accounts.vault.keys() {
-            Ok(keys) => keys,
-            Err(e) => {
-                let _ = reply.send(Err(e));
-                return;
-            }
-        };
+        if let Err(e) = self.accounts.vault.keys() {
+            let _ = reply.send(Err(e));
+            return;
+        }
         if let Some(waiters) = self.accounts.checks.get_mut(&account) {
             if waiters.len() >= MAX_WAITERS {
                 let _ = reply.send(Err(overloaded()));
@@ -678,29 +680,64 @@ impl Coordinator {
             let _ = reply.send(Err(overloaded()));
             return;
         }
-        let loaded = self
-            .with_store(move |store| store.account_credential(account))
-            .await;
-        let (row, stored) = match loaded {
-            Ok(loaded) => loaded,
+        let row = match self.with_store(move |store| store.account(account)).await {
+            Ok(row) => row,
             Err(e) => {
                 let _ = reply.send(Err(e.into()));
                 return;
             }
         };
-        if !row.enabled {
-            let _ = reply.send(Err(ProtocolError::new(
-                ErrorCode::NotApplicable,
-                "the account is disabled; enable it to check it",
-            )));
+        if let Err(e) = self.checkable(&row) {
+            let _ = reply.send(Err(e));
             return;
         }
-        let Some(provider) = self.accounts.provider(&row.service) else {
-            let _ = reply.send(Err(ProtocolError::new(
+        self.accounts.checks.insert(account, vec![reply]);
+        self.enqueue(account, LaneWork::Check).await;
+    }
+
+    /// Whether an account can be checked now.
+    fn checkable(&self, row: &crate::store::AccountRow) -> Result<(), ProtocolError> {
+        if !row.enabled {
+            return Err(ProtocolError::new(
+                ErrorCode::NotApplicable,
+                "the account is disabled; enable it to check it",
+            ));
+        }
+        if self.accounts.provider(&row.service).is_none() {
+            return Err(ProtocolError::new(
                 ErrorCode::NotApplicable,
                 "Wayfetch cannot check accounts of this service",
-            )));
-            return;
+            ));
+        }
+        Ok(())
+    }
+
+    /// Starts the account's queued check with its credentials as they are
+    /// now, in a task of its own. Returns whether it started; if not, its
+    /// waiters were answered.
+    pub(super) async fn start_check(&mut self, account: AccountId) -> bool {
+        let fail = |this: &mut Self, e: ProtocolError| {
+            for waiter in this.accounts.checks.remove(&account).unwrap_or_default() {
+                let _ = waiter.send(Err(e.clone()));
+            }
+            false
+        };
+        let keys = match self.accounts.vault.keys() {
+            Ok(keys) => keys,
+            Err(e) => return fail(self, e),
+        };
+        let loaded = self
+            .with_store(move |store| store.account_credential(account))
+            .await;
+        let (row, stored) = match loaded {
+            Ok(loaded) => loaded,
+            Err(e) => return fail(self, e.into()),
+        };
+        if let Err(e) = self.checkable(&row) {
+            return fail(self, e);
+        }
+        let Some(provider) = self.accounts.provider(&row.service) else {
+            return false;
         };
         let generation = row.generation;
         let credential = match keys.open(&stored.reference, &row.service, &stored.sealed) {
@@ -716,11 +753,13 @@ impl Coordinator {
                         store.record_check(account, generation, &failed, now())
                     })
                     .await;
-                let _ = reply.send(answer(row));
-                return;
+                let summary = answer(row);
+                for waiter in self.accounts.checks.remove(&account).unwrap_or_default() {
+                    let _ = waiter.send(summary.clone());
+                }
+                return false;
             }
         };
-        self.accounts.checks.insert(account, vec![reply]);
         let client = self.client.clone();
         let cancel = self.supervisor.cancel.clone();
         self.supervisor.spawn(async move {
@@ -740,6 +779,7 @@ impl Coordinator {
                 })
                 .await;
         });
+        true
     }
 
     /// A check ended: stores what it found, if the credentials it read are
@@ -792,6 +832,7 @@ impl Coordinator {
         for waiter in waiters {
             let _ = waiter.send(summary.clone());
         }
+        self.lane_done(account).await;
     }
 
     /// After a committed account command: stops sign-ins it overtook, and
@@ -800,6 +841,12 @@ impl Coordinator {
         match command {
             Command::RemoveAccount { account, .. } => {
                 self.accounts.overtake(*account, "the account was removed");
+                self.stop_routed(
+                    *account,
+                    "The account this download used was removed. Remove the download, then \
+                     collect its link again to download it another way.",
+                )
+                .await;
                 let empty = self
                     .with_store(|store| store.accounts().map(|rows| rows.is_empty()))
                     .await;
@@ -811,7 +858,15 @@ impl Coordinator {
                 account,
                 enabled: false,
                 ..
-            } => self.accounts.overtake(*account, "the account was disabled"),
+            } => {
+                self.accounts.overtake(*account, "the account was disabled");
+                self.stop_routed(
+                    *account,
+                    "The account this download uses was disabled. Enable it in Accounts, then \
+                     retry.",
+                )
+                .await;
+            }
             _ => {}
         }
     }
@@ -879,7 +934,7 @@ async fn poll(
     }
 }
 
-fn seal(
+pub(super) fn seal(
     keys: &Keys,
     service: &ProviderId,
     credential: &Secret,

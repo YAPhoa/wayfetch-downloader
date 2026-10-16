@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 2, minor: 1 });
+export const PROTOCOL = Object.freeze({ major: 2, minor: 2 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -55,6 +55,7 @@ export const PROTOCOL = Object.freeze({ major: 2, minor: 1 });
  * @typedef {import('./generated/Authorization.js').Authorization} Authorization
  * @typedef {import('./generated/AuthorizationId.js').AuthorizationId} AuthorizationId
  * @typedef {import('./generated/ServiceSupport.js').ServiceSupport} ServiceSupport
+ * @typedef {import('./generated/JobRoute.js').JobRoute} JobRoute
  * @typedef {Exclude<JobAction, 'rename' | 'remove'>} StateAction The
  *   actions that change whether a job runs.
  */
@@ -108,6 +109,7 @@ export const PROTOCOL = Object.freeze({ major: 2, minor: 1 });
  *     action: LinksAction,
  *     links: LinkRef[],
  *     destination?: RootId,
+ *     account?: AccountId,
  *   }) => Promise<CommandResult>,
  *   linkSource: (link: LinkId) => Promise<string>,
  *   jobCommand: (job: JobId, request: {
@@ -116,6 +118,7 @@ export const PROTOCOL = Object.freeze({ major: 2, minor: 1 });
  *     action: JobAction,
  *     expectedRevision: number,
  *     name?: string,
+ *     repeatProviderOperation?: boolean,
  *   }) => Promise<CommandResult>,
  *   jobSource: (job: JobId) => Promise<string>,
  *   settings: () => Promise<Settings>,

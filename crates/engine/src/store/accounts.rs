@@ -10,7 +10,9 @@
 //! change, and work that read older credentials (a status check, a
 //! refresh, a sign-in that started before another finished) can only store
 //! its result while the generation it read is current, so a late answer
-//! never restores obsolete credentials or status.
+//! never restores obsolete credentials or status. `sign_in` advances
+//! only when the account is signed in again, so a link generated with an
+//! earlier sign-in is never used, while a refresh keeps links usable.
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::id::AccountId;
@@ -38,6 +40,9 @@ pub(crate) struct AccountRow {
     pub(crate) alias: Option<AccountAlias>,
     pub(crate) revision: Revision,
     pub(crate) generation: Generation,
+    /// Which sign-in the credentials come from: advanced by signing in
+    /// again, not by a refresh.
+    pub(crate) sign_in: Generation,
     pub(crate) enabled: bool,
     pub(crate) status: AccountStatus,
     pub(crate) problem: Option<DiagnosticText>,
@@ -102,7 +107,7 @@ pub(crate) enum CheckResult {
 }
 
 const COLUMNS: &str = "id, service, alias, revision, credential_generation, enabled, status, \
-                       problem, checked_at, provider_user, username, plan, expires_at, added_at";
+                       problem, checked_at, provider_user, username, plan, expires_at, added_at, sign_in";
 
 type Raw = (
     (i64, String, Option<String>, i64, i64, bool, String),
@@ -113,6 +118,7 @@ type Raw = (
         Option<String>,
         Option<String>,
         Option<i64>,
+        i64,
         i64,
     ),
 );
@@ -136,6 +142,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Raw> {
             row.get(11)?,
             row.get(12)?,
             row.get(13)?,
+            row.get(14)?,
         ),
     ))
 }
@@ -143,7 +150,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Raw> {
 fn decode(raw: Raw) -> Result<AccountRow, StoreError> {
     let (
         (id, service, alias, revision, generation, enabled, status),
-        (problem, checked_at, provider_user, username, plan, expires_at, added_at),
+        (problem, checked_at, provider_user, username, plan, expires_at, added_at, sign_in),
     ) = raw;
     let corrupt = |_| StoreError::Corrupt("account");
     Ok(AccountRow {
@@ -155,6 +162,7 @@ fn decode(raw: Raw) -> Result<AccountRow, StoreError> {
             .map_err(corrupt)?,
         revision: key(revision)?,
         generation: key(generation)?,
+        sign_in: key(sign_in)?,
         enabled,
         status: from_text(&status).ok_or(StoreError::Corrupt("account status"))?,
         problem: problem.map(|p| DiagnosticText::new(&p)),
@@ -504,7 +512,8 @@ impl Store {
         let revision = next(row.revision, Revision::next)?;
         tx.execute(
             "UPDATE accounts SET revision = ?2, credential_generation = ?3, \
-             status = 'not_checked', problem = NULL, checked_at = NULL WHERE id = ?1",
+             sign_in = sign_in + 1, status = 'not_checked', problem = NULL, checked_at = NULL \
+             WHERE id = ?1",
             params![
                 sql(account)?,
                 sql(revision)?,
@@ -518,6 +527,31 @@ impl Store {
         record(&tx, envelope, &result, now)?;
         tx.commit().map_err(StoreError::from)?;
         Ok(result)
+    }
+
+    /// Stores credentials a provider call refreshed, if the account's
+    /// credentials are still the generation the call read, advancing it.
+    /// Returns whether they were stored.
+    pub(crate) fn store_refreshed(
+        &mut self,
+        account: AccountId,
+        generation: Generation,
+        credential: &StoredCredential,
+    ) -> Result<bool, StoreError> {
+        let tx = self.write()?;
+        let Some(row) = load(&tx, account)? else {
+            return Ok(false);
+        };
+        if row.generation != generation {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE accounts SET credential_generation = ?2 WHERE id = ?1",
+            params![sql(account)?, sql(next(generation, Generation::next)?)?],
+        )?;
+        write_credential(&tx, account, credential)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Stores what checking an account found, if its credentials are still
@@ -620,6 +654,9 @@ pub(super) fn remove(
     .map_err(StoreError::from)?;
     tx.execute("DELETE FROM accounts WHERE id = ?1", [sql(account)?])
         .map_err(StoreError::from)?;
+    // Links generated through it are erased with it: the vault's key may
+    // be forgotten below.
+    super::operations::retire_account(tx, account)?;
     // With no account left, the vault holds nothing a key could open, so
     // it forgets the key's check: the next account may use a new key. A
     // key is never replaced while it protects anything.
