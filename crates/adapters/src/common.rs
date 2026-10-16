@@ -161,10 +161,9 @@ impl Api {
                     ))
                 }
                 ApiErrorKind::TooLarge => self.malformed("a request: the answer is too large"),
-                ApiErrorKind::Refused => ProviderError::Malformed(format!(
-                    "the request to {name} was refused: {}",
-                    e.message
-                )),
+                ApiErrorKind::Refused | ApiErrorKind::Unreadable => ProviderError::Malformed(
+                    format!("the request to {name} was refused: {}", e.message),
+                ),
             })
     }
 

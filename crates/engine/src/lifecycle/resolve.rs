@@ -15,8 +15,13 @@
 //! * A generated link is sealed with the vault's key and reused, across
 //!   pauses, restarts, and retries, until the download host refuses it.
 //! * Results are applied only if the job is still at the generation that
-//!   asked and its account is still enabled; a cancelled or removed job's
-//!   outcome is recorded, never used.
+//!   asked, its account is still enabled, and the account was not signed
+//!   in again meanwhile; a cancelled or removed job's outcome is recorded,
+//!   never used. A link is released only once its outcome is committed.
+//! * The provider's record is the account's history, not a record of
+//!   operations: an entry is taken as a lost answer's outcome only if it is
+//!   the one entry for exactly the original link since the intent, and no
+//!   other operation through the account may have made it.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -119,6 +124,8 @@ pub(super) struct Resolved {
     pending: Box<Pending>,
     /// The credential generation the task read.
     generation: Generation,
+    /// The account's sign-in the task read.
+    sign_in: Generation,
     found: Found,
     refreshed: Option<Secret>,
 }
@@ -159,6 +166,38 @@ const AMBIGUOUS: &str = "The provider's answer was lost, and its record shows no
      download, so Wayfetch did not ask again. Retry and confirm to ask again; the provider may \
      then repeat the work.";
 
+const UNSAVED: &str = "Wayfetch could not record the provider's answer, so it did not use it. \
+     Retry and confirm to look for the link the provider made; the provider may then repeat the \
+     work.";
+
+const SIGNED_IN_AGAIN: &str = "The account was signed in again while Wayfetch was asking for this \
+     download's link, so that answer was not used. Retry to download with the account's current \
+     sign-in.";
+
+const CLOSED: &str = "This download's provider request was closed meanwhile, so its answer was \
+     not used. Retry the download.";
+
+/// The earliest a provider may date a link generated for `op`.
+fn since(op: &Operation) -> UtcTimestamp {
+    UtcTimestamp::from_unix_millis(
+        op.started_at
+            .unix_millis()
+            .saturating_sub(i64::try_from(CLOCK_SKEW.as_millis()).unwrap_or(i64::MAX)),
+    )
+}
+
+/// Whether two original links may name the same file: the same host and
+/// path, in any form.
+fn may_be_same(a: &Url, b: &Url) -> bool {
+    let key = |u: &Url| {
+        (
+            u.host_str().map(str::to_ascii_lowercase),
+            u.path().trim_end_matches('/').to_owned(),
+        )
+    };
+    key(a) == key(b)
+}
+
 /// Checks a link a provider generated before it is stored or used: HTTPS
 /// (or plain HTTP to a loopback test server), no credentials in it, and a
 /// bounded length. The provider's name and size are hints, bounded too.
@@ -181,7 +220,12 @@ fn checked_link(link: GeneratedLink) -> Option<GeneratedLink> {
     })
 }
 
-fn seal_link(keys: &Keys, service: &ProviderId, link: &GeneratedLink) -> Option<OperationOutcome> {
+fn seal_link(
+    keys: &Keys,
+    service: &ProviderId,
+    link: &GeneratedLink,
+    sign_in: Generation,
+) -> Option<OperationOutcome> {
     let payload = Sealed {
         url: link.url.as_str().to_owned(),
         filename: link.filename.clone(),
@@ -190,7 +234,11 @@ fn seal_link(keys: &Keys, service: &ProviderId, link: &GeneratedLink) -> Option<
     let secret = Secret::new(serde_json::to_vec(&payload).ok()?);
     let reference = keys.reference().ok()?;
     let sealed = keys.seal_result(&reference, service, &secret).ok()?;
-    Some(OperationOutcome::Succeeded { reference, sealed })
+    Some(OperationOutcome::Succeeded {
+        reference,
+        sealed,
+        sign_in,
+    })
 }
 
 fn open_link(keys: &Keys, operation: &Operation) -> Option<GeneratedLink> {
@@ -219,8 +267,8 @@ impl Coordinator {
             // A direct job, or a storage fault: nothing to resolve.
             _ => return,
         };
-        let keys = match self.usable_account(&route).await {
-            Ok(keys) => keys,
+        let (keys, sign_in) = match self.usable_account(&route).await {
+            Ok(usable) => usable,
             Err(failed) => {
                 let _ = request.reply.send(Resolution::Failed(failed));
                 return;
@@ -236,7 +284,9 @@ impl Coordinator {
                 None
             }
             Some(op) if op.state == OperationState::Succeeded => {
+                // Only a link from the account's current sign-in.
                 if request.refused != Some(op.id)
+                    && op.sign_in == Some(sign_in)
                     && let Some(link) = open_link(&keys, &op)
                 {
                     let _ = request.reply.send(Resolution::Link(ResolvedLink {
@@ -246,7 +296,8 @@ impl Coordinator {
                     }));
                     return;
                 }
-                // Refused by the download host, or unreadable: replaced.
+                // Refused by the download host, from an earlier sign-in,
+                // or unreadable: replaced.
                 let id = op.id;
                 let _ = self
                     .with_store(move |store| store.retire_operation(id, now()))
@@ -302,12 +353,13 @@ impl Coordinator {
         })
     }
 
-    /// The vault's keys, if `route`'s account can be used now; else the
-    /// failure that says why not and what to do.
+    /// The vault's keys and the account's current sign-in, if `route`'s
+    /// account can be used now; else the failure that says why not and
+    /// what to do.
     async fn usable_account(
         &mut self,
         route: &JobRoute,
-    ) -> Result<std::sync::Arc<Keys>, FailureSummary> {
+    ) -> Result<(std::sync::Arc<Keys>, Generation), FailureSummary> {
         let id = route.account;
         let row = self.with_store(move |store| store.account(id)).await;
         let row = match row {
@@ -353,13 +405,14 @@ impl Coordinator {
                 None,
             ));
         }
-        self.accounts.vault.keys().map_err(|e| {
+        let keys = self.accounts.vault.keys().map_err(|e| {
             failure(
                 FailureCode::InvalidCredentials,
                 &format!("{} Fix it, then retry.", e.message),
                 None,
             )
-        })
+        })?;
+        Ok((keys, row.sign_in))
     }
 
     /// Queues `work` on `account`'s lane, and starts it if the lane is free.
@@ -425,7 +478,7 @@ impl Coordinator {
             return false;
         }
         let keys = match self.usable_account(&pending.route).await {
-            Ok(keys) => keys,
+            Ok((keys, _)) => keys,
             Err(failed) => {
                 if let Step::Ask(op) = &pending.step {
                     let id = op.id;
@@ -445,9 +498,9 @@ impl Coordinator {
         let opened = loaded.ok().and_then(|(row, stored)| {
             keys.open(&stored.reference, &row.service, &stored.sealed)
                 .ok()
-                .map(|credential| (row.generation, credential))
+                .map(|credential| (row.generation, row.sign_in, credential))
         });
-        let Some((generation, credential)) = opened else {
+        let Some((generation, sign_in, credential)) = opened else {
             if let Step::Ask(op) = &pending.step {
                 let id = op.id;
                 let outcome =
@@ -486,13 +539,6 @@ impl Coordinator {
                         ))
                     })
                 }
-            };
-            let since = |op: &Operation| {
-                UtcTimestamp::from_unix_millis(
-                    op.started_at
-                        .unix_millis()
-                        .saturating_sub(i64::try_from(CLOCK_SKEW.as_millis()).unwrap_or(i64::MAX)),
-                )
             };
             // An engine stopping abandons the call; its intent stays, and
             // the next start reconciles it.
@@ -535,6 +581,7 @@ impl Coordinator {
             let resolved = Resolved {
                 pending,
                 generation,
+                sign_in,
                 found,
                 refreshed,
             };
@@ -549,6 +596,7 @@ impl Coordinator {
         let Resolved {
             pending,
             generation,
+            sign_in,
             found,
             refreshed,
         } = *resolved;
@@ -572,11 +620,19 @@ impl Coordinator {
                     && s.stage() != JobStage::Publishing
                     && s.desired() == DesiredState::Running
             });
-        let keep = wanted && usable.is_ok();
+        // Signed in again since the task read the credentials: its answer
+        // is recorded, never used.
+        let signed_in_again = usable
+            .as_ref()
+            .is_ok_and(|&(_, current)| current != sign_in);
+        let keep = wanted && usable.is_ok() && !signed_in_again;
         let operation = match &step {
             Step::Ask(op) | Step::Reconcile { operation: op, .. } => op.clone(),
         };
         let repeat = matches!(step, Step::Reconcile { repeat: true, .. });
+        let found = self
+            .unclaimed(found, &operation, &request.link, account)
+            .await;
         let generated = match found {
             Found::Asked(Unrestricted::Generated(link), _)
             | Found::Asked(Unrestricted::Ambiguous(_), Some(Reconciled::Found(link)))
@@ -592,13 +648,22 @@ impl Coordinator {
             Found::Asked(Unrestricted::Ambiguous(why), _) => {
                 Err((FailureCode::OperationAmbiguous, why, None))
             }
-            Found::Looked(Reconciled::NotFound) if repeat => {
+            Found::Looked(Reconciled::NotFound | Reconciled::Inconclusive(_)) if repeat => {
                 // The user confirmed asking again: the old intent is
                 // retired and a new one recorded before the request.
                 let id = operation.id;
-                let _ = self
+                let retired = self
                     .with_store(move |store| store.retire_operation(id, now()))
                     .await;
+                if retired.is_err() {
+                    self.lane_done(account).await;
+                    let _ = request.reply.send(Resolution::Failed(failure(
+                        FailureCode::OperationAmbiguous,
+                        UNSAVED,
+                        None,
+                    )));
+                    return;
+                }
                 if keep && let Some(pending) = self.intend(request, route).await {
                     if !self.start_resolve(Box::new(pending)).await {
                         self.lane_done(account).await;
@@ -610,6 +675,9 @@ impl Coordinator {
             }
             Found::Looked(Reconciled::NotFound) => {
                 Err((FailureCode::OperationAmbiguous, String::new(), None))
+            }
+            Found::Looked(Reconciled::Inconclusive(why)) => {
+                Err((FailureCode::OperationAmbiguous, why, None))
             }
             Found::Looked(Reconciled::Unknown(why)) if repeat => {
                 // Still confirmed: a later retry looks again.
@@ -635,7 +703,7 @@ impl Coordinator {
                 .vault
                 .keys()
                 .ok()
-                .and_then(|keys| seal_link(&keys, &route.service, &link))
+                .and_then(|keys| seal_link(&keys, &route.service, &link, sign_in))
             {
                 Some(outcome) => (
                     outcome,
@@ -673,16 +741,81 @@ impl Coordinator {
                 )
             }
         };
-        let _ = self
+        // An answer from an earlier sign-in, even a refusal, says nothing
+        // about the current one.
+        let answer = match (&outcome, answer) {
+            (OperationOutcome::Ambiguous(_), answer) => answer,
+            _ if signed_in_again => Resolution::Failed(failure(
+                FailureCode::InvalidCredentials,
+                SIGNED_IN_AGAIN,
+                None,
+            )),
+            (_, answer) => answer,
+        };
+        let finished = self
             .with_store(move |store| store.finish_operation(id, &outcome, keep, now()))
             .await;
         self.lane_done(account).await;
+        // A link is released only once its outcome is committed: if not,
+        // the intent stays, and a retry reconciles it.
+        let answer = match (finished, answer) {
+            (Ok(true), answer) => answer,
+            (Ok(false), Resolution::Link(_)) => {
+                Resolution::Failed(failure(FailureCode::RequestTimeout, CLOSED, None))
+            }
+            (Err(_), Resolution::Link(_)) => {
+                Resolution::Failed(failure(FailureCode::OperationAmbiguous, UNSAVED, None))
+            }
+            (_, answer) => answer,
+        };
         let answer = match usable {
             Ok(_) => answer,
             Err(failed) => Resolution::Failed(failed),
         };
         if wanted {
             let _ = request.reply.send(answer);
+        }
+    }
+
+    /// `found`, unless it takes an entry of the provider's record that
+    /// another operation through the account may have made for the same
+    /// file since `operation`'s intent: such an entry is no evidence of
+    /// this operation's outcome.
+    async fn unclaimed(
+        &mut self,
+        found: Found,
+        operation: &Operation,
+        link: &Url,
+        account: AccountId,
+    ) -> Found {
+        let taken = matches!(
+            found,
+            Found::Asked(Unrestricted::Ambiguous(_), Some(Reconciled::Found(_)))
+                | Found::Looked(Reconciled::Found(_))
+        );
+        if !taken {
+            return found;
+        }
+        let (id, since) = (operation.id, since(operation));
+        let others = self
+            .with_store(move |store| store.recent_operation_links(account, id, since))
+            .await;
+        let claimed = others.map_or(true, |others| {
+            others
+                .iter()
+                .any(|other| Url::parse(other).map_or(true, |other| may_be_same(&other, link)))
+        });
+        if !claimed {
+            return found;
+        }
+        let why = Reconciled::Inconclusive(
+            "another request through this account may have made the provider's entry for this \
+             link"
+                .into(),
+        );
+        match found {
+            Found::Asked(asked, _) => Found::Asked(asked, Some(why)),
+            Found::Looked(_) => Found::Looked(why),
         }
     }
 

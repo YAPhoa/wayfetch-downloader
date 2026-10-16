@@ -82,10 +82,15 @@ pub enum ApiErrorKind {
     Unreachable,
     /// The deadline passed.
     Timeout,
-    /// The network policy refused the destination, a redirect, or the
-    /// response's encoding.
+    /// The network policy refused the destination, or the request could
+    /// not be built: it was never sent.
     Refused,
-    /// The body was longer than allowed.
+    /// The provider answered, but its answer was refused unread: a
+    /// redirect, or an encoded body. The provider may have acted on the
+    /// request.
+    Unreadable,
+    /// The body was longer than allowed. The provider may have acted on
+    /// the request.
     TooLarge,
     /// The connection failed after the request may have reached the
     /// provider: unlike [`Self::Unreachable`], the provider may have acted
@@ -266,6 +271,11 @@ pub enum Reconciled {
     Found(GeneratedLink),
     /// The provider's record answered and lists none.
     NotFound,
+    /// The provider's record was read, but cannot show whether the request
+    /// generated a link: several entries, or one in another form, may be
+    /// its outcome, or it reaches back too little. Reading it again will
+    /// not tell.
+    Inconclusive(String),
     /// The provider's record could not be read; nothing is known.
     Unknown(String),
 }

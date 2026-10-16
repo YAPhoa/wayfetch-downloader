@@ -30,7 +30,7 @@ use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
 use wayfetch_protocol::account::{
-    AccountAlias, AccountPlan, AuthorizationMethod, AuthorizationState, ServiceSupport,
+    AccountAlias, AccountPlan, AccountRef, AuthorizationMethod, AuthorizationState, ServiceSupport,
 };
 use wayfetch_protocol::command::{CollectItems, LinkRef, LinkRefs};
 use wayfetch_protocol::domain::failure::FailureCode;
@@ -211,7 +211,8 @@ impl AccountProvider for Provider {
             Ok(PollOutcome::Authorized {
                 credential: Self::credential(n),
                 profile: Profile {
-                    user_id: Some(format!("user-{n}")),
+                    // The same user each time, so it can sign in again.
+                    user_id: Some("user-1".into()),
                     username: Some("synthetic-user".into()),
                     plan: Some(AccountPlan::Premium),
                     expires_at: None,
@@ -499,10 +500,28 @@ fn env() -> Env {
 
 /// Signs an account in and returns it.
 async fn add_account(owner: &EngineOwner, provider: &Provider) -> AccountId {
+    authorize(owner, provider, None).await
+}
+
+/// Signs `account` in again, replacing its credentials.
+async fn sign_in_again(owner: &EngineOwner, provider: &Provider, account: AccountId) {
+    let revision = account_revision(owner, account).await;
+    let again = AccountRef { account, revision };
+    assert_eq!(authorize(owner, provider, Some(again)).await, account);
+}
+
+async fn authorize(
+    owner: &EngineOwner,
+    provider: &Provider,
+    account: Option<AccountRef>,
+) -> AccountId {
+    let alias = account
+        .is_none()
+        .then(|| AccountAlias::new("Main").unwrap());
     let command = Command::AuthorizeAccount {
         service: ProviderId::new(SERVICE).unwrap(),
-        account: None,
-        alias: Some(AccountAlias::new("Main").unwrap()),
+        account,
+        alias,
     };
     let started = match owner
         .handle()
@@ -660,6 +679,37 @@ fn assert_no_secret_in(text: &[u8], what: &str) {
 
 async fn job(owner: &EngineOwner, id: JobId) -> JobSummary {
     support::job(owner, id).await
+}
+
+/// A second connection to the engine's database, as a fault injector.
+fn database(env: &Env) -> rusqlite::Connection {
+    let db = rusqlite::Connection::open(env.state.join("state.sqlite3")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db
+}
+
+/// The states of every provider operation, oldest first.
+fn operation_states(env: &Env) -> Vec<String> {
+    let db = database(env);
+    let mut query = db
+        .prepare("SELECT state FROM provider_operations ORDER BY id")
+        .unwrap();
+    query
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// The generated links the download host was asked for, by number.
+fn links_asked(host: &Host) -> Vec<String> {
+    let mut asked = host
+        .requests()
+        .into_iter()
+        .filter_map(|(url, _)| url.split("/d/").nth(1).map(|n| n[..1].to_owned()))
+        .collect::<Vec<_>>();
+    asked.dedup();
+    asked
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1023,6 +1073,166 @@ async fn an_unknown_outcome_waits_for_the_user_to_confirm_a_repeat() {
     owner.handle().execute(confirmed, ALL).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!((provider.unrestricts(), provider.lookups()), (2, 2));
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_whose_outcome_was_not_saved_is_never_used() {
+    let env = env();
+    let (provider, host) = (&env.server.provider, &env.server.host);
+    let data = body(3 * KIB);
+    host.serve(data.clone());
+    let owner = env.start().await;
+    let account = add_account(&owner, provider).await;
+    // Recording any operation's outcome fails.
+    database(&env)
+        .execute_batch(
+            "CREATE TRIGGER fail_outcomes BEFORE UPDATE OF state ON provider_operations \
+             BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+    let id = start_one(&owner, Some(account)).await;
+    let job = failed(&owner, id).await;
+    let failure = job.failure.clone().unwrap();
+    assert_eq!(failure.code, FailureCode::OperationAmbiguous);
+    assert!(
+        failure
+            .message
+            .unwrap()
+            .as_str()
+            .contains("could not record"),
+        "{job:?}"
+    );
+    assert!(host.requests().is_empty(), "the link was released");
+    assert_eq!(operation_states(&env), ["intended"]);
+    assert_eq!(provider.unrestricts(), 1);
+
+    // Once storage works again, a confirmed retry finds the link the
+    // provider made, without asking again.
+    database(&env)
+        .execute_batch("DROP TRIGGER fail_outcomes;")
+        .unwrap();
+    let (_, plain) = retry(&owner, &job, false).await;
+    assert_eq!(plain.unwrap_err().code, ErrorCode::NotApplicable);
+    retry(&owner, &job, true).await.1.unwrap();
+    support::complete(&owner, id).await;
+    assert_eq!(env.published("Provider Name.bin"), data);
+    assert_eq!((provider.unrestricts(), provider.lookups()), (1, 1));
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_for_replaced_credentials_is_never_used() {
+    let env = env();
+    let (provider, host) = (&env.server.provider, &env.server.host);
+    let data = body(3 * KIB);
+    host.serve(data.clone());
+    let owner = env.start().await;
+    let account = add_account(&owner, provider).await;
+    provider.answer(Answer::WaitThenGenerate);
+    let id = start_one(&owner, Some(account)).await;
+    while provider.unrestricts() == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Signed in again while the provider is still answering the request
+    // made with the old credentials.
+    sign_in_again(&owner, provider, account).await;
+    provider.gate.add_permits(1);
+    let job = failed(&owner, id).await;
+    let failure = job.failure.clone().unwrap();
+    assert_eq!(failure.code, FailureCode::InvalidCredentials);
+    assert!(
+        failure
+            .message
+            .unwrap()
+            .as_str()
+            .contains("signed in again"),
+        "{job:?}"
+    );
+    assert!(host.requests().is_empty(), "the old link was used");
+    assert_eq!(operation_states(&env), ["retired"]);
+
+    // A retry asks with the current sign-in.
+    retry(&owner, &job, false).await.1.unwrap();
+    support::complete(&owner, id).await;
+    assert_eq!(env.published("Provider Name.bin"), data);
+    assert_eq!(provider.unrestricts(), 2);
+    assert_eq!(links_asked(host), ["2"]);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stored_link_from_an_earlier_sign_in_is_replaced() {
+    let env = env();
+    let (provider, host) = (&env.server.provider, &env.server.host);
+    let data = body(64 * KIB);
+    host.serve(data.clone());
+    host.change(|f| f.stall_at = Some(16 * KIB));
+    let owner = env.start().await;
+    let account = add_account(&owner, provider).await;
+    let id = start_one(&owner, Some(account)).await;
+    let running = wait_for(&owner, id, |j| j.bytes_done >= 8 * KIB as u64).await;
+    let pause = Command::Pause {
+        job: id,
+        expected_revision: running.revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, pause), ALL)
+        .await
+        .unwrap();
+    let paused = wait_for(&owner, id, |j| j.stage == JobStage::Paused).await;
+    // The paused download's stored link came with the old sign-in.
+    sign_in_again(&owner, provider, account).await;
+    host.change(|f| f.stall_at = None);
+    let resume = Command::Resume {
+        job: id,
+        expected_revision: paused.revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, resume), ALL)
+        .await
+        .unwrap();
+    support::complete(&owner, id).await;
+    assert_eq!(env.published("Provider Name.bin"), data);
+    assert_eq!(provider.unrestricts(), 2);
+    assert_eq!(links_asked(host), ["1", "2"]);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entry_another_request_may_have_made_is_not_taken() {
+    let env = env();
+    let (provider, host) = (&env.server.provider, &env.server.host);
+    let data = body(3 * KIB);
+    host.serve(data.clone());
+    // The first link is refused, so a second is asked for, and its answer
+    // is lost: the provider's record then lists two entries for the same
+    // link, and the newest is not proven to be the second request's.
+    host.refused_paths
+        .lock()
+        .unwrap()
+        .insert("/d/1/file.bin".into());
+    let owner = env.start().await;
+    let account = add_account(&owner, provider).await;
+    provider.answer(Answer::Generate);
+    provider.answer(Answer::GenerateThenLose);
+    let id = start_one(&owner, Some(account)).await;
+    let job = failed(&owner, id).await;
+    assert_eq!(
+        job.failure.as_ref().unwrap().code,
+        FailureCode::OperationAmbiguous
+    );
+    assert_eq!((provider.unrestricts(), provider.lookups()), (2, 1));
+    assert_eq!(links_asked(host), ["1"]);
+
+    // Confirmed: still not provable, so the provider is asked again.
+    retry(&owner, &job, true).await.1.unwrap();
+    support::complete(&owner, id).await;
+    assert_eq!(env.published("Provider Name.bin"), data);
+    assert_eq!((provider.unrestricts(), provider.lookups()), (3, 2));
+    assert_eq!(links_asked(host), ["1", "3"]);
     shutdown(owner).await;
 }
 

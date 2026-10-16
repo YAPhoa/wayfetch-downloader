@@ -208,7 +208,20 @@ async fn a_lost_or_unreadable_answer_is_ambiguous_and_never_resent() {
         // The connection drops before any answer.
         Answer::Raw(Vec::new()),
         Answer::json(200, "not json"),
+        // Answered, but encoded or redirected: refused unread, after the
+        // request reached Real-Debrid.
+        Answer::Raw(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\n{}"
+                .to_vec(),
+        ),
+        Answer::Raw(
+            b"HTTP/1.1 302 Found\r\nLocation: https://elsewhere.example/\r\nContent-Length: 0\r\n\r\n"
+                .to_vec(),
+        ),
         Answer::json(500, r#"{"error":"internal","error_code":-1}"#),
+        // A server error that does not say why.
+        Answer::json(503, "Service Unavailable"),
+        Answer::json(502, r#"{"error":"bad_gateway"}"#),
     ];
     for (n, answer) in lost.into_iter().enumerate() {
         server.with(|rd| rd.once.insert(UNRESTRICT_PATH, vec![answer]));
@@ -323,6 +336,59 @@ async fn the_record_shows_links_generated_since_the_request() {
 }
 
 #[tokio::test]
+async fn only_one_exact_entry_is_taken_as_the_outcome() {
+    let server = Server::start().await;
+    let rd = provider(&server);
+    let credential = sign_in(&rd).await;
+    let since = UtcTimestamp::from_unix_millis(1_792_144_000_000);
+    let entry = |link: &str, n: u32| support::Generated {
+        link: link.into(),
+        path: format!("/d/entry{n}/f"),
+        generated: "2026-10-16T10:00:00.000Z".into(),
+    };
+    let original = Url::parse(LINK).unwrap();
+    let find = || AccountProvider::find_generated(&rd, &credential, &original, since);
+
+    // The same path on another port or scheme is another origin: never
+    // taken, and not proof that nothing was generated either.
+    for similar in [
+        "https://hoster.example:8443/file/abc123",
+        "http://hoster.example/file/abc123",
+        "https://hoster.example/file/abc123?mirror=2",
+    ] {
+        server.with(|rd| rd.generated = vec![entry(similar, 1)]);
+        let result = find().await.result;
+        assert!(
+            matches!(result, Reconciled::Inconclusive(_)),
+            "{similar}: {result:?}"
+        );
+    }
+
+    // Two entries for exactly this link: either may be another
+    // request's, so neither is chosen.
+    server.with(|rd| rd.generated = vec![entry(LINK, 1), entry(LINK, 2)]);
+    let result = find().await.result;
+    assert!(matches!(result, Reconciled::Inconclusive(_)), "{result:?}");
+
+    // One exact entry beside other links' entries: taken.
+    server.with(|rd| {
+        rd.generated = vec![
+            entry("https://hoster.example/file/other", 1),
+            entry(LINK, 2),
+        ]
+    });
+    let Reconciled::Found(found) = find().await.result else {
+        panic!()
+    };
+    assert!(
+        found.url.path().ends_with("/d/entry2/f"),
+        "{}",
+        found.url.path()
+    );
+    assert_eq!(server.hits(UNRESTRICT_PATH), 0);
+}
+
+#[tokio::test]
 async fn a_full_page_that_does_not_reach_the_request_proves_nothing() {
     let server = Server::start().await;
     let rd = provider(&server);
@@ -344,5 +410,5 @@ async fn a_full_page_that_does_not_reach_the_request_proves_nothing() {
     )
     .await
     .result;
-    assert!(matches!(result, Reconciled::Unknown(_)), "{result:?}");
+    assert!(matches!(result, Reconciled::Inconclusive(_)), "{result:?}");
 }

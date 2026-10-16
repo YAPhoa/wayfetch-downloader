@@ -90,7 +90,8 @@ async fn redirects_are_refused_and_not_followed() {
     let mut req = request(&server, "/api");
     req.bearer = Some(Secret::from_text("synthetic-token"));
     let err = send(&transport, &req).await.unwrap_err();
-    assert_eq!(err.kind, ApiErrorKind::Refused);
+    // Answered: the provider may have acted on the request.
+    assert_eq!(err.kind, ApiErrorKind::Unreadable);
     assert_eq!(server.hits("/elsewhere"), 0);
 }
 
@@ -115,7 +116,7 @@ async fn oversized_and_encoded_bodies_are_refused() {
     for (path, kind) in [
         ("/large", ApiErrorKind::TooLarge),
         ("/chunked", ApiErrorKind::TooLarge),
-        ("/gzip", ApiErrorKind::Refused),
+        ("/gzip", ApiErrorKind::Unreadable),
     ] {
         let err = send(&transport, &request(&server, path)).await.unwrap_err();
         assert_eq!(err.kind, kind, "{path}: {}", err.message);

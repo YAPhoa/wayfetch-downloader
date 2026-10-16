@@ -77,7 +77,7 @@ impl HttpTransport {
         let status = response.status();
         if status.is_redirection() && status != StatusCode::NOT_MODIFIED {
             return Err(fail(
-                ApiErrorKind::Refused,
+                ApiErrorKind::Unreadable,
                 format!("HTTP {status}: provider API redirects are not followed"),
             ));
         }
@@ -86,7 +86,10 @@ impl HttpTransport {
             .get(header::CONTENT_ENCODING)
             .is_some_and(|v| !v.as_bytes().eq_ignore_ascii_case(b"identity"));
         if encoded {
-            return Err(fail(ApiErrorKind::Refused, "the response body is encoded"));
+            return Err(fail(
+                ApiErrorKind::Unreadable,
+                "the response body is encoded",
+            ));
         }
         let too_large = || {
             fail(

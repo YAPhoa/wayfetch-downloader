@@ -52,6 +52,8 @@ pub(crate) struct Operation {
     pub(crate) started_at: UtcTimestamp,
     /// The sealed link of a succeeded operation, and its reference.
     pub(crate) sealed: Option<(Reference, Vec<u8>)>,
+    /// The account's sign-in a succeeded operation's link came with.
+    pub(crate) sign_in: Option<Generation>,
 }
 
 impl std::fmt::Debug for Operation {
@@ -67,10 +69,12 @@ impl std::fmt::Debug for Operation {
 /// How an operation ended.
 #[derive(Debug)]
 pub(crate) enum OperationOutcome {
-    /// A link, sealed for the operation's service.
+    /// A link, sealed for the operation's service, generated or found
+    /// with the account's sign-in `sign_in`.
     Succeeded {
         reference: Reference,
         sealed: Vec<u8>,
+        sign_in: Generation,
     },
     /// Nothing was generated.
     Failed(String),
@@ -88,11 +92,12 @@ pub(super) fn open(tx: &Transaction<'_>, job: JobId) -> Result<Option<Operation>
         i64,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
+        Option<i64>,
     );
     let row: Option<Row> = tx
         .query_row(
             &format!(
-                "SELECT id, state, service, account_id, started_at, reference, sealed \
+                "SELECT id, state, service, account_id, started_at, reference, sealed, sign_in \
                  FROM provider_operations WHERE job_id = ?1 AND state IN {OPEN}"
             ),
             [sql(job)?],
@@ -105,11 +110,12 @@ pub(super) fn open(tx: &Transaction<'_>, job: JobId) -> Result<Option<Operation>
                     r.get(4)?,
                     r.get(5)?,
                     r.get(6)?,
+                    r.get(7)?,
                 ))
             },
         )
         .optional()?;
-    let Some((id, state, service, account, started_at, reference, sealed)) = row else {
+    let Some((id, state, service, account, started_at, reference, sealed, sign_in)) = row else {
         return Ok(None);
     };
     let corrupt = || StoreError::Corrupt("provider operation");
@@ -128,6 +134,7 @@ pub(super) fn open(tx: &Transaction<'_>, job: JobId) -> Result<Option<Operation>
         account: key(account)?,
         started_at: UtcTimestamp::from_unix_millis(started_at),
         sealed,
+        sign_in: sign_in.map(key).transpose()?,
     }))
 }
 
@@ -255,21 +262,28 @@ impl Store {
         now: UtcTimestamp,
     ) -> Result<bool, StoreError> {
         let tx = self.write()?;
-        let (state, reference, sealed, problem) = match outcome {
-            OperationOutcome::Succeeded { reference, sealed } if keep => (
+        let (state, reference, sealed, sign_in, problem) = match outcome {
+            OperationOutcome::Succeeded {
+                reference,
+                sealed,
+                sign_in,
+            } if keep => (
                 OperationState::Succeeded,
                 Some(&reference[..]),
                 Some(sealed.as_slice()),
+                Some(sql(*sign_in)?),
                 None,
             ),
-            OperationOutcome::Succeeded { .. } => (OperationState::Retired, None, None, None),
-            OperationOutcome::Failed(why) => (OperationState::Failed, None, None, Some(why)),
-            OperationOutcome::Ambiguous(why) => (OperationState::Ambiguous, None, None, Some(why)),
+            OperationOutcome::Succeeded { .. } => (OperationState::Retired, None, None, None, None),
+            OperationOutcome::Failed(why) => (OperationState::Failed, None, None, None, Some(why)),
+            OperationOutcome::Ambiguous(why) => {
+                (OperationState::Ambiguous, None, None, None, Some(why))
+            }
         };
         let state: &'static str = state.into();
         let changed = tx.execute(
             "UPDATE provider_operations SET state = ?2, reference = ?3, sealed = ?4, \
-             problem = ?5, finished_at = ?6 \
+             sign_in = ?7, problem = ?5, finished_at = ?6 \
              WHERE id = ?1 AND state IN ('intended', 'confirmed')",
             params![
                 id,
@@ -277,11 +291,40 @@ impl Store {
                 reference,
                 sealed,
                 problem.map(|p| DiagnosticText::new(p).as_str().to_owned()),
-                now.unix_millis()
+                now.unix_millis(),
+                sign_in
             ],
         )?;
         tx.commit()?;
         Ok(changed == 1)
+    }
+
+    /// The original links of operations through `account`, other than
+    /// `operation`, that may have generated a link at or after `since`:
+    /// open ones, and any that ended since, except those that certainly
+    /// generated nothing. Earlier operations of the same job count too.
+    /// The newest 1000 at most.
+    pub(crate) fn recent_operation_links(
+        &mut self,
+        account: AccountId,
+        operation: i64,
+        since: UtcTimestamp,
+    ) -> Result<Vec<String>, StoreError> {
+        let tx = self.read()?;
+        let links = tx
+            .prepare(
+                "SELECT s.input_url FROM provider_operations p \
+                 JOIN jobs j ON j.id = p.job_id JOIN source_links s ON s.id = j.source_link_id \
+                 WHERE p.account_id = ?1 AND p.id <> ?2 AND p.state <> 'failed' \
+                 AND (p.finished_at IS NULL OR p.finished_at >= ?3) \
+                 ORDER BY p.id DESC LIMIT 1000",
+            )?
+            .query_map(
+                params![sql(account)?, operation, since.unix_millis()],
+                |r| r.get(0),
+            )?
+            .collect::<Result<_, _>>()?;
+        Ok(links)
     }
 
     /// Retires operation `id`, erasing its link: the download host refused

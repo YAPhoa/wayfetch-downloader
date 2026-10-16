@@ -7,7 +7,10 @@
 //! resent. Only a 401 before Real-Debrid processed anything (an expired
 //! access token) is answered by refreshing and sending once more. The
 //! engine reconciles with `GET /downloads`, the account's list of generated
-//! links, newest first. Torrents, folders, passwords, Remote traffic, and
+//! links, newest first. That list is the account's history, not a record
+//! of operations, so an entry is accepted only if it names exactly the
+//! original link, is dated no earlier than the intent, and is the only one
+//! that might be this request's; anything less certain is unknown. Torrents, folders, passwords, Remote traffic, and
 //! multi-result links are not used.
 //!
 //! The generated link is checked before the engine sees it: HTTPS (plain
@@ -174,7 +177,7 @@ impl RealDebrid {
                 .await;
             let response = match sent {
                 Ok(response) => response,
-                // Never reached Real-Debrid.
+                // Never sent: refused before sending, or no connection.
                 Err(e) if matches!(e.kind, ApiErrorKind::Unreachable | ApiErrorKind::Refused) => {
                     return Unrestricted::refused(
                         FailureCode::RequestTimeout,
@@ -184,7 +187,9 @@ impl RealDebrid {
                         ),
                     );
                 }
-                // It may have generated the link.
+                // Sent, and answered unreadably or not at all (a redirect,
+                // an encoded or oversized body, a timeout, a lost
+                // connection): it may have generated the link.
                 Err(e) => {
                     return Unrestricted::Ambiguous(format!(
                         "Real-Debrid's answer was lost ({})",
@@ -348,6 +353,8 @@ impl RealDebrid {
                 return Reconciled::Unknown("Real-Debrid's record could not be read".into());
             };
             let mut oldest = None;
+            let mut found = Vec::new();
+            let mut unclear = false;
             for entry in &entries {
                 let at = entry.generated.as_deref().and_then(parse_rfc3339);
                 oldest = match (oldest, at) {
@@ -355,21 +362,42 @@ impl RealDebrid {
                     (None, a) => a,
                     (o, None) => o,
                 };
-                let same = entry
-                    .link
-                    .as_deref()
-                    .and_then(|l| Url::parse(l).ok())
-                    .is_some_and(|l| same_link(&l, link));
-                if !same || at.is_none_or(|at| at < since.unix_millis()) {
+                // Older than the intent: another request's.
+                if at.is_some_and(|at| at < since.unix_millis()) {
                     continue;
                 }
-                if let Some(found) = entry
-                    .download
-                    .as_deref()
-                    .and_then(|d| self.generated(d, entry.filename.as_deref(), entry.filesize))
-                {
-                    return Reconciled::Found(found);
+                let recorded = entry.link.as_deref().and_then(|l| Url::parse(l).ok());
+                match recorded.as_ref().map(|r| identity(r, link)) {
+                    Some(Identity::Other) => {}
+                    Some(Identity::Same) if at.is_some() => {
+                        match entry.download.as_deref().and_then(|d| {
+                            self.generated(d, entry.filename.as_deref(), entry.filesize)
+                        }) {
+                            Some(generated) => found.push(generated),
+                            None => unclear = true,
+                        }
+                    }
+                    // Undated, unreadable, or a different form of the
+                    // link (another scheme, port, or query): it may be
+                    // this request's, and it may not.
+                    _ => unclear = true,
                 }
+            }
+            if unclear {
+                return Reconciled::Inconclusive(
+                    "Real-Debrid's record lists a link that may or may not be this download's"
+                        .into(),
+                );
+            }
+            if found.len() > 1 {
+                return Reconciled::Inconclusive(
+                    "Real-Debrid's record lists several links for this download, and Wayfetch \
+                     cannot tell which is its own"
+                        .into(),
+                );
+            }
+            if let Some(generated) = found.pop() {
+                return Reconciled::Found(generated);
             }
             // A full page that does not reach back to the intent proves
             // nothing about older entries.
@@ -378,29 +406,46 @@ impl RealDebrid {
             return if complete {
                 Reconciled::NotFound
             } else {
-                Reconciled::Unknown("Real-Debrid generated too many links since to check".into())
+                Reconciled::Inconclusive(
+                    "Real-Debrid generated too many links since to check".into(),
+                )
             };
         }
     }
 }
 
-/// Whether Real-Debrid's record of an original link names `link`. It may
-/// echo it with another scheme or a trailing slash.
-fn same_link(recorded: &Url, link: &Url) -> bool {
-    let key = |u: &Url| {
-        let path = u.path().trim_end_matches('/').to_owned();
+/// How an original link in Real-Debrid's record relates to `link`.
+#[derive(Debug, PartialEq, Eq)]
+enum Identity {
+    /// Exactly `link`: the same scheme, host, port, path, and query.
+    Same,
+    /// The same host and path in another form, such as another scheme,
+    /// port, query, or a trailing slash: proof neither way.
+    Similar,
+    /// Another link.
+    Other,
+}
+
+fn identity(recorded: &Url, link: &Url) -> Identity {
+    let near = |u: &Url| {
         (
             u.host_str().map(str::to_ascii_lowercase),
-            path,
-            u.query().map(str::to_owned),
+            u.path().trim_end_matches('/').to_owned(),
         )
     };
-    recorded == link || key(recorded) == key(link)
+    if recorded == link {
+        Identity::Same
+    } else if near(recorded) == near(link) {
+        Identity::Similar
+    } else {
+        Identity::Other
+    }
 }
 
 /// What an error answer from `POST /unrestrict/link` means. Every code
-/// here is a refusal: Real-Debrid generated nothing. An unknown server
-/// error may have happened after it did, so it is ambiguous.
+/// here is a refusal: Real-Debrid generated nothing. A server error
+/// without a known code, 503 included, may have happened after it did, so
+/// it is ambiguous.
 fn refusal(status: u16, code: Option<i64>) -> Unrestricted {
     use FailureCode::*;
     let (failure, message) = match code {
@@ -487,10 +532,8 @@ fn refusal(status: u16, code: Option<i64>) -> Unrestricted {
                 retry_after: Some(SLOW_DOWN),
             };
         }
-        _ if status == 503 => (
-            RequestTimeout,
-            "Real-Debrid is temporarily unavailable. Retry later.",
-        ),
+        // Received, and failed without saying why: it may have generated
+        // the link first.
         _ if status >= 500 => {
             return Unrestricted::Ambiguous(format!(
                 "Real-Debrid failed with HTTP {status} after receiving the request"
@@ -623,19 +666,25 @@ mod tests {
     }
 
     #[test]
-    fn recorded_links_match_loosely_but_not_other_files() {
-        let link = Url::parse("https://host.example/file/abc").unwrap();
-        for same in [
-            "https://host.example/file/abc/",
-            "http://HOST.example/file/abc",
+    fn only_the_exact_link_is_the_same_source() {
+        let link = Url::parse("https://host.example/file/abc?x=1").unwrap();
+        let same = Url::parse("https://HOST.example:443/file/abc?x=1").unwrap();
+        assert_eq!(identity(&same, &link), Identity::Same);
+        for similar in [
+            "https://host.example/file/abc/?x=1",
+            "http://host.example/file/abc?x=1",
+            "https://host.example:8443/file/abc?x=1",
+            "https://host.example/file/abc",
         ] {
-            assert!(same_link(&Url::parse(same).unwrap(), &link), "{same}");
+            let recorded = Url::parse(similar).unwrap();
+            assert_eq!(identity(&recorded, &link), Identity::Similar, "{similar}");
         }
         for other in [
-            "https://host.example/file/abd",
-            "https://other.example/file/abc",
+            "https://host.example/file/abd?x=1",
+            "https://other.example/file/abc?x=1",
         ] {
-            assert!(!same_link(&Url::parse(other).unwrap(), &link), "{other}");
+            let recorded = Url::parse(other).unwrap();
+            assert_eq!(identity(&recorded, &link), Identity::Other, "{other}");
         }
     }
 }

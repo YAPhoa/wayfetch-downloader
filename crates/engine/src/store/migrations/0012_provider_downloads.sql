@@ -15,12 +15,18 @@ ALTER TABLE jobs ADD COLUMN route_account INTEGER
     CHECK ((route_account IS NULL) = (route_service IS NULL) AND
            (route_account IS NULL OR route_account > 0));
 
+-- Which sign-in an account's credentials come from: advanced only when
+-- the account is signed in again, not by a refresh. A link is used only
+-- while the sign-in that generated it is current.
+ALTER TABLE accounts ADD COLUMN sign_in INTEGER NOT NULL DEFAULT 1 CHECK (sign_in > 0);
+
 -- One provider operation per row: the intent is recorded before the
 -- request is sent, and the outcome before the transfer starts.
 --
 -- * `intended`: sent, or about to be; the outcome is not known.
 -- * `succeeded`: the provider generated a link, sealed here with the
---   vault's key (`reference`, `sealed`) until it is used up or refused.
+--   vault's key (`reference`, `sealed`) until it is used up or refused;
+--   `sign_in` is the account's sign-in it was generated or found with.
 -- * `failed`: the provider certainly generated nothing.
 -- * `ambiguous`: the answer was lost and no record shows the outcome; it
 --   waits for the user to confirm a repeat.
@@ -45,7 +51,9 @@ CREATE TABLE provider_operations (
     reference BLOB CHECK (reference IS NULL OR length(reference) = 16),
     sealed BLOB CHECK (sealed IS NULL OR length(sealed) BETWEEN 28 AND 8220),
     problem TEXT CHECK (problem IS NULL OR length(problem) <= 512),
+    sign_in INTEGER CHECK (sign_in IS NULL OR sign_in > 0),
     CHECK ((state = 'succeeded') = (sealed IS NOT NULL)),
+    CHECK (state <> 'succeeded' OR sign_in IS NOT NULL),
     CHECK ((reference IS NULL) = (sealed IS NULL))
 ) STRICT;
 
