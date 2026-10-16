@@ -520,6 +520,31 @@ impl Store {
         Ok(result)
     }
 
+    /// Stores credentials a provider call refreshed, if the account's
+    /// credentials are still the generation the call read, advancing it.
+    /// Returns whether they were stored.
+    pub(crate) fn store_refreshed(
+        &mut self,
+        account: AccountId,
+        generation: Generation,
+        credential: &StoredCredential,
+    ) -> Result<bool, StoreError> {
+        let tx = self.write()?;
+        let Some(row) = load(&tx, account)? else {
+            return Ok(false);
+        };
+        if row.generation != generation {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE accounts SET credential_generation = ?2 WHERE id = ?1",
+            params![sql(account)?, sql(next(generation, Generation::next)?)?],
+        )?;
+        write_credential(&tx, account, credential)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Stores what checking an account found, if its credentials are still
     /// the generation the check read; refreshed credentials advance it.
     /// Returns the account as it is now, `None` once removed.
@@ -620,6 +645,9 @@ pub(super) fn remove(
     .map_err(StoreError::from)?;
     tx.execute("DELETE FROM accounts WHERE id = ?1", [sql(account)?])
         .map_err(StoreError::from)?;
+    // Links generated through it are erased with it: the vault's key may
+    // be forgotten below.
+    super::operations::retire_account(tx, account)?;
     // With no account left, the vault holds nothing a key could open, so
     // it forgets the key's check: the next account may use a new key. A
     // key is never replaced while it protects anything.

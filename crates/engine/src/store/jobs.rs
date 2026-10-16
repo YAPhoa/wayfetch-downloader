@@ -14,23 +14,24 @@ use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Generation;
 use wayfetch_protocol::event::{EventCursor, EventKind};
 use wayfetch_protocol::query::{
-    ArtifactSummary, FailureSummary, JobCounts, JobFilter, JobSummary, Page, Query, QueryResult,
+    ArtifactSummary, FailureSummary, JobCounts, JobFilter, JobRoute, JobSummary, Page, Query,
+    QueryResult,
 };
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
-use super::{Store, StoreError, files, key, links, outbox, sql};
+use super::{Store, StoreError, files, key, links, operations, outbox, sql};
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
 /// the job's newest partial; the next three describe its published file,
 /// then come the submitted link, the job's destination root, whether the
 /// user removed it from lists, and why its latest attempt restarted from
-/// zero.
+/// zero, and the provider route it was started through.
 const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.generation, \
      j.revision, j.bytes_total, j.failure_code, j.failure_retry_at, j.failure_message, \
      COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
                ORDER BY p.generation DESC LIMIT 1), 0), \
      a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id, j.removed_at IS NOT NULL, \
-     j.restart_reason";
+     j.restart_reason, j.route_service, j.route_account";
 
 /// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
 /// has exactly one source link.
@@ -52,6 +53,9 @@ pub struct Admission {
     pub url: String,
     /// Where it is saved, if decided yet.
     pub root: Option<RootId>,
+    /// The provider account it downloads through; `None` for a direct
+    /// download.
+    pub route: Option<JobRoute>,
 }
 
 /// Stages that are parked with a failure explaining why.
@@ -77,6 +81,8 @@ pub(super) struct StoredJob {
     pub(super) removed: bool,
     /// Why the latest attempt started from zero.
     restart_reason: Option<DiagnosticText>,
+    /// The provider account it downloads through.
+    route: Option<JobRoute>,
 }
 
 impl StoredJob {
@@ -96,6 +102,7 @@ impl StoredJob {
             original_host: Some(self.original_host.clone()),
             destination: self.destination,
             restart_reason: self.restart_reason.clone(),
+            route: self.route.clone().map(Box::new),
         }
     }
 }
@@ -118,6 +125,7 @@ struct RawJob {
     root: Option<i64>,
     removed: bool,
     restart_reason: Option<String>,
+    route: (Option<String>, Option<i64>),
 }
 
 impl RawJob {
@@ -142,6 +150,7 @@ impl RawJob {
             root: row.get(15)?,
             removed: row.get(16)?,
             restart_reason: row.get(17)?,
+            route: (row.get(18)?, row.get(19)?),
         })
     }
 
@@ -188,6 +197,7 @@ impl RawJob {
             destination: self.root.map(key).transpose()?,
             removed: self.removed,
             restart_reason: self.restart_reason.as_deref().map(DiagnosticText::new),
+            route: operations::decode_route(self.route.0, self.route.1)?,
         })
     }
 }
@@ -264,6 +274,10 @@ pub(super) fn save(
     if job.state.stage() == JobStage::Queued && job.state.generation() != previous.generation() {
         files::abandon_unreserved(tx, job.id, job.state.generation())?;
     }
+    // A finished or cancelled job needs no generated link any more.
+    if matches!(job.state.stage(), JobStage::Complete | JobStage::Cancelled) {
+        operations::retire_links(tx, job.id)?;
+    }
     outbox::append(tx, &EventKind::JobChanged { job: job.summary() }, now)?;
     Ok(())
 }
@@ -282,22 +296,24 @@ pub(super) fn set_restart_reason(
     Ok(())
 }
 
-/// Creates the queued job of source link `source`, saved in `root`, and
-/// marks the link staged, with a `job_added` event. The link's unique job
-/// makes a second call for it fail rather than add another job.
+/// Creates the queued job of source link `source`, saved in `root` and
+/// downloaded through `route` (directly if `None`), and marks the link
+/// staged, with a `job_added` event. The link's unique job makes a second
+/// call for it fail rather than add another job.
 pub(super) fn create(
     tx: &Transaction<'_>,
     source: i64,
     package: i64,
     root: Option<i64>,
+    route: Option<&JobRoute>,
     now: UtcTimestamp,
 ) -> Result<JobId, StoreError> {
     let state = JobState::new();
     let desired: &'static str = state.desired().into();
     tx.execute(
         "INSERT INTO jobs (source_link_id, package_id, desired_state, stage, generation, \
-         revision, root_id, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+         revision, root_id, route_service, route_account, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
         params![
             source,
             package,
@@ -306,6 +322,8 @@ pub(super) fn create(
             sql(state.generation())?,
             sql(state.revision())?,
             root,
+            route.map(|r| r.service.as_str()),
+            route.map(|r| sql(r.account)).transpose()?,
             now.unix_millis(),
         ],
     )?;
@@ -352,7 +370,7 @@ impl Store {
             .collect::<Result<_, _>>()?;
         let staged = pending
             .into_iter()
-            .map(|(source, package, root)| create(&tx, source, package, root, now))
+            .map(|(source, package, root)| create(&tx, source, package, root, None, now))
             .collect::<Result<Vec<_>, _>>()?;
         tx.commit()?;
         Ok(staged)
@@ -446,9 +464,20 @@ impl Store {
     ) -> Result<Vec<Admission>, StoreError> {
         let tx = self.read()?;
         let fetch = i64::try_from(limit.saturating_add(running.len())).unwrap_or(i64::MAX);
-        let rows: Vec<(i64, String, i64, String, String, Option<i64>)> = tx
+        type Row = (
+            i64,
+            String,
+            i64,
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+        );
+        let rows: Vec<Row> = tx
             .prepare(
-                "SELECT j.id, j.stage, j.generation, j.desired_state, s.input_url, j.root_id \
+                "SELECT j.id, j.stage, j.generation, j.desired_state, s.input_url, j.root_id, \
+                 j.route_service, j.route_account \
                  FROM jobs j JOIN source_links s ON s.id = j.source_link_id \
                  WHERE j.stage IN ('queued', 'recovering') AND (?2 OR j.root_id IS NOT NULL) \
                  ORDER BY j.stage = 'recovering' DESC, j.id LIMIT ?1",
@@ -461,11 +490,13 @@ impl Store {
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
                 ))
             })?
             .collect::<Result<_, _>>()?;
         let mut ready = Vec::with_capacity(limit);
-        for (id, stage, generation, desired, url, root) in rows {
+        for (id, stage, generation, desired, url, root, service, account) in rows {
             let id: JobId = key(id)?;
             if running.contains(&id) || ready.len() == limit {
                 continue;
@@ -478,6 +509,7 @@ impl Store {
                     .map_err(|_| StoreError::Corrupt("desired state"))?,
                 url,
                 root: root.map(key).transpose()?,
+                route: operations::decode_route(service, account)?,
             });
         }
         Ok(ready)

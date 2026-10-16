@@ -28,4 +28,10 @@ expected_revision: Revision,
 /**
  * The new file name, for [`Action::Rename`] only.
  */
-name?: string, };
+name?: string, 
+/**
+ * For [`Action::Retry`] only: repeat a provider operation whose
+ * outcome is unknown, accepting possible duplicate provider work
+ * ([`Command::Retry`]). Added in protocol 2.2.
+ */
+repeat_provider_operation?: boolean, };

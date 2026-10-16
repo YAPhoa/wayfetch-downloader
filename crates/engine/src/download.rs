@@ -36,9 +36,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use wayfetch_domain::failure::FailureCode;
-use wayfetch_domain::id::JobId;
+use wayfetch_domain::id::{AttemptId, JobId, ResourceId, RouteId};
 use wayfetch_domain::job::{DesiredState, JobError, JobStage, Outcome};
-use wayfetch_domain::name::DiagnosticText;
+use wayfetch_domain::name::{DiagnosticText, HostName};
+use wayfetch_domain::source::Candidate;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::BootEpoch;
 use wayfetch_protocol::InstanceId;
@@ -47,12 +48,18 @@ use wayfetch_protocol::query::FailureSummary;
 use crate::config::{Limits, Timeouts};
 use crate::destinations::Destination;
 use crate::fs::{FsError, PublicationCheck, RelativePath, Root, StagingFile, StagingRecord};
-use crate::lifecycle::{SoleAttempt, StoreClient};
+use crate::lifecycle::{Resolution, ResolvedLink, SoleAttempt, StoreClient};
 use crate::store::{Admission, Partial, Store, StoreError};
-use crate::transfer::lease::Representation;
+use crate::transfer::lease::{
+    LeaseSource, Parallelism, ReplayPolicy, Representation, RequestRef, ResumePolicy, Transfer,
+    TransferLease, TransferOffer,
+};
 use crate::transfer::range::{self, Plan};
 use crate::transfer::transport::{OpenRequest, Response, Transport};
 use crate::transfer::writer::{IntervalWriter, StreamEnd, WriteError};
+
+/// The host's one egress route; routes are not configurable yet.
+const DEFAULT_ROUTE: RouteId = RouteId::new(std::num::NonZeroU64::MIN);
 
 /// Alternative names tried when a target name is taken.
 const NAME_ATTEMPTS: u32 = 100;
@@ -77,6 +84,8 @@ enum Stop {
     /// Leave the partial and queue the job again under a new generation,
     /// which starts from zero, for the reason given.
     Restart(&'static str),
+    /// Fail the job as a provider explained.
+    Fail(FailureSummary),
 }
 
 /// Why a job started again from zero, as shown to the user.
@@ -94,6 +103,8 @@ mod why {
     pub(super) const NOTHING_LEFT: &str = "the server said nothing was left to send, but the saved data could not be confirmed complete";
     pub(super) const PUBLICATION_LOST: &str =
         "the finished file was missing or damaged before it could be saved";
+    pub(super) const NEW_LINK: &str = "the download host no longer accepted the provider's link, \
+         and a new link cannot continue the saved data";
 }
 
 impl From<StoreError> for Stop {
@@ -218,6 +229,9 @@ impl Download {
                     now(),
                 ),
                 Stop::Restart(reason) => store.restart_from_zero(job, generation, reason, now()),
+                Stop::Fail(failure) => {
+                    store.record_stage(job, JobStage::Failed, generation, Some(failure), now())
+                }
                 Stop::Abandon | Stop::Interrupted => Ok(Outcome::Unchanged),
             })
             .await;
@@ -249,22 +263,27 @@ impl Download {
             }
             other => other,
         };
-        let (response, target) = match self.request(&url, continued.as_ref()).await? {
+        let (opened, link) = self.open(&url, continued.as_ref()).await?;
+        // A provider's link names the file better than the original link.
+        let named = link.as_ref().map_or(&url, |l| &l.link.url);
+        let (response, target) = match opened {
             Opened::Body(response, target) => (response, target),
             Opened::Covered(size) => {
                 let c = continued.ok_or(Stop::Abandon)?;
-                let name = target_name(self.job.job, c.partial.suggested_name.as_deref(), &url);
+                let name = target_name(self.job.job, c.partial.suggested_name.as_deref(), named);
                 return self.finish(&root, c.file, size, name).await;
             }
         };
         // Only a usable name is kept, so a long or hostile header cannot
-        // make the response unrecordable.
+        // make the response unrecordable. The download host's suggestion
+        // comes first, then the provider's; both are only hints.
         let suggested = match &continued {
             Some(c) => c.partial.suggested_name.clone(),
             None => response
                 .filename
                 .as_deref()
                 .and_then(file_name)
+                .or_else(|| link.as_ref()?.link.filename.as_deref().and_then(file_name))
                 .map(|name| name.as_str().to_owned()),
         };
         self.advance(JobStage::Transferring).await?;
@@ -277,8 +296,126 @@ impl Download {
             }
         };
         let (size, file) = self.stream(file, response, &target).await?;
-        let name = target_name(self.job.job, suggested.as_deref(), &url);
+        let name = target_name(self.job.job, suggested.as_deref(), named);
         self.finish(&root, file, size, name).await
+    }
+
+    /// Opens the job's bytes: the original link for a direct job; for a
+    /// job routed through a provider account, the link the provider
+    /// generated, bound to this job generation and that account by a
+    /// transfer lease. A generated link the download host no longer
+    /// accepts is replaced once per attempt; a new link never continues
+    /// saved data, which then restarts from zero.
+    async fn open(
+        &self,
+        original: &Url,
+        continued: Option<&Continued>,
+    ) -> Result<(Opened, Option<ResolvedLink>), Stop> {
+        if self.job.route.is_none() {
+            return Ok((self.request(original, continued, None).await?, None));
+        }
+        let mut refused = None;
+        loop {
+            let link = self.resolve(original, refused).await?;
+            let mut transfer = self.lease(&link).await?;
+            match self
+                .request(&link.link.url, continued, Some(&mut transfer))
+                .await
+            {
+                Err(Stop::Park(_, FailureCode::LeaseExpired | FailureCode::LeaseNotFound, _))
+                    if refused.is_none() =>
+                {
+                    if continued.is_some() {
+                        // The next generation asks for the new link.
+                        self.call({
+                            let id = link.operation;
+                            move |s| s.retire_operation(id, now())
+                        })
+                        .await??;
+                        return Err(Stop::Restart(why::NEW_LINK));
+                    }
+                    refused = Some(link.operation);
+                }
+                Err(Stop::Park(
+                    stage,
+                    code @ (FailureCode::LeaseExpired | FailureCode::LeaseNotFound),
+                    message,
+                )) => {
+                    return Err(Stop::Park(
+                        stage,
+                        code,
+                        format!(
+                            "the download host refused the provider's new link too ({message}); \
+                             retry later"
+                        ),
+                    ));
+                }
+                other => return other.map(|opened| (opened, Some(link))),
+            }
+        }
+    }
+
+    /// The provider link for this generation, waiting while the
+    /// coordinator asks the provider. A pause or cancel stops waiting.
+    async fn resolve(&self, original: &Url, refused: Option<i64>) -> Result<ResolvedLink, Stop> {
+        let (job, generation) = (self.job.job, self.job.generation);
+        let asked = self
+            .store
+            .resolve(job, generation, original.clone(), refused);
+        let resolution = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => return Err(Stop::Interrupted),
+            resolution = asked => resolution,
+        };
+        match resolution {
+            Some(Resolution::Link(link)) => Ok(link),
+            Some(Resolution::Failed(failure)) => Err(Stop::Fail(failure)),
+            None if self.cancel.is_cancelled() => Err(Stop::Interrupted),
+            None => Err(Stop::Abandon),
+        }
+    }
+
+    /// A transfer lease for `link`, started against the job's current
+    /// generation: the offer binds the provider, the account, and what the
+    /// provider said about the file; its request is never repeated
+    /// automatically beyond the replay rules.
+    async fn lease(&self, link: &ResolvedLink) -> Result<Transfer, Stop> {
+        let job = self.job.job;
+        // This slice stores one resource per job and one egress route.
+        let candidate = Candidate {
+            resource: ResourceId::new(std::num::NonZeroU64::new(job.get()).ok_or(Stop::Abandon)?),
+            original_host: HostName::new(link.link.url.host_str().unwrap_or_default())
+                .map_err(|e| failed(FailureCode::AdapterParseFailure, e))?,
+            provider: link.route.service.clone(),
+            account: Some(link.route.account),
+            route: DEFAULT_ROUTE,
+        };
+        let offer = TransferOffer {
+            candidate,
+            representation: Representation {
+                length: link.link.size,
+                ..Representation::default()
+            },
+            source: LeaseSource::PreparedRequest(RequestRef(
+                u64::try_from(link.operation).unwrap_or_default(),
+            )),
+            // The provider documents no expiry; the host's refusal ends it.
+            expires_at: None,
+            replay: ReplayPolicy::Idempotent,
+            resume: ResumePolicy::Conditional,
+            parallelism: Parallelism::Sequential,
+        };
+        let attempt = AttemptId::new(
+            std::num::NonZeroU64::new(self.job.generation.get()).ok_or(Stop::Abandon)?,
+        );
+        let lease = TransferLease::new(offer, job, self.job.generation, attempt);
+        let current = self.call(move |s| s.job_state(job)).await??.generation();
+        lease
+            .start(current, now())
+            .map_err(|e| match e.failure_code() {
+                Some(code) => failed(code, e),
+                None => Stop::Abandon,
+            })
     }
 
     /// Opens the job's destination root, blocking the job if it is
@@ -514,7 +651,12 @@ impl Download {
 
     /// Sends the request, from zero or after a continued partial's durable
     /// bytes, and checks the response before any byte is written.
-    async fn request(&self, url: &Url, continued: Option<&Continued>) -> Result<Opened, Stop> {
+    async fn request(
+        &self,
+        url: &Url,
+        continued: Option<&Continued>,
+        transfer: Option<&mut Transfer>,
+    ) -> Result<Opened, Stop> {
         let stored = continued.and_then(|c| c.partial.representation.clone());
         let requested = continued.map(|c| (c.partial.durable_end, None));
         let request = OpenRequest {
@@ -550,6 +692,15 @@ impl Download {
                 }
             },
         };
+        // A provider's link must serve what the provider described.
+        if let Some(transfer) = transfer
+            && transfer.observe(response.representation.clone()).is_err()
+        {
+            return Err(failed(
+                FailureCode::IntegrityMismatch,
+                "the download host's file is not the size the provider reported",
+            ));
+        }
         let changed = stored
             .as_ref()
             .is_some_and(|stored| *stored != response.representation);
@@ -994,6 +1145,7 @@ mod tests {
                 command: Command::Retry {
                     job,
                     expected_revision: store.job_state(job).unwrap().revision(),
+                    repeat_provider_operation: false,
                 },
             };
             store
@@ -1037,6 +1189,7 @@ mod tests {
                 desired: DesiredState::Running,
                 url: URL.into(),
                 root: Some(root_id),
+                route: None,
             },
             attempt: SoleAttempt::assume(job),
         };

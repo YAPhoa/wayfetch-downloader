@@ -132,9 +132,19 @@ async fn deadlines_and_hang_ups_are_temporary() {
     req.deadline = Duration::from_millis(300);
     let err = send(&transport, &req).await.unwrap_err();
     assert_eq!(err.kind, ApiErrorKind::Timeout);
+    // The request was sent before the provider hung up, so it may have
+    // acted on it.
     let err = send(&transport, &request(&server, "/hangup"))
         .await
         .unwrap_err();
+    assert_eq!(err.kind, ApiErrorKind::Interrupted, "{}", err.message);
+    // Nothing listens: the request never left.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let mut req = request(&server, "/hang");
+    req.url = format!("http://127.0.0.1:{port}/nothing").parse().unwrap();
+    let err = send(&transport, &req).await.unwrap_err();
     assert_eq!(err.kind, ApiErrorKind::Unreachable, "{}", err.message);
 }
 

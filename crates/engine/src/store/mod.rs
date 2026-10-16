@@ -38,6 +38,9 @@
 //!   file found.
 //! * `Store::allocate_root`, `Store::adopt_root`, `Store::register_root`,
 //!   and `Store::forget_root`: one root recorded by path.
+//! * `Store::begin_operation` and `Store::finish_operation`: a provider
+//!   operation's intent, before its request is sent, and its outcome,
+//!   before any transfer uses it.
 //! * [`Store::begin_publication`], [`Store::complete_publication`] (with
 //!   the job's completion), and [`Store::abandon_publication`]: the
 //!   publication intent around the filesystem link.
@@ -55,6 +58,7 @@ mod commands;
 mod files;
 mod jobs;
 mod links;
+mod operations;
 mod outbox;
 mod progress;
 mod renames;
@@ -68,6 +72,7 @@ pub use commands::CommandContext;
 pub use files::Partial;
 pub use jobs::Admission;
 pub use links::Unusable;
+pub(crate) use operations::{Operation, OperationOutcome, OperationState};
 pub use renames::{RenameIntent, RenameStart};
 pub(crate) use roots::path_text;
 

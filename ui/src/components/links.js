@@ -29,9 +29,11 @@ import {
   matches,
   refusals,
 } from '../client/links.js';
+import { accountName, canChooseRoute, routeAccounts } from '../client/routes.js';
 import { openDialog } from './dialog.js';
 import { copyText, focusedKey, h, refocus, show } from './dom.js';
 import { icon } from './icons.js';
+import { loadServices } from './services.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -42,6 +44,8 @@ import { icon } from './icons.js';
  * @typedef {import('../client/contract.js').CollectedLink} CollectedLink
  * @typedef {import('../client/contract.js').LinksAction} LinksAction
  * @typedef {import('../client/contract.js').CommandResult} CommandResult
+ * @typedef {import('../client/contract.js').AccountId} AccountId
+ * @typedef {import('../client/contract.js').AccountSummary} AccountSummary
  * @typedef {import('./menu.js').Menu} Menu
  * @typedef {import('./menu.js').MenuEntry} MenuEntry
  * @typedef {import('./menu.js').Anchor} Anchor
@@ -77,8 +81,18 @@ const NO_CONTROL = 'You may not change or remove links';
 /**
  * What to tell the user about a command refused as a whole.
  * @param {WayfetchError} error
+ * @param {AccountId} [account] the account the links were to start through
  */
-function refused(error) {
+function refused(error, account) {
+  if (account !== undefined) {
+    switch (error.code) {
+      case 'permission_denied':
+        return 'You may not download through accounts. The links were kept; start them directly instead.';
+      case 'not_found':
+      case 'not_applicable':
+        return `The links were kept and nothing started: ${error.message}`;
+    }
+  }
   switch (error.code) {
     case 'not_found':
       return 'That folder is no longer a permitted destination. Choose another.';
@@ -126,7 +140,7 @@ export class LinksPage {
     this.timer = undefined;
 
     this.buttons = {
-      start: this.tool('start', 'resume', 'Start selected', () => this.act('start', this.chosen().filter(startable))),
+      start: this.tool('start', 'resume', 'Start selected', () => void this.start(this.chosen().filter(startable))),
       move: this.tool('move', 'folder', 'Save to…', () => this.chooseFolder(this.chosen().filter((l) => !l.job))),
       remove: this.tool('remove', 'cancel', 'Remove', () => this.act('remove', this.chosen())),
     };
@@ -333,8 +347,9 @@ export class LinksPage {
    * @param {LinksAction} action
    * @param {readonly CollectedLink[]} links
    * @param {RootId} [destination]
+   * @param {AccountId} [account] for a start: the account to download through
    */
-  async act(action, links, destination) {
+  async act(action, links, destination, account) {
     const hello = this.context.hello();
     if (links.length === 0 || this.busy) return;
     if (!hello) {
@@ -352,13 +367,14 @@ export class LinksPage {
         action,
         links: links.map((l) => ({ link: l.id, revision: l.revision })),
         destination,
+        account,
       });
     } catch (error) {
       if (error instanceof WayfetchError && error.code === 'unauthenticated') {
         this.context.onSignedOut();
         return;
       }
-      this.say(error instanceof WayfetchError ? refused(error) : String(error));
+      this.say(error instanceof WayfetchError ? refused(error, account) : String(error));
     } finally {
       this.busy = false;
     }
@@ -397,6 +413,94 @@ export class LinksPage {
       warn: n > 0 && notApplied.length > 0,
       downloads: action === 'start' && n > 0,
     };
+  }
+
+  /**
+   * Starts `links`: directly, unless the client may download through
+   * accounts and one can be used, when the user chooses how first. Direct
+   * stays the default, and a choice is never changed afterwards.
+   * @param {readonly CollectedLink[]} links
+   */
+  async start(links) {
+    if (links.length === 0 || this.busy) return;
+    if (!canChooseRoute(this.context.client.permissions)) {
+      await this.act('start', links);
+      return;
+    }
+    /** @type {AccountSummary[]} */
+    let accounts;
+    try {
+      accounts = routeAccounts(await this.context.client.accounts());
+    } catch (error) {
+      if (error instanceof WayfetchError && error.code === 'unauthenticated') {
+        this.context.onSignedOut();
+        return;
+      }
+      this.say(
+        `Nothing started: the accounts to download through could not be read (${error instanceof Error ? error.message : String(error)}). Try again.`,
+      );
+      return;
+    }
+    if (accounts.length === 0) {
+      await this.act('start', links);
+      return;
+    }
+    /** @type {Map<string, string>} */
+    const names = new Map();
+    for (const service of await loadServices().catch(() => [])) names.set(service.id, service.name);
+    this.chooseRoute(links, accounts, (id) => names.get(id) ?? id);
+  }
+
+  /**
+   * Asks how `links` will be downloaded: directly from their hosts, or
+   * through one of `accounts`.
+   * @param {readonly CollectedLink[]} links
+   * @param {readonly AccountSummary[]} accounts
+   * @param {(service: string) => string} serviceName
+   */
+  chooseRoute(links, accounts, serviceName) {
+    const choice = (/** @type {string} */ value, /** @type {string} */ label, /** @type {string | null} */ hint, checked = false) =>
+      h(
+        'label',
+        { class: 'choice' },
+        h('input', { type: 'radio', name: 'links-route', value, checked }),
+        h('span', { class: 'choice-text' }, h('span', null, label), hint && h('span', { class: 'hint' }, hint)),
+      );
+    const start = h('button', { type: 'submit', class: 'primary' }, 'Start');
+    const cancel = h('button', { type: 'button', onclick: () => dialog.close() }, 'Cancel');
+    const form = h(
+      'form',
+      {
+        onsubmit: (/** @type {SubmitEvent} */ event) => {
+          event.preventDefault();
+          const picked = /** @type {HTMLInputElement | null} */ (form.querySelector('input:checked'));
+          dialog.close();
+          const account = picked && picked.value !== 'direct' ? /** @type {AccountId} */ (picked.value) : undefined;
+          void this.act('start', links, undefined, account);
+        },
+      },
+      h(
+        'fieldset',
+        null,
+        h('legend', null, 'Download via'),
+        choice('direct', 'Direct', 'From each link’s own host', true),
+        accounts.map((account) => {
+          const service = serviceName(account.service);
+          return choice(account.id, `${service}: ${accountName(account, service)}`, account.username && account.alias ? account.username : null);
+        }),
+      ),
+      h(
+        'p',
+        { class: 'hint' },
+        'Through an account, the provider makes a download link for each file when it starts, using the account. If that fails, the download stops and says why; it is never switched to another way.',
+      ),
+      h('div', { class: 'row' }, start, cancel),
+    );
+    const dialog = openDialog(
+      { title: `Start ${count(links.length, 'link')}`, className: 'start-links' },
+      form,
+    );
+    /** @type {HTMLElement | null} */ (form.querySelector('input:checked'))?.focus();
   }
 
   /**
@@ -530,7 +634,7 @@ export class LinksPage {
             : starts.length === 0
               ? 'Not a valid link'
               : undefined,
-        run: () => void this.act('start', starts),
+        run: () => void this.start(starts),
       },
       {
         key: 'move-links',

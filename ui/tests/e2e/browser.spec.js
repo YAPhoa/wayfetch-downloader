@@ -8,7 +8,17 @@ import { expect, test } from '@playwright/test';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { Daemon, Fixture, MIB, RD_SECRETS, RD_USER_CODE, RealDebridFixture, content, freePort } from './harness.js';
+import {
+  Daemon,
+  Fixture,
+  MIB,
+  RD_SECRETS,
+  RD_SIGNATURE,
+  RD_USER_CODE,
+  RealDebridFixture,
+  content,
+  freePort,
+} from './harness.js';
 
 const PASSWORD = 'correct horse battery staple';
 /** A file name that is markup if mistaken for HTML, and fine on disk. */
@@ -138,12 +148,13 @@ async function expectServiceCatalogue(page, accounts) {
   // Real-Debrid leads, as the first planned integration.
   const featured = catalogue.locator('.service-card.featured');
   await expect(featured.locator('h4')).toHaveText('Real-Debrid');
-  await expect(featured.locator('.tag')).toHaveText(['Multi-host services', 'Available', 'Sign-in only']);
+  // Downloads go through it too, so it is not marked Sign-in only.
+  await expect(featured.locator('.tag')).toHaveText(['Multi-host services', 'Available']);
   await expect(names.first()).toHaveText('Real-Debrid');
   // Only Real-Debrid can be signed in to, and nothing asks for a password.
   await expect(catalogue.getByRole('button')).toHaveText(['×', 'Sign in…']);
   await expect(featured.getByRole('button', { name: 'Sign in to Real-Debrid' })).toBeVisible();
-  await expect(featured.getByText(/cannot download through it yet/)).toBeVisible();
+  await expect(featured.getByText(/cannot download through it yet/)).toHaveCount(0);
   await expect(catalogue.locator('input:not([type="search"], [type="radio"]), select, textarea')).toHaveCount(0);
   await expect(catalogue.locator('.service-card .tag', { hasText: 'Not available yet' })).toHaveCount(19);
   await expect(catalogue.locator('.service-card .tag.available')).toHaveCount(1);
@@ -1218,7 +1229,7 @@ test('accounts are signed in on the service, checked, disabled, signed in again,
   await page.getByRole('dialog', { name: 'Add account' }).getByRole('button', { name: 'Sign in to Real-Debrid' }).click();
 
   await expect(signIn.getByText('Wayfetch never asks for your password', { exact: false })).toBeVisible();
-  await expect(signIn.getByText(/Downloading through Real-Debrid is not supported yet/)).toBeVisible();
+  await expect(signIn.getByText(/Downloading through Real-Debrid is not supported yet/)).toHaveCount(0);
   await expect(signIn.locator('input[type="password"]')).toHaveCount(0);
   const name = signIn.getByLabel('Name in Wayfetch (optional)');
   await expect(name).toBeFocused();
@@ -1302,6 +1313,118 @@ test('accounts are signed in on the service, checked, disabled, signed in again,
     expect(daemon.log).not.toContain(secret);
   }
   expect(offOrigin).toEqual([]);
+  await context.close();
+});
+
+test('links download through a chosen Real-Debrid account, and a lost answer is asked again only once confirmed', async ({
+  browser,
+}) => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto(daemon.origin);
+  await page.getByLabel('Owner name').fill('owner');
+  await page.getByLabel('Password').fill(PASSWORD);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.locator('.statusbar .status')).toHaveText('Live');
+
+  // Without an account, starting asks nothing.
+  const direct = fixture.put('direct-before-account.bin', MIB);
+  await add(page, direct);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+
+  await page.goto(`${daemon.origin}/settings/accounts`);
+  const accounts = page.locator('.settings-content section', { has: page.getByRole('heading', { name: /Accounts & services/ }) });
+  await accounts.getByRole('button', { name: 'Add account…' }).click();
+  await page.getByRole('dialog', { name: 'Add account' }).getByRole('button', { name: 'Sign in to Real-Debrid' }).click();
+  const signIn = page.getByRole('dialog', { name: 'Sign in to Real-Debrid' });
+  await signIn.getByLabel('Name in Wayfetch (optional)').fill('Main');
+  await signIn.getByRole('button', { name: 'Continue' }).click();
+  await expect(signIn).toHaveCount(0);
+  await expect(accounts.locator('[data-key="accounts-message"]')).toHaveText('Account added and signed in.');
+  await page.locator('[data-key="settings-back"]').click();
+
+  // Collecting asks the provider nothing.
+  const asked = () => realDebrid.requested.filter((path) => path === '/rest/1.0/unrestrict/link').length;
+  const original = 'https://hoster.example/file/through-account';
+  const lost = 'https://hoster.example/file/answer-lost';
+  await collect(page, `${original}\n${lost}`, 'Collected 2 links for review.');
+  expect(asked()).toBe(0);
+  const linkRow = (/** @type {string} */ name) =>
+    page.locator('tr[data-link]', { has: page.locator('td.name', { hasText: new RegExp(`^${name}$`) }) });
+
+  // Starting offers Direct, chosen by default, and the account.
+  await linkRow('through-account').locator('input[type="checkbox"]').check();
+  await page.getByRole('button', { name: 'Start selected' }).click();
+  const choose = page.getByRole('dialog', { name: 'Start 1 link' });
+  await expect(choose.getByRole('radio', { name: /^Direct/ })).toBeChecked();
+  await expect(choose.getByRole('radio')).toHaveCount(2);
+  expect(asked()).toBe(0);
+  // Cancelled: nothing starts and the link stays.
+  await choose.getByRole('button', { name: 'Cancel' }).click();
+  await expect(linkRow('through-account').locator('td.link-status')).toHaveText('Not checked');
+  await page.getByRole('button', { name: 'Start selected' }).click();
+  await choose.getByRole('radio', { name: 'Real-Debrid: Main' }).check();
+  await choose.getByRole('button', { name: 'Start' }).click();
+  await expect(page.getByText('Started 1 download.')).toBeVisible();
+  // Downloads routed through an account, as the API reports them.
+  const routed = async () => {
+    const response = await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`);
+    expect(response.ok()).toBe(true);
+    return (await response.json()).items.filter((/** @type {{ route?: unknown }} */ job) => job.route);
+  };
+  await expect.poll(async () => (await routed()).map((/** @type {{ stage: string }} */ j) => j.stage)).toEqual(['complete']);
+  const [through] = await routed();
+  expect(through.route.service).toBe('real-debrid');
+  expect(asked()).toBe(1);
+  // The provider's file name, saved in the folder the link was collected to.
+  expect(through.artifact.path).toBe(realDebrid.filename);
+  const settings = await (await page.request.get(`${daemon.origin}/v1/settings`)).json();
+  const folder = settings.roots.find((/** @type {{ id: string }} */ r) => r.id === through.artifact.root).path;
+  const saved = await readFile(join(folder, through.artifact.path));
+  expect(saved.equals(content(0, realDebrid.size))).toBe(true);
+  expect(realDebrid.downloadAuth).toEqual([undefined]);
+  await page.goto(`${daemon.origin}/jobs/${through.id}`);
+  await expect(page.locator('[data-fact="download-via"]')).toHaveText('Real-Debrid, Main');
+
+  // The answer to the next request is lost: the download stops, saying
+  // the outcome is unknown, and Retry asks before asking again.
+  realDebrid.lose = 1;
+  await page.goto(`${daemon.origin}/links`);
+  await linkRow('answer-lost').locator('input[type="checkbox"]').check();
+  await page.getByRole('button', { name: 'Start selected' }).click();
+  await choose.getByRole('radio', { name: 'Real-Debrid: Main' }).check();
+  await choose.getByRole('button', { name: 'Start' }).click();
+  await expect(page.getByText('Started 1 download.')).toBeVisible();
+  await expect.poll(async () => (await routed()).length).toBe(2);
+  const lostJob = (await routed()).find((/** @type {{ id: string }} */ j) => j.id !== through.id);
+  await page.goto(`${daemon.origin}/jobs/${lostJob.id}`);
+  await expect(page.locator('[data-fact="download-via"]')).toHaveText('Real-Debrid, Main');
+  await expect(page.locator('.inspector')).toContainText('the provider may do that work twice');
+  expect(asked()).toBe(2);
+  const retry = page.getByRole('button', { name: `Retry ${lostJob.id}` });
+  await retry.click();
+  const confirm = page.getByRole('dialog', { name: /^Retry / });
+  await expect(confirm).toContainText('may count against the account a second time');
+  await confirm.getByRole('button', { name: 'Cancel' }).click();
+  await expect(confirm).toHaveCount(0);
+  expect(asked()).toBe(2);
+  await retry.click();
+  await confirm.getByRole('button', { name: 'Ask again' }).click();
+  await expect
+    .poll(async () => (await routed()).find((/** @type {{ id: string }} */ j) => j.id === lostJob.id).stage)
+    .toBe('complete');
+  expect(asked()).toBe(3);
+  expect(realDebrid.downloadAuth).toEqual([undefined, undefined]);
+
+  // No generated link or credential reached the page, its storage, or the
+  // daemon's output.
+  const seen = await page.evaluate(() =>
+    JSON.stringify([document.documentElement.outerHTML, location.href, Object.entries(localStorage), Object.entries(sessionStorage)]),
+  );
+  for (const secret of [...Object.values(RD_SECRETS), RD_SIGNATURE]) {
+    expect(seen).not.toContain(secret);
+    expect(daemon.log).not.toContain(secret);
+  }
   await context.close();
 });
 

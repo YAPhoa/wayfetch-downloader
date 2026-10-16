@@ -20,6 +20,7 @@
 use std::time::Duration;
 
 use url::Url;
+use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::name::ProviderId;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_protocol::account::{AccountPlan, ServiceSupport};
@@ -86,6 +87,10 @@ pub enum ApiErrorKind {
     Refused,
     /// The body was longer than allowed.
     TooLarge,
+    /// The connection failed after the request may have reached the
+    /// provider: unlike [`Self::Unreachable`], the provider may have acted
+    /// on it.
+    Interrupted,
 }
 
 /// A metadata request failed. Its message names no secret.
@@ -196,6 +201,96 @@ pub enum ProviderError {
     Malformed(String),
 }
 
+/// A download link a provider generated for an account (Real-Debrid's
+/// "unrestricted" link). The URL is a bearer capability: it never prints,
+/// and the engine keeps it sealed.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GeneratedLink {
+    /// Where the file is downloaded from. Checked by the provider: HTTPS,
+    /// without credentials.
+    pub url: Url,
+    /// The name the provider suggests: an untrusted hint, checked like a
+    /// server's suggestion before use.
+    pub filename: Option<String>,
+    /// The size the provider reports; `None` when it does not know.
+    pub size: Option<u64>,
+}
+
+impl std::fmt::Debug for GeneratedLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeneratedLink")
+            .field("url", &"[redacted]")
+            .field("filename", &self.filename)
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
+/// What asking a provider for a download link found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unrestricted {
+    /// The provider generated a link.
+    Generated(GeneratedLink),
+    /// The provider certainly did not generate one: it refused, or the
+    /// request never reached it. `code` is the failure to record; the
+    /// message says what the person can do and names no secret.
+    Refused {
+        /// The failure.
+        code: FailureCode,
+        /// What happened.
+        message: String,
+        /// When trying again may work, if the provider said.
+        retry_after: Option<Duration>,
+    },
+    /// The request may have reached the provider, but its answer was lost
+    /// or could not be read: the provider may have generated a link. The
+    /// engine reconciles rather than asking again.
+    Ambiguous(String),
+}
+
+impl Unrestricted {
+    /// A refusal with no hint of when to try again.
+    pub fn refused(code: FailureCode, message: impl Into<String>) -> Self {
+        Self::Refused {
+            code,
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+}
+
+/// What looking for a link the provider may already have generated found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reconciled {
+    /// The provider lists a link generated for the original link.
+    Found(GeneratedLink),
+    /// The provider's record answered and lists none.
+    NotFound,
+    /// The provider's record could not be read; nothing is known.
+    Unknown(String),
+}
+
+/// A provider call made with an account's credentials, and the
+/// credentials to store instead when it refreshed them, whether or not
+/// the call then succeeded.
+#[derive(Debug)]
+pub struct WithCredentials<T> {
+    /// What the call found.
+    pub result: T,
+    /// Refreshed credentials.
+    pub refreshed: Option<Secret>,
+}
+
+impl<T> WithCredentials<T> {
+    /// A result reached without changing the credentials.
+    pub fn unchanged(result: T) -> Self {
+        Self {
+            result,
+            refreshed: None,
+        }
+    }
+}
+
 /// One provider's account authorization.
 pub trait AccountProvider: Send + Sync + 'static {
     /// The service, as named in the UI's catalogue.
@@ -214,4 +309,39 @@ pub trait AccountProvider: Send + Sync + 'static {
     /// Checks stored credentials with the provider, refreshing them first
     /// if they have expired or the provider says they have.
     fn check<'a>(&'a self, credential: &'a Secret) -> BoxFuture<'a, Checked>;
+
+    /// Asks the provider, once, for a download link for the original
+    /// `link` through the account. Not idempotent: the provider may count
+    /// or record each request, so the engine records its intent first and
+    /// never repeats a request whose answer was lost; it reconciles with
+    /// [`Self::find_generated`] instead. Only for a provider whose
+    /// [`ServiceSupport::downloads`] is true.
+    fn unrestrict<'a>(
+        &'a self,
+        _credential: &'a Secret,
+        _link: &'a Url,
+    ) -> BoxFuture<'a, WithCredentials<Unrestricted>> {
+        Box::pin(async {
+            WithCredentials::unchanged(Unrestricted::refused(
+                FailureCode::UnsupportedCapability,
+                "this service cannot download yet",
+            ))
+        })
+    }
+
+    /// Looks, without generating anything, for a link the provider
+    /// generated for `link` through the account at or after `since`: the
+    /// evidence that an earlier request whose answer was lost succeeded.
+    fn find_generated<'a>(
+        &'a self,
+        _credential: &'a Secret,
+        _link: &'a Url,
+        _since: UtcTimestamp,
+    ) -> BoxFuture<'a, WithCredentials<Reconciled>> {
+        Box::pin(async {
+            WithCredentials::unchanged(Reconciled::Unknown(
+                "this service keeps no record of generated links".into(),
+            ))
+        })
+    }
 }

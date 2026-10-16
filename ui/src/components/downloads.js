@@ -32,12 +32,14 @@ import {
   restartNote,
   retryPlan,
 } from '../client/jobs.js';
+import { routeLabel } from '../client/routes.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
 import { copyText, focusedKey, h, refocus, show } from './dom.js';
 import { icon } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu } from './menu.js';
+import { loadServices } from './services.js';
 import { SETTINGS_PATH, SettingsPage, sectionPath, settingsSection } from './settings.js';
 import { toolbar } from './toolbar.js';
 
@@ -49,6 +51,7 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('../client/contract.js').ProgressSample} ProgressSample
  * @typedef {import('../client/contract.js').Settings} Settings
  * @typedef {import('../client/contract.js').RootId} RootId
+ * @typedef {import('../client/contract.js').Accounts} Accounts
  * @typedef {import('./menu.js').MenuEntry} MenuEntry
  * @typedef {import('./settings.js').Density} Density
  * @typedef {import('../client/feed.js').FeedStatus} FeedStatus
@@ -214,6 +217,13 @@ export class Downloads {
      * @type {{ job: JobId, url: string | null | undefined } | null}
      */
     this.link = null;
+    /**
+     * What names the account a job in the details goes through, once read:
+     * the accounts (`null` without the `accounts` permission or if they
+     * could not be read) and the services' names.
+     * @type {{ job: JobId, accounts: Accounts | null, names: Map<string, string> } | null | undefined}
+     */
+    this.routeNames = undefined;
 
     /** Connection state, for the status bar. */
     this.status = h('span', { class: 'status', role: 'status', 'data-status': 'connecting' });
@@ -737,9 +747,13 @@ export class Downloads {
    * click cannot send a second request.
    * @param {JobSummary} job
    * @param {StateAction | 'rename' | 'remove'} action
-   * @param {{ name?: string, refused?: (text: string, error?: WayfetchError) => void }} [options]
+   * @param {{
+   *   name?: string,
+   *   repeatProviderOperation?: boolean,
+   *   refused?: (text: string, error?: WayfetchError) => void,
+   * }} [options]
    */
-  async send(job, action, { name, refused } = {}) {
+  async send(job, action, { name, repeatProviderOperation, refused } = {}) {
     const hello = this.feed.hello;
     if (!hello) {
       (refused ?? ((text) => (this.notice = text)))('Not connected yet. Try again in a moment.');
@@ -758,6 +772,7 @@ export class Downloads {
         action,
         expectedRevision: job.revision,
         name,
+        repeatProviderOperation,
       });
       accepted = true;
     } catch (error) {
@@ -793,13 +808,25 @@ export class Downloads {
    * continues the saved data when the server still offers the same file.
    * A refusal because the job changed meanwhile is explained from its
    * state once re-read.
+   * A download whose provider request may have gone through without its
+   * answer arriving is retried only once the user accepts that the
+   * provider may do that work again.
    * @param {JobSummary} job
+   * @param {boolean} [repeat] the user accepted repeating it
    */
-  async retry(job) {
+  async retry(job, repeat = false) {
     const name = jobName(job);
+    if (job.route && job.failure?.code === 'operation_ambiguous' && !repeat) {
+      if (this.client.permissions.includes('provider_downloads')) this.confirmRepeat(job);
+      else this.notice = `${name}: retrying asks the provider for its link again, which needs permission to download through accounts.`;
+      // The toolbar's Retry, disabled while acting, is drawn enabled again.
+      this.schedule();
+      return;
+    }
     /** @type {WayfetchError | undefined} */
     let refusal;
     const accepted = await this.send(job, 'retry', {
+      repeatProviderOperation: repeat || undefined,
       refused: (text, error) => {
         refusal = error;
         this.notice = `${name}: ${text}`;
@@ -819,6 +846,39 @@ export class Downloads {
           : `${name} was already started again or changed state, so it was not retried twice.`;
     }
     this.schedule();
+  }
+
+  /**
+   * Asks before retrying `job`, whose provider request may have gone
+   * through: the provider may then make its download link a second time.
+   * @param {JobSummary} job
+   */
+  confirmRepeat(job) {
+    const name = jobName(job);
+    const retry = h(
+      'button',
+      {
+        type: 'button',
+        class: 'primary',
+        'data-key': 'confirm-repeat',
+        onclick: () => {
+          dialog.close();
+          void this.retry(job, true);
+        },
+      },
+      'Ask again',
+    );
+    const cancel = h('button', { type: 'button', onclick: () => dialog.close() }, 'Cancel');
+    const dialog = openDialog(
+      { title: `Retry ${name}?`, className: 'confirm-repeat' },
+      h(
+        'p',
+        null,
+        'Wayfetch asked the provider for a download link, but its answer was lost, so Wayfetch cannot tell whether the provider made one. Wayfetch first looks for that link once more. If it is not found, it asks the provider again, which may count against the account a second time.',
+      ),
+      h('div', { class: 'row' }, retry, cancel),
+    );
+    retry.focus();
   }
 
   // The row menu.
@@ -1457,6 +1517,7 @@ export class Downloads {
         ['Type', name && fileKind(name)],
         ['Size', shown.size],
         [job.artifact ? 'Saved in' : 'Saves to', this.folder(job, where.folder)],
+        ['Download via', this.via(job)],
         ...this.source(job),
       ]),
       job.failure && h('p', { class: `note tone-${state.tone}` }, explain(job.failure)),
@@ -1554,6 +1615,31 @@ export class Downloads {
         ),
       ],
     ];
+  }
+
+  /**
+   * How `job` downloads: directly, or the service and account it goes
+   * through, named once the accounts are read.
+   * @param {JobSummary} job
+   */
+  via(job) {
+    const route = job.route;
+    if (!route) return 'Direct';
+    if (this.routeNames?.job !== job.id) {
+      /** @type {{ job: JobId, accounts: Accounts | null, names: Map<string, string> }} */
+      const read = { job: job.id, accounts: null, names: new Map() };
+      this.routeNames = read;
+      const accounts = this.client.permissions.includes('accounts')
+        ? this.client.accounts().catch(() => null)
+        : Promise.resolve(null);
+      void Promise.all([accounts, loadServices().catch(() => [])]).then(([list, services]) => {
+        read.accounts = list;
+        for (const service of services) read.names.set(service.id, service.name);
+        if (this.routeNames === read) this.schedule();
+      });
+    }
+    const { accounts, names } = this.routeNames;
+    return routeLabel(route, accounts, (id) => names.get(id) ?? id);
   }
 
   /** @param {JobSummary} job */
