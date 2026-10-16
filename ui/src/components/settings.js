@@ -26,6 +26,7 @@ import { focusedKey, h, refocus, show } from './dom.js';
 import { browseServerFolders } from './folders.js';
 import { icon } from './icons.js';
 import { accountsSection } from './accounts.js';
+import { toolbar } from './toolbar.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -51,7 +52,6 @@ import { accountsSection } from './accounts.js';
  *   navigate: (path: string) => void,
  *   back: () => void,
  *   backLabel: () => string,
- *   brand: Node,
  * }} SettingsContext
  */
 
@@ -243,13 +243,7 @@ export class SettingsPage {
           }
         },
       },
-      h(
-        'header',
-        { class: 'toolbar' },
-        context.brand,
-        this.back,
-        this.title,
-      ),
+      toolbar([this.back, this.title]),
       h('div', { class: 'settings-body' }, this.nav, this.content),
     );
   }
