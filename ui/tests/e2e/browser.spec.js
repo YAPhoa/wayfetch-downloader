@@ -437,14 +437,25 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeFocused();
   await expect(page.locator('.downloads-view table.jobs')).toBeHidden();
   const sections = page.getByRole('navigation', { name: 'Settings sections' });
-  const folderLink = sections.getByRole('link', { name: 'Download folder' });
+  const downloadsLink = sections.getByRole('link', { name: 'Downloads', exact: true });
+  const folderLink = sections.getByRole('link', { name: 'Download folders' });
   const displayLink = sections.getByRole('link', { name: 'Display' });
   const accountsLink = sections.getByRole('link', { name: 'Accounts & services' });
+  await expect(downloadsLink).toHaveAttribute('aria-current', 'page');
+  expect(await sections.getByRole('link').allInnerTexts()).toEqual([
+    'Downloads',
+    'Download folders',
+    'Accounts & services',
+    'Display',
+  ]);
+  const pane = page.locator('.settings-content');
+  await expect(pane.getByLabel('Maximum simultaneous downloads')).toHaveValue('4');
+  await folderLink.click();
+  await expect(page).toHaveURL(`${daemon.origin}/settings/folder`);
   await expect(folderLink).toHaveAttribute('aria-current', 'page');
   await expect(displayLink).not.toHaveAttribute('aria-current');
-  const pane = page.locator('.settings-content');
   // The permitted server folders.
-  await expect(pane.getByRole('heading', { name: 'Download folder' })).toBeVisible();
+  await expect(pane.getByRole('heading', { name: 'Download folders' })).toBeVisible();
   const archive = pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) });
   await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.root}`) })).toBeChecked();
   await expect(pane.getByText('Server paths', { exact: true })).toBeVisible();
@@ -456,7 +467,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(page).toHaveURL(`${daemon.origin}/settings/display`);
   await expect(displayLink).toHaveAttribute('aria-current', 'page');
   await expect(folderLink).not.toHaveAttribute('aria-current');
-  await expect(pane.getByRole('heading', { name: 'Download folder' })).toBeHidden();
+  await expect(pane.getByRole('heading', { name: 'Download folders' })).toBeHidden();
   await expect(pane.getByRole('radio', { name: 'System', exact: true })).toBeChecked();
   await page.emulateMedia({ colorScheme: 'dark' });
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
@@ -480,7 +491,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await pane.getByRole('radio', { name: 'Compact' }).check();
   // From the keyboard: arrows move along the sections, Enter opens one,
   // and focus is drawn.
-  await displayLink.focus();
+  await folderLink.focus();
   await page.keyboard.press('ArrowDown');
   await expect(accountsLink).toBeFocused();
   expect(await accountsLink.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe('solid');
@@ -581,8 +592,17 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   // Only a folder the user added can be removed; its files stay.
   const films = join(shares, 'films');
   // Links collected to be saved there do not keep it; they show it as
-  // removed until given another folder.
+  // removed until given another folder. The folder checked is not saved,
+  // which the section is marked for, and leaving asks first.
+  await expect(folderLink.locator('.unsaved')).toBeVisible();
   await page.locator('[data-key="settings-back"]').click();
+  const discard = page.getByRole('dialog', { name: 'Discard unsaved changes?' });
+  await expect(discard).toContainText('Download folders has changes that are not saved.');
+  await discard.getByRole('button', { name: 'Keep editing' }).click();
+  await expect(discard).toHaveCount(0);
+  await expect(page).toHaveURL(`${daemon.origin}/settings/folder`);
+  await page.keyboard.press('Escape');
+  await discard.getByRole('button', { name: 'Discard changes' }).click();
   await page.getByRole('button', { name: 'Add links' }).click();
   await page.getByLabel('Save to').selectOption({ label: films });
   await page.getByLabel('Links, one per line').fill(fixture.put('orphan.bin', MIB));
@@ -638,7 +658,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(page).toHaveURL(`${daemon.origin}/`);
   await expect(settingsButton).toBeFocused();
   await settingsButton.click();
-  await expect(folderLink).toHaveAttribute('aria-current', 'page');
+  await expect(downloadsLink).toHaveAttribute('aria-current', 'page');
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(`${daemon.origin}/`);
   await expect(settingsButton).toBeFocused();
@@ -938,6 +958,86 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await views.getByRole('link', { name: 'Downloads' }).click();
   await expect(page.getByRole('button', { name: `All (${jobsBefore + 1})` })).toBeVisible();
   await expect(daemon.published('review-b.bin', daemon.archive)).rejects.toThrow();
+  await context.close();
+});
+
+test('the download limit is a server setting every window shares', async ({ browser }) => {
+  const context = await browser.newContext();
+  const first = await context.newPage();
+  await first.goto(daemon.origin);
+  await first.getByLabel('Owner name').fill('owner');
+  await first.getByLabel('Password').fill(PASSWORD);
+  await first.getByRole('button', { name: 'Sign in' }).click();
+  await expect(first.locator('.statusbar .status')).toHaveText('Live');
+  const second = await context.newPage();
+  await second.goto(`${daemon.origin}/settings`);
+  await first.goto(`${daemon.origin}/settings/downloads`);
+
+  /** @param {import('@playwright/test').Page} page */
+  const parts = (page) => {
+    const pane = page.locator('.settings-content');
+    return {
+      pane,
+      limit: pane.getByLabel('Maximum simultaneous downloads'),
+      save: pane.getByRole('button', { name: 'Save' }),
+      cancel: pane.getByRole('button', { name: 'Cancel' }),
+      useDefault: pane.getByRole('button', { name: 'Use default' }),
+      unsaved: page.locator('[data-key="settings-section-downloads"] .unsaved'),
+    };
+  };
+  const a = parts(first);
+  const b = parts(second);
+  await expect(a.limit).toHaveValue('4');
+  await expect(a.pane.getByText('Allowed: 1–64. Using the default.')).toBeVisible();
+  await expect(a.pane.getByText('Applies to the server', { exact: true })).toBeVisible();
+  await expect(a.save).toBeDisabled();
+  await expect(a.useDefault).toBeDisabled();
+
+  // Only whole numbers in range can be saved.
+  await a.limit.fill('70');
+  await expect(a.pane.getByText('Enter a whole number from 1 to 64.')).toBeVisible();
+  await expect(a.save).toBeDisabled();
+  await a.limit.fill('6');
+  await expect(a.pane.getByText('Enter a whole number from 1 to 64.')).toHaveCount(0);
+  await expect(a.unsaved).toBeVisible();
+
+  // Another window has a draft of its own when this one saves: it hears
+  // of the change and keeps its draft.
+  await b.limit.fill('3');
+  await a.save.click();
+  await expect(a.pane.getByText('Saved. Up to 6 downloads run at once.')).toBeVisible();
+  await expect(a.unsaved).toBeHidden();
+  await expect(b.pane.getByText('The settings were changed elsewhere. Your unsaved value is kept.')).toBeVisible();
+  await expect(b.pane.getByText('Allowed: 1–64. Saved; the default is 4.')).toBeVisible();
+  await expect(b.limit).toHaveValue('3');
+  await b.save.click();
+  await expect(b.pane.getByText('Saved. Up to 3 downloads run at once.')).toBeVisible();
+  // The first window follows, having nothing unsaved.
+  await expect(a.limit).toHaveValue('3');
+
+  // Cancel restores what applies; Use default drops the saved value.
+  await a.limit.fill('9');
+  await a.cancel.click();
+  await expect(a.limit).toHaveValue('3');
+  await expect(a.pane.getByText('Changes discarded.')).toBeVisible();
+  await a.useDefault.click();
+  await expect(a.pane.getByText('Using the default: 4 at once.')).toBeVisible();
+  await expect(a.limit).toHaveValue('4');
+  await expect(b.limit).toHaveValue('4');
+  await expect(a.useDefault).toBeDisabled();
+  await expectFitsWindow(first);
+
+  // A failed save keeps the draft.
+  await first.route('**/v1/settings', (route) =>
+    route.request().method() === 'PUT'
+      ? route.fulfill({ status: 503, contentType: 'application/json', body: '{"code":"overloaded","message":"busy"}' })
+      : route.continue(),
+  );
+  await a.limit.fill('5');
+  await a.save.click();
+  await expect(a.limit).toHaveValue('5');
+  await expect(a.save).toBeEnabled();
+  await first.unroute('**/v1/settings');
   await context.close();
 });
 

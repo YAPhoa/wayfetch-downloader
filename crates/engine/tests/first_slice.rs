@@ -24,15 +24,15 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use support::{ALL, KIB, ROOT, body, complete, envelope, job, jobs, shutdown, wait_for};
-use wayfetch_engine::EngineOwner;
-use wayfetch_engine::Timeouts;
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
+use wayfetch_engine::{EngineOwner, IntegerPolicy, Timeouts};
 use wayfetch_protocol::command::{
     AppliedLink, CollectItems, LinkRef, LinkRefs, MAX_COLLECTED_LINKS, MAX_SUBMIT_ITEMS,
+    PreferenceChange,
 };
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::{JobId, RootId};
@@ -40,7 +40,8 @@ use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::domain::version::Revision;
 use wayfetch_protocol::event::{EventKind, ResyncReason};
 use wayfetch_protocol::query::{
-    CollectedLink, JobFilter, JobSummary, LinkCheck, LinkPage, PageSize, Settings,
+    BoundedSetting, CollectedLink, JobFilter, JobSummary, LinkCheck, LinkPage, PageSize,
+    SettingSource, Settings,
 };
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Permission, ProtocolError, Query,
@@ -505,9 +506,9 @@ async fn pause_keeps_durable_bytes_and_cancel_retires_the_generation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn active_files_bounds_concurrent_transfers() {
+async fn max_active_downloads_bounds_concurrent_transfers() {
     let mut env = env();
-    env.limits.active_files = NonZeroUsize::new(2).unwrap();
+    env.policy.max_active_downloads.default = Some(2);
     let paths = ["/a.bin", "/b.bin", "/c.bin", "/d.bin", "/e.bin"];
     for path in paths {
         let mut resource = Resource::new(body(8 * KIB));
@@ -530,6 +531,212 @@ async fn active_files_bounds_concurrent_transfers() {
         complete(&owner, id).await;
     }
     assert_eq!(env.server.most_open_bodies.load(Ordering::SeqCst), 2);
+    shutdown(owner).await;
+}
+
+fn max_active(
+    owner: &EngineOwner,
+    revision: Revision,
+    change: PreferenceChange,
+) -> CommandEnvelope {
+    envelope(
+        owner,
+        Command::UpdateSettings {
+            expected_revision: revision,
+            default_root: None,
+            max_active_downloads: Some(change),
+        },
+    )
+}
+
+/// Changes the most downloads at once at the current revision.
+async fn set_max_active(owner: &EngineOwner, change: PreferenceChange) -> CommandResult {
+    let revision = settings(owner).await.revision;
+    owner
+        .handle()
+        .execute(max_active(owner, revision, change), ALL)
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn changing_the_download_limit_applies_at_once_and_stops_nothing() {
+    let mut env = env();
+    env.policy.max_active_downloads.default = Some(2);
+    let paths = ["/a.bin", "/b.bin", "/c.bin", "/d.bin", "/e.bin"];
+    for path in paths {
+        let mut resource = Resource::new(body(8 * KIB));
+        resource.stall_at = Some(4 * KIB);
+        env.server.put(path, resource);
+    }
+    let requests = || env.server.requests.lock().unwrap().len();
+    let owner = env.start().await;
+    let ids = submit(&owner, &paths).await;
+    wait_for(&owner, ids[1], |j| j.bytes_done > 0).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(requests(), 2);
+
+    // Raising the limit starts queued downloads at once.
+    set_max_active(&owner, PreferenceChange::Set(4)).await;
+    wait_for(&owner, ids[3], |j| j.bytes_done > 0).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(requests(), 4);
+    assert_eq!(job(&owner, ids[4]).await.stage, JobStage::Queued);
+
+    // Lowering it cancels nothing: the four keep transferring, and the
+    // fifth waits until fewer than one runs.
+    set_max_active(&owner, PreferenceChange::Set(1)).await;
+    let limit = settings(&owner).await.max_active_downloads;
+    assert_eq!((limit.value, limit.source), (1, SettingSource::Saved));
+    env.server.update("/a.bin", |r| r.stall_at = None);
+    complete(&owner, ids[0]).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for id in &ids[1..4] {
+        assert_eq!(job(&owner, *id).await.stage, JobStage::Transferring);
+    }
+    assert_eq!(job(&owner, ids[4]).await.stage, JobStage::Queued);
+    assert_eq!(requests(), 4);
+    for path in &paths[1..4] {
+        env.server.update(path, |r| r.stall_at = None);
+    }
+    for id in &ids[1..4] {
+        complete(&owner, *id).await;
+    }
+    wait_for(&owner, ids[4], |j| j.bytes_done > 0).await;
+    env.server.update("/e.bin", |r| r.stall_at = None);
+    complete(&owner, ids[4]).await;
+    assert_eq!(env.server.most_open_bodies.load(Ordering::SeqCst), 4);
+    assert_eq!(requests(), 5);
+    shutdown(owner).await;
+
+    // The saved limit survives a restart.
+    let owner = env.start().await;
+    let limit = settings(&owner).await.max_active_downloads;
+    assert_eq!(
+        (limit.value, limit.saved, limit.source),
+        (1, Some(1), SettingSource::Saved)
+    );
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_operator_policy_bounds_and_locks_the_download_limit() {
+    let mut env = env();
+    let owner = env.start().await;
+    assert_eq!(
+        settings(&owner).await.max_active_downloads,
+        BoundedSetting {
+            value: 4,
+            source: SettingSource::BuiltIn,
+            default: 4,
+            saved: None,
+            min: 1,
+            max: 64,
+            locked: false,
+            conflict: false,
+        }
+    );
+    // Every client hears of a change.
+    let handle = owner.handle();
+    let head = handle.hello().await.unwrap().head;
+    let mut events = handle
+        .subscribe(Subscribe { after: Some(head) }, ALL)
+        .await
+        .unwrap();
+    let CommandResult::SettingsUpdated { revision, .. } =
+        set_max_active(&owner, PreferenceChange::Set(12)).await
+    else {
+        panic!("not a settings update");
+    };
+    assert!(matches!(events.next().await, Some(StreamItem::Hello(_))));
+    let Some(StreamItem::Event(event)) = events.next().await else {
+        panic!("no event");
+    };
+    assert_eq!(event.kind, EventKind::SettingsChanged { revision });
+    shutdown(owner).await;
+
+    // A narrower policy keeps the saved value but runs within it.
+    env.policy.max_active_downloads = IntegerPolicy {
+        default: Some(3),
+        min: 1,
+        max: 8,
+        locked: false,
+    };
+    let owner = env.start().await;
+    let narrowed = settings(&owner).await.max_active_downloads;
+    assert_eq!(
+        (
+            narrowed.value,
+            narrowed.saved,
+            narrowed.conflict,
+            narrowed.source
+        ),
+        (8, Some(12), true, SettingSource::Saved)
+    );
+    let revision = settings(&owner).await.revision;
+    for value in [0, 9] {
+        let refused = owner
+            .handle()
+            .execute(
+                max_active(&owner, revision, PreferenceChange::Set(value)),
+                ALL,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::InvalidRequest);
+    }
+    // Returning to the default lets the configured one apply.
+    set_max_active(&owner, PreferenceChange::UseDefault).await;
+    let reset = settings(&owner).await.max_active_downloads;
+    assert_eq!(
+        (reset.value, reset.saved, reset.conflict, reset.source),
+        (3, None, false, SettingSource::Server)
+    );
+    set_max_active(&owner, PreferenceChange::Set(6)).await;
+    // A change must change something.
+    let empty = owner
+        .handle()
+        .execute(
+            envelope(
+                &owner,
+                Command::UpdateSettings {
+                    expected_revision: settings(&owner).await.revision,
+                    default_root: None,
+                    max_active_downloads: None,
+                },
+            ),
+            ALL,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(empty.code, ErrorCode::InvalidRequest);
+    shutdown(owner).await;
+
+    // A lock wins over the saved value and refuses changes.
+    env.policy.max_active_downloads.default = Some(2);
+    env.policy.max_active_downloads.locked = true;
+    let owner = env.start().await;
+    let locked = settings(&owner).await.max_active_downloads;
+    assert_eq!(
+        (
+            locked.value,
+            locked.saved,
+            locked.locked,
+            locked.conflict,
+            locked.source
+        ),
+        (2, Some(6), true, true, SettingSource::Server)
+    );
+    let revision = settings(&owner).await.revision;
+    let refused = owner
+        .handle()
+        .execute(max_active(&owner, revision, PreferenceChange::Set(2)), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::NotApplicable);
+    set_max_active(&owner, PreferenceChange::UseDefault).await;
+    let cleared = settings(&owner).await.max_active_downloads;
+    assert_eq!((cleared.saved, cleared.conflict), (None, false));
     shutdown(owner).await;
 }
 
@@ -661,7 +868,7 @@ async fn pruned_events_and_old_instances_resync_after_restart() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rejected_checkpoint_fails_the_job_and_frees_its_slot() {
     let mut env = env();
-    env.limits.active_files = NonZeroUsize::new(1).unwrap();
+    env.policy.max_active_downloads.default = Some(1);
     let mut first = Resource::new(body(32 * KIB));
     first.stall_at = Some(8 * KIB);
     env.server.put("/first.bin", first);
@@ -850,7 +1057,8 @@ fn choose(owner: &EngineOwner, revision: Revision, root: RootId) -> CommandEnvel
         owner,
         Command::UpdateSettings {
             expected_revision: revision,
-            default_root: root,
+            default_root: Some(root),
+            max_active_downloads: None,
         },
     )
 }
@@ -1612,7 +1820,7 @@ async fn removed_jobs_leave_lists_and_counts_but_keep_their_files() {
 #[tokio::test(flavor = "multi_thread")]
 async fn blocked_jobs_do_not_hold_back_the_jobs_behind_them() {
     let mut env = env();
-    env.limits.active_files = NonZeroUsize::new(2).unwrap();
+    env.policy.max_active_downloads.default = Some(2);
     let media = folder(&env, "media");
     env.roots.push(media.clone());
     let media_id = env.init_root(&media);

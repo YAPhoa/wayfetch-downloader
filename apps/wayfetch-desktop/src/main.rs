@@ -30,7 +30,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::{Manager, RunEvent, WindowEvent};
 use wayfetch_engine::protocol::InstanceId;
 use wayfetch_engine::{ShutdownReport, ShutdownRequest};
-use wayfetch_host::{EngineArgs, InitRootArgs, Message, Printer, Signals, Terminal};
+use wayfetch_host::{EngineArgs, InitRootArgs, Message, NoServer, Printer, Signals, Terminal};
 
 use crate::ipc::Desktop;
 use crate::subscriptions::{Ended, Subscriptions};
@@ -207,12 +207,14 @@ fn run_on(
     args: &EngineArgs,
     notices: &SyncSender<Option<Notice>>,
 ) -> Result<ExitCode, String> {
-    let state_dir = wayfetch_host::absolute(&args.state.state_dir)?;
+    // The desktop app has no listener, so a `[server]` section is refused.
+    let (settings, _) = args.load::<NoServer>()?;
+    let state_dir = settings.state_dir().to_path_buf();
     // Signals first, so one during startup still stops gracefully; the
     // engine before any window, so a refused state directory shows none.
     let (mut signals, started) = runtime.block_on(async {
         let signals = Signals::new()?;
-        let started = wayfetch_host::start_engine(args).await?;
+        let started = wayfetch_host::start_engine(settings).await?;
         Ok::<_, String>((signals, started))
     })?;
     let root_problem = started.root_problem();

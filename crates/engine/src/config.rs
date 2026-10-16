@@ -39,15 +39,20 @@ pub enum ConfigError {
     /// The download root is not one of the configured roots.
     #[error("download root {} is not configured", .0.display())]
     UnknownDownloadRoot(PathBuf),
+    /// A preference's policy permits nothing, or its default lies outside
+    /// what it permits.
+    #[error("{setting}: {problem}")]
+    Policy {
+        /// The setting's name.
+        setting: &'static str,
+        /// What is wrong.
+        problem: String,
+    },
 }
 
 /// Bounds on the engine's queues, buffers, and retained history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Limits {
-    /// Files transferring at once. Each has one stream and at most one
-    /// read buffer in memory. Further jobs stay queued in the database, not
-    /// in memory.
-    pub active_files: NonZeroUsize,
     /// Largest body chunk a transport may hand over at once, the per-stream
     /// read buffer.
     pub read_buffer_bytes: NonZeroUsize,
@@ -106,6 +111,122 @@ pub struct EngineConfig {
     pub limits: Limits,
     /// Request deadlines.
     pub timeouts: Timeouts,
+    /// The operator's policy for preferences users change at run time.
+    pub policy: Policy,
+}
+
+/// A preference users can change at run time, with a whole-number value:
+/// its built-in default and the range the engine supports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Preference {
+    /// The setting's name, as configuration and errors spell it.
+    pub name: &'static str,
+    /// Wayfetch's own default.
+    pub built_in: u64,
+    /// Smallest value the engine supports.
+    pub min: u64,
+    /// Largest value the engine supports.
+    pub max: u64,
+}
+
+impl Preference {
+    /// Files transferring at once, engine-wide. Each has one stream and at
+    /// most one read buffer in memory; further jobs stay queued in the
+    /// database, not in memory.
+    pub const MAX_ACTIVE_DOWNLOADS: Self = Self {
+        name: "downloads.max_active",
+        built_in: 4,
+        min: 1,
+        max: 64,
+    };
+}
+
+/// The operator's policy for one [`Preference`]: a default, the range a
+/// user may choose from, and whether it is fixed. A default alone never
+/// fixes the value; only `locked` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntegerPolicy {
+    /// The value without a saved preference; the built-in default if
+    /// `None`.
+    pub default: Option<u64>,
+    /// Smallest value a user may choose.
+    pub min: u64,
+    /// Largest value a user may choose.
+    pub max: u64,
+    /// Whether the default is enforced: users cannot change it, and a
+    /// saved preference is not used.
+    pub locked: bool,
+}
+
+impl IntegerPolicy {
+    /// No restriction beyond what the engine supports.
+    pub const fn unrestricted(preference: Preference) -> Self {
+        Self {
+            default: None,
+            min: preference.min,
+            max: preference.max,
+            locked: false,
+        }
+    }
+
+    /// The value without a saved preference.
+    pub fn default_value(&self, preference: Preference) -> u64 {
+        self.default.unwrap_or(preference.built_in)
+    }
+
+    fn validate(&self, preference: Preference) -> Result<(), ConfigError> {
+        let problem = |problem: String| ConfigError::Policy {
+            setting: preference.name,
+            problem,
+        };
+        let supported = preference.min..=preference.max;
+        if !supported.contains(&self.min) || !supported.contains(&self.max) || self.min > self.max {
+            return Err(problem(format!(
+                "the permitted range {}..={} must lie within {}..={}",
+                self.min, self.max, preference.min, preference.max
+            )));
+        }
+        let default = self.default_value(preference);
+        if !(self.min..=self.max).contains(&default) {
+            return Err(problem(match self.default {
+                Some(_) => format!(
+                    "the default {default} lies outside the permitted range {}..={}",
+                    self.min, self.max
+                ),
+                None => format!(
+                    "the built-in default {default} lies outside the permitted range {}..={}; \
+                     configure a default within it",
+                    self.min, self.max
+                ),
+            }));
+        }
+        Ok(())
+    }
+}
+
+/// The operator's policy for every run-time preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    /// [`Preference::MAX_ACTIVE_DOWNLOADS`].
+    pub max_active_downloads: IntegerPolicy,
+}
+
+impl Policy {
+    /// Built-in defaults, and every supported value permitted.
+    pub const DEFAULT: Self = Self {
+        max_active_downloads: IntegerPolicy::unrestricted(Preference::MAX_ACTIVE_DOWNLOADS),
+    };
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        self.max_active_downloads
+            .validate(Preference::MAX_ACTIVE_DOWNLOADS)
+    }
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// Accepted range of a setting, inclusive.
@@ -146,7 +267,6 @@ const HOUR_MS: u64 = 3600 * SECOND_MS;
 impl Limits {
     /// The brief's initial targets for the server profile (section 10.1).
     pub const DEFAULT: Self = Self {
-        active_files: NonZeroUsize::new(4).unwrap(),
         read_buffer_bytes: NonZeroUsize::new(256 * 1024).unwrap(),
         checkpoint_bytes: NonZeroU64::new(8 * MIB).unwrap(),
         event_buffer: NonZeroUsize::new(1024).unwrap(),
@@ -155,7 +275,6 @@ impl Limits {
     };
 
     fn validate(&self) -> Result<(), ConfigError> {
-        bounds("limits.active_files", 1, 64).check(self.active_files.get() as u64)?;
         bounds("limits.read_buffer_bytes", 4 * KIB, 16 * MIB)
             .check(self.read_buffer_bytes.get() as u64)?;
         // A checkpoint covers at least one full read buffer.
@@ -232,6 +351,7 @@ impl EngineConfig {
             download_root: None,
             limits: Limits::DEFAULT,
             timeouts: Timeouts::DEFAULT,
+            policy: Policy::DEFAULT,
         }
     }
 
@@ -257,7 +377,8 @@ impl EngineConfig {
             return Err(ConfigError::UnknownDownloadRoot(root.clone()));
         }
         self.limits.validate()?;
-        self.timeouts.validate()
+        self.timeouts.validate()?;
+        self.policy.validate()
     }
 }
 
@@ -286,10 +407,6 @@ mod tests {
         let mut c = config();
         c.request_queue = NonZeroUsize::MAX;
         assert_eq!(out_of_range(&c), "request_queue");
-
-        let mut c = config();
-        c.limits.active_files = NonZeroUsize::new(65).unwrap();
-        assert_eq!(out_of_range(&c), "limits.active_files");
 
         let mut c = config();
         c.limits.read_buffer_bytes = NonZeroUsize::new(1).unwrap();
@@ -326,6 +443,41 @@ mod tests {
         let mut c = config();
         c.shutdown_timeout = Duration::ZERO;
         assert_eq!(out_of_range(&c), "shutdown_timeout_ms");
+    }
+
+    #[test]
+    fn a_policy_permits_its_default_within_what_is_supported() {
+        let max_active = |default, min, max| {
+            let mut c = config();
+            c.policy.max_active_downloads = IntegerPolicy {
+                default,
+                min,
+                max,
+                locked: false,
+            };
+            c.validate()
+        };
+        assert_eq!(max_active(Some(8), 2, 16), Ok(()));
+        assert_eq!(max_active(None, 1, 64), Ok(()));
+        for (default, min, max) in [
+            (None, 0, 8),
+            (None, 1, 65),
+            (None, 9, 8),
+            (Some(20), 1, 16),
+            // The built-in 4 is outside, so a default must be configured.
+            (None, 8, 16),
+        ] {
+            assert!(
+                matches!(
+                    max_active(default, min, max),
+                    Err(ConfigError::Policy {
+                        setting: "downloads.max_active",
+                        ..
+                    })
+                ),
+                "{default:?} {min} {max}"
+            );
+        }
     }
 
     #[test]

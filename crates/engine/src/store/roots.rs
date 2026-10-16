@@ -10,9 +10,11 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::id::RootId;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
+use wayfetch_protocol::command::PreferenceChange;
+use wayfetch_protocol::event::EventKind;
 use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 
-use super::{Store, StoreError, key, sql};
+use super::{Store, StoreError, key, outbox, sql};
 
 /// A recorded root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,8 +136,8 @@ impl Store {
         Ok(())
     }
 
-    /// The settings revision and the chosen default root, if any.
-    pub(crate) fn settings(&mut self) -> Result<(Revision, Option<RootId>), StoreError> {
+    /// The user's settings as saved.
+    pub(crate) fn settings(&mut self) -> Result<SavedSettings, StoreError> {
         let tx = self.read()?;
         settings(&tx)
     }
@@ -155,45 +157,106 @@ impl Store {
     }
 }
 
-fn settings(tx: &Transaction<'_>) -> Result<(Revision, Option<RootId>), StoreError> {
-    let (revision, root): (i64, Option<i64>) = tx.query_row(
-        "SELECT revision, default_root FROM settings WHERE id = 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    Ok((key(revision)?, root.map(key).transpose()?))
+/// The user's settings as saved: the default destination they chose and
+/// their engine preferences, each `None` until chosen. The operator's
+/// policy decides what applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SavedSettings {
+    /// Revision to present with the next change.
+    pub(crate) revision: Revision,
+    /// The chosen default root, which may no longer be permitted.
+    pub(crate) default_root: Option<RootId>,
+    /// The saved most downloads at once, which may no longer be permitted.
+    pub(crate) max_active_downloads: Option<u64>,
 }
 
-/// Chooses the default root at the revision the client saw. The
-/// coordinator has checked that the root is permitted and available.
+fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
+    let (revision, root, max_active): (i64, Option<i64>, Option<i64>) = tx.query_row(
+        "SELECT revision, default_root, max_active_downloads FROM settings WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    Ok(SavedSettings {
+        revision: key(revision)?,
+        default_root: root.map(key).transpose()?,
+        max_active_downloads: max_active
+            .map(|v| u64::try_from(v).map_err(|_| StoreError::Corrupt("max_active_downloads")))
+            .transpose()?,
+    })
+}
+
+/// Refused unless the client saw the current settings revision.
+fn check_revision(saved: &SavedSettings, expected: Revision) -> Result<(), ProtocolError> {
+    if expected == saved.revision {
+        return Ok(());
+    }
+    Err(ProtocolError {
+        current_revision: Some(saved.revision),
+        ..ProtocolError::new(
+            ErrorCode::RevisionConflict,
+            "settings changed since they were read",
+        )
+    })
+}
+
+/// The next settings revision, announced to clients in the same
+/// transaction as the change.
+fn next_revision(
+    tx: &Transaction<'_>,
+    saved: &SavedSettings,
+    now: UtcTimestamp,
+) -> Result<Revision, ProtocolError> {
+    let next = saved
+        .revision
+        .next()
+        .map_err(|_| StoreError::Corrupt("settings revision"))?;
+    outbox::append(tx, &EventKind::SettingsChanged { revision: next }, now)?;
+    Ok(next)
+}
+
+/// Changes the settings at the revision the client saw, all or none: the
+/// default root if given, and each preference given. The coordinator has
+/// checked that the root is permitted and available and that each value
+/// is within the operator's policy. A saved preference stays saved even
+/// when it equals the default.
 pub(super) fn update_settings(
     tx: &Transaction<'_>,
     expected: Revision,
-    root: RootId,
+    default_root: Option<RootId>,
+    max_active_downloads: Option<PreferenceChange>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
-    let (revision, current) = settings(tx)?;
-    if expected != revision {
-        return Err(ProtocolError {
-            current_revision: Some(revision),
-            ..ProtocolError::new(
-                ErrorCode::RevisionConflict,
-                "settings changed since they were read",
-            )
-        });
-    }
-    if current == Some(root) {
+    let saved = settings(tx)?;
+    check_revision(&saved, expected)?;
+    let wanted = SavedSettings {
+        default_root: default_root.or(saved.default_root),
+        max_active_downloads: match max_active_downloads {
+            None => saved.max_active_downloads,
+            Some(PreferenceChange::Set(value)) => Some(value),
+            Some(PreferenceChange::UseDefault) => None,
+        },
+        ..saved
+    };
+    if wanted == saved {
         return Ok(CommandResult::SettingsUpdated {
-            revision,
+            revision: saved.revision,
             changed: false,
         });
     }
-    let next = revision
-        .next()
-        .map_err(|_| StoreError::Corrupt("settings revision"))?;
+    let next = next_revision(tx, &saved, now)?;
+    let max_active = wanted
+        .max_active_downloads
+        .map(|v| i64::try_from(v).map_err(|_| StoreError::Corrupt("max_active_downloads")))
+        .transpose()?;
     tx.execute(
-        "UPDATE settings SET revision = ?1, default_root = ?2, updated_at = ?3 WHERE id = 1",
-        params![sql(next)?, sql(root)?, now.unix_millis()],
+        "UPDATE settings SET revision = ?1, default_root = ?2, max_active_downloads = ?3, \
+         updated_at = ?4 WHERE id = 1",
+        params![
+            sql(next)?,
+            wanted.default_root.map(sql).transpose()?,
+            max_active,
+            now.unix_millis()
+        ],
     )
     .map_err(StoreError::from)?;
     Ok(CommandResult::SettingsUpdated {
@@ -213,16 +276,8 @@ pub(super) fn remove_root(
     id: RootId,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
-    let (revision, current) = settings(tx)?;
-    if expected != revision {
-        return Err(ProtocolError {
-            current_revision: Some(revision),
-            ..ProtocolError::new(
-                ErrorCode::RevisionConflict,
-                "settings changed since they were read",
-            )
-        });
-    }
+    let saved = settings(tx)?;
+    check_revision(&saved, expected)?;
     let root = sql(id)?;
     let registered: Option<bool> = tx
         .query_row(
@@ -238,7 +293,7 @@ pub(super) fn remove_root(
             "destination not found",
         ));
     }
-    if current == Some(id) {
+    if saved.default_root == Some(id) {
         return Err(ProtocolError::new(
             ErrorCode::NotApplicable,
             "new downloads are saved to this folder; choose another default first",
@@ -265,9 +320,7 @@ pub(super) fn remove_root(
             ),
         ));
     }
-    let next = revision
-        .next()
-        .map_err(|_| StoreError::Corrupt("settings revision"))?;
+    let next = next_revision(tx, &saved, now)?;
     tx.execute("UPDATE roots SET registered = 0 WHERE id = ?1", [root])
         .map_err(StoreError::from)?;
     tx.execute(
@@ -336,10 +389,18 @@ mod tests {
     fn settings_are_revision_checked() {
         let (_dir, mut store) = store();
         let root = store.allocate_root(Path::new("/a"), false, now()).unwrap();
-        let (first, chosen) = store.settings().unwrap();
-        assert_eq!((first.get(), chosen), (1, None));
+        let first = store.settings().unwrap();
+        assert_eq!(
+            (
+                first.revision.get(),
+                first.default_root,
+                first.max_active_downloads
+            ),
+            (1, None, None)
+        );
+        let first = first.revision;
         let tx = store.write().unwrap();
-        let updated = update_settings(&tx, first, root, now()).unwrap();
+        let updated = update_settings(&tx, first, Some(root), None, now()).unwrap();
         assert_eq!(
             updated,
             CommandResult::SettingsUpdated {
@@ -347,10 +408,10 @@ mod tests {
                 changed: true
             }
         );
-        let stale = update_settings(&tx, first, root, now()).unwrap_err();
+        let stale = update_settings(&tx, first, Some(root), None, now()).unwrap_err();
         assert_eq!(stale.code, ErrorCode::RevisionConflict);
         assert_eq!(stale.current_revision, first.next().ok());
-        let same = update_settings(&tx, first.next().unwrap(), root, now()).unwrap();
+        let same = update_settings(&tx, first.next().unwrap(), Some(root), None, now()).unwrap();
         assert_eq!(
             same,
             CommandResult::SettingsUpdated {
@@ -359,6 +420,53 @@ mod tests {
             }
         );
         tx.commit().unwrap();
-        assert_eq!(store.settings().unwrap().1, Some(root));
+        assert_eq!(store.settings().unwrap().default_root, Some(root));
+        // One event, for the one change.
+        assert_eq!(
+            store.events_after(0, 10).unwrap(),
+            [(
+                1,
+                EventKind::SettingsChanged {
+                    revision: first.next().unwrap()
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn a_saved_preference_stays_saved_until_the_default_is_chosen() {
+        let (_dir, mut store) = store();
+        let root = store.allocate_root(Path::new("/a"), false, now()).unwrap();
+        let tx = store.write().unwrap();
+        let first = settings(&tx).unwrap().revision;
+        update_settings(&tx, first, Some(root), None, now()).unwrap();
+        let change = |revision: Revision, change| match update_settings(
+            &tx,
+            revision,
+            None,
+            Some(change),
+            now(),
+        )
+        .unwrap()
+        {
+            CommandResult::SettingsUpdated { revision, changed } => (revision, changed),
+            other => panic!("{other:?}"),
+        };
+        let second = first.next().unwrap();
+        // Saving the built-in value is still a saved choice.
+        let (third, changed) = change(second, PreferenceChange::Set(4));
+        assert!(changed);
+        let saved = settings(&tx).unwrap();
+        assert_eq!(saved.max_active_downloads, Some(4));
+        // Another setting is untouched by a preference change.
+        assert_eq!(saved.default_root, Some(root));
+        assert_eq!(change(third, PreferenceChange::Set(4)), (third, false));
+        let (fourth, changed) = change(third, PreferenceChange::UseDefault);
+        assert!(changed);
+        assert_eq!(settings(&tx).unwrap().max_active_downloads, None);
+        assert_eq!(
+            change(fourth, PreferenceChange::UseDefault),
+            (fourth, false)
+        );
     }
 }
