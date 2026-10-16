@@ -1233,7 +1233,21 @@ test('accounts are signed in on the service, checked, disabled, signed in again,
   const added = table.locator('tbody tr');
   await expect(added).toHaveCount(1);
   await expect(added.locator('td').nth(0)).toHaveText('Real-Debrid');
-  await expect(added.locator('td').nth(1)).toHaveText(/^Main synthetic-user\s*Premium$/);
+  await expect(added.locator('td').nth(1)).toHaveText(/^Main\s*Premium\s*synthetic-user$/);
+  // One menu holds the row's commands; nothing else is shown while the
+  // account needs nothing.
+  const more = added.getByRole('button', { name: 'Actions for Main' });
+  await expect(added.locator('td.row-actions button')).toHaveCount(1);
+  await expect(more).toHaveAttribute('aria-haspopup', 'menu');
+  const menu = page.getByRole('menu', { name: 'Account actions' });
+  /** @param {string} name */
+  const item = (name) => menu.getByRole('menuitem', { name });
+  /** @param {string} name */
+  const run = async (name) => {
+    await more.click();
+    await item(name).click();
+    await expect(menu).toBeHidden();
+  };
   await expect(added.locator('td').nth(2)).toHaveText('Signed in');
   await expect(added.locator('td').nth(3)).not.toHaveText('—');
 
@@ -1242,21 +1256,34 @@ test('accounts are signed in on the service, checked, disabled, signed in again,
   await page.reload();
   await expect(added.locator('td').nth(2)).toHaveText('Signed in');
   expect(realDebrid.requested.filter((path) => path === '/rest/1.0/user').length).toBe(users);
-  await accounts.getByRole('button', { name: 'Check Main' }).click();
+  await more.click();
+  await expect(menu.getByRole('menuitem')).toHaveText(['Check', 'Sign in again…', 'Disable', 'Remove…']);
+  await expect(item('Check')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(menu).toBeHidden();
+  await expect(more).toBeFocused();
+  // Right-clicking the row opens the same menu.
+  await added.locator('td').nth(0).click({ button: 'right' });
+  await expect(menu).toBeVisible();
+  await expect(added).toHaveClass(/menu-open/);
+  await page.keyboard.press('Escape');
+  await run('Check');
   await expect(status).toHaveText('Checked: Signed in.');
   expect(realDebrid.requested.filter((path) => path === '/rest/1.0/user').length).toBe(users + 1);
 
   // Disabled: kept, but not used.
-  await accounts.getByRole('button', { name: 'Disable Main' }).click();
+  await run('Disable');
   await expect(status).toHaveText('Disabled: kept, but not used.');
   await expect(added.locator('td').nth(2)).toHaveText('Disabled');
-  await expect(accounts.getByRole('button', { name: 'Check Main' })).toHaveCount(0);
-  await expect(accounts.getByRole('button', { name: 'Sign in again to Main' })).toHaveCount(0);
-  await accounts.getByRole('button', { name: 'Enable Main' }).click();
+  await more.click();
+  await expect(item('Check Account is disabled')).toHaveAttribute('aria-disabled', 'true');
+  await expect(item('Sign in again… Account is disabled')).toHaveAttribute('aria-disabled', 'true');
+  await page.keyboard.press('Escape');
+  await run('Enable');
   await expect(added.locator('td').nth(2)).toHaveText('Signed in');
 
   // Signed in again: new sign-in, same account.
-  await accounts.getByRole('button', { name: 'Sign in again to Main' }).click();
+  await run('Sign in again…');
   const again = page.getByRole('dialog', { name: 'Sign in to Real-Debrid again' });
   await expect(again.locator('.user-code')).toHaveText(RD_USER_CODE);
   await expect(again.getByRole('textbox')).toHaveCount(0);
@@ -1280,7 +1307,7 @@ test('accounts are signed in on the service, checked, disabled, signed in again,
   await expect(table.locator('tbody tr')).toHaveCount(1);
 
   // Removed after confirming.
-  await accounts.getByRole('button', { name: 'Remove Main' }).click();
+  await run('Remove…');
   const confirm = page.getByRole('dialog', { name: 'Remove account' });
   await expect(confirm.getByText(/The account itself stays at the service/)).toBeVisible();
   await confirm.getByRole('button', { name: 'Remove' }).click();

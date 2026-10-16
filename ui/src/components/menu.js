@@ -76,6 +76,32 @@ export function suppressNativeMenu(doc) {
   });
 }
 
+/**
+ * A table row's handlers that open its menu: a right-click anywhere in the
+ * row, at the pointer, and the context-menu key or Shift+F10, at the row's
+ * menu button `more`.
+ * @param {HTMLElement} more
+ * @param {(anchor: Anchor) => void} open
+ */
+export function rowMenuHandlers(more, open) {
+  return {
+    oncontextmenu: (/** @type {MouseEvent} */ event) => {
+      event.preventDefault();
+      // A context-menu key press has no pointer position.
+      const anchor =
+        event.button === 0 && event.clientX === 0 && event.clientY === 0
+          ? more.getBoundingClientRect()
+          : { left: event.clientX, right: event.clientX, top: event.clientY, bottom: event.clientY };
+      open(anchor);
+    },
+    onkeydown: (/** @type {KeyboardEvent} */ event) => {
+      if (!(event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey))) return;
+      event.preventDefault();
+      open(more.getBoundingClientRect());
+    },
+  };
+}
+
 export class Menu {
   /**
    * @param {string} label the menu's accessible name

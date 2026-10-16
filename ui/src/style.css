@@ -619,7 +619,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 
 .jobs .row-actions { width: 1%; padding-top: 0; padding-bottom: 0; text-align: right; }
 
-.jobs button.more {
+.jobs button.more, .accounts-table button.more {
   min-height: 26px;
   padding: 0 6px;
   border-color: transparent;
@@ -627,18 +627,19 @@ dd { margin: 0; overflow-wrap: anywhere; }
   color: var(--muted);
 }
 
-.jobs button.more .icon { stroke-width: 3; }
-.jobs tr:hover button.more, .jobs tr.menu-open button.more, .jobs button.more:focus-visible {
+.jobs button.more .icon, .accounts-table button.more .icon { stroke-width: 3; }
+.jobs tr:hover button.more, .jobs tr.menu-open button.more, .jobs button.more:focus-visible,
+.accounts-table tr:hover button.more, .accounts-table tr.menu-open button.more, .accounts-table button.more:focus-visible {
   border-color: var(--control);
   color: var(--ink);
 }
 
-.jobs tbody tr.menu-open { background: var(--hover); }
+.jobs tbody tr.menu-open, .accounts-table tbody tr.menu-open { background: var(--hover); }
 .jobs tbody tr.selected.menu-open { background: var(--selected); }
 
 /* Coarse pointers get a target large enough to touch. */
 @media (pointer: coarse) {
-  .jobs button.more { min-width: 40px; min-height: 40px; border-color: var(--control); }
+  .jobs button.more, .accounts-table button.more { min-width: 40px; min-height: 40px; border-color: var(--control); }
 }
 
 .menu {
@@ -1064,10 +1065,13 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 .settings-group .table-scroll { flex: none; }
 .settings-group .accounts-table th, .settings-group .accounts-table td { padding: 10px 16px; }
 .settings-group .accounts-table td.empty { padding: 28px 16px; color: var(--muted); text-align: center; border-bottom: 0; }
-.accounts-table td .tag { margin-left: 8px; }
-.accounts-table .account-problem { display: block; font-size: 13px; white-space: normal; }
-.accounts-table .row-actions { text-align: right; white-space: normal; }
-.accounts-table .row-actions button { min-height: 28px; padding: 0 10px; margin: 2px 0 2px 4px; white-space: nowrap; }
+.accounts-table td .tag { margin-left: 8px; vertical-align: 1px; }
+/* The username under an account's name, and a problem under its status. */
+.accounts-table .account-detail { display: block; font-size: 13px; white-space: normal; }
+/* The menu button, and beside it a command the account needs now. */
+.settings-group .accounts-table td.row-actions { width: 1%; padding-top: 0; padding-bottom: 0; text-align: right; white-space: nowrap; }
+.accounts-table .row-actions button { vertical-align: middle; }
+.accounts-table .row-actions button:not(.more) { min-height: 28px; padding: 0 10px; margin-right: 4px; }
 .settings-section > .message.notice { margin-bottom: 12px; }
 .service-title .pick-service { margin-left: auto; min-height: 28px; padding: 0 12px; }
 

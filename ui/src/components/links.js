@@ -32,6 +32,7 @@ import {
 import { openDialog } from './dialog.js';
 import { copyText, focusedKey, h, refocus, show } from './dom.js';
 import { icon } from './icons.js';
+import { rowMenuHandlers } from './menu.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -794,19 +795,7 @@ export class LinksPage {
           if (/** @type {Element} */ (event.target).closest('a, button, input, label')) return;
           this.select([link], !selected);
         },
-        oncontextmenu: (/** @type {MouseEvent} */ event) => {
-          event.preventDefault();
-          const anchor =
-            event.button === 0 && event.clientX === 0 && event.clientY === 0
-              ? more.getBoundingClientRect()
-              : { left: event.clientX, right: event.clientX, top: event.clientY, bottom: event.clientY };
-          this.openMenu(link, anchor);
-        },
-        onkeydown: (/** @type {KeyboardEvent} */ event) => {
-          if (!(event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey))) return;
-          event.preventDefault();
-          this.openMenu(link, more.getBoundingClientRect());
-        },
+        ...rowMenuHandlers(more, (anchor) => this.openMenu(link, anchor)),
       },
       h(
         'td',
