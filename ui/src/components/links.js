@@ -625,7 +625,8 @@ export class LinksPage {
     if (chosen.length === 0) {
       show(
         this.summary,
-        h('span', null, this.total ? 'Select links to start them. Nothing downloads until you do.' : ''),
+        // With no links it stays empty, so it takes no room.
+        !!this.total && h('span', null, 'Select links to start them. Nothing downloads until you do.'),
         hiddenNote,
       );
       return;

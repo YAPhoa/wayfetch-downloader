@@ -314,7 +314,10 @@ code { font-family: ui-monospace, monospace; }
   display: flex;
   align-items: center;
   margin-left: auto;
-  flex: 0 1 260px;
+  /* A small basis, so it shrinks to stay beside the tools before it wraps
+     below them; it grows back to its full width when there is room. */
+  flex: 1 1 160px;
+  max-width: 260px;
   min-width: 160px;
 }
 
@@ -1008,6 +1011,8 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
    buttons, which stay together at the end. */
 .group-foot .message { flex: 1 1 240px; min-width: 0; margin-right: 8px; }
 .group-foot .message + button { margin-left: auto; }
+/* A foot holding only an empty status line takes no room. */
+.group-foot:not(:has(> :not(:empty))) { display: none; }
 .group-foot button { white-space: nowrap; }
 
 /* One setting per row: its name and purpose, then the control. */
@@ -1064,7 +1069,9 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 .accounts-table { width: 100%; min-width: 480px; border-collapse: collapse; }
 .settings-group .table-scroll { flex: none; }
 .settings-group .accounts-table th, .settings-group .accounts-table td { padding: 10px 16px; }
-.settings-group .accounts-table td.empty { padding: 28px 16px; color: var(--muted); text-align: center; border-bottom: 0; }
+.settings-group .accounts-table td.empty { padding: 28px 16px; color: var(--muted); text-align: center; }
+/* The group's border, or its foot's, closes the last row. */
+.settings-group .accounts-table tbody tr:last-child td { border-bottom: 0; }
 .accounts-table td .tag { margin-left: 8px; vertical-align: 1px; }
 /* The username under an account's name, and a problem under its status. */
 .accounts-table .account-detail { display: block; font-size: 13px; white-space: normal; }
@@ -1154,7 +1161,7 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
   .filters { flex: none; flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line); }
   .filters-title { display: none; }
   .filter { width: auto; }
-  .search { flex-basis: 100%; margin-left: 0; }
+  .search { flex-basis: 100%; max-width: none; margin-left: 0; }
   .toolbar .search { order: 1; }
   /* The name and Settings share the first row; the rest wraps below. */
   .toolbar { flex-wrap: wrap; justify-content: space-between; }
