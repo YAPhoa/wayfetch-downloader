@@ -51,6 +51,7 @@ use crate::lifecycle::{SoleAttempt, StoreClient};
 use crate::store::{Admission, Partial, Store, StoreError};
 use crate::transfer::lease::Representation;
 use crate::transfer::range::{self, Plan};
+use crate::transfer::throttle::Bandwidth;
 use crate::transfer::transport::{OpenRequest, Response, Transport};
 use crate::transfer::writer::{IntervalWriter, StreamEnd, WriteError};
 
@@ -169,6 +170,8 @@ pub(crate) struct Download {
     pub(crate) boot_epoch: BootEpoch,
     pub(crate) limits: Limits,
     pub(crate) timeouts: Timeouts,
+    /// The engine's shared download budget.
+    pub(crate) bandwidth: Arc<Bandwidth>,
     /// Fires when the user pauses or cancels the job, or the engine stops.
     pub(crate) cancel: CancellationToken,
     /// Held by every blocking file operation (the state-directory lock).
@@ -654,7 +657,8 @@ impl Download {
         target: &Target,
     ) -> Result<(u64, StagingFile), Stop> {
         let mut writer = IntervalWriter::new(Arc::new(file), target.start, target.end)
-            .holding(self.guard.clone());
+            .holding(self.guard.clone())
+            .throttled(self.bandwidth.clone());
         let (checkpoints, mut certified) = mpsc::channel(1);
         // Stops the writer when a checkpoint is rejected, as well as on a
         // pause, cancel, or shutdown.
@@ -852,7 +856,7 @@ mod tests {
 
     use wayfetch_domain::id::RootId;
     use wayfetch_protocol::command::{InputUrl, SubmitItems};
-    use wayfetch_protocol::query::JobSummary;
+    use wayfetch_protocol::query::{JobSummary, SpeedLimit};
     use wayfetch_protocol::{Command, CommandEnvelope, IdempotencyKey, Query, QueryResult};
 
     use super::*;
@@ -1028,6 +1032,7 @@ mod tests {
             boot_epoch: epoch,
             limits: Limits::DEFAULT,
             timeouts: Timeouts::DEFAULT,
+            bandwidth: Arc::new(Bandwidth::new(SpeedLimit::Unlimited)),
             cancel: CancellationToken::new(),
             guard: Arc::new(()),
             job: Admission {

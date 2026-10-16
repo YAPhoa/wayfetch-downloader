@@ -14,7 +14,7 @@ use wayfetch_domain::version::Revision;
 use crate::account::{AccountAlias, AccountRef};
 use crate::command::{
     CollectItems, Command, CommandEnvelope, IdempotencyKey, InputUrl, LinkRef, LinkRefs,
-    PreferenceChange, SubmitItems,
+    PreferenceChange, SpeedLimitChange, SubmitItems,
 };
 use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
@@ -174,6 +174,10 @@ pub struct UpdateSettingsRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub max_active_downloads: Option<PreferenceChange>,
+    /// The total download speed limit. Added in protocol 2.2.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub download_speed_limit: Option<SpeedLimitChange>,
 }
 
 impl UpdateSettingsRequest {
@@ -186,6 +190,7 @@ impl UpdateSettingsRequest {
                 expected_revision: self.expected_revision,
                 default_root: self.default_root,
                 max_active_downloads: self.max_active_downloads,
+                download_speed_limit: self.download_speed_limit,
             },
         }
     }
@@ -431,6 +436,7 @@ impl AccountCommandRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::SpeedLimit;
     use serde_json::json;
 
     fn submit(items: serde_json::Value) -> Result<CommandEnvelope, ProtocolError> {
@@ -530,6 +536,7 @@ mod tests {
                 expected_revision: Revision::from_u64(1).unwrap(),
                 default_root: RootId::from_u64(4),
                 max_active_downloads: None,
+                download_speed_limit: None,
             }
         );
         let preference: UpdateSettingsRequest = serde_json::from_value(json!({
@@ -545,7 +552,20 @@ mod tests {
                 expected_revision: Revision::from_u64(2).unwrap(),
                 default_root: None,
                 max_active_downloads: Some(PreferenceChange::Set(6)),
+                download_speed_limit: None,
             }
+        );
+        let both: UpdateSettingsRequest = serde_json::from_value(json!({
+            "idempotency_key": IdempotencyKey::generate(),
+            "target": InstanceId::generate(),
+            "expected_revision": 2,
+            "max_active_downloads": {"set": 6},
+            "download_speed_limit": {"set": {"bytes_per_second": 1_048_576}},
+        }))
+        .unwrap();
+        assert_eq!(
+            both.download_speed_limit,
+            Some(SpeedLimitChange::Set(SpeedLimit::BytesPerSecond(1_048_576)))
         );
         let reset: UpdateSettingsRequest = serde_json::from_value(json!({
             "idempotency_key": IdempotencyKey::generate(),

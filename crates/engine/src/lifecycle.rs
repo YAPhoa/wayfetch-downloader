@@ -56,7 +56,9 @@ use wayfetch_protocol::command::{IdempotencyKey, MAX_SUBMIT_ITEMS};
 use wayfetch_protocol::event::{
     DurableEvent, EventCursor, ResyncReason, Retained, SubscriptionStart,
 };
-use wayfetch_protocol::query::{BoundedSetting, FailureSummary, FolderListing, RootSummary};
+use wayfetch_protocol::query::{
+    BoundedSetting, FailureSummary, FolderListing, RootSummary, SpeedLimit, SpeedLimitSetting,
+};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Hello, InstanceId, Permission,
     ProtocolError, ProtocolVersion, Query, QueryResult, Subscribe, TransportLimits,
@@ -74,6 +76,7 @@ use crate::fs::Root;
 use crate::state_dir::{Identity, StateDir, StateDirError};
 use crate::store::{Admission, CommandContext, Store, StoreError, StoreInfo, Unusable};
 use crate::subscription::Subscription;
+use crate::transfer::throttle::Bandwidth;
 use crate::transfer::transport::Transport;
 use crate::{preferences, published};
 
@@ -162,7 +165,7 @@ impl EngineBuilder {
     pub async fn start(self) -> Result<EngineOwner, StartError> {
         self.config.validate()?;
         let config = self.config.clone();
-        let (state_dir, store, head, destinations, max_active, vault) = self
+        let (state_dir, store, head, destinations, saved, vault) = self
             .runtime
             .spawn_blocking(move || -> Result<_, StartError> {
                 let state_dir = StateDir::open(&config.state_dir)?;
@@ -172,12 +175,17 @@ impl EngineBuilder {
                 prune(&mut store, &config.limits)?;
                 let head = store.event_head()?;
                 let destinations = Destinations::load(&mut store, &config)?;
-                let max_active = store.settings()?.max_active_downloads;
+                let saved = store.settings()?;
                 let vault = Vault::open(config.credential_key.as_deref(), store.key_check()?);
-                Ok((state_dir, store, head, destinations, max_active, vault))
+                Ok((state_dir, store, head, destinations, saved, vault))
             })
             .await??;
         let identity = state_dir.identity();
+        let speed_limit = saved.download_speed_limit;
+        let bandwidth = Arc::new(Bandwidth::new(
+            preferences::resolve_speed_limit(&self.config.policy.download_speed_limit, speed_limit)
+                .value,
+        ));
         let credential_key = self.config.credential_key.clone();
         let store_info = store.info().clone();
         let (readiness_tx, readiness_rx) = watch::channel(Readiness::Starting);
@@ -223,7 +231,9 @@ impl EngineBuilder {
             running: HashMap::new(),
             held: HashSet::new(),
             destinations,
-            max_active,
+            max_active: saved.max_active_downloads,
+            speed_limit,
+            bandwidth,
             probes,
             file_jobs: Claims::default(),
             registering: 0,
@@ -927,6 +937,11 @@ struct Coordinator {
     destinations: Destinations,
     /// The user's saved most downloads at once, if any.
     max_active: Option<u64>,
+    /// The user's saved total download speed limit, if any.
+    speed_limit: Option<SpeedLimit>,
+    /// The budget every download's body is written from, set to the
+    /// effective speed limit.
+    bandwidth: Arc<Bandwidth>,
     /// Filesystem checks of root folders.
     probes: Probes,
     /// Jobs whose published file a request is working on.
@@ -1099,6 +1114,10 @@ impl Coordinator {
                     // A lower limit takes effect as downloads end; a higher
                     // one admits at once, in `changed` below.
                     self.max_active = saved.max_active_downloads;
+                    // Running transfers follow at their next grant, before
+                    // the change is reported.
+                    self.speed_limit = saved.download_speed_limit;
+                    self.bandwidth.set(self.download_speed_limit().value);
                 }
                 if let Some(root) = gone {
                     self.destinations.remove(root);
@@ -1263,12 +1282,16 @@ impl Coordinator {
             Command::UpdateSettings {
                 default_root,
                 max_active_downloads,
+                download_speed_limit,
                 ..
             } => {
                 if self.replays(envelope).await? {
                     return Ok(Unusable::new());
                 }
-                if default_root.is_none() && max_active_downloads.is_none() {
+                if default_root.is_none()
+                    && max_active_downloads.is_none()
+                    && download_speed_limit.is_none()
+                {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidRequest,
                         "the settings change changes nothing",
@@ -1278,6 +1301,12 @@ impl Coordinator {
                     preferences::check(
                         Preference::MAX_ACTIVE_DOWNLOADS,
                         &self.config.policy.max_active_downloads,
+                        change,
+                    )?;
+                }
+                if let Some(change) = *download_speed_limit {
+                    preferences::check_speed_limit(
+                        &self.config.policy.download_speed_limit,
                         change,
                     )?;
                 }
@@ -1362,6 +1391,11 @@ impl Coordinator {
         )
     }
 
+    /// What applies for the total download speed limit.
+    fn download_speed_limit(&self) -> SpeedLimitSetting {
+        preferences::resolve_speed_limit(&self.config.policy.download_speed_limit, self.speed_limit)
+    }
+
     /// Whether root `id` is permitted (`Err(None)` if not) and available
     /// now (`Err(Some(why))` if not).
     fn usable(&self, id: RootId) -> impl Future<Output = Result<(), Option<String>>> + use<> {
@@ -1405,6 +1439,7 @@ impl Coordinator {
         let (destinations, probes) = (self.destinations.clone(), self.probes.clone());
         let instance = self.identity.instance;
         let max_active_downloads = self.max_active_downloads();
+        let download_speed_limit = self.download_speed_limit();
         self.supervisor.spawn(async move {
             let mut checks = tokio::task::JoinSet::new();
             for (i, root) in destinations.all().into_iter().enumerate() {
@@ -1414,7 +1449,8 @@ impl Coordinator {
             let mut available = checks.join_all().await;
             available.sort_by_key(|(i, _)| *i);
             let available = available.into_iter().map(|(_, a)| a).collect();
-            let settings = destinations.settings(available, max_active_downloads);
+            let settings =
+                destinations.settings(available, max_active_downloads, download_speed_limit);
             let _ = reply.send(Ok(QueryResult::Settings(settings)));
         });
     }
@@ -1603,6 +1639,7 @@ impl Coordinator {
                 boot_epoch: self.identity.boot_epoch,
                 limits: self.config.limits.clone(),
                 timeouts: self.config.timeouts,
+                bandwidth: self.bandwidth.clone(),
                 cancel,
                 guard: self.supervisor.guard(),
                 job,

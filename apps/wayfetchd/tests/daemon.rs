@@ -529,7 +529,10 @@ async fn a_configuration_file_sets_up_the_daemon_and_its_download_policy() {
     );
     assert!(!dirs.state.exists());
 
-    let config = configure(&dirs, "default = 2\nmax = 8");
+    let config = configure(
+        &dirs,
+        "default = 2\nmax = 8\n\n[downloads.speed_limit]\ndefault = 1048576\nmax = 4194304",
+    );
     let init = std::process::Command::new(BIN)
         .arg("init-root")
         .arg("--config")
@@ -546,6 +549,27 @@ async fn a_configuration_file_sets_up_the_daemon_and_its_download_policy() {
         json!({"value": 2, "source": "server", "default": 2, "min": 1, "max": 8,
                "locked": false, "conflict": false}),
         "{settings}"
+    );
+    assert_eq!(
+        settings["download_speed_limit"],
+        json!({"value": {"bytes_per_second": 1_048_576}, "source": "server",
+               "default": {"bytes_per_second": 1_048_576}, "min": 1024, "max": 4_194_304,
+               "unlimited": false, "locked": false, "conflict": false}),
+        "{settings}"
+    );
+    // The ceiling holds against Unlimited.
+    let (status, error) = client
+        .put(
+            "/v1/settings",
+            &client.command(json!({
+                "expected_revision": settings["revision"],
+                "download_speed_limit": {"set": "unlimited"},
+            })),
+        )
+        .await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::BAD_REQUEST, &"invalid_request".into())
     );
     assert_eq!(
         settings["roots"][0]["path"],
@@ -570,13 +594,25 @@ async fn a_configuration_file_sets_up_the_daemon_and_its_download_policy() {
         .put("/v1/settings", &set(&settings["revision"], 6))
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    // Both preferences change in one revision.
     let (status, updated) = client
-        .put("/v1/settings", &set(&settings["revision"], 6))
+        .put(
+            "/v1/settings",
+            &client.command(json!({
+                "expected_revision": settings["revision"],
+                "max_active_downloads": {"set": 6},
+                "download_speed_limit": {"set": {"bytes_per_second": 2_097_152}},
+            })),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
     let (_, settings) = client.get("/v1/settings").await;
     assert_eq!(settings["max_active_downloads"]["value"], 6);
     assert_eq!(settings["max_active_downloads"]["source"], "saved");
+    assert_eq!(
+        settings["download_speed_limit"]["value"],
+        json!({"bytes_per_second": 2_097_152})
+    );
     daemon.stop("TERM").await;
 
     // Locked by the operator: the saved value is kept but not used, and

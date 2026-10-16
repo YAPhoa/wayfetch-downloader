@@ -54,6 +54,20 @@ min = 1
 max = 16
 locked = false
 
+# The combined speed of every download, in whole bytes per second
+# (1024 = 1 KiB/s, 1048576 = 1 MiB/s), shared by all of them, not given to
+# each. `default` is "unlimited" (the built-in default) or a number; users
+# change it in Settings within `min` and `max` (1 KiB/s to 1 TiB/s at
+# most), and changes apply to running downloads at once. `max` is a ceiling
+# Unlimited cannot bypass: with it, `default` must be a number, and a user's
+# saved Unlimited runs at `max`. `locked = true` fixes it at `default`.
+# The limit covers download bodies, not protocol overhead or the engine's
+# other requests.
+[downloads.speed_limit]
+default = "unlimited"
+min = 1024
+locked = false
+
 # wayfetchd only; the other programs refuse this section.
 [server]
 # Loopback by default. Anything else belongs behind an authenticated TLS

@@ -8,7 +8,10 @@
 //! Writes run on the blocking pool and never stall the runtime.
 //!
 //! A body that stops sending fails after the idle-read deadline instead of
-//! holding its transfer slot forever (T09).
+//! holding its transfer slot forever (T09). A writer given the engine's
+//! [`Bandwidth`] writes each chunk only as fast as it grants, so the next
+//! chunk is read later; that wait is not counted against the deadline,
+//! which covers reading alone.
 
 use std::any::Any;
 use std::future::Future;
@@ -21,6 +24,7 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use super::throttle::Bandwidth;
 use crate::fs::{StagingFile, SyncedRanges};
 
 /// A boxed, sendable future.
@@ -87,6 +91,7 @@ pub struct IntervalWriter {
     position: u64,
     certified: u64,
     hold: Option<Arc<dyn Any + Send + Sync>>,
+    bandwidth: Option<Arc<Bandwidth>>,
 }
 
 impl std::fmt::Debug for IntervalWriter {
@@ -110,7 +115,15 @@ impl IntervalWriter {
             position: start,
             certified: start,
             hold: None,
+            bandwidth: None,
         }
+    }
+
+    /// Takes the bytes it writes from `bandwidth`, the budget every
+    /// download of the engine shares.
+    pub fn throttled(mut self, bandwidth: Arc<Bandwidth>) -> Self {
+        self.bandwidth = Some(bandwidth);
+        self
     }
 
     /// Keeps `guard` alive until every write or sync this writer started has
@@ -135,17 +148,8 @@ impl IntervalWriter {
     /// Writes `chunk` at the current position. A chunk that would cross the
     /// interval's end is refused whole.
     pub async fn write(&mut self, chunk: Bytes) -> Result<(), WriteError> {
-        let len = chunk.len() as u64;
-        let next = self
-            .position
-            .checked_add(len)
-            .ok_or(WriteError::Overflow { end: u64::MAX })?;
-        if let Some(end) = self.end
-            && next > end
-        {
-            return Err(WriteError::Overflow { end });
-        }
-        if len == 0 {
+        let next = self.fits(chunk.len())?;
+        if chunk.is_empty() {
             return Ok(());
         }
         let (file, offset) = (self.file.clone(), self.position);
@@ -153,6 +157,19 @@ impl IntervalWriter {
             .await?;
         self.position = next;
         Ok(())
+    }
+
+    /// Where `len` more bytes would end, or the overflow if they cross the
+    /// interval's end.
+    fn fits(&self, len: usize) -> Result<u64, WriteError> {
+        let next = self
+            .position
+            .checked_add(len as u64)
+            .ok_or(WriteError::Overflow { end: u64::MAX })?;
+        match self.end {
+            Some(end) if next > end => Err(WriteError::Overflow { end }),
+            _ => Ok(next),
+        }
     }
 
     /// Synchronizes the file and certifies the bytes written since the last
@@ -209,9 +226,12 @@ impl IntervalWriter {
     /// channel, so a coordinator that commits slowly slows the transfer
     /// instead of queueing certificates.
     ///
-    /// Cancellation is checked before each read and while waiting; a write
-    /// already handed to the blocking pool finishes first. A finished body
-    /// must have filled the interval exactly when its end is known.
+    /// Throttled, each chunk is written in the pieces the bandwidth grants,
+    /// and the wait for a grant is not part of the idle deadline.
+    /// Cancellation is checked before each read and while waiting for data
+    /// or a grant; a write already handed to the blocking pool finishes
+    /// first. A finished body must have filled the interval exactly when
+    /// its end is known.
     pub async fn stream(
         &mut self,
         source: &mut dyn ChunkSource,
@@ -228,11 +248,28 @@ impl IntervalWriter {
                     .map_err(|_| WriteError::Stalled(idle))?
                     .map_err(WriteError::Source)?,
             };
-            let Some(chunk) = chunk else { break };
-            self.write(chunk).await?;
-            if self.position - self.certified >= every && !self.deliver(checkpoints, cancel).await?
-            {
-                return Ok(StreamEnd::Cancelled);
+            let Some(mut chunk) = chunk else { break };
+            // A chunk crossing the end is refused whole, before any of it
+            // is written.
+            self.fits(chunk.len())?;
+            while !chunk.is_empty() {
+                let piece = match &self.bandwidth {
+                    None => std::mem::take(&mut chunk),
+                    Some(bandwidth) => {
+                        let granted = tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => return Ok(StreamEnd::Cancelled),
+                            granted = bandwidth.admit(chunk.len()) => granted,
+                        };
+                        chunk.split_to(granted)
+                    }
+                };
+                self.write(piece).await?;
+                if self.position - self.certified >= every
+                    && !self.deliver(checkpoints, cancel).await?
+                {
+                    return Ok(StreamEnd::Cancelled);
+                }
             }
         }
         if let Some(end) = self.end
@@ -272,6 +309,7 @@ mod tests {
 
     use wayfetch_domain::id::JobId;
     use wayfetch_domain::version::Generation;
+    use wayfetch_protocol::query::SpeedLimit;
 
     use super::*;
     use crate::fs::Root;
@@ -500,6 +538,102 @@ mod tests {
         // The written bytes stay uncertified, as for any failure.
         assert!(rx.try_recv().is_err());
         assert_eq!(writer.position(), 3);
+    }
+
+    fn kib(n: usize) -> Bytes {
+        Bytes::from(vec![7; n * 1024])
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_for_bandwidth_is_not_inactivity() {
+        let (_tmp, _root, file) = staging();
+        let (tx, mut rx) = mpsc::channel(64);
+        let bandwidth = Arc::new(Bandwidth::new(SpeedLimit::BytesPerSecond(1024)));
+        let mut writer = IntervalWriter::new(file, 0, Some(4096)).throttled(bandwidth);
+        let mut body = Chunks((0..4).map(|_| Ok(kib(1))).collect());
+        let started = tokio::time::Instant::now();
+        // Far shorter than the throttled transfer takes.
+        let idle = Duration::from_millis(500);
+        let end = writer
+            .stream(&mut body, &CancellationToken::new(), &tx, 1024, idle)
+            .await
+            .unwrap();
+        assert_eq!(end, StreamEnd::Finished);
+        assert_eq!(writer.position(), 4096);
+        // One free quantum, then 3840 bytes at 1 KiB/s.
+        assert!(started.elapsed() >= Duration::from_millis(3750));
+        drop(tx);
+        let mut certified = 0;
+        while let Some(synced) = rx.recv().await {
+            certified += synced.ranges().iter().map(|r| r.end - r.start).sum::<u64>();
+        }
+        assert_eq!(certified, 4096);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_throttled_body_that_stalls_still_fails() {
+        let (_tmp, _root, file) = staging();
+        let (tx, _rx) = mpsc::channel(8);
+        let bandwidth = Arc::new(Bandwidth::new(SpeedLimit::BytesPerSecond(1024)));
+        let mut writer = IntervalWriter::new(file, 0, None).throttled(bandwidth);
+        let mut body = Stalls(Chunks(VecDeque::from([Ok(kib(1))])), Arc::default());
+        let idle = Duration::from_millis(500);
+        let err = writer
+            .stream(&mut body, &CancellationToken::new(), &tx, 1 << 20, idle)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, WriteError::Stalled(d) if d == idle),
+            "{err:?}"
+        );
+        assert_eq!(writer.position(), 1024);
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(clippy::single_range_in_vec_init, reason = "a list of one byte range")]
+    async fn cancellation_interrupts_a_wait_for_bandwidth() {
+        let (_tmp, _root, file) = staging();
+        let (tx, _rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let bandwidth = Arc::new(Bandwidth::new(SpeedLimit::BytesPerSecond(1024)));
+        let mut writer = IntervalWriter::new(file, 0, None).throttled(bandwidth.clone());
+        let mut body = Chunks(VecDeque::from([Ok(kib(64))]));
+        let task = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let end = writer.stream(&mut body, &cancel, &tx, 1 << 20, IDLE).await;
+                (end, writer)
+            })
+        };
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let cancelled = tokio::time::Instant::now();
+        cancel.cancel();
+        let (end, mut writer) = task.await.unwrap();
+        assert_eq!(end.unwrap(), StreamEnd::Cancelled);
+        assert!(cancelled.elapsed() < Duration::from_millis(5));
+        // Only what was granted was written, and a pause may certify it.
+        let written = writer.position();
+        assert!((1024..=1280).contains(&written), "{written}");
+        let synced = writer.checkpoint().await.unwrap().unwrap();
+        assert_eq!(synced.ranges(), &[0..written]);
+        // The abandoned wait took nothing: the next grant comes as soon as
+        // the debt of what was written is repaid.
+        assert_eq!(bandwidth.admit(1).await, 1);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_chunk_crossing_the_end_is_refused_whole_when_throttled() {
+        let (_tmp, _root, file) = staging();
+        let (tx, _rx) = mpsc::channel(8);
+        let bandwidth = Arc::new(Bandwidth::new(SpeedLimit::BytesPerSecond(1 << 30)));
+        let mut writer = IntervalWriter::new(file, 0, Some(100_000)).throttled(bandwidth);
+        let mut body = Chunks(VecDeque::from([Ok(kib(64)), Ok(kib(64))]));
+        let err = writer
+            .stream(&mut body, &CancellationToken::new(), &tx, 1 << 20, IDLE)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WriteError::Overflow { end: 100_000 }));
+        assert_eq!(writer.position(), 65_536);
     }
 
     #[test]

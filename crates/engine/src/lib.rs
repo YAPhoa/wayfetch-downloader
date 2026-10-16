@@ -32,7 +32,10 @@ mod store;
 pub mod subscription;
 pub mod transfer;
 
-pub use config::{ConfigError, EngineConfig, IntegerPolicy, Limits, Policy, Preference, Timeouts};
+pub use config::{
+    ConfigError, EngineConfig, IntegerPolicy, Limits, Policy, Preference, SpeedLimitPolicy,
+    Timeouts,
+};
 pub use destinations::{RootError, initialize_root};
 #[cfg(feature = "failpoints")]
 pub use fail;

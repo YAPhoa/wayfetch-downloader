@@ -1,5 +1,6 @@
-// The Settings page: how many downloads run at once, where new downloads
-// are saved, accounts with download services, and how the list looks.
+// The Settings page: how many downloads run at once and how fast they may
+// download together, where new downloads are saved, accounts with
+// download services, and how the list looks.
 // Only what Wayfetch supports today can be changed here. A menu of
 // sections sits beside the selected section, as in a desktop app's
 // preferences.
@@ -36,6 +37,11 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('../client/contract.js').RootSummary} RootSummary
  * @typedef {import('../client/contract.js').BoundedSetting} BoundedSetting
  * @typedef {import('../client/contract.js').PreferenceChange} PreferenceChange
+ * @typedef {import('../client/contract.js').SpeedLimit} SpeedLimit
+ * @typedef {import('../client/contract.js').SpeedLimitSetting} SpeedLimitSetting
+ * @typedef {import('../client/contract.js').SpeedLimitChange} SpeedLimitChange
+ * @typedef {Pick<import('../client/contract.js').SettingsChange, 'maxActiveDownloads' | 'downloadSpeedLimit'>} Change
+ * @typedef {'KiB' | 'MiB'} RateUnit
  * @typedef {'compact' | 'comfortable'} Density
  * @typedef {'downloads' | 'folder' | 'display' | 'accounts'} Section
  */
@@ -136,22 +142,133 @@ function failure(context, error, say, explain = notSaved) {
  * @param {boolean} local whether the engine runs in this app
  */
 export function describeSetting(setting, local) {
+  return explain(setting, `Allowed: ${setting.min}–${setting.max}.`, String, local);
+}
+
+/**
+ * The same for the total download speed limit.
+ * @param {SpeedLimitSetting} setting
+ * @param {boolean} local whether the engine runs in this app
+ */
+export function describeSpeedLimit(setting, local) {
+  const range = `${formatRate(setting.min)}–${formatRate(setting.max)}`;
+  return explain(
+    setting,
+    setting.unlimited ? `Allowed: Unlimited, or ${range}.` : `Allowed: ${range}; Unlimited is not allowed here.`,
+    formatSpeedLimit,
+    local,
+  );
+}
+
+/**
+ * @template T
+ * @param {{ value: T, default: T, saved?: T, source: string, locked: boolean, conflict: boolean }} setting
+ * @param {string} range
+ * @param {(value: T) => string} format
+ * @param {boolean} local
+ */
+function explain(setting, range, format, local) {
   if (setting.locked) {
     const managed = local ? 'Managed by this app’s configuration.' : 'Managed by server configuration.';
-    return setting.conflict ? `${managed} Your saved value ${setting.saved} is not used.` : managed;
+    return setting.conflict && setting.saved !== undefined
+      ? `${managed} Your saved value ${format(setting.saved)} is not used.`
+      : managed;
   }
-  const range = `Allowed: ${setting.min}–${setting.max}.`;
-  if (setting.conflict) {
-    return `${range} Your saved value ${setting.saved} is outside it, so ${setting.value} is used.`;
+  if (setting.conflict && setting.saved !== undefined) {
+    return `${range} Your saved value ${format(setting.saved)} is outside it, so ${format(setting.value)} is used.`;
   }
   switch (setting.source) {
     case 'saved':
-      return `${range} Saved; the default is ${setting.default}.`;
+      return `${range} Saved; the default is ${format(setting.default)}.`;
     case 'server':
       return `${range} Using the ${local ? 'configured' : 'server’s'} default.`;
     default:
       return `${range} Using the default.`;
   }
+}
+
+/** Units a speed limit is typed in, as multiples of a byte per second. */
+/** @type {readonly RateUnit[]} */
+export const RATE_UNITS = Object.freeze(['KiB', 'MiB']);
+const UNIT_BYTES = { KiB: 1024, MiB: 1024 * 1024 };
+const DISPLAY_UNITS = /** @type {const} */ ([
+  ['TiB', 2 ** 40],
+  ['GiB', 2 ** 30],
+  ['MiB', 2 ** 20],
+  ['KiB', 2 ** 10],
+]);
+
+/**
+ * `value` with at most `places` decimals and no trailing zeros.
+ * @param {number} value
+ * @param {number} places
+ */
+function decimal(value, places) {
+  return String(Number(value.toFixed(places)));
+}
+
+/**
+ * A rate in bytes per second, in the largest binary unit it reaches.
+ * @param {number} bytes
+ */
+export function formatRate(bytes) {
+  const found = DISPLAY_UNITS.find(([, size]) => bytes >= size);
+  return found ? `${decimal(bytes / found[1], 2)} ${found[0]}/s` : `${bytes} B/s`;
+}
+
+/** @param {SpeedLimit} limit */
+export function formatSpeedLimit(limit) {
+  return limit === 'unlimited' ? 'Unlimited' : formatRate(limit.bytes_per_second);
+}
+
+/**
+ * How the form shows `limit`: whether it is limited, and the amount and
+ * unit to type, in MiB/s from 1 MiB/s and in KiB/s below.
+ * @param {SpeedLimit} limit
+ * @returns {{ limited: false } | { limited: true, amount: string, unit: RateUnit }}
+ */
+export function speedFields(limit) {
+  if (limit === 'unlimited') return { limited: false };
+  const bytes = limit.bytes_per_second;
+  const unit = bytes >= UNIT_BYTES.MiB ? 'MiB' : 'KiB';
+  return { limited: true, amount: decimal(bytes / UNIT_BYTES[unit], 3), unit };
+}
+
+/**
+ * The rate typed for `setting` in `unit`, in whole bytes per second, or
+ * why it cannot be saved. A fraction is allowed and rounded to the
+ * nearest byte, then checked against the range.
+ * @param {string} text
+ * @param {RateUnit} unit
+ * @param {SpeedLimitSetting} setting
+ * @returns {{ value: number, error: null } | { value: null, error: string }}
+ */
+export function parseRate(text, unit, setting) {
+  const error = `Enter a speed from ${formatRate(setting.min)} to ${formatRate(setting.max)}.`;
+  const trimmed = text.trim();
+  if (!/^\d+(\.\d+)?$/.test(trimmed) || !(unit in UNIT_BYTES)) return { value: null, error };
+  const value = Math.round(Number(trimmed) * UNIT_BYTES[unit]);
+  if (!Number.isSafeInteger(value) || value < setting.min || value > setting.max) return { value: null, error };
+  return { value, error: null };
+}
+
+/**
+ * What a save of `change` did, as `saved` shows it.
+ * @param {Change} change
+ * @param {Settings} saved
+ */
+export function savedMessage(change, saved) {
+  const parts = [];
+  if (change.maxActiveDownloads) parts.push(`Up to ${saved.max_active_downloads.value} downloads run at once.`);
+  if (change.downloadSpeedLimit) {
+    const limit = saved.download_speed_limit.value;
+    parts.push(
+      limit === 'unlimited'
+        ? 'Downloads are not speed limited.'
+        : `Downloads share at most ${formatRate(limit.bytes_per_second)}.`,
+    );
+  }
+  return ['Saved.', ...parts].join(' ');
 }
 
 /**
@@ -376,8 +493,9 @@ export class SettingsPage {
   }
 
   /**
-   * The engine's download preferences: how many downloads run at once,
-   * within what the server's configuration allows.
+   * The engine's download preferences: how many downloads run at once and
+   * the total download speed limit, within what the server's configuration
+   * allows. Both are saved together, all or none.
    */
   downloadsSection() {
     const { context } = this;
@@ -404,11 +522,52 @@ export class SettingsPage {
     });
     const policy = h('span', { class: 'hint', id: 'max-active-policy' });
     const problem = h('span', { class: 'problem', id: 'max-active-problem' });
+
+    const speedRadio = (/** @type {'unlimited' | 'limited'} */ value, /** @type {string} */ text) =>
+      h(
+        'label',
+        null,
+        h('input', {
+          type: 'radio',
+          name: 'speed-limit',
+          value,
+          'data-key': `speed-${value}`,
+          onchange: () => {
+            update();
+            if (value === 'limited') rate.focus();
+          },
+        }),
+        h('span', null, text),
+      );
+    const unlimitedLabel = speedRadio('unlimited', 'Unlimited');
+    const limitedLabel = speedRadio('limited', 'Limit to');
+    const unlimited = /** @type {HTMLInputElement} */ (unlimitedLabel.querySelector('input'));
+    const limited = /** @type {HTMLInputElement} */ (limitedLabel.querySelector('input'));
+    const rate = h('input', {
+      type: 'number',
+      id: 'speed-limit-rate',
+      class: 'count rate',
+      'data-key': 'speed-rate',
+      inputmode: 'decimal',
+      min: 0,
+      step: 'any',
+      'aria-label': 'Total download speed limit',
+      'aria-describedby': 'speed-limit-about speed-limit-policy speed-limit-problem',
+      oninput: () => update(),
+    });
+    const unit = h(
+      'select',
+      { id: 'speed-limit-unit', 'data-key': 'speed-unit', 'aria-label': 'Speed limit unit', onchange: () => update() },
+      RATE_UNITS.map((name) => h('option', { value: name }, `${name}/s`)),
+    );
+    const speedPolicy = h('span', { class: 'hint', id: 'speed-limit-policy' });
+    const speedProblem = h('span', { class: 'problem', id: 'speed-limit-problem' });
+
     const message = h('p', { class: 'message', role: 'status' });
     const useDefault = h(
       'button',
-      { type: 'button', 'data-key': 'downloads-default', onclick: () => void save('use_default') },
-      'Use default',
+      { type: 'button', 'data-key': 'downloads-default', onclick: () => void reset() },
+      'Use defaults',
     );
     const cancel = h(
       'button',
@@ -417,7 +576,8 @@ export class SettingsPage {
         'data-key': 'downloads-cancel',
         onclick: () => {
           if (!current) return;
-          input.value = String(current.max_active_downloads.value);
+          showCount(current.max_active_downloads);
+          showSpeed(current.download_speed_limit);
           update();
           show(message, 'Changes discarded.');
           input.focus();
@@ -434,8 +594,13 @@ export class SettingsPage {
         onsubmit: (/** @type {SubmitEvent} */ event) => {
           event.preventDefault();
           if (!current) return;
-          const { value } = parseCount(input.value, current.max_active_downloads);
-          if (value !== null) void save({ set: value });
+          const { count, speed } = draft();
+          if ((count.changed && count.parsed.error) || (speed.changed && speed.error)) return;
+          /** @type {Change} */
+          const change = {};
+          if (count.changed && count.parsed.value !== null) change.maxActiveDownloads = { set: count.parsed.value };
+          if (speed.changed && speed.limit) change.downloadSpeedLimit = { set: speed.limit };
+          if (change.maxActiveDownloads || change.downloadSpeedLimit) void save(change);
         },
       },
       h(
@@ -467,6 +632,34 @@ export class SettingsPage {
             ),
             input,
           ),
+          h(
+            'div',
+            { class: 'setting-row' },
+            h(
+              'div',
+              { class: 'setting-text' },
+              h('span', { class: 'setting-name', id: 'speed-limit-name' }, 'Total download speed limit'),
+              h(
+                'span',
+                { class: 'hint', id: 'speed-limit-about' },
+                'Shared by all downloads together, not given to each one. Changes apply to running downloads at once.',
+              ),
+              speedPolicy,
+              speedProblem,
+            ),
+            h(
+              'div',
+              { class: 'speed-control' },
+              h(
+                'div',
+                { class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'speed-limit-name' },
+                unlimitedLabel,
+                limitedLabel,
+              ),
+              rate,
+              unit,
+            ),
+          ),
         ),
         h('div', { class: 'group-foot' }, message, useDefault, cancel, saveButton),
       ),
@@ -479,36 +672,87 @@ export class SettingsPage {
       ),
     );
 
-    /** The value typed, whether it differs from what applies, and whether it can be saved. */
+    /** @param {BoundedSetting} setting */
+    const showCount = (setting) => {
+      input.value = String(setting.value);
+    };
+
+    /**
+     * Shows `setting`'s limit; for Unlimited, the amount keeps what it held.
+     * @param {SpeedLimitSetting} setting
+     */
+    const showSpeed = (setting) => {
+      const shown = speedFields(setting.value);
+      limited.checked = shown.limited;
+      unlimited.checked = !shown.limited;
+      if (shown.limited) {
+        rate.value = shown.amount;
+        unit.value = shown.unit;
+      }
+    };
+
+    /**
+     * What is typed, whether it differs from what applies, and whether it
+     * can be saved.
+     */
     const draft = () => {
-      const setting = /** @type {Settings} */ (current).max_active_downloads;
-      const parsed = parseCount(input.value, setting);
-      return { parsed, changed: input.value.trim() !== String(setting.value) };
+      const settings = /** @type {Settings} */ (current);
+      const countSetting = settings.max_active_downloads;
+      const count = {
+        parsed: parseCount(input.value, countSetting),
+        changed: input.value.trim() !== String(countSetting.value),
+      };
+      const speedSetting = settings.download_speed_limit;
+      const applied = speedFields(speedSetting.value);
+      const changed = limited.checked
+        ? !applied.limited || rate.value.trim() !== applied.amount || unit.value !== applied.unit
+        : applied.limited;
+      /** @type {{ changed: boolean, limit: SpeedLimit | null, error: string | null }} */
+      let speed = { changed, limit: 'unlimited', error: null };
+      if (limited.checked) {
+        const parsed = parseRate(rate.value, /** @type {RateUnit} */ (unit.value), speedSetting);
+        speed = {
+          changed,
+          limit: parsed.value === null ? null : { bytes_per_second: parsed.value },
+          error: parsed.error,
+        };
+      }
+      return { count, speed };
     };
 
     /** Enables what can be done now, and says what is wrong with the draft. */
     const update = () => {
       if (!current) return;
-      const setting = current.max_active_downloads;
-      const editable = canChange && !setting.locked;
-      const { parsed, changed } = draft();
-      const invalid = changed && parsed.error !== null;
-      show(problem, invalid ? parsed.error : '');
-      input.setAttribute('aria-invalid', String(invalid));
+      const countSetting = current.max_active_downloads;
+      const speedSetting = current.download_speed_limit;
+      const { count, speed } = draft();
+      const countInvalid = count.changed && count.parsed.error !== null;
+      const speedInvalid = speed.changed && speed.error !== null;
+      show(problem, countInvalid ? count.parsed.error : '');
+      show(speedProblem, speedInvalid ? speed.error : '');
+      input.setAttribute('aria-invalid', String(countInvalid));
+      rate.setAttribute('aria-invalid', String(speedInvalid));
       // Typing is held while a save is under way, so its answer never
       // replaces a newer edit.
-      input.disabled = !editable || saving;
+      input.disabled = !canChange || countSetting.locked || saving;
+      const speedFixed = !canChange || speedSetting.locked || saving;
+      unlimited.disabled = speedFixed || !speedSetting.unlimited;
+      limited.disabled = speedFixed;
+      rate.disabled = speedFixed || !limited.checked;
+      unit.disabled = rate.disabled;
+      const editable = canChange && !(countSetting.locked && speedSetting.locked);
+      const changed = count.changed || speed.changed;
       saveButton.hidden = !editable;
       cancel.hidden = !editable;
-      saveButton.disabled = saving || !changed || invalid;
+      saveButton.disabled = saving || !changed || countInvalid || speedInvalid;
       cancel.disabled = saving || !changed;
       useDefault.hidden = !canChange;
-      useDefault.disabled = saving || setting.saved === undefined;
+      useDefault.disabled = saving || (countSetting.saved === undefined && speedSetting.saved === undefined);
       this.draft('downloads', changed);
     };
 
     /**
-     * Shows `settings`, keeping a changed draft if `keep`. An answer older
+     * Shows `settings`, keeping changed drafts if `keep`. An answer older
      * than the settings shown, which arrived late, only reports `said`.
      * @param {Settings} settings
      * @param {string} said
@@ -521,20 +765,27 @@ export class SettingsPage {
         return;
       }
       context.onSettings(settings);
-      const kept = keep && current !== null && draft().changed;
+      const kept = keep && current !== null ? draft() : null;
       current = settings;
-      const setting = settings.max_active_downloads;
-      input.min = String(setting.min);
-      input.max = String(setting.max);
-      if (!kept) input.value = String(setting.value);
-      show(policy, describeSetting(setting, client.local), !canChange && ' You may not change settings.');
+      const countSetting = settings.max_active_downloads;
+      input.min = String(countSetting.min);
+      input.max = String(countSetting.max);
+      if (!kept?.count.changed) showCount(countSetting);
+      if (!kept?.speed.changed) showSpeed(settings.download_speed_limit);
+      const denied = !canChange && ' You may not change settings.';
+      show(policy, describeSetting(countSetting, client.local), denied);
+      show(speedPolicy, describeSpeedLimit(settings.download_speed_limit, client.local), denied);
       show(message, said);
       update();
       if (!section.contains(form)) show(section, form);
     };
 
-    /** @param {PreferenceChange} change */
-    const save = async (change) => {
+    /**
+     * Saves `change`, all or none.
+     * @param {Change} change
+     * @param {(saved: Settings) => string} [said]
+     */
+    const save = async (change, said = (saved) => savedMessage(change, saved)) => {
       const hello = context.hello();
       if (!hello || !current) {
         show(message, 'Not connected yet. Try again in a moment.');
@@ -549,22 +800,16 @@ export class SettingsPage {
           idempotencyKey: idempotencyKey(),
           target: hello.instance,
           expectedRevision: current.revision,
-          maxActiveDownloads: change,
+          ...change,
         });
         const saved = await client.settings();
         saving = false;
-        const count = saved.max_active_downloads.value;
-        apply(
-          saved,
-          change === 'use_default'
-            ? `Using the default: ${count} at once.`
-            : `Saved. Up to ${count} downloads run at once.`,
-        );
+        apply(saved, said(saved));
       } catch (error) {
         saving = false;
         if (error instanceof WayfetchError && error.code === 'revision_conflict') {
           await reload(
-            'The settings were changed elsewhere and have been reloaded. Your value is kept; save again to apply it.',
+            'The settings were changed elsewhere and have been reloaded. Your values are kept; save again to apply them.',
           );
         } else {
           failure(context, error, (text) => show(message, text));
@@ -574,6 +819,21 @@ export class SettingsPage {
       refocus(section, working);
     };
 
+    /** Removes every saved preference here, so the defaults apply. */
+    const reset = () => {
+      if (!current) return;
+      /** @type {Change} */
+      const change = {};
+      if (current.max_active_downloads.saved !== undefined) change.maxActiveDownloads = 'use_default';
+      if (current.download_speed_limit.saved !== undefined) change.downloadSpeedLimit = 'use_default';
+      return save(change, (saved) => {
+        const parts = [];
+        if (change.maxActiveDownloads) parts.push(`${saved.max_active_downloads.value} at once`);
+        if (change.downloadSpeedLimit) parts.push(formatSpeedLimit(saved.download_speed_limit.value));
+        return `Using the default${parts.length > 1 ? 's' : ''}: ${parts.join(', ')}.`;
+      });
+    };
+
     /**
      * Reads the settings again, keeping a changed draft.
      * @param {string} said
@@ -581,10 +841,10 @@ export class SettingsPage {
     const reload = async (said = '') => {
       try {
         const settings = await client.settings();
-        const changed = current !== null && draft().changed;
+        const changed = current !== null && (draft().count.changed || draft().speed.changed);
         apply(
           settings,
-          said || (changed ? 'The settings were changed elsewhere. Your unsaved value is kept.' : ''),
+          said || (changed ? 'The settings were changed elsewhere. Your unsaved values are kept.' : ''),
           true,
         );
       } catch (error) {

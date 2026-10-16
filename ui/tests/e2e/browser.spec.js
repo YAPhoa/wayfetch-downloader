@@ -971,7 +971,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await context.close();
 });
 
-test('the download limit is a server setting every window shares', async ({ browser }) => {
+test('the download limit and speed limit are server settings every window shares', async ({ browser }) => {
   const context = await browser.newContext();
   const first = await context.newPage();
   await first.goto(daemon.origin);
@@ -991,7 +991,7 @@ test('the download limit is a server setting every window shares', async ({ brow
       limit: pane.getByLabel('Maximum simultaneous downloads'),
       save: pane.getByRole('button', { name: 'Save' }),
       cancel: pane.getByRole('button', { name: 'Cancel' }),
-      useDefault: pane.getByRole('button', { name: 'Use default' }),
+      useDefault: pane.getByRole('button', { name: 'Use defaults' }),
       unsaved: page.locator('[data-key="settings-section-downloads"] .unsaved'),
     };
   };
@@ -1017,7 +1017,7 @@ test('the download limit is a server setting every window shares', async ({ brow
   await a.save.click();
   await expect(a.pane.getByText('Saved. Up to 6 downloads run at once.')).toBeVisible();
   await expect(a.unsaved).toBeHidden();
-  await expect(b.pane.getByText('The settings were changed elsewhere. Your unsaved value is kept.')).toBeVisible();
+  await expect(b.pane.getByText('The settings were changed elsewhere. Your unsaved values are kept.')).toBeVisible();
   await expect(b.pane.getByText('Allowed: 1–64. Saved; the default is 4.')).toBeVisible();
   await expect(b.limit).toHaveValue('3');
   await b.save.click();
@@ -1025,7 +1025,7 @@ test('the download limit is a server setting every window shares', async ({ brow
   // The first window follows, having nothing unsaved.
   await expect(a.limit).toHaveValue('3');
 
-  // Cancel restores what applies; Use default drops the saved value.
+  // Cancel restores what applies; Use defaults drops the saved value.
   await a.limit.fill('9');
   await a.cancel.click();
   await expect(a.limit).toHaveValue('3');
@@ -1048,6 +1048,83 @@ test('the download limit is a server setting every window shares', async ({ brow
   await expect(a.limit).toHaveValue('5');
   await expect(a.save).toBeEnabled();
   await first.unroute('**/v1/settings');
+  await a.cancel.click();
+
+  // The total speed limit: shared too, and saved with the count.
+  {
+    /** @param {import('@playwright/test').Page} page */
+    const speedParts = (page) => {
+      const pane = page.locator('.settings-content');
+      const choice = pane.getByRole('radiogroup', { name: 'Total download speed limit' });
+      return {
+        pane,
+        unlimited: choice.getByRole('radio', { name: 'Unlimited' }),
+        limited: choice.getByRole('radio', { name: 'Limit to' }),
+        rate: pane.getByRole('spinbutton', { name: 'Total download speed limit' }),
+        unit: pane.getByLabel('Speed limit unit'),
+        count: pane.getByLabel('Maximum simultaneous downloads'),
+        save: pane.getByRole('button', { name: 'Save' }),
+        useDefault: pane.getByRole('button', { name: 'Use defaults' }),
+      };
+    };
+    const a = speedParts(first);
+    const b = speedParts(second);
+    await first.goto(`${daemon.origin}/settings/downloads`);
+    await second.goto(`${daemon.origin}/settings/downloads`);
+    await expect(a.unlimited).toBeChecked();
+    await expect(a.rate).toBeDisabled();
+    await expect(a.pane.getByText('Shared by all downloads together, not given to each one.', { exact: false })).toBeVisible();
+    await expect(a.pane.getByText('Allowed: Unlimited, or 1 KiB/s–1 TiB/s. Using the default.')).toBeVisible();
+
+    // A limit needs a speed in range; a fraction is fine.
+    await a.limited.check();
+    await expect(a.rate).toBeFocused();
+    await expect(a.save).toBeDisabled();
+    await a.rate.fill('0.5');
+    await a.unit.selectOption('KiB');
+    await expect(a.pane.getByText('Enter a speed from 1 KiB/s to 1 TiB/s.')).toBeVisible();
+    await a.rate.fill('1.5');
+    await a.unit.selectOption('MiB');
+    await expect(a.pane.getByText('Enter a speed from 1 KiB/s to 1 TiB/s.')).toHaveCount(0);
+
+    // Saving both at once, while the other window has a draft of its own.
+    await b.count.fill('5');
+    await a.count.fill('3');
+    await a.save.click();
+    await expect(
+      a.pane.getByText('Saved. Up to 3 downloads run at once. Downloads share at most 1.5 MiB/s.'),
+    ).toBeVisible();
+    await expect(b.pane.getByText('The settings were changed elsewhere. Your unsaved values are kept.')).toBeVisible();
+    await expect(b.count).toHaveValue('5');
+    // The other window shows the saved limit, which its draft did not touch.
+    await expect(b.limited).toBeChecked();
+    await expect(b.rate).toHaveValue('1.5');
+    await expect(b.unit).toHaveValue('MiB');
+    await expect(b.pane.getByText('Allowed: Unlimited, or 1 KiB/s–1 TiB/s. Saved; the default is Unlimited.')).toBeVisible();
+    await b.count.fill('3');
+
+    // Unlimited is a choice of its own, kept as saved.
+    await a.unlimited.check();
+    await expect(a.rate).toBeDisabled();
+    await a.save.click();
+    await expect(a.pane.getByText('Saved. Downloads are not speed limited.')).toBeVisible();
+    await expect(b.unlimited).toBeChecked();
+    await expect(a.pane.getByText('Allowed: Unlimited, or 1 KiB/s–1 TiB/s. Saved; the default is Unlimited.')).toBeVisible();
+
+    // Use defaults drops both saved values.
+    await a.useDefault.click();
+    await expect(a.pane.getByText('Using the defaults: 4 at once, Unlimited.')).toBeVisible();
+    await expect(a.count).toHaveValue('4');
+    await expect(a.useDefault).toBeDisabled();
+    await expectFitsWindow(first);
+    // On a phone the page scrolls down, never sideways.
+    await first.setViewportSize({ width: 390, height: 844 });
+    const [wide, width] = await first.evaluate(() => [
+      document.documentElement.scrollWidth,
+      document.documentElement.clientWidth,
+    ]);
+    expect(wide).toBe(width);
+  }
   await context.close();
 });
 

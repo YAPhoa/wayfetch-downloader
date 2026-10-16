@@ -27,6 +27,7 @@ use wayfetch_domain::version::Revision;
 use crate::account::{AccountAlias, AccountRef, Authorization};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
+use crate::query::SpeedLimit;
 
 /// Maximum inputs in one [`Command::Submit`].
 pub const MAX_SUBMIT_ITEMS: usize = 1000;
@@ -351,6 +352,10 @@ pub enum Command {
         /// protocol 2.0.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_active_downloads: Option<PreferenceChange>,
+        /// The combined rate of every download's body. Added in protocol
+        /// 2.2; older clients omit it, which leaves it unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        download_speed_limit: Option<SpeedLimitChange>,
     },
     /// Give a completed job's published file another name in the same
     /// folder. Never replaces an existing file. Added in protocol 1.0.
@@ -461,6 +466,19 @@ pub enum PreferenceChange {
     /// choice even when it equals today's default, so a later change to
     /// the default does not move it.
     Set(u64),
+    /// Remove the saved preference, so the configured default applies,
+    /// including later changes to it.
+    UseDefault,
+}
+
+/// A change to the total download speed limit. Added in protocol 2.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum SpeedLimitChange {
+    /// Save this limit, Unlimited included, as the user's preference. It
+    /// stays the user's choice even when it equals today's default.
+    Set(SpeedLimit),
     /// Remove the saved preference, so the configured default applies,
     /// including later changes to it.
     UseDefault,
@@ -785,6 +803,7 @@ mod tests {
             expected_revision: Revision::from_u64(2).unwrap(),
             default_root: RootId::from_u64(4),
             max_active_downloads: None,
+            download_speed_limit: None,
         };
         assert_eq!(
             serde_json::to_string(&command).unwrap(),
@@ -794,11 +813,38 @@ mod tests {
             expected_revision: Revision::from_u64(2).unwrap(),
             default_root: None,
             max_active_downloads: Some(PreferenceChange::Set(6)),
+            download_speed_limit: None,
         };
         assert_eq!(
             serde_json::to_string(&change).unwrap(),
             r#"{"type":"update_settings","expected_revision":2,"max_active_downloads":{"set":6}}"#
         );
+    }
+
+    #[test]
+    fn a_speed_limit_change_is_explicit_about_unlimited() {
+        let wire = |change: SpeedLimitChange| serde_json::to_value(change).unwrap();
+        assert_eq!(
+            wire(SpeedLimitChange::Set(SpeedLimit::BytesPerSecond(2_097_152))),
+            serde_json::json!({"set": {"bytes_per_second": 2_097_152}})
+        );
+        assert_eq!(
+            wire(SpeedLimitChange::Set(SpeedLimit::Unlimited)),
+            serde_json::json!({"set": "unlimited"})
+        );
+        assert_eq!(wire(SpeedLimitChange::UseDefault), "use_default");
+        // Neither a bare number, a fraction, nor a negative is a limit.
+        for bad in [
+            serde_json::json!({"set": 0}),
+            serde_json::json!({"set": {"bytes_per_second": 1.5}}),
+            serde_json::json!({"set": {"bytes_per_second": -1}}),
+            serde_json::json!({"set": null}),
+        ] {
+            assert!(
+                serde_json::from_value::<SpeedLimitChange>(bad.clone()).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

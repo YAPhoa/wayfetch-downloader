@@ -2,7 +2,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { settingsRequest } from '../../src/client/contract.js';
-import { SECTIONS, describeSetting, parseCount, sectionPath, settingsSection } from '../../src/components/settings.js';
+import {
+  SECTIONS,
+  describeSetting,
+  describeSpeedLimit,
+  formatRate,
+  formatSpeedLimit,
+  parseCount,
+  parseRate,
+  savedMessage,
+  sectionPath,
+  settingsSection,
+  speedFields,
+} from '../../src/components/settings.js';
 
 test('Settings paths name their section; others are not Settings', () => {
   assert.equal(settingsSection('/settings'), 'downloads');
@@ -74,4 +86,120 @@ test('a settings change sends only what changes', () => {
     max_active_downloads: { set: 6 },
   });
   assert.deepEqual(settingsRequest({ ...base, maxActiveDownloads: 'use_default' }).max_active_downloads, 'use_default');
+  assert.deepEqual(
+    settingsRequest({
+      ...base,
+      maxActiveDownloads: { set: 2 },
+      downloadSpeedLimit: { set: { bytes_per_second: 2097152 } },
+    }),
+    {
+      idempotency_key: 'k',
+      target: 't',
+      expected_revision: 3,
+      max_active_downloads: { set: 2 },
+      download_speed_limit: { set: { bytes_per_second: 2097152 } },
+    },
+  );
+  assert.deepEqual(settingsRequest({ ...base, downloadSpeedLimit: { set: 'unlimited' } }).download_speed_limit, {
+    set: 'unlimited',
+  });
+  assert.equal('download_speed_limit' in settingsRequest(base), false);
+});
+
+const MIB = 1024 * 1024;
+
+/** @type {import('../../src/client/contract.js').SpeedLimitSetting} */
+const SPEED = {
+  value: 'unlimited',
+  source: 'built_in',
+  default: 'unlimited',
+  min: 1024,
+  max: 2 ** 40,
+  unlimited: true,
+  locked: false,
+  conflict: false,
+};
+
+test('rates read in binary units, and Unlimited is a word, not a number', () => {
+  assert.equal(formatRate(1024), '1 KiB/s');
+  assert.equal(formatRate(1536), '1.5 KiB/s');
+  assert.equal(formatRate(2 * MIB), '2 MiB/s');
+  assert.equal(formatRate(2 ** 40), '1 TiB/s');
+  assert.equal(formatRate(500), '500 B/s');
+  assert.equal(formatSpeedLimit('unlimited'), 'Unlimited');
+  assert.equal(formatSpeedLimit({ bytes_per_second: 3 * MIB }), '3 MiB/s');
+  assert.deepEqual(speedFields('unlimited'), { limited: false });
+  assert.deepEqual(speedFields({ bytes_per_second: 2 * MIB }), { limited: true, amount: '2', unit: 'MiB' });
+  assert.deepEqual(speedFields({ bytes_per_second: 1536 * 1024 }), { limited: true, amount: '1.5', unit: 'MiB' });
+  assert.deepEqual(speedFields({ bytes_per_second: 512 * 1024 }), { limited: true, amount: '512', unit: 'KiB' });
+});
+
+test('a typed speed is converted to whole bytes per second within the allowed range', () => {
+  const capped = { ...SPEED, min: 64 * 1024, max: 4 * MIB, unlimited: false };
+  assert.deepEqual(parseRate('2', 'MiB', capped), { value: 2 * MIB, error: null });
+  // A fraction is rounded to the nearest byte, then checked.
+  assert.deepEqual(parseRate(' 1.5 ', 'MiB', capped), { value: 1.5 * MIB, error: null });
+  assert.deepEqual(parseRate('64.0004', 'KiB', capped), { value: 65536, error: null });
+  assert.deepEqual(parseRate('4096', 'KiB', capped), { value: 4 * MIB, error: null });
+  const error = 'Enter a speed from 64 KiB/s to 4 MiB/s.';
+  for (const [text, unit] of [
+    ['', 'MiB'],
+    ['0', 'MiB'],
+    ['63.9', 'KiB'],
+    ['4.001', 'MiB'],
+    ['-1', 'MiB'],
+    ['1e3', 'KiB'],
+    ['two', 'MiB'],
+    ['1,5', 'MiB'],
+    ['99999999999999999999', 'MiB'],
+    ['1', 'GiB'],
+  ]) {
+    assert.deepEqual(parseRate(text, /** @type {any} */ (unit), capped), { value: null, error }, `${text} ${unit}`);
+  }
+});
+
+test('the speed limit says what it allows, including whether Unlimited is', () => {
+  assert.equal(describeSpeedLimit(SPEED, false), 'Allowed: Unlimited, or 1 KiB/s–1 TiB/s. Using the default.');
+  const capped = { ...SPEED, max: 4 * MIB, unlimited: false, default: { bytes_per_second: MIB }, source: 'server' };
+  assert.equal(
+    describeSpeedLimit(/** @type {any} */ ({ ...capped, value: { bytes_per_second: MIB } }), false),
+    'Allowed: 1 KiB/s–4 MiB/s; Unlimited is not allowed here. Using the server’s default.',
+  );
+  assert.equal(
+    describeSpeedLimit(
+      /** @type {any} */ ({ ...capped, source: 'saved', saved: 'unlimited', value: { bytes_per_second: 4 * MIB }, conflict: true }),
+      false,
+    ),
+    'Allowed: 1 KiB/s–4 MiB/s; Unlimited is not allowed here. Your saved value Unlimited is outside it, so 4 MiB/s is used.',
+  );
+  assert.equal(
+    describeSpeedLimit(/** @type {any} */ ({ ...SPEED, source: 'saved', saved: { bytes_per_second: MIB }, value: { bytes_per_second: MIB } }), true),
+    'Allowed: Unlimited, or 1 KiB/s–1 TiB/s. Saved; the default is Unlimited.',
+  );
+  assert.equal(
+    describeSpeedLimit(
+      /** @type {any} */ ({ ...capped, locked: true, saved: 'unlimited', value: { bytes_per_second: MIB }, conflict: true }),
+      false,
+    ),
+    'Managed by server configuration. Your saved value Unlimited is not used.',
+  );
+});
+
+test('a save says what it changed', () => {
+  const saved = /** @type {any} */ ({
+    max_active_downloads: { value: 3 },
+    download_speed_limit: { value: { bytes_per_second: 2 * MIB } },
+  });
+  assert.equal(savedMessage({ maxActiveDownloads: { set: 3 } }, saved), 'Saved. Up to 3 downloads run at once.');
+  assert.equal(
+    savedMessage({ maxActiveDownloads: { set: 3 }, downloadSpeedLimit: { set: { bytes_per_second: 2 * MIB } } }, saved),
+    'Saved. Up to 3 downloads run at once. Downloads share at most 2 MiB/s.',
+  );
+  assert.equal(
+    savedMessage(
+      { downloadSpeedLimit: { set: 'unlimited' } },
+      /** @type {any} */ ({ ...saved, download_speed_limit: { value: 'unlimited' } }),
+    ),
+    'Saved. Downloads are not speed limited.',
+  );
 });

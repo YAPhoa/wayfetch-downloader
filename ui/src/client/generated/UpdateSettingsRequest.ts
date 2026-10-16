@@ -4,6 +4,7 @@ import type { InstanceId } from "./InstanceId.js";
 import type { PreferenceChange } from "./PreferenceChange.js";
 import type { Revision } from "./Revision.js";
 import type { RootId } from "./RootId.js";
+import type { SpeedLimitChange } from "./SpeedLimitChange.js";
 
 /**
  * Changes settings at the revision the client saw: the default
@@ -30,4 +31,8 @@ default_root?: RootId,
 /**
  * Most downloads transferring at once. Added in protocol 2.0.
  */
-max_active_downloads?: PreferenceChange, };
+max_active_downloads?: PreferenceChange, 
+/**
+ * The total download speed limit. Added in protocol 2.2.
+ */
+download_speed_limit?: SpeedLimitChange, };

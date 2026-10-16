@@ -32,6 +32,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0009_manual_retry.sql")),
     M::up(include_str!("migrations/0010_preferences.sql")),
     M::up(include_str!("migrations/0011_accounts.sql")),
+    M::up(include_str!("migrations/0012_speed_limit.sql")),
 ];
 
 /// Newest schema version this engine knows.
@@ -93,8 +94,8 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), 11);
-        assert_eq!(migrate(&mut conn).unwrap(), 11);
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
         let saved: (i64, i64) = conn
             .query_row(
                 "SELECT revision, max_active_downloads FROM settings WHERE id = 1",
@@ -107,5 +108,31 @@ mod tests {
             .query_row("SELECT count(*) FROM accounts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(accounts, 0);
+    }
+
+    #[test]
+    fn the_speed_limit_upgrade_preserves_settings_and_saves_nothing() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATIONS[..11])
+            .to_latest(&mut conn)
+            .unwrap();
+        conn.execute(
+            "UPDATE settings SET revision = 5, max_active_downloads = 2 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), 12);
+        let saved: (i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT revision, max_active_downloads, download_speed_limit FROM settings",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(saved, (5, 2, None));
+        assert!(
+            conn.execute("UPDATE settings SET download_speed_limit = -1", [])
+                .is_err()
+        );
     }
 }
