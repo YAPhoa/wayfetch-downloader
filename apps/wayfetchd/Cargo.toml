@@ -23,6 +23,7 @@ tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
 url.workspace = true
 
 [dev-dependencies]
+wayfetch-adapters.workspace = true
 wayfetch-net.workspace = true
 wayfetch-protocol.workspace = true
 bytes.workspace = true

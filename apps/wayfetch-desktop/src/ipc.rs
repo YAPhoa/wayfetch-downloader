@@ -5,13 +5,17 @@
 //! | Command | Engine operation |
 //! |---|---|
 //! | `hello` | handshake: instance, boot epoch, protocol, head, limits |
-//! | `query` | a [`Query`]: list, inspect, or count jobs, settings, a job's link, collected links |
+//! | `query` | a [`Query`]: list, inspect, or count jobs, settings, a job's link, collected links, accounts, a sign-in |
 //! | `submit` | [`SubmitRequest`] as a submit command |
 //! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, retry, rename, or remove |
 //! | `collect_links` | [`CollectRequest`]: collect links for review |
 //! | `links_command` | [`LinksCommandRequest`]: start, remove, or move collected links |
 //! | `update_settings` | [`UpdateSettingsRequest`]: change the default destination or a preference |
 //! | `remove_root` | [`RemoveRootRequest`]: stop offering a folder the user added |
+//! | `authorize_account` | [`AuthorizeAccountRequest`]: starts signing a provider account in |
+//! | `cancel_authorization` | stops a sign-in still waiting for approval |
+//! | `account_command` | [`AccountCommandRequest`]: enable, disable, or remove an account |
+//! | `refresh_account` | checks an account with its provider |
 //! | `choose_download_folder` | the native folder dialog; the chosen folder becomes a permitted destination |
 //! | `open_file` | opens a finished job's file with this computer's default application |
 //! | `reveal_file` | opens the folder holding a finished job's file |
@@ -32,7 +36,9 @@
 //! revision conflicts, wrong-instance refusals, and resynchronization
 //! behave as they do over HTTP. The window belongs to the person signed in
 //! to this computer's session, so the host grants it the local owner's
-//! permissions (section 4.6); nothing from the renderer can widen them.
+//! permissions (section 4.6), the `accounts` permission among them;
+//! nothing from the renderer can widen them. No command takes or returns a
+//! provider credential.
 
 use std::path::{Path, PathBuf};
 
@@ -41,12 +47,13 @@ use serde_json::Value;
 use tauri::ipc::Channel;
 use tauri::{State, Webview, WebviewWindow};
 use wayfetch_engine::EngineHandle;
-use wayfetch_engine::domain::id::JobId;
+use wayfetch_engine::domain::id::{AccountId, JobId};
+use wayfetch_engine::protocol::account::{AccountSummary, Authorization, AuthorizationId};
 use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::RootSummary;
 use wayfetch_engine::protocol::request::{
-    CollectRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
-    UpdateSettingsRequest,
+    AccountCommandRequest, AuthorizeAccountRequest, CollectRequest, JobCommandRequest,
+    LinksCommandRequest, RemoveRootRequest, SubmitRequest, UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
     ErrorCode, EventCursor, Hello, Permission, ProtocolError, Query, QueryResult, StreamItem,
@@ -142,6 +149,90 @@ pub async fn update_settings(
 pub async fn remove_root(desktop: State<'_, Desktop>, request: Value) -> IpcResult<CommandResult> {
     let envelope = decode::<RemoveRootRequest>(request)?.into_envelope();
     desktop.engine.execute(envelope, GRANTED).await
+}
+
+/// Starts signing a provider account in, or signing one in again. The
+/// person approves on the provider's site; the renderer follows the
+/// sign-in with [`Query::Authorization`].
+#[tauri::command]
+pub async fn authorize_account(
+    desktop: State<'_, Desktop>,
+    request: Value,
+) -> IpcResult<CommandResult> {
+    accounts::authorize(&desktop.engine, GRANTED, request).await
+}
+
+/// Cancels a sign-in still waiting for approval.
+#[tauri::command]
+pub async fn cancel_authorization(
+    desktop: State<'_, Desktop>,
+    authorization: Value,
+) -> IpcResult<Authorization> {
+    accounts::cancel(&desktop.engine, GRANTED, authorization).await
+}
+
+/// Enables, disables, or removes an account at the revision the renderer
+/// saw.
+#[tauri::command]
+pub async fn account_command(
+    desktop: State<'_, Desktop>,
+    account: Value,
+    request: Value,
+) -> IpcResult<CommandResult> {
+    accounts::command(&desktop.engine, GRANTED, account, request).await
+}
+
+/// Checks an account with its provider now, and answers with it.
+#[tauri::command]
+pub async fn refresh_account(
+    desktop: State<'_, Desktop>,
+    account: Value,
+) -> IpcResult<AccountSummary> {
+    accounts::refresh(&desktop.engine, GRANTED, account).await
+}
+
+/// The account commands with the permissions they run with, so they can be
+/// exercised with fewer than the local owner's.
+mod accounts {
+    use super::*;
+
+    pub async fn authorize(
+        engine: &EngineHandle,
+        granted: &[Permission],
+        request: Value,
+    ) -> IpcResult<CommandResult> {
+        let envelope = decode::<AuthorizeAccountRequest>(request)?.into_envelope()?;
+        engine.execute(envelope, granted).await
+    }
+
+    pub async fn cancel(
+        engine: &EngineHandle,
+        granted: &[Permission],
+        authorization: Value,
+    ) -> IpcResult<Authorization> {
+        let id: AuthorizationId = decode(authorization)?;
+        engine.cancel_authorization(id, granted).await
+    }
+
+    pub async fn command(
+        engine: &EngineHandle,
+        granted: &[Permission],
+        account: Value,
+        request: Value,
+    ) -> IpcResult<CommandResult> {
+        let account: AccountId = decode(account)?;
+        let envelope = decode::<AccountCommandRequest>(request)?.into_envelope(account);
+        engine.execute(envelope, granted).await
+    }
+
+    pub async fn refresh(
+        engine: &EngineHandle,
+        granted: &[Permission],
+        account: Value,
+    ) -> IpcResult<AccountSummary> {
+        let account: AccountId = decode(account)?;
+        engine.refresh_account(account, granted).await
+    }
 }
 
 /// Shows the native folder dialog and permits the folder the user chose as
@@ -275,5 +366,90 @@ mod tests {
         assert_eq!(privileged.unwrap_err().code, ErrorCode::InvalidRequest);
         assert!(decode::<JobId>(json!("job-0")).is_err());
         assert_eq!(decode::<Option<EventCursor>>(json!(null)).unwrap(), None);
+        let signing_in_with_a_password = decode::<AuthorizeAccountRequest>(json!({
+            "idempotency_key": "6f1c2c5e-6c1e-4b8a-9f57-3a8f9f0f6a11",
+            "target": "6f1c2c5e-6c1e-4b8a-9f57-3a8f9f0f6a12",
+            "service": "real-debrid",
+            "password": "synthetic",
+        }));
+        assert_eq!(
+            signing_in_with_a_password.unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    /// The account commands pass on only the permissions granted: without
+    /// `accounts`, nothing reaches the engine's account work.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn account_commands_need_the_accounts_permission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = wayfetch_engine::EngineConfig::new(tmp.path().join("state"));
+        let owner = wayfetch_engine::EngineBuilder::new(config, tokio::runtime::Handle::current())
+            .start()
+            .await
+            .unwrap();
+        let engine = owner.handle();
+        let instance = owner.identity().instance;
+        let others = [
+            Permission::Read,
+            Permission::Submit,
+            Permission::Control,
+            Permission::Sources,
+        ];
+        let request = |fields: Value| {
+            let mut body = json!({
+                "idempotency_key": "6f1c2c5e-6c1e-4b8a-9f57-3a8f9f0f6a11",
+                "target": instance,
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            body
+        };
+        let denied = ErrorCode::PermissionDenied;
+        let sign_in = request(json!({"service": "real-debrid"}));
+        let remove = request(json!({"action": "remove", "expected_revision": 1}));
+        let sign_in_id = json!("6f1c2c5e-6c1e-4b8a-9f57-3a8f9f0f6a13");
+        assert_eq!(
+            accounts::authorize(&engine, &others, sign_in.clone())
+                .await
+                .unwrap_err()
+                .code,
+            denied
+        );
+        assert_eq!(
+            accounts::command(&engine, &others, json!("acct-1"), remove)
+                .await
+                .unwrap_err()
+                .code,
+            denied
+        );
+        assert_eq!(
+            accounts::refresh(&engine, &others, json!("acct-1"))
+                .await
+                .unwrap_err()
+                .code,
+            denied
+        );
+        assert_eq!(
+            accounts::cancel(&engine, &others, sign_in_id.clone())
+                .await
+                .unwrap_err()
+                .code,
+            denied
+        );
+        // The local owner's permissions reach the engine, which answers on
+        // its merits: no account integration was configured here.
+        let err = accounts::authorize(&engine, GRANTED, sign_in)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotApplicable);
+        let err = accounts::cancel(&engine, GRANTED, sign_in_id)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+        owner
+            .shutdown(wayfetch_engine::ShutdownRequest::default())
+            .await;
     }
 }

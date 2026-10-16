@@ -8,7 +8,8 @@
 //! on SIGTERM or SIGINT with jobs kept for the next start and a single
 //! owner per state directory; and browser access: owner setup with a setup
 //! secret, sign-in, sessions for commands and events, origin and CSRF
-//! checks, sign-out, restarts, and owner reset.
+//! checks, sign-out, restarts, and owner reset; and provider accounts,
+//! signed in against a local stand-in for Real-Debrid.
 //!
 //! Files that stall are large enough to cross a default 8 MiB checkpoint
 //! first, so there are durable bytes to observe and resume from.
@@ -16,6 +17,8 @@
 mod common;
 #[path = "../../../crates/engine/tests/support/mod.rs"]
 mod engine_support;
+#[path = "../../../crates/adapters/tests/support/mod.rs"]
+mod rd;
 #[path = "../../../crates/net/tests/support/mod.rs"]
 mod support;
 
@@ -55,6 +58,8 @@ struct Dirs {
     roots: Vec<PathBuf>,
     tokens: PathBuf,
     browser: bool,
+    /// Further arguments to `run`.
+    args: Vec<std::ffi::OsString>,
 }
 
 impl Dirs {
@@ -67,6 +72,7 @@ impl Dirs {
             roots: Vec::new(),
             tokens: tmp.path().join("tokens"),
             browser: false,
+            args: Vec::new(),
             tmp,
         };
         std::fs::create_dir(&dirs.root).unwrap();
@@ -190,6 +196,7 @@ impl Daemon {
         for root in &dirs.roots {
             command.arg("--root").arg(root);
         }
+        command.args(&dirs.args);
         if dirs.browser {
             command
                 .arg("--auth-dir")
@@ -974,7 +981,7 @@ async fn a_missing_token_file_is_created_owner_only_and_never_printed() {
     let text = std::fs::read_to_string(&dirs.tokens).unwrap();
     let line = text.lines().find(|l| !l.starts_with('#')).unwrap();
     let (token, scopes) = line.split_once(' ').unwrap();
-    assert_eq!(scopes, "read,submit,control,sources");
+    assert_eq!(scopes, "read,submit,control,sources,accounts");
     let (status, _) = daemon.client(token).get("/v1/capabilities").await;
     assert_eq!(status, StatusCode::OK);
 
@@ -1521,7 +1528,7 @@ async fn browsers_set_up_the_owner_sign_in_and_use_the_api() {
     assert_eq!(session["csrf_token"], signed_in["csrf_token"]);
     assert_eq!(
         session["permissions"],
-        json!(["read", "submit", "control", "sources"])
+        json!(["read", "submit", "control", "sources", "accounts"])
     );
     let mut events = browser.events().await;
     events.until(|e, _| e.event == "hello").await;
@@ -1680,4 +1687,229 @@ async fn insecure_browser_access_is_refused_beyond_loopback() {
     }
     // Refused before anything was written.
     assert!(!dirs.auth().exists());
+}
+
+/// Every file under `dir`.
+fn files_under(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut dirs = vec![dir.to_owned()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                out.push((path.clone(), std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    out
+}
+
+/// What Real-Debrid hands out that grants access: never shown, logged, or
+/// stored in the clear.
+const RD_SECRETS: [&str; 4] = [
+    rd::DEVICE_CODE,
+    rd::CLIENT_SECRET,
+    "synthetic-access-",
+    "synthetic-refresh-",
+];
+
+fn assert_no_rd_secret(what: &str, bytes: &[u8]) {
+    for secret in RD_SECRETS {
+        assert!(
+            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "{secret} in {what}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accounts_are_signed_in_and_managed_over_http() {
+    const LIMITED_TOKEN: &str = "limited-0123456789abcdef0123456789abcdef";
+    let server = Server::https().await;
+    let provider = rd::Server::start().await;
+    let mut dirs = Dirs::new(&server);
+    dirs.init_root();
+    write_private(
+        &dirs.tokens,
+        &format!(
+            "{OWNER_TOKEN} read,submit,control,sources,accounts\n\
+             {LIMITED_TOKEN} read,submit,control,sources\n"
+        ),
+    );
+    // No --credential-key: the daemon keeps its key beside the token file.
+    let key = dirs.tokens.with_file_name("credential-key");
+    dirs.args.extend([
+        "--provider-endpoint".into(),
+        format!("real-debrid={}", provider.base()).into(),
+    ]);
+    let daemon = Daemon::start(&dirs).await;
+    let client = daemon.owner();
+
+    let response = client
+        .request(reqwest::Method::GET, "/v1/accounts")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let listed: Value = response.json().await.unwrap();
+    assert_eq!(listed["type"], "accounts");
+    assert_eq!(listed["vault"], "ready");
+    assert_eq!(
+        listed["services"],
+        json!([{"service": "real-debrid", "method": "device_code", "downloads": false}])
+    );
+    assert_eq!(listed["accounts"], json!([]));
+
+    // Sign in: the person enters the code at the provider; the client
+    // polls until the provider approved.
+    let sign_in = client.command(json!({"service": "real-debrid", "alias": "Main"}));
+    let (status, started) = client.post("/v1/accounts/authorizations", &sign_in).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    assert_eq!(started["type"], "authorization_started");
+    assert_eq!(started["user_code"], rd::USER_CODE);
+    assert_eq!(started["state"], "pending");
+    let id = started["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        client.post("/v1/accounts/authorizations", &sign_in).await.1,
+        started
+    );
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    let done = loop {
+        let (status, current) = client
+            .get(&format!("/v1/accounts/authorizations/{id}"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{current}");
+        if current["state"] != "pending" {
+            break current;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{current}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(done["state"], "completed", "{done}");
+    let account = done["account"].as_str().unwrap().to_owned();
+    let (_, listed) = client.get("/v1/accounts").await;
+    let added = &listed["accounts"][0];
+    assert_eq!(added["id"], account.as_str());
+    assert_eq!(added["service"], "real-debrid");
+    assert_eq!(added["alias"], "Main");
+    assert_eq!(added["status"], "authenticated");
+    assert_eq!(added["username"], "synthetic-user");
+    assert_eq!(added["plan"], "premium");
+    assert_eq!(added["enabled"], true);
+    assert_no_rd_secret("the account list", listed.to_string().as_bytes());
+    assert_no_rd_secret("the sign-in", done.to_string().as_bytes());
+
+    // Permissions short of `accounts` grant nothing here.
+    let limited = daemon.client(LIMITED_TOKEN);
+    for (method, path, body) in [
+        ("GET", "/v1/accounts".to_owned(), None),
+        (
+            "POST",
+            "/v1/accounts/authorizations".to_owned(),
+            Some(limited.command(json!({"service": "real-debrid"}))),
+        ),
+        ("GET", format!("/v1/accounts/authorizations/{id}"), None),
+        (
+            "POST",
+            format!("/v1/accounts/authorizations/{id}/cancel"),
+            None,
+        ),
+        (
+            "POST",
+            format!("/v1/accounts/{account}/commands"),
+            Some(
+                limited
+                    .command(json!({"action": "remove", "expected_revision": added["revision"]})),
+            ),
+        ),
+        ("POST", format!("/v1/accounts/{account}/refresh"), None),
+    ] {
+        let mut request = limited.request(method.parse().unwrap(), &path);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let (status, error) = limited.send(request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {error}");
+        assert_eq!(error["code"], "permission_denied");
+    }
+
+    // A check with the provider, on request only.
+    let users = provider.hits(rd::USER_PATH);
+    client.get("/v1/accounts").await;
+    assert_eq!(provider.hits(rd::USER_PATH), users);
+    let (status, checked) = client
+        .post(&format!("/v1/accounts/{account}/refresh"), &json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{checked}");
+    assert_eq!(checked["status"], "authenticated");
+    assert_eq!(provider.hits(rd::USER_PATH), users + 1);
+
+    // The account and its credentials survive a restart.
+    daemon.stop("TERM").await;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the key is owner-only");
+        assert_eq!(std::fs::read_to_string(&key).unwrap().trim().len(), 64);
+    }
+    for (path, bytes) in files_under(&dirs.state) {
+        assert_no_rd_secret(&path.display().to_string(), &bytes);
+    }
+    let daemon = Daemon::start(&dirs).await;
+    let client = daemon.owner();
+    let (_, listed) = client.get("/v1/accounts").await;
+    assert_eq!(listed["accounts"][0]["id"], account.as_str());
+    let (status, checked) = client
+        .post(&format!("/v1/accounts/{account}/refresh"), &json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{checked}");
+    assert_eq!(checked["status"], "authenticated");
+
+    // Disabled: kept, but not used.
+    let disable =
+        client.command(json!({"action": "disable", "expected_revision": checked["revision"]}));
+    let (status, disabled) = client
+        .post(&format!("/v1/accounts/{account}/commands"), &disable)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{disabled}");
+    assert_eq!(disabled["type"], "account_updated");
+    let (status, error) = client
+        .post(&format!("/v1/accounts/{account}/refresh"), &json!({}))
+        .await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::CONFLICT, &"not_applicable".into())
+    );
+    let stale =
+        client.command(json!({"action": "remove", "expected_revision": checked["revision"]}));
+    let (status, error) = client
+        .post(&format!("/v1/accounts/{account}/commands"), &stale)
+        .await;
+    assert_eq!(
+        (status, &error["code"]),
+        (StatusCode::CONFLICT, &"revision_conflict".into())
+    );
+    let remove =
+        client.command(json!({"action": "remove", "expected_revision": disabled["revision"]}));
+    let (status, removed) = client
+        .post(&format!("/v1/accounts/{account}/commands"), &remove)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    let (_, listed) = client.get("/v1/accounts").await;
+    assert_eq!(listed["accounts"], json!([]));
+
+    let finished = {
+        daemon.signal("TERM");
+        daemon.finish().await
+    };
+    assert!(finished.status.success(), "{}", finished.stderr);
+    assert_no_rd_secret("the daemon's output", finished.stderr.as_bytes());
+    for line in &finished.lines {
+        assert_no_rd_secret("the daemon's output", line.to_string().as_bytes());
+    }
+    for (path, bytes) in files_under(&dirs.state) {
+        assert_no_rd_secret(&path.display().to_string(), &bytes);
+    }
 }

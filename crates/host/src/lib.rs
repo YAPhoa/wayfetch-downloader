@@ -1,8 +1,8 @@
 //! What every Wayfetch Downloader application host composes the same way
 //! (architecture brief section 4.3, "application host"): the operator's
-//! configuration file and state-directory, root, and network options,
-//! explicit root initialization, engine startup with the HTTP transport,
-//! process signals, and non-blocking terminal output.
+//! configuration file, state-directory, root, network, and credential-key
+//! options, explicit root initialization, engine startup with the HTTP
+//! transport and account integrations, signals, and non-blocking output.
 //!
 //! Hosts differ only in how they talk to people: `wayfetch` reads standard
 //! input, `wayfetchd` serves HTTP, and `wayfetch-desktop` shows the shared
@@ -109,6 +109,49 @@ pub struct EngineArgs {
     /// turned off. Repeatable; adds to `network.ca_certs`.
     #[arg(long, value_name = "FILE")]
     pub ca_cert: Vec<PathBuf>,
+    /// The key file that encrypts provider account credentials: 64 hex
+    /// digits, readable by its owner only, outside the state directory.
+    /// Created when the first account is added if it does not exist then,
+    /// and never replaced afterwards. `wayfetchd` defaults to
+    /// `credential-key` beside its token file, the desktop app to a file
+    /// beside the state directory; without one, accounts cannot be added.
+    /// Downloads work either way.
+    #[arg(long, value_name = "FILE")]
+    pub credential_key: Option<PathBuf>,
+    /// Another address serving a provider's API, for testing against a
+    /// local stand-in: HTTPS, or HTTP on a loopback address. Repeatable.
+    #[arg(
+        long = "provider-endpoint",
+        value_name = "SERVICE=URL",
+        value_parser = service_and_url,
+        hide = true
+    )]
+    pub provider_endpoints: Vec<(String, String)>,
+}
+
+fn service_and_url(value: &str) -> Result<(String, String), String> {
+    let (service, url) = value
+        .split_once('=')
+        .ok_or("expected SERVICE=URL, such as real-debrid=http://127.0.0.1:9000/")?;
+    Ok((service.to_owned(), url.to_owned()))
+}
+
+impl EngineArgs {
+    /// Uses a key file beside the state directory, named after it, unless
+    /// one was given: for a desktop, where one person owns both.
+    pub fn default_credential_key(&mut self) -> Result<(), String> {
+        if self.credential_key.is_none() {
+            let loaded = self.state.load::<IgnoredAny>()?;
+            let state = self.state.state_dir(loaded.as_ref())?;
+            let name = state
+                .file_name()
+                .ok_or_else(|| format!("{}: not a directory name", state.display()))?;
+            let mut key = name.to_owned();
+            key.push(".credential-key");
+            self.credential_key = Some(state.with_file_name(key));
+        }
+        Ok(())
+    }
 }
 
 /// What a host runs its engine with: the command line applied over the
@@ -118,6 +161,7 @@ pub struct EngineSettings {
     config: EngineConfig,
     http: HttpConfig,
     root: PathBuf,
+    provider_endpoints: Vec<(String, String)>,
 }
 
 impl EngineSettings {
@@ -164,6 +208,7 @@ impl EngineArgs {
             }
         }
         config.download_root = Some(root.clone());
+        config.credential_key = self.credential_key.as_deref().map(absolute).transpose()?;
         if let Some(file) = file {
             config::apply(file, &mut config)?;
         }
@@ -180,7 +225,12 @@ impl EngineArgs {
         for path in file_cas.chain(self.ca_cert.iter().cloned()) {
             http.extra_roots.extend(read_ca(&path)?);
         }
-        Ok(EngineSettings { config, http, root })
+        Ok(EngineSettings {
+            config,
+            http,
+            root,
+            provider_endpoints: self.provider_endpoints.clone(),
+        })
     }
 }
 
@@ -261,13 +311,21 @@ impl Started {
 /// Starts an engine on the current runtime with the HTTP transport, the
 /// production network defaults, and only the exceptions the operator named.
 pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
-    let EngineSettings { config, http, root } = settings;
-    let transport = HttpTransport::new(http).map_err(|e| format!("cannot configure HTTP: {e}"))?;
-    let owner = EngineBuilder::new(config, tokio::runtime::Handle::current())
-        .transport(Arc::new(transport))
-        .start()
-        .await
-        .map_err(|e| e.to_string())?;
+    let EngineSettings {
+        config,
+        http,
+        root,
+        provider_endpoints,
+    } = settings;
+    let transport =
+        Arc::new(HttpTransport::new(http).map_err(|e| format!("cannot configure HTTP: {e}"))?);
+    let providers = wayfetch_adapters::providers(transport.clone(), &provider_endpoints)?;
+    let mut builder =
+        EngineBuilder::new(config, tokio::runtime::Handle::current()).transport(transport);
+    for provider in providers {
+        builder = builder.account_provider(provider);
+    }
+    let owner = builder.start().await.map_err(|e| e.to_string())?;
     Ok(Started { owner, root })
 }
 
@@ -434,5 +492,31 @@ max = 8
         let huge = write("huge.der", &vec![0; MAX_CA_FILE_BYTES as usize + 1]);
         assert!(read_ca(&huge).unwrap_err().contains("too large"));
         assert!(read_ca(&tmp.path().join("missing")).is_err());
+    }
+    #[test]
+    fn desktop_key_and_providers_survive_loading_toml_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wayfetch.toml");
+        std::fs::write(
+            &file,
+            "schema_version = 1\n[storage]\nstate_dir = 'state'\ndownload_root = 'downloads'\n",
+        )
+        .unwrap();
+        let mut args = engine_args(&[
+            "--config",
+            file.to_str().unwrap(),
+            "--provider-endpoint",
+            "real-debrid=http://127.0.0.1:9000/",
+        ]);
+        args.default_credential_key().unwrap();
+        let (settings, _) = args.load::<NoServer>().unwrap();
+        assert_eq!(
+            settings.config.credential_key,
+            Some(dir.path().join("state.credential-key"))
+        );
+        assert_eq!(
+            settings.provider_endpoints,
+            vec![("real-debrid".into(), "http://127.0.0.1:9000/".into())]
+        );
     }
 }

@@ -87,7 +87,7 @@ enum Command {
     /// empty directory.
     InitRoot(InitRootArgs),
     /// Run the engine and serve its HTTP API until SIGINT or SIGTERM.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Ask a running daemon whether it is ready; exit 0 only if it is.
     ///
     /// For health checks: it starts no engine, takes no lock, and needs no
@@ -235,6 +235,20 @@ struct RunArgs {
     json: bool,
 }
 
+impl RunArgs {
+    /// Keeps the credential key beside the token file unless one was
+    /// given: with the server's other secrets, apart from the state
+    /// directory, so accounts need no setup.
+    fn default_credential_key(&mut self) -> Result<(), String> {
+        if self.engine.credential_key.is_none() {
+            let loaded = self.engine.state.load::<ServerFile>()?;
+            let server = self.server(loaded.as_ref())?;
+            self.engine.credential_key = Some(server.token_file.with_file_name("credential-key"));
+        }
+        Ok(())
+    }
+}
+
 /// What the daemon prints.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -346,7 +360,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }),
         Command::Run(args) => {
-            wayfetch_host::block_on(run(args, &terminal)).and_then(|result| result)
+            wayfetch_host::block_on(run(*args, &terminal)).and_then(|result| result)
         }
         Command::ResetOwner(args) => wayfetch_api::reset_owner(&args.auth_dir)
             .map(|existed| {
@@ -368,7 +382,8 @@ fn main() -> ExitCode {
 }
 
 /// Serves until a signal, then drains the API and stops the engine.
-async fn run(args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
+async fn run(mut args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String> {
+    args.default_credential_key()?;
     let printer = Printer::new(args.json, terminal);
     // A closed output never stops the daemon; it only loses its log.
     let print = |notice: &Notice| {
@@ -521,7 +536,7 @@ mod tests {
         let Command::Run(args) = cli.command else {
             panic!("not run");
         };
-        args
+        *args
     }
 
     fn parse(extra: &[&str]) -> RunArgs {
@@ -564,6 +579,35 @@ mod tests {
         assert_eq!(ui.version().len(), 16);
         assert!(UiFiles::get("main.js").is_some());
         assert!(UiFiles::iter().all(|path| !path.ends_with(".gitkeep") && !path.ends_with(".ts")));
+    }
+
+    #[test]
+    fn the_credential_key_defaults_to_beside_the_token_file() {
+        let run = [
+            "wayfetchd",
+            "run",
+            "--state-dir",
+            "/srv/state",
+            "--download-root",
+            "/srv/downloads",
+            "--token-file",
+            "/srv/secrets/api-tokens",
+        ];
+        let key = |extra: &[&str]| {
+            let Command::Run(mut args) = Cli::try_parse_from(run.iter().chain(extra))
+                .unwrap()
+                .command
+            else {
+                panic!("not run");
+            };
+            args.default_credential_key().unwrap();
+            args.engine.credential_key.unwrap()
+        };
+        assert_eq!(key(&[]), PathBuf::from("/srv/secrets/credential-key"));
+        assert_eq!(
+            key(&["--credential-key", "/keys/wayfetch"]),
+            PathBuf::from("/keys/wayfetch")
+        );
     }
 
     #[test]
@@ -645,5 +689,17 @@ browser_origins = ["https://wayfetch.example.lan"]
         let args = run_args(&["run", "--config", config.to_str().unwrap()]);
         let refused = args.engine.load::<ServerFile>().unwrap_err();
         assert!(refused.contains("listen_on"), "{refused}");
+    }
+    #[test]
+    fn credential_key_follows_the_configured_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wayfetch.toml");
+        std::fs::write(&file, "schema_version = 1\n[storage]\nstate_dir = 'state'\ndownload_root = 'downloads'\n[server]\ntoken_file = 'secrets/tokens'\n").unwrap();
+        let mut args = run_args(&["run", "--config", file.to_str().unwrap()]);
+        args.default_credential_key().unwrap();
+        assert_eq!(
+            args.engine.credential_key,
+            Some(dir.path().join("secrets/credential-key"))
+        );
     }
 }

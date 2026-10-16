@@ -31,6 +31,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0008_collected_links.sql")),
     M::up(include_str!("migrations/0009_manual_retry.sql")),
     M::up(include_str!("migrations/0010_preferences.sql")),
+    M::up(include_str!("migrations/0011_accounts.sql")),
 ];
 
 /// Newest schema version this engine knows.
@@ -80,5 +81,31 @@ mod tests {
             Err(StoreError::SchemaTooNew { found, supported })
                 if found == LATEST + 1 && supported == LATEST
         ));
+    }
+    #[test]
+    fn accounts_upgrade_preserves_existing_preferences() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATIONS[..10])
+            .to_latest(&mut conn)
+            .unwrap();
+        conn.execute(
+            "UPDATE settings SET revision = 7, max_active_downloads = 3 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), 11);
+        assert_eq!(migrate(&mut conn).unwrap(), 11);
+        let saved: (i64, i64) = conn
+            .query_row(
+                "SELECT revision, max_active_downloads FROM settings WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(saved, (7, 3));
+        let accounts: i64 = conn
+            .query_row("SELECT count(*) FROM accounts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(accounts, 0);
     }
 }

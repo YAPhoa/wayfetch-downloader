@@ -244,7 +244,10 @@ impl Session<'_> {
                 CommandResult::Submitted { .. }
                 | CommandResult::SettingsUpdated { .. }
                 | CommandResult::LinksCollected { .. }
-                | CommandResult::LinksApplied { .. },
+                | CommandResult::LinksApplied { .. }
+                | CommandResult::AuthorizationStarted(_)
+                | CommandResult::AccountAuthorized { .. }
+                | CommandResult::AccountUpdated { .. },
             ) => unexpected().into(),
             Err(e) => e.into(),
         })
@@ -288,7 +291,10 @@ impl Session<'_> {
                 CommandResult::JobUpdated { .. }
                 | CommandResult::SettingsUpdated { .. }
                 | CommandResult::LinksCollected { .. }
-                | CommandResult::LinksApplied { .. },
+                | CommandResult::LinksApplied { .. }
+                | CommandResult::AuthorizationStarted(_)
+                | CommandResult::AccountAuthorized { .. }
+                | CommandResult::AccountUpdated { .. },
             ) => unexpected().into(),
             Err(e) => e.into(),
         })
