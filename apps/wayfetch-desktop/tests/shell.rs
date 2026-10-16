@@ -22,7 +22,8 @@
 //! only bundled assets; that the host starts no daemon and listens on
 //! no TCP port; and a provider account signed in against a local stand-in
 //! for Real-Debrid, with its key beside the state directory, then shown,
-//! checked, disabled, signed in again, and removed.
+//! checked, disabled, signed in again, and removed; and a collected link
+//! downloaded through that account, chosen when starting it.
 //!
 //! These tests need an X display (`DISPLAY`, for example from `xvfb-run`)
 //! and `WebKitWebDriver` on `PATH`, so they are ignored by default; see
@@ -1863,6 +1864,114 @@ async fn an_account_is_signed_in_and_managed_through_the_window() {
         "synthetic-access-",
         "synthetic-refresh-",
     ] {
+        assert!(!printed.contains(secret), "{secret} printed");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an X display and WebKitWebDriver"]
+async fn a_link_downloads_through_a_chosen_account_in_the_window() {
+    let provider = rd::Server::start().await;
+    let file = body(MIB);
+    provider.with(|rd| {
+        rd.file = file.to_vec();
+        rd.filesize = file.len() as u64;
+    });
+    let mut dirs = Dirs::new().await;
+    dirs.args.extend([
+        "--provider-endpoint".to_owned(),
+        format!("real-debrid={}", provider.base()),
+    ]);
+    let shell = Shell::launch(&dirs).await;
+    shell.click("[data-key=\"open-settings\"]").await;
+    shell
+        .click("[data-key=\"settings-section-accounts\"]")
+        .await;
+    shell.click("[data-key=\"add-account\"]").await;
+    shell.click("[data-key=\"pick-real-debrid\"]").await;
+    let alias = shell
+        .client
+        .wait()
+        .at_most(DEADLINE)
+        .for_element(Locator::Css("#account-alias"))
+        .await
+        .unwrap();
+    alias.send_keys("Main").await.unwrap();
+    shell.click("[data-key=\"sign-in-start\"]").await;
+    accounts_say(&shell, "Account added and signed in.").await;
+    shell.click("[data-key=\"settings-back\"]").await;
+
+    // Collecting asks the provider for nothing.
+    shell
+        .collect(
+            "https://hoster.example/file/abc",
+            "Collected 1 link for review.",
+        )
+        .await;
+    assert_eq!(provider.hits(rd::UNRESTRICT_PATH), 0);
+    tick(&shell, "abc").await;
+    shell
+        .click(".links-page [data-key=\"links-start\"]:not([disabled])")
+        .await;
+    // Direct is the default; the account is chosen instead.
+    shell
+        .wait_for(
+            "document.querySelector('.start-links input[value=\"direct\"]')?.checked === true",
+        )
+        .await;
+    assert_eq!(provider.hits(rd::UNRESTRICT_PATH), 0);
+    shell
+        .click(".start-links input[name=\"links-route\"]:not([value=\"direct\"])")
+        .await;
+    shell.click(".start-links button[type=\"submit\"]").await;
+    shell
+        .wait_for("document.querySelector('.links-page .notice > span')?.textContent.startsWith('Started 1 download.')")
+        .await;
+    let saved = eventually(|| async {
+        std::fs::read(dirs.root.join("Synthetic File.bin"))
+            .ok()
+            .filter(|bytes| bytes.len() == file.len())
+    })
+    .await;
+    assert!(saved == file, "the provider's file, byte for byte");
+    assert_eq!(provider.hits(rd::UNRESTRICT_PATH), 1);
+    for request in provider.log() {
+        if request.path.starts_with("/d/") {
+            assert_eq!(
+                request.authorization, None,
+                "credentials sent to {}",
+                request.path
+            );
+        }
+    }
+    shell
+        .click(".workspace > :not([hidden]) [data-key=\"view-downloads\"]")
+        .await;
+    shell.wait_for_state("job-1", "Done").await;
+    shell.click("tr[data-job=\"job-1\"] td.name a").await;
+    shell
+        .wait_for("document.querySelector('[data-fact=\"download-via\"]')?.textContent === 'Real-Debrid, Main'")
+        .await;
+
+    // Neither the generated link nor a credential reached the page, its
+    // storage, or the app's output.
+    let seen = shell
+        .js("return JSON.stringify([document.documentElement.outerHTML, location.href, Object.entries(localStorage), Object.entries(sessionStorage)])")
+        .await;
+    let seen = seen.as_str().unwrap();
+    let secrets = [
+        rd::DEVICE_CODE,
+        rd::CLIENT_SECRET,
+        rd::SIGNATURE,
+        "synthetic-access-",
+        "synthetic-refresh-",
+    ];
+    for secret in secrets {
+        assert!(!seen.contains(secret), "{secret} in the page");
+    }
+    let notices = shell.close().await;
+    let printed = serde_json::to_string(&notices).unwrap();
+    for secret in secrets {
         assert!(!printed.contains(secret), "{secret} printed");
     }
 }

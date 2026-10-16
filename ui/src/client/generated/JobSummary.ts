@@ -7,6 +7,7 @@ import type { FailureSummary } from "./FailureSummary.js";
 import type { Generation } from "./Generation.js";
 import type { HostName } from "./HostName.js";
 import type { JobId } from "./JobId.js";
+import type { JobRoute } from "./JobRoute.js";
 import type { JobStage } from "./JobStage.js";
 import type { PackageId } from "./PackageId.js";
 import type { Revision } from "./Revision.js";
@@ -78,4 +79,12 @@ destination?: RootId | null,
  * from zero, such as a file that changed on the server. Kept until the
  * job is retried again. Added in protocol 1.2.
  */
-restart_reason?: DiagnosticText | null, };
+restart_reason?: DiagnosticText | null, 
+/**
+ * The provider account the job downloads through, chosen when it was
+ * started; absent for a direct download. Names the account only by
+ * its ID: its alias and username are for clients that may see
+ * accounts. Boxed, as most jobs have none, to keep summaries and the
+ * events carrying them small. Added in protocol 2.2.
+ */
+route?: JobRoute, };

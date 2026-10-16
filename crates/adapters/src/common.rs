@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use url::Url;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
-    ApiClient, ApiErrorKind, ApiMethod, ApiRequest, ApiResponse, ProviderError,
+    ApiClient, ApiError, ApiErrorKind, ApiMethod, ApiRequest, ApiResponse, ProviderError,
 };
 use wayfetch_engine::domain::time::UtcTimestamp;
 
@@ -115,6 +115,32 @@ impl Api {
         &self.endpoint
     }
 
+    /// Sends one bounded request, and says exactly how it failed: whether
+    /// the provider may have seen it matters for a request that must not
+    /// be repeated.
+    pub async fn send(
+        &self,
+        method: ApiMethod,
+        url: Url,
+        bearer: Option<&str>,
+        form: Option<Secret>,
+    ) -> Result<ApiResponse, ApiError> {
+        let request = ApiRequest {
+            method,
+            url,
+            bearer: bearer.map(Secret::from_text),
+            form,
+            deadline: REQUEST_DEADLINE,
+            max_body: MAX_BODY,
+        };
+        self.client.send(&request).await
+    }
+
+    /// The provider's name, for messages.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
     /// Sends one bounded request. A failure to get any answer is
     /// [`ProviderError::Unavailable`]; any status is an answer.
     pub async fn call(
@@ -124,25 +150,21 @@ impl Api {
         bearer: Option<&str>,
         form: Option<Secret>,
     ) -> Result<ApiResponse, ProviderError> {
-        let request = ApiRequest {
-            method,
-            url,
-            bearer: bearer.map(Secret::from_text),
-            form,
-            deadline: REQUEST_DEADLINE,
-            max_body: MAX_BODY,
-        };
         let name = self.name;
-        self.client.send(&request).await.map_err(|e| match e.kind {
-            ApiErrorKind::Unreachable | ApiErrorKind::Timeout => {
-                ProviderError::Unavailable(format!("{name} could not be reached: {}", e.message))
-            }
-            ApiErrorKind::TooLarge => self.malformed("a request: the answer is too large"),
-            ApiErrorKind::Refused => ProviderError::Malformed(format!(
-                "the request to {name} was refused: {}",
-                e.message
-            )),
-        })
+        self.send(method, url, bearer, form)
+            .await
+            .map_err(|e| match e.kind {
+                ApiErrorKind::Unreachable | ApiErrorKind::Timeout | ApiErrorKind::Interrupted => {
+                    ProviderError::Unavailable(format!(
+                        "{name} could not be reached: {}",
+                        e.message
+                    ))
+                }
+                ApiErrorKind::TooLarge => self.malformed("a request: the answer is too large"),
+                ApiErrorKind::Refused | ApiErrorKind::Unreadable => ProviderError::Malformed(
+                    format!("the request to {name} was refused: {}", e.message),
+                ),
+            })
     }
 
     /// An answer to `what` this integration cannot use.

@@ -99,13 +99,27 @@ pub struct JobCommandRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub name: Option<String>,
+    /// For [`Action::Retry`] only: repeat a provider operation whose
+    /// outcome is unknown, accepting possible duplicate provider work
+    /// ([`Command::Retry`]). Added in protocol 2.2.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub repeat_provider_operation: Option<bool>,
 }
 
 impl JobCommandRequest {
     /// The command envelope for `job`. A name is required for a rename and
-    /// refused with any other action.
+    /// refused with any other action; only a retry may repeat a provider
+    /// operation.
     pub fn into_envelope(self, job: JobId) -> Result<CommandEnvelope, ProtocolError> {
         let expected_revision = self.expected_revision;
+        let repeat_provider_operation = self.repeat_provider_operation.unwrap_or(false);
+        if repeat_provider_operation && self.action != Action::Retry {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "only a retry repeats a provider operation",
+            ));
+        }
         let command = match (self.action, self.name) {
             (Action::Rename, Some(name)) => Command::Rename {
                 job,
@@ -143,6 +157,7 @@ impl JobCommandRequest {
             (Action::Retry, None) => Command::Retry {
                 job,
                 expected_revision,
+                repeat_provider_operation,
             },
         };
         Ok(CommandEnvelope {
@@ -284,6 +299,11 @@ pub struct LinksCommandRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub destination: Option<RootId>,
+    /// For [`LinksAction::Start`] only: the provider account to download
+    /// through, directly if absent. Added in protocol 2.2.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub account: Option<AccountId>,
 }
 
 impl LinksCommandRequest {
@@ -291,6 +311,12 @@ impl LinksCommandRequest {
     /// refused with any other action.
     pub fn into_envelope(self) -> Result<CommandEnvelope, ProtocolError> {
         let links = LinkRefs::try_from(self.links)?;
+        if self.account.is_some() && self.action != LinksAction::Start {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "only a start takes an account",
+            ));
+        }
         let command = match (self.action, self.destination) {
             (LinksAction::Move, Some(destination)) => Command::MoveLinks { links, destination },
             (LinksAction::Move, None) => {
@@ -305,7 +331,10 @@ impl LinksCommandRequest {
                     "only a move takes a destination",
                 ));
             }
-            (LinksAction::Start, None) => Command::StartLinks { links },
+            (LinksAction::Start, None) => Command::StartLinks {
+                links,
+                account: self.account,
+            },
             (LinksAction::Remove, None) => Command::RemoveLinks { links },
         };
         Ok(CommandEnvelope {
@@ -587,7 +616,11 @@ mod tests {
     #[test]
     fn link_commands_name_each_link_once_at_a_revision() {
         let one = json!([{"link": "src-3", "revision": 2}]);
-        let Command::StartLinks { links: refs } = links("start", one.clone(), None).unwrap() else {
+        let Command::StartLinks {
+            links: refs,
+            account: None,
+        } = links("start", one.clone(), None).unwrap()
+        else {
             panic!()
         };
         assert_eq!(
@@ -623,6 +656,67 @@ mod tests {
             links("start", json!(many), None).unwrap_err().code,
             ErrorCode::LimitExceeded
         );
+    }
+
+    #[test]
+    fn only_a_start_names_an_account_and_only_a_retry_repeats() {
+        let one = json!([{"link": "src-3", "revision": 2}]);
+        let with_account = |action: &str| {
+            serde_json::from_value::<LinksCommandRequest>(json!({
+                "idempotency_key": IdempotencyKey::generate(),
+                "target": InstanceId::generate(),
+                "action": action,
+                "links": one,
+                "account": "acct-4",
+            }))
+            .unwrap()
+            .into_envelope()
+            .map(|e| e.command)
+        };
+        let started = with_account("start").unwrap();
+        assert!(matches!(
+            &started,
+            Command::StartLinks { account: Some(a), .. } if a.get() == 4
+        ));
+        assert_eq!(
+            started.required_permissions(),
+            [
+                crate::Permission::Submit,
+                crate::Permission::ProviderDownloads
+            ]
+        );
+        assert_eq!(
+            with_account("remove").unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        let job = |action: &str| {
+            serde_json::from_value::<JobCommandRequest>(json!({
+                "idempotency_key": IdempotencyKey::generate(),
+                "target": InstanceId::generate(),
+                "action": action,
+                "expected_revision": 2,
+                "repeat_provider_operation": true,
+            }))
+            .unwrap()
+            .into_envelope(JobId::from_u64(1).unwrap())
+            .map(|e| e.command)
+        };
+        let retry = job("retry").unwrap();
+        assert!(matches!(
+            retry,
+            Command::Retry {
+                repeat_provider_operation: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            retry.required_permissions(),
+            [
+                crate::Permission::Control,
+                crate::Permission::ProviderDownloads
+            ]
+        );
+        assert_eq!(job("resume").unwrap_err().code, ErrorCode::InvalidRequest);
     }
 
     #[test]

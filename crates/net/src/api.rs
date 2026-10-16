@@ -77,7 +77,7 @@ impl HttpTransport {
         let status = response.status();
         if status.is_redirection() && status != StatusCode::NOT_MODIFIED {
             return Err(fail(
-                ApiErrorKind::Refused,
+                ApiErrorKind::Unreadable,
                 format!("HTTP {status}: provider API redirects are not followed"),
             ));
         }
@@ -86,7 +86,10 @@ impl HttpTransport {
             .get(header::CONTENT_ENCODING)
             .is_some_and(|v| !v.as_bytes().eq_ignore_ascii_case(b"identity"));
         if encoded {
-            return Err(fail(ApiErrorKind::Refused, "the response body is encoded"));
+            return Err(fail(
+                ApiErrorKind::Unreadable,
+                "the response body is encoded",
+            ));
         }
         let too_large = || {
             fail(
@@ -101,7 +104,14 @@ impl HttpTransport {
             return Err(too_large());
         }
         let mut body = Zeroizing::new(Vec::new());
-        while let Some(chunk) = response.chunk().await.map_err(send_failure)? {
+        // The request was sent: a failure now loses the provider's answer.
+        while let Some(chunk) = response.chunk().await.map_err(|e| {
+            let mut e = send_failure(e);
+            if e.kind == ApiErrorKind::Unreachable {
+                e.kind = ApiErrorKind::Interrupted;
+            }
+            e
+        })? {
             if body.len() + chunk.len() > request.max_body {
                 return Err(too_large());
             }
@@ -136,10 +146,13 @@ fn send_failure(err: reqwest::Error) -> ApiError {
             format!("TLS verification failed: {tls}"),
         );
     }
+    // Only a failed connection proves the provider never saw the request.
     let kind = if err.is_timeout() {
         ApiErrorKind::Timeout
-    } else {
+    } else if err.is_connect() {
         ApiErrorKind::Unreachable
+    } else {
+        ApiErrorKind::Interrupted
     };
     let detail = match std::error::Error::source(&err) {
         Some(source) => format!("{err}: {source}"),
