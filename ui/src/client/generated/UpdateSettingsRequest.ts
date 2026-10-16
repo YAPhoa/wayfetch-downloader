@@ -33,6 +33,6 @@ default_root?: RootId,
  */
 max_active_downloads?: PreferenceChange, 
 /**
- * The total download speed limit. Added in protocol 2.2.
+ * The total download speed limit. Added in protocol 2.3.
  */
 download_speed_limit?: SpeedLimitChange, };

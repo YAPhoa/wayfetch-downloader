@@ -174,7 +174,7 @@ pub(crate) struct SavedSettings {
     pub(crate) download_speed_limit: Option<SpeedLimit>,
 }
 
-/// A speed limit's stored form: 0 is Unlimited (migration 12).
+/// A speed limit's stored form: 0 is Unlimited (migration 13).
 fn stored_speed_limit(limit: SpeedLimit) -> Result<i64, StoreError> {
     match limit {
         SpeedLimit::Unlimited => Ok(0),

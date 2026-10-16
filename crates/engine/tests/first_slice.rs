@@ -2518,7 +2518,13 @@ fn refs(links: &[&CollectedLink]) -> LinkRefs {
 }
 
 fn start_links(owner: &EngineOwner, links: &[&CollectedLink]) -> CommandEnvelope {
-    envelope(owner, Command::StartLinks { links: refs(links) })
+    envelope(
+        owner,
+        Command::StartLinks {
+            links: refs(links),
+            account: None,
+        },
+    )
 }
 
 async fn links(owner: &EngineOwner) -> LinkPage {
@@ -2916,6 +2922,7 @@ fn retry(owner: &EngineOwner, job: &JobSummary) -> CommandEnvelope {
         Command::Retry {
             job: job.id,
             expected_revision: job.revision,
+            repeat_provider_operation: false,
         },
     )
 }

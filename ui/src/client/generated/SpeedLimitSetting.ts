@@ -4,7 +4,7 @@ import type { SpeedLimit } from "./SpeedLimit.js";
 
 /**
  * The total download speed limit, as the operator's policy and the
- * user's saved choice resolve it. Added in protocol 2.2.
+ * user's saved choice resolve it. Added in protocol 2.3.
  */
 export type SpeedLimitSetting = { 
 /**

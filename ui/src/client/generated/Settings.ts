@@ -30,6 +30,6 @@ roots: Array<RootSummary>,
 max_active_downloads: BoundedSetting, 
 /**
  * The combined rate of every download's body, engine-wide. Added in
- * protocol 2.2.
+ * protocol 2.3.
  */
 download_speed_limit: SpeedLimitSetting, };

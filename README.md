@@ -167,8 +167,10 @@ beyond loopback has no TLS of its own and belongs behind an authenticated TLS
 reverse proxy. Every request needs `Authorization: Bearer TOKEN`. The token file
 holds one `TOKEN PERMISSION[,PERMISSION...]` per line, with permissions `read`,
 `submit`, `control`, `sources` (reading back submitted links, which can
-carry signed tokens), and `accounts` (provider sign-ins; no other permission
-implies it), and must be readable only by its owner. If it does not
+carry signed tokens), `accounts` (provider sign-ins), and `provider_downloads`
+(choosing an account to download through when starting links, which spends
+that account's provider work); no other permission implies either of the last
+two. The file must be readable only by its owner. If it does not
 exist, `wayfetchd` creates it with one token holding every permission; the token
 is never printed.
 
@@ -179,11 +181,11 @@ is never printed.
 | `GET /v1/jobs` | A page of jobs: `after`, `page_size`, `stage=a,b`, `package` |
 | `GET /v1/jobs/{id}` | One job |
 | `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
-| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"rename", "expected_revision"}`, plus `"name"` for a rename |
+| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"rename", "expected_revision"}`, plus `"name"` for a rename, and `"repeat_provider_operation": true` to retry a provider request whose answer was lost (needs `provider_downloads`) |
 | `GET /v1/jobs/{id}/source` | The link the job was submitted with (needs `sources`) |
 | `POST /v1/staging/links` | Collect links for review without downloading them: `{"idempotency_key", "target", "items": [text...], "destination"?: "root-N"}` |
 | `GET /v1/staging/links` | A page of collected links: `after`, `page_size` |
-| `POST /v1/staging/commands` | `{"idempotency_key", "target", "action": "start"\|"remove"\|"move", "links": [{"link", "revision"}...]}`, plus `"destination"` for a move |
+| `POST /v1/staging/commands` | `{"idempotency_key", "target", "action": "start"\|"remove"\|"move", "links": [{"link", "revision"}...]}`, plus `"destination"` for a move, and `"account"` to start through a provider account (needs `provider_downloads`) |
 | `GET /v1/staging/links/{id}/source` | A collected link as entered (needs `sources`) |
 | `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem`, `max_active_downloads` with its source, default, saved value, range, lock, and conflict, and `download_speed_limit` likewise, with whether Unlimited is allowed |
 | `PUT /v1/settings` | `{"idempotency_key", "target", "expected_revision"}` with `"default_root": "root-N"`, `"max_active_downloads": {"set": N}` or `"use_default"`, `"download_speed_limit": {"set": "unlimited"}`, `{"set": {"bytes_per_second": N}}` or `"use_default"`, or any of them together, all or none (needs `control`) |
@@ -232,8 +234,19 @@ Downloads without an account keep working either way. Real-Debrid is the only se
 Signing in uses its device flow: the request answers with a code and a
 Real-Debrid page where you enter it, and no password or token ever passes
 through the API. Responses never carry stored credentials, and account
-routes are never cached. Signing in to Real-Debrid does not yet make
-downloads go through it.
+routes are never cached.
+
+Starting collected links with `"account"` downloads each through that
+Real-Debrid account: when a download starts, Real-Debrid makes a download
+link for it, which Wayfetch keeps encrypted and never shows. The job keeps
+the account as its `route`, and a provider failure stops the job and says
+what to do; it never falls back to a direct download. Without `"account"`,
+and for `/v1/inputs`, links download directly as before. If Real-Debrid's
+answer was lost, the job fails as `operation_ambiguous` once Wayfetch has
+checked Real-Debrid's downloads list and found no matching link; retrying it
+needs `"repeat_provider_operation": true`, since Real-Debrid may then do the
+work twice. One link gives one file over one connection. Folders,
+password-protected links, torrents, and streaming are not supported.
 
 `target` is the instance from `/v1/capabilities` and `idempotency_key` a fresh
 UUID per logical command; a retry with the same key returns the first result.
@@ -426,8 +439,11 @@ a searchable catalogue of file hosts, cloud storage and multi-host
 services, found by name, by any of their domains, or by a pasted link.
 Only Real-Debrid can be signed in to so far; the others say Not available
 yet. Signing in shows a code to enter on Real-Debrid's own page and waits
-for your approval there; signing in does not yet make downloads use the
-account, and direct links never need one. This section needs the `accounts`
+for your approval there. Once an enabled account can download, Start on the
+Links page asks how to download: Direct, the default, or through one of
+those accounts; a download's details say which (Download via). Retrying a
+download whose request to the provider had its answer lost asks first, as
+the provider may do that work twice. Direct links never need an account. This section needs the `accounts`
 permission, which a browser's owner session has. Each row of the
 download table has a menu, from its "…"
 button, a right-click, or Shift+F10 or the Menu key: rename a finished

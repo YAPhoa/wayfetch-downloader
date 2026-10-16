@@ -156,12 +156,13 @@ export class HttpClient {
   }
 
   /**
-   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId }} request
+   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId, account?: AccountId }} request
    */
-  linksCommand({ idempotencyKey, target, action, links, destination }) {
+  linksCommand({ idempotencyKey, target, action, links, destination, account }) {
     /** @type {LinksCommandRequest} */
     const body = { idempotency_key: idempotencyKey, target, action, links };
     if (destination !== undefined) body.destination = destination;
+    if (account !== undefined) body.account = account;
     return this.request('POST', '/v1/staging/commands', { body });
   }
 
@@ -173,9 +174,9 @@ export class HttpClient {
 
   /**
    * @param {JobId} job
-   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number, name?: string }} request
+   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number, name?: string, repeatProviderOperation?: boolean }} request
    */
-  jobCommand(job, { idempotencyKey, target, action, expectedRevision, name }) {
+  jobCommand(job, { idempotencyKey, target, action, expectedRevision, name, repeatProviderOperation }) {
     /** @type {JobCommandRequest} */
     const body = {
       idempotency_key: idempotencyKey,
@@ -184,6 +185,7 @@ export class HttpClient {
       expected_revision: expectedRevision,
     };
     if (name !== undefined) body.name = name;
+    if (repeatProviderOperation) body.repeat_provider_operation = true;
     return this.request('POST', `/v1/jobs/${encodeURIComponent(job)}/commands`, { body });
   }
 

@@ -119,7 +119,7 @@ const FAILURES = Object.freeze({
   operation_ambiguous: {
     short: 'outcome unknown',
     explain:
-      'Wayfetch could not tell whether its last request went through, so it did not repeat it. Check the source before trying again.',
+      'Wayfetch could not tell whether its last request to the provider went through, so it did not repeat it. Retry asks before repeating it, since the provider may do that work twice.',
   },
   token_expired: {
     short: 'sign-in expired',

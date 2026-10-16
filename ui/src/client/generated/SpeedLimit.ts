@@ -2,7 +2,7 @@
 
 /**
  * A cap on the combined rate of download bodies, in bytes per second.
- * Added in protocol 2.2.
+ * Added in protocol 2.3.
  *
  * On the wire, `"unlimited"` or `{"bytes_per_second": n}`. No number
  * stands for Unlimited: zero is refused like any value below the

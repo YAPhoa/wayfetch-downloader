@@ -130,6 +130,38 @@ impl Keys {
         service: &ProviderId,
         credential: &Secret,
     ) -> Result<Vec<u8>, SealError> {
+        self.seal_as(Purpose::Credential, reference, service, credential)
+    }
+
+    /// Seals what a provider operation returned, such as a generated
+    /// download link, for the record `reference` of `service`. Such a
+    /// record never opens as a credential, nor a credential as one.
+    pub(crate) fn seal_result(
+        &self,
+        reference: &Reference,
+        service: &ProviderId,
+        result: &Secret,
+    ) -> Result<Vec<u8>, SealError> {
+        self.seal_as(Purpose::ProviderResult, reference, service, result)
+    }
+
+    /// Opens a record [`Self::seal_result`] produced.
+    pub(crate) fn open_result(
+        &self,
+        reference: &Reference,
+        service: &ProviderId,
+        sealed: &[u8],
+    ) -> Result<Secret, SealError> {
+        self.open_as(Purpose::ProviderResult, reference, service, sealed)
+    }
+
+    fn seal_as(
+        &self,
+        purpose: Purpose,
+        reference: &Reference,
+        service: &ProviderId,
+        credential: &Secret,
+    ) -> Result<Vec<u8>, SealError> {
         if credential.len() > MAX_CREDENTIAL_BYTES {
             return Err(SealError::TooLarge);
         }
@@ -145,7 +177,7 @@ impl Keys {
             .aead
             .seal_in_place_separate_tag(
                 Nonce::assume_unique_for_key(head.try_into().expect("nonce length")),
-                Aad::from(associated(reference, service)),
+                Aad::from(associated(purpose, reference, service)),
                 body,
             )
             .map_err(|_| SealError::TooLarge)?;
@@ -161,6 +193,16 @@ impl Keys {
         service: &ProviderId,
         sealed: &[u8],
     ) -> Result<Secret, SealError> {
+        self.open_as(Purpose::Credential, reference, service, sealed)
+    }
+
+    fn open_as(
+        &self,
+        purpose: Purpose,
+        reference: &Reference,
+        service: &ProviderId,
+        sealed: &[u8],
+    ) -> Result<Secret, SealError> {
         if sealed.len() < SEAL_OVERHEAD || sealed.len() > SEAL_OVERHEAD + MAX_CREDENTIAL_BYTES {
             return Err(SealError::Tampered);
         }
@@ -170,7 +212,7 @@ impl Keys {
             .aead
             .open_in_place(
                 Nonce::assume_unique_for_key(nonce.try_into().expect("nonce length")),
-                Aad::from(associated(reference, service)),
+                Aad::from(associated(purpose, reference, service)),
                 &mut body,
             )
             .map_err(|_| SealError::Tampered)?;
@@ -178,10 +220,22 @@ impl Keys {
     }
 }
 
-/// The associated data binding a record to its format, reference, and
-/// service.
-fn associated(reference: &Reference, service: &ProviderId) -> Vec<u8> {
-    let mut aad = b"wayfetch credential\0".to_vec();
+/// What a sealed record holds.
+#[derive(Debug, Clone, Copy)]
+enum Purpose {
+    /// An account's credentials.
+    Credential,
+    /// What a provider operation returned.
+    ProviderResult,
+}
+
+/// The associated data binding a record to what it holds, its format,
+/// reference, and service.
+fn associated(purpose: Purpose, reference: &Reference, service: &ProviderId) -> Vec<u8> {
+    let mut aad = match purpose {
+        Purpose::Credential => b"wayfetch credential\0".to_vec(),
+        Purpose::ProviderResult => b"wayfetch provider result\0".to_vec(),
+    };
     aad.push(FORMAT);
     aad.extend_from_slice(reference);
     aad.extend_from_slice(service.as_str().as_bytes());
@@ -464,6 +518,14 @@ mod tests {
         assert!(keys.open(&reference, &other_service, &sealed).is_err());
         let other_key = Vault::initialize(&dir.path().join("k2")).unwrap();
         assert!(other_key.open(&reference, &service(), &sealed).is_err());
+        // A credential never opens as a provider result, nor one as the other.
+        assert!(keys.open_result(&reference, &service(), &sealed).is_err());
+        let result = keys.seal_result(&reference, &service(), &secret).unwrap();
+        assert_eq!(
+            keys.open_result(&reference, &service(), &result).unwrap(),
+            secret
+        );
+        assert!(keys.open(&reference, &service(), &result).is_err());
         assert!(keys.open(&reference, &service(), &sealed[..10]).is_err());
 
         let huge = Secret::new(vec![0; MAX_CREDENTIAL_BYTES + 1]);

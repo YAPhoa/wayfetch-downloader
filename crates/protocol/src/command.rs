@@ -96,6 +96,12 @@ pub enum Permission {
     /// since accounts hold the user's provider credentials. Added in
     /// protocol 1.3; clients treat permissions they do not know as absent.
     Accounts,
+    /// Download through provider accounts: choose an account when starting
+    /// links, and confirm repeating a provider operation whose outcome was
+    /// lost. Using an account spends its provider work, so no other
+    /// permission implies it; it neither lists nor manages accounts, which
+    /// is [`Permission::Accounts`]. Added in protocol 2.2.
+    ProviderDownloads,
 }
 
 /// One URL to ingest.
@@ -327,15 +333,24 @@ pub enum Command {
         expected_revision: Revision,
     },
     /// Start a failed or cancelled job again as a new attempt of the same
-    /// job, keeping its source, destination, and collected link. The
-    /// attempt continues the job's verified saved data when it safely can,
-    /// and otherwise starts from zero and says why. A failure whose retry
-    /// deadline has not passed is refused. Added in protocol 1.2.
+    /// job, keeping its source, destination, collected link, and the
+    /// account it downloads through. The attempt continues the job's
+    /// verified saved data when it safely can, and otherwise starts from
+    /// zero and says why. A failure whose retry deadline has not passed is
+    /// refused. Added in protocol 1.2.
     Retry {
         /// The job.
         job: JobId,
         /// The job revision the client last saw.
         expected_revision: Revision,
+        /// Repeat a provider operation whose outcome is unknown (the job
+        /// failed as `operation_ambiguous`), accepting that the provider may
+        /// do the work twice. The engine first looks once more for evidence
+        /// that the earlier operation succeeded. Without it such a retry is
+        /// refused. Needs [`Permission::ProviderDownloads`] as well. Added in
+        /// protocol 2.2.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        repeat_provider_operation: bool,
     },
     /// Change the user's settings, all or none: where jobs submitted from
     /// now on are saved (jobs already submitted keep their destination),
@@ -353,7 +368,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_active_downloads: Option<PreferenceChange>,
         /// The combined rate of every download's body. Added in protocol
-        /// 2.2; older clients omit it, which leaves it unchanged.
+        /// 2.3; older clients omit it, which leaves it unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         download_speed_limit: Option<SpeedLimitChange>,
     },
@@ -402,6 +417,15 @@ pub enum Command {
     StartLinks {
         /// The links.
         links: LinkRefs,
+        /// The provider account to download them through; directly from
+        /// their hosts if absent. It must be an enabled account of a
+        /// service whose downloads the engine supports. The choice is kept
+        /// with each download, and never changed silently: a provider
+        /// failure fails the download instead of trying another route.
+        /// Needs [`Permission::ProviderDownloads`] as well. Added in
+        /// protocol 2.2.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<AccountId>,
     },
     /// Remove collected links from the list. Only their collected records
     /// go; downloads already started are not affected. Added in protocol
@@ -471,7 +495,7 @@ pub enum PreferenceChange {
     UseDefault,
 }
 
-/// A change to the total download speed limit. Added in protocol 2.2.
+/// A change to the total download speed limit. Added in protocol 2.3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -490,7 +514,28 @@ impl Permission {
 }
 
 impl Command {
-    /// The permission the caller needs.
+    /// Every permission the caller needs: [`Self::required_permission`],
+    /// and [`Permission::ProviderDownloads`] for a command that has a
+    /// provider account do work, so neither a submit-only nor a
+    /// control-only client can use an account implicitly.
+    pub fn required_permissions(&self) -> Vec<Permission> {
+        let mut required = vec![self.required_permission()];
+        let uses_account = match self {
+            Self::StartLinks { account, .. } => account.is_some(),
+            Self::Retry {
+                repeat_provider_operation,
+                ..
+            } => *repeat_provider_operation,
+            _ => false,
+        };
+        if uses_account {
+            required.push(Permission::ProviderDownloads);
+        }
+        required
+    }
+
+    /// The main permission the caller needs; see
+    /// [`Self::required_permissions`] for all of them.
     pub const fn required_permission(&self) -> Permission {
         match self {
             Self::Submit { .. } | Self::CollectLinks { .. } | Self::StartLinks { .. } => {
@@ -852,6 +897,7 @@ mod tests {
         let retry = Command::Retry {
             job: JobId::from_u64(3).unwrap(),
             expected_revision: Revision::from_u64(2).unwrap(),
+            repeat_provider_operation: false,
         };
         let canonical = br#"{"type":"retry","job":"job-3","expected_revision":2}"#;
         let digest: [u8; 32] = Sha256::digest(canonical).into();
@@ -877,8 +923,10 @@ mod tests {
         let retry = Command::Retry {
             job: JobId::from_u64(1).unwrap(),
             expected_revision: Revision::INITIAL,
+            repeat_provider_operation: false,
         };
         assert_eq!(retry.required_permission(), Permission::Control);
+        assert_eq!(retry.required_permissions(), [Permission::Control]);
         assert_eq!(
             "sources".parse::<Permission>().unwrap(),
             Permission::Sources
@@ -893,6 +941,31 @@ mod tests {
             "accounts".parse::<Permission>().unwrap(),
             Permission::Accounts
         );
+    }
+
+    #[test]
+    fn a_start_without_an_account_keeps_its_older_wire_form() {
+        // A 2.1 client's start, and its stored fingerprint, are unchanged by
+        // the optional account added in 2.2.
+        let links = LinkRefs::try_from(vec![LinkRef {
+            link: SourceLinkId::from_u64(3).unwrap(),
+            revision: Revision::INITIAL,
+        }])
+        .unwrap();
+        let direct = Command::StartLinks {
+            links: links.clone(),
+            account: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&direct).unwrap(),
+            r#"{"type":"start_links","links":[{"link":"src-3","revision":1}]}"#
+        );
+        assert_eq!(direct.required_permissions(), [Permission::Submit]);
+        let via = Command::StartLinks {
+            links,
+            account: AccountId::from_u64(2),
+        };
+        assert_ne!(via.fingerprint(), direct.fingerprint());
     }
 
     #[test]

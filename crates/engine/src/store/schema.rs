@@ -32,7 +32,8 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0009_manual_retry.sql")),
     M::up(include_str!("migrations/0010_preferences.sql")),
     M::up(include_str!("migrations/0011_accounts.sql")),
-    M::up(include_str!("migrations/0012_speed_limit.sql")),
+    M::up(include_str!("migrations/0012_provider_downloads.sql")),
+    M::up(include_str!("migrations/0013_speed_limit.sql")),
 ];
 
 /// Newest schema version this engine knows.
@@ -111,9 +112,63 @@ mod tests {
     }
 
     #[test]
-    fn the_speed_limit_upgrade_preserves_settings_and_saves_nothing() {
+    fn existing_jobs_download_directly_after_the_provider_upgrade() {
         let mut conn = Connection::open_in_memory().unwrap();
         Migrations::from_slice(&MIGRATIONS[..11])
+            .to_latest(&mut conn)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO packages (id, name, created_at) VALUES (1, 'p', 0); \
+             INSERT INTO input_batches (id, package_id, input_count, created_at) \
+                 VALUES (1, 1, 1, 0); \
+             INSERT INTO source_links (id, batch_id, ordinal, input_url) \
+                 VALUES (1, 1, 0, 'https://files.example/a'); \
+             INSERT INTO jobs (id, source_link_id, package_id, desired_state, stage, \
+                 generation, revision, created_at, updated_at) \
+                 VALUES (1, 1, 1, 'running', 'queued', 1, 1, 0, 0);",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
+        let route: (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT route_service, route_account FROM jobs WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(route, (None, None));
+        // A route names both its service and its account, or neither.
+        assert!(
+            conn.execute(
+                "UPDATE jobs SET route_service = 'real-debrid' WHERE id = 1",
+                []
+            )
+            .is_err()
+        );
+        conn.execute(
+            "UPDATE jobs SET route_service = 'real-debrid', route_account = 3 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        // One open operation per job, and a link only in a succeeded one.
+        let intend = "INSERT INTO provider_operations \
+             (job_id, generation, service, account_id, state, started_at) \
+             VALUES (1, 1, 'real-debrid', 3, 'intended', 0)";
+        conn.execute(intend, []).unwrap();
+        assert!(conn.execute(intend, []).is_err());
+        assert!(
+            conn.execute(
+                "UPDATE provider_operations SET reference = zeroblob(16), sealed = zeroblob(40)",
+                []
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_speed_limit_upgrade_preserves_settings_and_provider_state() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATIONS[..12])
             .to_latest(&mut conn)
             .unwrap();
         conn.execute(
@@ -121,7 +176,50 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), 12);
+        conn.execute_batch(
+            "INSERT INTO accounts (id, service, revision, credential_generation, enabled, \
+                 status, added_at, sign_in) VALUES (3, 'real-debrid', 7, 4, 1, 'authenticated', 0, 2); \
+             INSERT INTO account_credentials (account_id, reference, format, sealed) \
+                 VALUES (3, zeroblob(16), 1, zeroblob(40)); \
+             INSERT INTO packages (id, name, created_at) VALUES (1, 'p', 0); \
+             INSERT INTO input_batches (id, package_id, input_count, created_at) VALUES (1, 1, 1, 0); \
+             INSERT INTO source_links (id, batch_id, ordinal, input_url) \
+                 VALUES (1, 1, 0, 'https://files.example/a'); \
+             INSERT INTO jobs (id, source_link_id, package_id, desired_state, stage, \
+                 generation, revision, created_at, updated_at, route_service, route_account) \
+                 VALUES (1, 1, 1, 'running', 'queued', 2, 3, 0, 0, 'real-debrid', 3); \
+             INSERT INTO provider_operations (job_id, generation, service, account_id, state, \
+                 started_at, reference, sealed, sign_in) \
+                 VALUES (1, 2, 'real-debrid', 3, 'succeeded', 0, zeroblob(16), zeroblob(40), 2);",
+        )
+        .unwrap();
+        // Compare all provider state, including opaque encrypted records,
+        // before and after applying the new settings migration twice.
+        let provider_state = |conn: &Connection| {
+            [
+                "accounts",
+                "account_credentials",
+                "jobs",
+                "provider_operations",
+            ]
+            .map(|table| {
+                let mut query = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+                let columns = query.column_count();
+                query
+                    .query_map([], |row| {
+                        (0..columns)
+                            .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap()
+            })
+        };
+        let before = provider_state(&conn);
+        assert_eq!(migrate(&mut conn).unwrap(), 13);
+        assert_eq!(migrate(&mut conn).unwrap(), 13);
+        assert_eq!(provider_state(&conn), before);
         let saved: (i64, i64, Option<i64>) = conn
             .query_row(
                 "SELECT revision, max_active_downloads, download_speed_limit FROM settings",

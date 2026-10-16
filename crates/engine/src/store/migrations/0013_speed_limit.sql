@@ -1,4 +1,4 @@
--- Wayfetch state schema, migration 12: the user's total download speed
+-- Wayfetch state schema, migration 13: the user's total download speed
 -- limit.
 --
 -- Migrations are append-only once merged: never edit this file, add the

@@ -12,9 +12,9 @@ use std::num::NonZeroU16;
 
 use serde::{Deserialize, Serialize};
 use wayfetch_domain::failure::FailureCode;
-use wayfetch_domain::id::{BatchId, JobId, PackageId, RootId, SourceLinkId};
+use wayfetch_domain::id::{AccountId, BatchId, JobId, PackageId, RootId, SourceLinkId};
 use wayfetch_domain::job::{DesiredState, DisplayState, JobStage};
-use wayfetch_domain::name::{DiagnosticText, HostName};
+use wayfetch_domain::name::{DiagnosticText, HostName, ProviderId};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{Generation, Revision};
 
@@ -243,6 +243,26 @@ pub struct JobSummary {
     /// job is retried again. Added in protocol 1.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_reason: Option<DiagnosticText>,
+    /// The provider account the job downloads through, chosen when it was
+    /// started; absent for a direct download. Names the account only by
+    /// its ID: its alias and username are for clients that may see
+    /// accounts. Boxed, as most jobs have none, to keep summaries and the
+    /// events carrying them small. Added in protocol 2.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub route: Option<Box<JobRoute>>,
+}
+
+/// How a job is downloaded, when it is not directly from its host. Added
+/// in protocol 2.2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct JobRoute {
+    /// The provider's service, as in the accounts' services.
+    pub service: ProviderId,
+    /// The account. It may have been removed since; the job then fails
+    /// rather than trying another route.
+    pub account: AccountId,
 }
 
 /// A file a job published.
@@ -342,7 +362,7 @@ pub struct Settings {
     /// 2.0.
     pub max_active_downloads: BoundedSetting,
     /// The combined rate of every download's body, engine-wide. Added in
-    /// protocol 2.2.
+    /// protocol 2.3.
     pub download_speed_limit: SpeedLimitSetting,
 }
 
@@ -391,7 +411,7 @@ pub enum SettingSource {
 }
 
 /// A cap on the combined rate of download bodies, in bytes per second.
-/// Added in protocol 2.2.
+/// Added in protocol 2.3.
 ///
 /// On the wire, `"unlimited"` or `{"bytes_per_second": n}`. No number
 /// stands for Unlimited: zero is refused like any value below the
@@ -408,7 +428,7 @@ pub enum SpeedLimit {
 }
 
 /// The total download speed limit, as the operator's policy and the
-/// user's saved choice resolve it. Added in protocol 2.2.
+/// user's saved choice resolve it. Added in protocol 2.3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SpeedLimitSetting {

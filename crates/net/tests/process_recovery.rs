@@ -103,6 +103,7 @@ async fn child_engine() {
         let retry = Command::Retry {
             job: id,
             expected_revision: job.revision,
+            repeat_provider_operation: false,
         };
         owner
             .handle()

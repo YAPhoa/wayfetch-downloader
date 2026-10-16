@@ -1,7 +1,9 @@
 //! A local stand-in for Real-Debrid's API over plain HTTP on `127.0.0.1`,
-//! following the documented device flow and `GET /rest/1.0/user`. Every
-//! value it hands out is synthetic; each answer can be overridden to
-//! misbehave on purpose, and every request is logged.
+//! following the documented device flow, `GET /rest/1.0/user`,
+//! `POST /rest/1.0/unrestrict/link`, and `GET /rest/1.0/downloads`, and
+//! serving the files its generated links name. Every value it hands out
+//! is synthetic; each answer can be overridden to misbehave on purpose,
+//! and every request is logged.
 
 #![allow(dead_code, reason = "each test file uses part of the fixture")]
 
@@ -61,6 +63,27 @@ pub struct Rd {
     /// Answers that replace the normal one, by path, every time.
     pub always: HashMap<&'static str, Answer>,
     pub log: Vec<Logged>,
+    /// Links generated so far, oldest first.
+    pub generated: Vec<Generated>,
+    /// The file every generated link serves.
+    pub file: Vec<u8>,
+    /// The name and size `unrestrict/link` reports (0 for unknown).
+    pub filename: String,
+    pub filesize: u64,
+    /// When generated links are dated, as Real-Debrid writes dates.
+    pub generated_at: String,
+    /// Where generated links redirect instead of serving [`Rd::file`].
+    pub redirect: Option<String>,
+}
+
+/// A link the fixture generated.
+#[derive(Debug, Clone)]
+pub struct Generated {
+    /// The original link.
+    pub link: String,
+    /// The generated link's path below the fixture.
+    pub path: String,
+    pub generated: String,
 }
 
 pub const CLIENT_ID: &str = "synthetic-user-client-id";
@@ -72,6 +95,10 @@ pub const DEVICE_PATH: &str = "/oauth/v2/device/code";
 pub const CREDENTIALS_PATH: &str = "/oauth/v2/device/credentials";
 pub const TOKEN_PATH: &str = "/oauth/v2/token";
 pub const USER_PATH: &str = "/rest/1.0/user";
+pub const UNRESTRICT_PATH: &str = "/rest/1.0/unrestrict/link";
+pub const DOWNLOADS_PATH: &str = "/rest/1.0/downloads";
+/// What generated links carry that grants access.
+pub const SIGNATURE: &str = "synthetic-download-signature";
 
 pub fn premium_user(seconds: i64) -> String {
     format!(
@@ -92,6 +119,12 @@ impl Default for Rd {
             once: HashMap::new(),
             always: HashMap::new(),
             log: Vec::new(),
+            generated: Vec::new(),
+            file: b"synthetic file through real-debrid".to_vec(),
+            filename: "Synthetic File.bin".into(),
+            filesize: 34,
+            generated_at: "2099-01-01T00:00:00.000Z".into(),
+            redirect: None,
         }
     }
 }
@@ -176,8 +209,97 @@ impl Rd {
                     Answer::json(401, r#"{"error":"bad_token","error_code":8}"#)
                 }
             }
+            UNRESTRICT_PATH | DOWNLOADS_PATH if !self.bearer_ok(request) => {
+                Answer::json(401, r#"{"error":"bad_token","error_code":8}"#)
+            }
+            UNRESTRICT_PATH => {
+                let Some(link) = f("link").map(str::to_owned) else {
+                    return Answer::json(400, r#"{"error":"parameter_missing","error_code":1}"#);
+                };
+                let n = self.generated.len() + 1;
+                let path = format!("/d/{n}/{}", self.filename.replace(' ', "%20"));
+                self.generated.push(Generated {
+                    link: link.clone(),
+                    path: path.clone(),
+                    generated: self.generated_at.clone(),
+                });
+                Answer::json(
+                    200,
+                    serde_json::json!({
+                        "id": format!("SYNTH{n}"),
+                        "filename": self.filename,
+                        "mimeType": "application/octet-stream",
+                        "filesize": self.filesize,
+                        "link": link,
+                        "host": "hoster.example",
+                        "chunks": 16,
+                        "crc": 1,
+                        "download": format!("{origin}{path}?sig={SIGNATURE}-{n}"),
+                        "streamable": 0
+                    })
+                    .to_string(),
+                )
+            }
+            DOWNLOADS_PATH => {
+                let limit: usize = q("limit").and_then(|l| l.parse().ok()).unwrap_or(100);
+                let items: Vec<_> = self
+                    .generated
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .take(limit)
+                    .map(|(i, g)| {
+                        serde_json::json!({
+                            "id": format!("SYNTH{}", i + 1),
+                            "filename": self.filename,
+                            "mimeType": "application/octet-stream",
+                            "filesize": self.filesize,
+                            "link": g.link,
+                            "host": "hoster.example",
+                            "chunks": 16,
+                            "download": format!("{origin}{}?sig={SIGNATURE}-{}", g.path, i + 1),
+                            "generated": g.generated
+                        })
+                    })
+                    .collect();
+                if items.is_empty() {
+                    return Answer::Raw(
+                        b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_vec(),
+                    );
+                }
+                Answer::json(200, serde_json::Value::Array(items).to_string())
+            }
+            path if self.generated.iter().any(|g| g.path == path) => {
+                if let Some(location) = &self.redirect {
+                    return Answer::Raw(
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .into_bytes(),
+                    );
+                }
+                let mut head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nETag: \"synthetic\"\r\nConnection: close\r\n\r\n",
+                    self.file.len()
+                )
+                .into_bytes();
+                head.extend_from_slice(&self.file);
+                Answer::Raw(head)
+            }
             _ => Answer::json(404, r#"{"error":"unknown_ressource","error_code":7}"#),
         }
+    }
+
+    fn bearer_ok(&self, request: &Logged) -> bool {
+        match (&request.authorization, &self.valid_access) {
+            (Some(header), Some(token)) => header == &format!("Bearer {token}"),
+            _ => false,
+        }
+    }
+
+    /// How often a path was asked for.
+    pub fn hits(&self, path: &str) -> usize {
+        self.log.iter().filter(|r| r.path == path).count()
     }
 }
 

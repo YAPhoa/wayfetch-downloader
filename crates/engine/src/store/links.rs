@@ -22,7 +22,7 @@ use wayfetch_protocol::command::{
     AppliedLink, CollectItems, InputUrl, LinkRef, LinkRefs, MAX_COLLECTED_LINKS, RefusedLink,
 };
 use wayfetch_protocol::event::{EventCursor, EventKind};
-use wayfetch_protocol::query::{CollectedLink, LinkCheck, LinkPage, PageSize};
+use wayfetch_protocol::query::{CollectedLink, JobRoute, LinkCheck, LinkPage, PageSize};
 use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 
 use super::{Store, StoreError, jobs, key, outbox, sql};
@@ -270,14 +270,49 @@ fn refusal(link: &LinkRef, row: &Held, started: bool) -> Option<(ErrorCode, Stri
     (row.revision != link.revision).then(|| (ErrorCode::RevisionConflict, CHANGED.to_owned()))
 }
 
-/// Starts each held link whose destination is usable as a queued job, in
-/// one transaction. A link started before reports its job again.
+/// Starts each held link whose destination is usable as a queued job
+/// downloaded through `route` (directly if `None`), in one transaction. A
+/// link started before reports its job again, on the route it was started
+/// on. The whole command is refused, and every link stays, if the route's
+/// account is gone, disabled, or of another service.
 pub(super) fn start(
     tx: &Transaction<'_>,
     links: &LinkRefs,
     unusable: &Unusable,
+    route: Option<&JobRoute>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
+    if let Some(route) = route {
+        let account: Option<(String, bool)> = tx
+            .query_row(
+                "SELECT service, enabled FROM accounts WHERE id = ?1",
+                [sql(route.account)?],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::from)?;
+        match account {
+            None => {
+                return Err(ProtocolError::new(
+                    ErrorCode::NotFound,
+                    "the chosen account was removed; choose another way to download",
+                ));
+            }
+            Some((service, _)) if service != route.service.as_str() => {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidRequest,
+                    "the chosen account belongs to another service",
+                ));
+            }
+            Some((_, false)) => {
+                return Err(ProtocolError::new(
+                    ErrorCode::NotApplicable,
+                    "the chosen account is disabled; enable it or choose another way to download",
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     apply_each(tx, links, |link, row| {
         let Some(row) = row else {
             return Ok(Err((ErrorCode::NotFound, REMOVED.to_owned())));
@@ -315,6 +350,7 @@ pub(super) fn start(
             sql(link.link)?,
             row.package,
             row.root.map(sql).transpose()?,
+            route,
             now,
         )?;
         Ok(Ok(AppliedLink {
