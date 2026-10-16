@@ -411,4 +411,25 @@ async fn a_full_page_that_does_not_reach_the_request_proves_nothing() {
     .await
     .result;
     assert!(matches!(result, Reconciled::Inconclusive(_)), "{result:?}");
+
+    // Two entries for this link, one beyond the newest 100: the visible
+    // one is not known to be the only one.
+    let entry = |path: &str| support::Generated {
+        link: LINK.into(),
+        path: path.into(),
+        generated: "2026-10-16T10:00:00.000Z".into(),
+    };
+    server.with(|rd| {
+        rd.generated.insert(0, entry("/d/hidden/f"));
+        *rd.generated.last_mut().unwrap() = entry("/d/visible/f");
+    });
+    let result = AccountProvider::find_generated(
+        &rd,
+        &credential,
+        &Url::parse(LINK).unwrap(),
+        UtcTimestamp::from_unix_millis(1_792_144_000_000),
+    )
+    .await
+    .result;
+    assert!(matches!(result, Reconciled::Inconclusive(_)), "{result:?}");
 }

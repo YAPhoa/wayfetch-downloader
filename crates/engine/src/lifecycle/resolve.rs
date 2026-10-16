@@ -756,17 +756,18 @@ impl Coordinator {
             .with_store(move |store| store.finish_operation(id, &outcome, keep, now()))
             .await;
         self.lane_done(account).await;
-        // A link is released only once its outcome is committed: if not,
-        // the intent stays, and a retry reconciles it.
+        // A link is released only once its outcome is committed. If any
+        // outcome, a refusal included, is not, the intent stays and only a
+        // confirmed retry reconciles it, so the job says so.
         let answer = match (finished, answer) {
             (Ok(true), answer) => answer,
             (Ok(false), Resolution::Link(_)) => {
                 Resolution::Failed(failure(FailureCode::RequestTimeout, CLOSED, None))
             }
-            (Err(_), Resolution::Link(_)) => {
+            (Ok(false), answer) => answer,
+            (Err(_), _) => {
                 Resolution::Failed(failure(FailureCode::OperationAmbiguous, UNSAVED, None))
             }
-            (_, answer) => answer,
         };
         let answer = match usable {
             Ok(_) => answer,

@@ -396,19 +396,19 @@ impl RealDebrid {
                         .into(),
                 );
             }
-            if let Some(generated) = found.pop() {
-                return Reconciled::Found(generated);
-            }
             // A full page that does not reach back to the intent proves
-            // nothing about older entries.
+            // nothing about older entries: one of them may match too, so
+            // even a single visible match is not unique.
             let complete = entries.len() < RECONCILE_PAGE as usize
                 || oldest.is_some_and(|o| o < since.unix_millis());
-            return if complete {
-                Reconciled::NotFound
-            } else {
-                Reconciled::Inconclusive(
+            if !complete {
+                return Reconciled::Inconclusive(
                     "Real-Debrid generated too many links since to check".into(),
-                )
+                );
+            }
+            return match found.pop() {
+                Some(generated) => Reconciled::Found(generated),
+                None => Reconciled::NotFound,
             };
         }
     }

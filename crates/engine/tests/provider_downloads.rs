@@ -1122,6 +1122,51 @@ async fn a_link_whose_outcome_was_not_saved_is_never_used() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_that_was_not_saved_can_be_retried() {
+    let env = env();
+    let (provider, host) = (&env.server.provider, &env.server.host);
+    let data = body(3 * KIB);
+    host.serve(data.clone());
+    let owner = env.start().await;
+    let account = add_account(&owner, provider).await;
+    database(&env)
+        .execute_batch(
+            "CREATE TRIGGER fail_outcomes BEFORE UPDATE OF state ON provider_operations \
+             BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+    provider.answer(Answer::Refuse(
+        FailureCode::HostUnavailableViaProvider,
+        "Real-Debrid cannot reach this host right now.",
+        None,
+    ));
+    let id = start_one(&owner, Some(account)).await;
+    // The refusal is not recorded, so the operation stays open: the job
+    // says its outcome is unresolved, which the confirmation answers.
+    let job = failed(&owner, id).await;
+    let failure = job.failure.clone().unwrap();
+    assert_eq!(failure.code, FailureCode::OperationAmbiguous, "{job:?}");
+    assert!(
+        failure
+            .message
+            .unwrap()
+            .as_str()
+            .contains("could not record")
+    );
+    assert_eq!(operation_states(&env), ["intended"]);
+    database(&env)
+        .execute_batch("DROP TRIGGER fail_outcomes;")
+        .unwrap();
+    let (_, plain) = retry(&owner, &job, false).await;
+    assert_eq!(plain.unwrap_err().code, ErrorCode::NotApplicable);
+    retry(&owner, &job, true).await.1.unwrap();
+    support::complete(&owner, id).await;
+    assert_eq!(env.published("Provider Name.bin"), data);
+    assert_eq!((provider.unrestricts(), provider.lookups()), (2, 1));
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_answer_for_replaced_credentials_is_never_used() {
     let env = env();
     let (provider, host) = (&env.server.provider, &env.server.host);
