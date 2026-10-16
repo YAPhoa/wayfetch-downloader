@@ -11,11 +11,16 @@
 // Listing reads what the engine last stored and contacts no service;
 // "Check" asks the service now. Each change is sent at the revision shown,
 // and a change made elsewhere meanwhile reloads the list.
+//
+// A row's commands are in its menu, opened from its button or by
+// right-clicking the row, as in the downloads table. Only an account that
+// needs signing in again shows that command beside the menu.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { openDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { icon } from './icons.js';
+import { Menu, rowMenuHandlers } from './menu.js';
 import { loadServices, pickService } from './services.js';
 
 /**
@@ -27,6 +32,8 @@ import { loadServices, pickService } from './services.js';
  * @typedef {import('../client/contract.js').Authorization} Authorization
  * @typedef {import('../client/contract.js').ServiceSupport} ServiceSupport
  * @typedef {import('./services.js').Service} Service
+ * @typedef {import('./menu.js').MenuEntry} MenuEntry
+ * @typedef {import('./menu.js').Anchor} Anchor
  * @typedef {{
  *   client: WayfetchClient,
  *   hello: () => Hello | null,
@@ -120,6 +127,17 @@ export function accountsSection(context) {
   const message = h('p', { class: 'message', role: 'status', 'data-key': 'accounts-message' });
   /** @type {Map<string, Service>} */
   const catalogue = new Map();
+  /** Accounts with a command on its way. @type {Set<string>} */
+  const busy = new Set();
+  /** Marks the row whose menu is open, in place, so no row is redrawn. */
+  const markMenu = () => {
+    for (const row of section.querySelectorAll('tr[data-account]')) {
+      const open = row.getAttribute('data-account') === menu.owner;
+      row.classList.toggle('menu-open', open);
+      row.querySelector('button.more')?.setAttribute('aria-expanded', String(open));
+    }
+  };
+  const menu = new Menu('Account actions', markMenu);
 
   if (!client.permissions.includes('accounts')) {
     show(
@@ -149,6 +167,8 @@ export function accountsSection(context) {
    */
   const render = (accounts, said = '') => {
     const focused = focusedKey(section);
+    // Its commands were for the accounts as they were.
+    menu.close(false);
     const blocked = vaultProblem(accounts, client.local);
     /** @type {Map<string, ServiceSupport>} */
     const integrations = new Map(accounts.services.map((s) => [s.service, s]));
@@ -216,6 +236,7 @@ export function accountsSection(context) {
         'Links you add directly download without an account. To add one, pick its service from the list. ' +
           'Signing in to a service and downloading through it are separate: a service marked Sign-in only can be checked, but downloads do not use it yet.',
       ),
+      menu.element,
     );
     refocus(section, focused);
   };
@@ -233,79 +254,149 @@ export function accountsSection(context) {
     const [status, tone] = accountStatus(account, accounts.vault);
     const usable = accounts.vault === 'ready' && account.enabled;
     const support = integrations.get(account.service);
-    /**
-     * @param {string} key
-     * @param {string} text
-     * @param {string} aria
-     * @param {(button: HTMLButtonElement) => Promise<void>} run
-     * @param {string} [className]
-     */
-    const action = (key, text, aria, run, className) =>
-      h(
-        'button',
-        {
-          type: 'button',
-          class: className,
-          'data-key': `${key}-${account.id}`,
-          'aria-label': `${aria} ${label}`,
-          onclick: (/** @type {MouseEvent} */ event) =>
-            void run(/** @type {HTMLButtonElement} */ (event.currentTarget)),
+    const again = usable && support && service ? () => signIn(context, service, support, account, done) : null;
+    const id = account.id;
+    /** @param {Anchor} anchor */
+    const open = (anchor) =>
+      menu.show(accountEntries(account, accounts, integrations), anchor, {
+        owner: id,
+        restore: () =>
+          /** @type {HTMLElement | null} */ (section.querySelector(`[data-key="account-menu-${id}"]`))?.focus(),
+      });
+    const more = h(
+      'button',
+      {
+        type: 'button',
+        class: 'more',
+        'data-key': `account-menu-${id}`,
+        'aria-label': `Actions for ${label}`,
+        'aria-haspopup': 'menu',
+        'aria-expanded': 'false',
+        onclick: (/** @type {MouseEvent} */ event) => {
+          const button = /** @type {HTMLElement} */ (event.currentTarget);
+          if (menu.justDismissed(id, button)) return;
+          if (menu.owner === id) {
+            menu.close(true);
+            return;
+          }
+          open(button.getBoundingClientRect());
         },
-        text,
-      );
+      },
+      icon('more'),
+    );
     return h(
       'tr',
-      { 'data-account': account.id },
+      {
+        'data-account': id,
+        ...rowMenuHandlers(more, open),
+      },
       h('td', null, name),
       h(
         'td',
         null,
         h('span', { class: 'account-name' }, label),
-        account.alias && account.username && h('span', { class: 'hint' }, ` ${account.username}`),
         account.plan && h('span', { class: 'tag' }, account.plan === 'premium' ? 'Premium' : 'Free'),
+        account.alias && account.username && h('span', { class: 'hint account-detail' }, account.username),
       ),
       h(
         'td',
         null,
         h('span', { class: tone ? `tone-${tone}` : null }, status),
-        account.problem && h('span', { class: 'hint account-problem' }, account.problem),
+        account.problem && h('span', { class: 'hint account-detail' }, account.problem),
       ),
       h('td', null, account.expires_at ? date(account.expires_at) : '—'),
       h(
         'td',
         { class: 'row-actions' },
-        usable && action('check-account', 'Check', 'Check', (button) => check(account, button)),
-        usable &&
-          support &&
-          service &&
-          action('replace-account', 'Sign in again…', 'Sign in again to', async () =>
-            signIn(context, service, support, account, done),
+        // Shown only when the account needs it, so it is one press away.
+        again &&
+          account.status === 'invalid_credentials' &&
+          h(
+            'button',
+            {
+              type: 'button',
+              'data-key': `replace-account-${id}`,
+              'aria-label': `Sign in again to ${label}`,
+              onclick: again,
+            },
+            'Sign in again…',
           ),
-        action(
-          'toggle-account',
-          account.enabled ? 'Disable' : 'Enable',
-          account.enabled ? 'Disable' : 'Enable',
-          (button) => command(account, account.enabled ? 'disable' : 'enable', button),
-        ),
-        action('remove-account', 'Remove…', 'Remove', async () => confirmRemove(account, label), 'remove-root'),
+        more,
       ),
     );
   };
 
   /**
+   * What can be done with `account`; what does not apply now stays in the
+   * menu, disabled, saying why.
+   * @param {AccountSummary} account
+   * @param {Accounts} accounts
+   * @param {Map<string, ServiceSupport>} integrations
+   * @returns {MenuEntry[]}
+   */
+  const accountEntries = (account, accounts, integrations) => {
+    const service = catalogue.get(account.service);
+    const label = account.alias ?? account.username ?? service?.name ?? account.service;
+    const support = integrations.get(account.service);
+    const working = busy.has(account.id);
+    /** Why a command that needs the account's sign-in does not apply. */
+    const unusable = working
+      ? 'Working…'
+      : accounts.vault !== 'ready'
+        ? 'Sign-ins are locked'
+        : !account.enabled
+          ? 'Account is disabled'
+          : undefined;
+    return [
+      {
+        key: 'check-account',
+        label: 'Check',
+        disabled: Boolean(unusable),
+        hint: unusable,
+        run: () => void check(account),
+      },
+      {
+        key: 'replace-account',
+        label: 'Sign in again…',
+        disabled: Boolean(unusable) || !support || !service,
+        hint: unusable ?? (!support || !service ? 'Not supported for this service' : undefined),
+        run: () => {
+          if (support && service) signIn(context, service, support, account, done);
+        },
+      },
+      'separator',
+      {
+        key: 'toggle-account',
+        label: account.enabled ? 'Disable' : 'Enable',
+        disabled: working,
+        hint: working ? 'Working…' : undefined,
+        run: () => void command(account, account.enabled ? 'disable' : 'enable'),
+      },
+      {
+        key: 'remove-account',
+        label: 'Remove…',
+        danger: true,
+        disabled: working,
+        hint: working ? 'Working…' : undefined,
+        run: () => confirmRemove(account, label),
+      },
+    ];
+  };
+
+  /**
    * Checks `account` with its service now.
    * @param {AccountSummary} account
-   * @param {HTMLButtonElement} button
    */
-  const check = async (account, button) => {
-    button.disabled = true;
+  const check = async (account) => {
+    busy.add(account.id);
     show(message, 'Checking…');
     try {
       const checked = await client.refreshAccount(account.id);
       const [status] = accountStatus(checked, 'ready');
+      busy.delete(account.id);
       await reload(`Checked: ${status}${checked.problem ? ` (${checked.problem})` : ''}.`);
     } catch (error) {
-      button.disabled = false;
+      busy.delete(account.id);
       failed(error);
     }
   };
@@ -314,15 +405,14 @@ export function accountsSection(context) {
    * Enables, disables, or removes `account` at the revision shown.
    * @param {AccountSummary} account
    * @param {AccountAction} action
-   * @param {HTMLButtonElement | null} button
    */
-  const command = async (account, action, button) => {
+  const command = async (account, action) => {
     const hello = context.hello();
     if (!hello) {
       show(message, 'Not connected yet. Try again in a moment.');
       return;
     }
-    if (button) button.disabled = true;
+    busy.add(account.id);
     try {
       await client.accountCommand(account.id, {
         idempotencyKey: idempotencyKey(),
@@ -331,13 +421,14 @@ export function accountsSection(context) {
         expectedRevision: account.revision,
       });
       const done = { enable: 'Enabled.', disable: 'Disabled: kept, but not used.', remove: 'Removed.' }[action];
+      busy.delete(account.id);
       await reload(done);
     } catch (error) {
+      busy.delete(account.id);
       if (error instanceof WayfetchError && error.code === 'revision_conflict') {
         await reload('The account was changed elsewhere and has been reloaded. Try again.');
         return;
       }
-      if (button) button.disabled = false;
       failed(error);
     }
   };
@@ -368,7 +459,7 @@ export function accountsSection(context) {
             'data-key': 'remove-confirm',
             onclick: () => {
               dialog.close();
-              void command(account, 'remove', null);
+              void command(account, 'remove');
             },
           },
           'Remove',
