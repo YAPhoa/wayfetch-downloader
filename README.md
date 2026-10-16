@@ -45,6 +45,7 @@ wayfetch-downloader/
 │   ├── net/                # HTTP, sessions, streaming transfers
 │   ├── host/               # What the CLI, daemon, and desktop hosts share
 │   ├── cli/                # Foreground `wayfetch` host
+│   ├── adapters/           # Provider account integrations
 │   └── api/                # HTTP authentication and REST/SSE adapter
 ├── ui/                     # Web UI; package.json has only dev checks
 │   ├── src/components/     # Shared workflow views
@@ -61,8 +62,8 @@ wayfetch-downloader/
 ```
 
 Tests live alongside the crates, applications, and UI they exercise. Add shared
-test directories only when a cross-component suite needs them. Provider adapters,
-extraction components, and worker binaries get directories when implemented;
+test directories only when a cross-component suite needs them. Extraction
+components and worker binaries get directories when implemented;
 the suggested architecture layout does not require empty placeholders.
 The architecture's decisions remain in the single architecture brief; additional
 documentation directories can be introduced when maintained content needs them.
@@ -129,7 +130,8 @@ whose folder is no longer configured waits, blocked, instead of moving.
 
 ### Configuration file
 
-Every option can instead come from a TOML file passed with `--config FILE`
+Storage, network, server, and download-policy settings can come from a TOML
+file passed with `--config FILE`
 (`wayfetchd`, `wayfetch`, and `wayfetch-desktop` all accept it);
 [`deploy/wayfetch.example.toml`](deploy/wayfetch.example.toml) documents each
 key. The file is read once at startup, so restart after changing it. Options
