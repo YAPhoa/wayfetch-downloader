@@ -56,13 +56,18 @@ use wayfetch_protocol::command::{IdempotencyKey, MAX_SUBMIT_ITEMS};
 use wayfetch_protocol::event::{
     DurableEvent, EventCursor, ResyncReason, Retained, SubscriptionStart,
 };
-use wayfetch_protocol::query::{BoundedSetting, FailureSummary, FolderListing, RootSummary};
+use wayfetch_protocol::query::{
+    BoundedSetting, FailureSummary, FolderListing, JobRoute, RootSummary,
+};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Hello, InstanceId, Permission,
     ProtocolError, ProtocolVersion, Query, QueryResult, Subscribe, TransportLimits,
 };
 
 mod accounts;
+mod resolve;
+
+pub(crate) use resolve::{Resolution, ResolveRequest, ResolvedLink};
 
 use crate::accounts::provider::AccountProvider;
 use crate::accounts::vault::Vault;
@@ -487,7 +492,9 @@ impl EngineHandle {
         envelope: CommandEnvelope,
         granted: &[Permission],
     ) -> Result<CommandResult, ProtocolError> {
-        authorize(envelope.command.required_permission(), granted)?;
+        for required in envelope.command.required_permissions() {
+            authorize(required, granted)?;
+        }
         let (reply, response) = oneshot::channel();
         self.send(Request::Execute(Box::new(envelope), reply))?;
         response.await.map_err(|_| shutting_down())?
@@ -868,6 +875,10 @@ enum Internal {
         generation: wayfetch_domain::version::Generation,
         result: crate::accounts::provider::Checked,
     },
+    /// A download asks for its provider link.
+    Resolve(ResolveRequest),
+    /// A provider call for a download's link ended.
+    Resolved(Box<resolve::Resolved>),
 }
 
 /// A download's way to the store: each call is queued to the coordinator
@@ -887,6 +898,27 @@ impl StoreClient {
         });
         self.0.send(Internal::Store(work)).await.ok()?;
         result.await.ok()
+    }
+
+    /// Asks the coordinator for a routed job's download link. `None` if the
+    /// engine stopped, or the work is stale.
+    pub(crate) async fn resolve(
+        &self,
+        job: JobId,
+        generation: wayfetch_domain::version::Generation,
+        link: url::Url,
+        refused: Option<i64>,
+    ) -> Option<Resolution> {
+        let (reply, answer) = oneshot::channel();
+        let request = ResolveRequest {
+            job,
+            generation,
+            link,
+            refused,
+            reply,
+        };
+        self.0.send(Internal::Resolve(request)).await.ok()?;
+        answer.await.ok()
     }
 }
 
@@ -1039,8 +1071,8 @@ impl Coordinator {
                     Command::SetAccountEnabled { .. } | Command::RemoveAccount { .. }
                 )
                 .then(|| envelope.command.clone());
-                let unusable = match self.prepare(&envelope).await {
-                    Ok(unusable) => unusable,
+                let (unusable, route) = match self.prepare(&envelope).await {
+                    Ok(prepared) => prepared,
                     Err(e) => {
                         let _ = reply.send(Err(e));
                         return;
@@ -1049,6 +1081,7 @@ impl Coordinator {
                 let context = CommandContext {
                     destination: self.destinations.default_root(),
                     unusable,
+                    route,
                 };
                 let settings = matches!(
                     envelope.command,
@@ -1242,6 +1275,8 @@ impl Coordinator {
                 generation,
                 result,
             } => self.checked(account, generation, result).await,
+            Internal::Resolve(request) => self.resolve(request).await,
+            Internal::Resolved(resolved) => self.resolved(resolved).await,
         }
         self.changed().await;
     }
@@ -1252,9 +1287,57 @@ impl Coordinator {
     /// change, and a destination chosen for links, must name a permitted
     /// root that is available now, and only a root the user added can be
     /// removed. A start of links learns which of their destinations cannot
-    /// be used, which it returns. A retry of a command already recorded is
-    /// only replayed.
-    async fn prepare(&mut self, envelope: &CommandEnvelope) -> Result<Unusable, ProtocolError> {
+    /// be used, which it returns, and the account it downloads through,
+    /// which must be enabled, of a service that downloads, with credential
+    /// storage unlocked. A retry of a command already recorded is only
+    /// replayed.
+    async fn prepare(
+        &mut self,
+        envelope: &CommandEnvelope,
+    ) -> Result<(Unusable, Option<JobRoute>), ProtocolError> {
+        let route = match &envelope.command {
+            Command::StartLinks {
+                account: Some(account),
+                ..
+            } if !self.replays(envelope).await? => Some(self.download_route(*account).await?),
+            _ => None,
+        };
+        let unusable = self.prepare_destinations(envelope).await?;
+        Ok((unusable, route))
+    }
+
+    /// The route for starting links through `account`, if it can download
+    /// now; else why not, so the links stay collected. The store checks
+    /// again when it starts them.
+    async fn download_route(&mut self, account: AccountId) -> Result<JobRoute, ProtocolError> {
+        let row = self.with_store(move |store| store.account(account)).await?;
+        let supported = self
+            .accounts
+            .provider(&row.service)
+            .is_some_and(|p| p.support().downloads);
+        if !supported {
+            return Err(ProtocolError::new(
+                ErrorCode::NotApplicable,
+                "Wayfetch cannot download through accounts of this service yet",
+            ));
+        }
+        if !row.enabled {
+            return Err(ProtocolError::new(
+                ErrorCode::NotApplicable,
+                "the chosen account is disabled; enable it or choose another way to download",
+            ));
+        }
+        self.accounts.vault.keys()?;
+        Ok(JobRoute {
+            service: row.service,
+            account,
+        })
+    }
+
+    async fn prepare_destinations(
+        &mut self,
+        envelope: &CommandEnvelope,
+    ) -> Result<Unusable, ProtocolError> {
         match &envelope.command {
             Command::Submit { .. }
             | Command::CollectLinks {
@@ -1299,7 +1382,7 @@ impl Coordinator {
                 self.refresh_destinations().await;
                 self.usable(*root).await.map_err(unusable_destination)?;
             }
-            Command::StartLinks { links } => {
+            Command::StartLinks { links, .. } => {
                 if self.replays(envelope).await? {
                     return Ok(Unusable::new());
                 }

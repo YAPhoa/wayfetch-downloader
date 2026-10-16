@@ -13,8 +13,8 @@
 //! offers sign-in for exactly the services [`providers`] returns.
 //!
 //! * [`common`]: endpoints, bounded requests, and answer checks.
-//! * [`real_debrid`]: Real-Debrid account sign-in and status. Downloading
-//!   through Real-Debrid is not implemented yet.
+//! * [`real_debrid`]: Real-Debrid account sign-in, status, and downloads
+//!   through an account.
 
 use std::sync::Arc;
 

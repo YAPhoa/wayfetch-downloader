@@ -14,11 +14,13 @@ use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
 use wayfetch_protocol::command::{CommandFingerprint, IdempotencyRecord, Replay, SubmitItems};
 use wayfetch_protocol::event::EventKind;
+use wayfetch_protocol::query::JobRoute;
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, InstanceId, ProtocolError,
 };
 
 use super::links::{self, Unusable};
+use super::operations::{self, OperationState};
 use super::{Store, StoreError, accounts, files, jobs, key, outbox, renames, roots, sql};
 
 /// What the coordinator knows about destinations when a command runs.
@@ -30,6 +32,9 @@ pub struct CommandContext {
     pub destination: Option<RootId>,
     /// Destinations of links being started that cannot be used, and why.
     pub unusable: Unusable,
+    /// The provider account links being started download through, as the
+    /// coordinator found it; `None` to download them directly.
+    pub route: Option<JobRoute>,
 }
 
 impl Store {
@@ -56,7 +61,9 @@ impl Store {
                 items,
                 destination: chosen,
             } => links::collect(&tx, items, chosen.or(destination), now)?,
-            Command::StartLinks { links } => links::start(&tx, links, &context.unusable, now)?,
+            Command::StartLinks { links, .. } => {
+                links::start(&tx, links, &context.unusable, context.route.as_ref(), now)?
+            }
             Command::RemoveLinks { links } => links::remove(&tx, links)?,
             Command::MoveLinks { links, destination } => links::relocate(&tx, links, *destination)?,
             Command::Pause {
@@ -74,7 +81,14 @@ impl Store {
             Command::Retry {
                 job,
                 expected_revision,
-            } => retry(&tx, *job, *expected_revision, now)?,
+                repeat_provider_operation,
+            } => retry(
+                &tx,
+                *job,
+                *expected_revision,
+                *repeat_provider_operation,
+                now,
+            )?,
             Command::UpdateSettings {
                 expected_revision,
                 default_root,
@@ -297,11 +311,15 @@ fn request(
 /// transaction, so the attempt can continue its verified saved data; the
 /// failure and any earlier restart reason are cleared. A failure whose
 /// retry deadline is still ahead is refused with that deadline, and left
-/// as it is.
+/// as it is. A job whose provider operation has an unknown outcome is
+/// refused unless the user confirmed repeating it (`repeat`), which may
+/// repeat work at the provider; the next attempt then looks for the
+/// outcome once more before asking the provider again.
 fn retry(
     tx: &Transaction<'_>,
     id: JobId,
     expected: Revision,
+    repeat: bool,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let mut job = jobs::load_listed(tx, id)?;
@@ -319,6 +337,23 @@ fn retry(
                 "the source asked to wait before trying again; retry after its deadline",
             )
         });
+    }
+    let unknown = operations::open(tx, id)?.is_some_and(|op| {
+        matches!(
+            op.state,
+            OperationState::Intended | OperationState::Ambiguous
+        )
+    });
+    if unknown && !repeat {
+        return Err(ProtocolError::new(
+            ErrorCode::NotApplicable,
+            "the provider may already have generated this link, but its answer was lost; \
+             retrying asks it again, which may repeat that work at the provider, so confirm \
+             the retry to go on",
+        ));
+    }
+    if unknown {
+        operations::confirm(tx, id)?;
     }
     job.state = next;
     files::reserve_for_retry(tx, id, job.state.generation())?;

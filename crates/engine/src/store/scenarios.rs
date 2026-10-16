@@ -1255,6 +1255,7 @@ fn retry_command(f: &mut Fixture, job: JobId) -> Command {
     Command::Retry {
         job,
         expected_revision: f.summary(job).revision,
+        repeat_provider_operation: false,
     }
 }
 
@@ -1322,6 +1323,7 @@ fn a_retry_hands_its_partial_to_the_next_generation_in_this_process() {
     let stale = Command::Retry {
         job,
         expected_revision: failed.revision,
+        repeat_provider_operation: false,
     };
     assert_eq!(
         f.run(IdempotencyKey::generate(), stale),
@@ -1471,6 +1473,7 @@ fn only_failed_and_settled_cancelled_jobs_are_retried() {
     let retry = Command::Retry {
         job: gone,
         expected_revision,
+        repeat_provider_operation: false,
     };
     assert_eq!(
         f.run(IdempotencyKey::generate(), retry),

@@ -51,7 +51,9 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * What the host grants the window: the local owner's permissions.
  * @type {readonly Permission[]}
  */
-const OWNER = Object.freeze(['read', 'submit', 'control', 'sources', 'accounts']);
+const OWNER = Object.freeze([
+  'read', 'submit', 'control', 'sources', 'accounts', 'provider_downloads',
+]);
 
 /**
  * The parts of Tauri's global API (`window.__TAURI__.core`) this client
@@ -150,12 +152,13 @@ export class DesktopIpcClient {
   }
 
   /**
-   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId }} request
+   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId, account?: AccountId }} request
    */
-  linksCommand({ idempotencyKey, target, action, links, destination }) {
+  linksCommand({ idempotencyKey, target, action, links, destination, account }) {
     /** @type {LinksCommandRequest} */
     const request = { idempotency_key: idempotencyKey, target, action, links };
     if (destination !== undefined) request.destination = destination;
+    if (account !== undefined) request.account = account;
     return this.call('links_command', { request });
   }
 
@@ -169,9 +172,9 @@ export class DesktopIpcClient {
 
   /**
    * @param {JobId} job
-   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number, name?: string }} request
+   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number, name?: string, repeatProviderOperation?: boolean }} request
    */
-  jobCommand(job, { idempotencyKey, target, action, expectedRevision, name }) {
+  jobCommand(job, { idempotencyKey, target, action, expectedRevision, name, repeatProviderOperation }) {
     /** @type {JobCommandRequest} */
     const request = {
       idempotency_key: idempotencyKey,
@@ -180,6 +183,7 @@ export class DesktopIpcClient {
       expected_revision: expectedRevision,
     };
     if (name !== undefined) request.name = name;
+    if (repeatProviderOperation) request.repeat_provider_operation = true;
     return this.call('job_command', { job, request });
   }
 
