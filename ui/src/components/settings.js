@@ -199,21 +199,37 @@ const DISPLAY_UNITS = /** @type {const} */ ([
 ]);
 
 /**
- * `value` with at most `places` decimals and no trailing zeros.
- * @param {number} value
+ * `bytes` in units of `size` with the fewest decimals, at most `places`,
+ * that still round to exactly `bytes`, or null if none do. A shown value
+ * then always parses back to the value it shows, so a limit or bound is
+ * never displayed outside itself.
+ * @param {number} bytes
+ * @param {number} size
  * @param {number} places
  */
-function decimal(value, places) {
-  return String(Number(value.toFixed(places)));
+function exactly(bytes, size, places) {
+  for (let p = 0; p <= places; p += 1) {
+    const text = String(Number((bytes / size).toFixed(p)));
+    if (Math.round(Number(text) * size) === bytes) return text;
+  }
+  return null;
 }
 
+/** A whole number of bytes divided by 1024 has at most ten decimals. */
+const KIB_PLACES = 10;
+
 /**
- * A rate in bytes per second, in the largest binary unit it reaches.
+ * A rate in bytes per second, in the largest binary unit that shows it
+ * exactly with at most three decimals, and otherwise exactly in KiB/s.
  * @param {number} bytes
  */
 export function formatRate(bytes) {
-  const found = DISPLAY_UNITS.find(([, size]) => bytes >= size);
-  return found ? `${decimal(bytes / found[1], 2)} ${found[0]}/s` : `${bytes} B/s`;
+  for (const [name, size] of DISPLAY_UNITS) {
+    if (bytes < size) continue;
+    const shown = exactly(bytes, size, name === 'KiB' ? KIB_PLACES : 3);
+    if (shown !== null) return `${shown} ${name}/s`;
+  }
+  return `${bytes} B/s`;
 }
 
 /** @param {SpeedLimit} limit */
@@ -223,15 +239,19 @@ export function formatSpeedLimit(limit) {
 
 /**
  * How the form shows `limit`: whether it is limited, and the amount and
- * unit to type, in MiB/s from 1 MiB/s and in KiB/s below.
+ * unit to type: MiB/s when that shows it exactly with at most three
+ * decimals, otherwise KiB/s, which always can. Saving what is shown keeps
+ * the limit unchanged.
  * @param {SpeedLimit} limit
  * @returns {{ limited: false } | { limited: true, amount: string, unit: RateUnit }}
  */
 export function speedFields(limit) {
   if (limit === 'unlimited') return { limited: false };
   const bytes = limit.bytes_per_second;
-  const unit = bytes >= UNIT_BYTES.MiB ? 'MiB' : 'KiB';
-  return { limited: true, amount: decimal(bytes / UNIT_BYTES[unit], 3), unit };
+  const mib = bytes >= UNIT_BYTES.MiB ? exactly(bytes, UNIT_BYTES.MiB, 3) : null;
+  if (mib !== null) return { limited: true, amount: mib, unit: 'MiB' };
+  const kib = /** @type {string} */ (exactly(bytes, UNIT_BYTES.KiB, KIB_PLACES));
+  return { limited: true, amount: kib, unit: 'KiB' };
 }
 
 /**

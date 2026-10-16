@@ -134,6 +134,37 @@ test('rates read in binary units, and Unlimited is a word, not a number', () => 
   assert.deepEqual(speedFields({ bytes_per_second: 512 * 1024 }), { limited: true, amount: '512', unit: 'KiB' });
 });
 
+test('a shown rate is exact, so a limit or bound always parses back to itself', () => {
+  // 5,000,000 B/s is 4.76837158203125 MiB/s: no MiB/s form with three
+  // decimals is exact, so it shows exactly in KiB/s.
+  assert.equal(formatRate(5_000_000), '4882.8125 KiB/s');
+  assert.equal(formatRate(1_000_001), '976.563 KiB/s');
+  assert.deepEqual(speedFields({ bytes_per_second: 5_000_000 }), { limited: true, amount: '4882.8125', unit: 'KiB' });
+  // A MiB/s value typed with three decimals shows as it was typed.
+  assert.deepEqual(speedFields({ bytes_per_second: Math.round(2.345 * MIB) }), {
+    limited: true,
+    amount: '2.345',
+    unit: 'MiB',
+  });
+  const pinned = { ...SPEED, min: 5_000_000, max: 5_000_000, unlimited: false };
+  assert.equal(
+    describeSpeedLimit(/** @type {any} */ ({ ...pinned, value: { bytes_per_second: 5_000_000 } }), false),
+    'Allowed: 4882.8125 KiB/s–4882.8125 KiB/s; Unlimited is not allowed here. Using the default.',
+  );
+  assert.deepEqual(parseRate('4882.8125', 'KiB', pinned), { value: 5_000_000, error: null });
+  // Across the whole range, the form's amount and every displayed rate
+  // parse back to exactly the rate they show.
+  const sizes = { 'KiB/s': 2 ** 10, 'MiB/s': 2 ** 20, 'GiB/s': 2 ** 30, 'TiB/s': 2 ** 40 };
+  for (let i = 0; i < 2000; i += 1) {
+    const bytes = 1024 + Math.floor(((i * 2654435761) % 2 ** 32) / 2 ** 32 * (2 ** 40 - 1024));
+    const fields = speedFields({ bytes_per_second: bytes });
+    assert.ok(fields.limited);
+    assert.equal(parseRate(fields.amount, fields.unit, SPEED).value, bytes, `${bytes}`);
+    const [amount, unit] = formatRate(bytes).split(' ');
+    assert.equal(Math.round(Number(amount) * sizes[/** @type {keyof typeof sizes} */ (unit)]), bytes, `${bytes}`);
+  }
+});
+
 test('a typed speed is converted to whole bytes per second within the allowed range', () => {
   const capped = { ...SPEED, min: 64 * 1024, max: 4 * MIB, unlimited: false };
   assert.deepEqual(parseRate('2', 'MiB', capped), { value: 2 * MIB, error: null });
