@@ -20,10 +20,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
-use wayfetch_domain::id::{BatchId, JobId, PackageId, RootId, SourceLinkId};
-use wayfetch_domain::name::DiagnosticText;
+use wayfetch_domain::id::{AccountId, BatchId, JobId, PackageId, RootId, SourceLinkId};
+use wayfetch_domain::name::{DiagnosticText, ProviderId};
 use wayfetch_domain::version::Revision;
 
+use crate::account::{AccountAlias, AccountRef, Authorization};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
 
@@ -89,6 +90,11 @@ pub enum Permission {
     /// tokens and so are not part of what [`Permission::Read`] shows.
     /// Added in protocol 1.0.
     Sources,
+    /// See and manage provider accounts: list them, sign them in, check,
+    /// enable, disable, and remove them. No other permission implies it,
+    /// since accounts hold the user's provider credentials. Added in
+    /// protocol 1.3; clients treat permissions they do not know as absent.
+    Accounts,
 }
 
 /// One URL to ingest.
@@ -408,6 +414,42 @@ pub enum Command {
         /// A permitted root that is available now.
         destination: RootId,
     },
+    /// Sign in to a provider: a new account of `service`, or `account`
+    /// again to replace its credentials. Starts an authorization that the
+    /// person approves on the provider's site; the account is added, or
+    /// its credentials replaced, only once they have. Carries no
+    /// credentials. A retry with the same key answers with the same
+    /// authorization, or with the account it added. Added in protocol 1.3.
+    AuthorizeAccount {
+        /// The service.
+        service: ProviderId,
+        /// The account to sign in again, at the revision the client saw;
+        /// absent to add one.
+        #[serde(default)]
+        account: Option<AccountRef>,
+        /// A name for a new account.
+        #[serde(default)]
+        alias: Option<AccountAlias>,
+    },
+    /// Enable or disable an account. A disabled account is kept, with its
+    /// credentials, but its provider is not contacted. Added in protocol
+    /// 1.3.
+    SetAccountEnabled {
+        /// The account.
+        account: AccountId,
+        /// The account revision the client last saw.
+        expected_revision: Revision,
+        /// Whether it may be used.
+        enabled: bool,
+    },
+    /// Remove an account and its stored credentials. Work for it that has
+    /// not finished is discarded. Added in protocol 1.3.
+    RemoveAccount {
+        /// The account.
+        account: AccountId,
+        /// The account revision the client last saw.
+        expected_revision: Revision,
+    },
 }
 
 /// A change to one engine preference. Added in protocol 2.0.
@@ -448,6 +490,9 @@ impl Command {
             | Self::Rename { .. }
             | Self::Remove { .. }
             | Self::RemoveRoot { .. } => Permission::Control,
+            Self::AuthorizeAccount { .. }
+            | Self::SetAccountEnabled { .. }
+            | Self::RemoveAccount { .. } => Permission::Accounts,
         }
     }
 
@@ -537,6 +582,28 @@ pub enum CommandResult {
         applied: Vec<AppliedLink>,
         /// The links it was refused for.
         refused: Vec<RefusedLink>,
+    },
+    /// An authorization started, or is still waiting, for
+    /// [`Command::AuthorizeAccount`]: show its code. Added in protocol 1.3.
+    AuthorizationStarted(Authorization),
+    /// An authorization completed: the account added or signed in again.
+    /// What a retry of [`Command::AuthorizeAccount`] answers once it has.
+    /// Added in protocol 1.3.
+    AccountAuthorized {
+        /// The account.
+        account: AccountId,
+        /// Its revision afterwards.
+        revision: Revision,
+    },
+    /// An account was enabled, disabled, or removed. Added in protocol 1.3.
+    AccountUpdated {
+        /// The account.
+        account: AccountId,
+        /// Its revision after the command; for a removal, the revision it
+        /// had.
+        revision: Revision,
+        /// Whether the command changed anything.
+        changed: bool,
     },
 }
 
@@ -770,5 +837,35 @@ mod tests {
             "sources".parse::<Permission>().unwrap(),
             Permission::Sources
         );
+        let disable = Command::SetAccountEnabled {
+            account: AccountId::from_u64(1).unwrap(),
+            expected_revision: Revision::INITIAL,
+            enabled: false,
+        };
+        assert_eq!(disable.required_permission(), Permission::Accounts);
+        assert_eq!(
+            "accounts".parse::<Permission>().unwrap(),
+            Permission::Accounts
+        );
+    }
+
+    #[test]
+    fn signing_in_carries_no_credentials() {
+        // A client cannot send a secret, so none reaches the fingerprint
+        // or the stored command.
+        let json = json!({
+            "type": "authorize_account",
+            "service": "real-debrid",
+            "account": null,
+            "alias": "Home",
+        });
+        let command = serde_json::from_value::<Command>(json).unwrap();
+        assert_eq!(command.required_permission(), Permission::Accounts);
+        let with_secret = json!({
+            "type": "authorize_account",
+            "service": "real-debrid",
+            "token": "secret",
+        });
+        assert!(serde_json::from_value::<Command>(with_secret).is_err());
     }
 }

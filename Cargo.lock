@@ -5102,6 +5102,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayfetch-adapters"
+version = "0.0.0"
+dependencies = [
+ "httparse",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "wayfetch-engine",
+ "wayfetch-net",
+ "zeroize",
+]
+
+[[package]]
 name = "wayfetch-api"
 version = "0.0.0"
 dependencies = [
@@ -5166,6 +5180,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "url",
+ "wayfetch-adapters",
  "wayfetch-engine",
  "wayfetch-host",
  "wayfetch-net",
@@ -5194,6 +5210,7 @@ dependencies = [
  "fail",
  "percent-encoding",
  "rangemap",
+ "ring",
  "rusqlite",
  "rusqlite_migration",
  "serde",
@@ -5206,6 +5223,7 @@ dependencies = [
  "url",
  "wayfetch-domain",
  "wayfetch-protocol",
+ "zeroize",
 ]
 
 [[package]]
@@ -5221,6 +5239,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 1.1.8+spec-1.1.0",
+ "wayfetch-adapters",
  "wayfetch-engine",
  "wayfetch-net",
 ]
@@ -5248,6 +5267,7 @@ dependencies = [
  "uuid",
  "wayfetch-engine",
  "wayfetch-protocol",
+ "zeroize",
 ]
 
 [[package]]
@@ -5284,6 +5304,7 @@ dependencies = [
  "tokio-rustls",
  "url",
  "uuid",
+ "wayfetch-adapters",
  "wayfetch-api",
  "wayfetch-engine",
  "wayfetch-host",

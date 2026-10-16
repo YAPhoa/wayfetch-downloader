@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::runtime::Handle;
+use wayfetch_engine::accounts::provider::AccountProvider;
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::transfer::transport::Transport;
 use wayfetch_engine::{
@@ -51,6 +52,10 @@ pub struct Env<S> {
     pub limits: Limits,
     pub timeouts: Timeouts,
     pub policy: Policy,
+    /// The credential key file engines are configured with, if any.
+    pub credential_key: Option<PathBuf>,
+    /// Account integrations engines start with.
+    pub providers: Vec<Arc<dyn AccountProvider>>,
 }
 
 impl<S> Env<S> {
@@ -84,6 +89,8 @@ impl<S> Env<S> {
             },
             timeouts: Timeouts::DEFAULT,
             policy: Policy::DEFAULT,
+            credential_key: None,
+            providers: Vec::new(),
         }
     }
 
@@ -106,11 +113,13 @@ impl<S> Env<S> {
         config.limits = self.limits.clone();
         config.timeouts = self.timeouts;
         config.policy = self.policy;
-        EngineBuilder::new(config, Handle::current())
-            .transport(self.transport.clone())
-            .start()
-            .await
-            .unwrap()
+        config.credential_key = self.credential_key.clone();
+        let mut builder =
+            EngineBuilder::new(config, Handle::current()).transport(self.transport.clone());
+        for provider in &self.providers {
+            builder = builder.account_provider(provider.clone());
+        }
+        builder.start().await.unwrap()
     }
 
     /// Initializes `path` as a root of the instance, as `init-root` does,

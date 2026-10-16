@@ -30,6 +30,12 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/generated/AddRootRequest.js').AddRootRequest} AddRootRequest
  * @typedef {import('../client/generated/CollectRequest.js').CollectRequest} CollectRequest
  * @typedef {import('../client/generated/LinksCommandRequest.js').LinksCommandRequest} LinksCommandRequest
+ * @typedef {import('../client/generated/AuthorizeAccountRequest.js').AuthorizeAccountRequest} AuthorizeAccountRequest
+ * @typedef {import('../client/generated/AccountCommandRequest.js').AccountCommandRequest} AccountCommandRequest
+ * @typedef {import('../client/contract.js').AccountId} AccountId
+ * @typedef {import('../client/contract.js').AccountRef} AccountRef
+ * @typedef {import('../client/contract.js').AccountAction} AccountAction
+ * @typedef {import('../client/contract.js').AuthorizationId} AuthorizationId
  */
 
 /** Server-sent event types, as `wayfetch-api` names them. */
@@ -227,6 +233,46 @@ export class HttpClient {
     /** @type {AddRootRequest} */
     const body = { path };
     return this.request('POST', '/v1/roots', { body });
+  }
+
+  accounts() {
+    return this.request('GET', '/v1/accounts');
+  }
+
+  /**
+   * @param {{ idempotencyKey: string, target: string, service: string, account?: AccountRef, alias?: string }} request
+   */
+  authorizeAccount({ idempotencyKey, target, service, account, alias }) {
+    /** @type {AuthorizeAccountRequest} */
+    const body = { idempotency_key: idempotencyKey, target, service };
+    if (account) body.account = account;
+    if (alias) body.alias = alias;
+    return this.request('POST', '/v1/accounts/authorizations', { body });
+  }
+
+  /** @param {AuthorizationId} id */
+  authorization(id) {
+    return this.request('GET', `/v1/accounts/authorizations/${encodeURIComponent(id)}`);
+  }
+
+  /** @param {AuthorizationId} id */
+  cancelAuthorization(id) {
+    return this.request('POST', `/v1/accounts/authorizations/${encodeURIComponent(id)}/cancel`);
+  }
+
+  /**
+   * @param {AccountId} account
+   * @param {{ idempotencyKey: string, target: string, action: AccountAction, expectedRevision: number }} request
+   */
+  accountCommand(account, { idempotencyKey, target, action, expectedRevision }) {
+    /** @type {AccountCommandRequest} */
+    const body = { idempotency_key: idempotencyKey, target, action, expected_revision: expectedRevision };
+    return this.request('POST', `/v1/accounts/${encodeURIComponent(account)}/commands`, { body });
+  }
+
+  /** @param {AccountId} account */
+  refreshAccount(account) {
+    return this.request('POST', `/v1/accounts/${encodeURIComponent(account)}/refresh`);
   }
 
   /**

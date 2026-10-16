@@ -162,13 +162,13 @@ fn main() -> ExitCode {
             terminal.finish(wayfetch_host::DRAIN);
             code
         }
-        Command::Run(args) => run(&args),
+        Command::Run(mut args) => run(&mut args),
     }
 }
 
 /// Runs the engine and the window until the window closes or a signal
 /// arrives, then stops the engine.
-fn run(args: &RunArgs) -> ExitCode {
+fn run(args: &mut RunArgs) -> ExitCode {
     // The window's threads report through a queue to one thread that owns
     // the terminal; `None` ends it.
     let (notices, queued) = sync_channel::<Option<Notice>>(NOTICE_QUEUE);
@@ -182,11 +182,14 @@ fn run(args: &RunArgs) -> ExitCode {
         }
         terminal.finish(wayfetch_host::DRAIN);
     });
-    let result = wayfetch_host::runtime().and_then(|runtime| {
-        let result = run_on(&runtime, &args.engine, &notices);
-        wayfetch_host::release(runtime);
-        result
-    });
+    let result = args.engine.default_credential_key();
+    let result = result
+        .and_then(|()| wayfetch_host::runtime())
+        .and_then(|runtime| {
+            let result = run_on(&runtime, &args.engine, &notices);
+            wayfetch_host::release(runtime);
+            result
+        });
     let code = result.unwrap_or_else(|message| {
         notify(&notices, Notice::Failed { message });
         ExitCode::FAILURE
@@ -255,6 +258,10 @@ fn run_on(
             ipc::links_command,
             ipc::update_settings,
             ipc::remove_root,
+            ipc::authorize_account,
+            ipc::cancel_authorization,
+            ipc::account_command,
+            ipc::refresh_account,
             ipc::choose_download_folder,
             ipc::open_file,
             ipc::reveal_file,

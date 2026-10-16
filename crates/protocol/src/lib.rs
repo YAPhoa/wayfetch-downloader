@@ -7,12 +7,14 @@
 //! codes, and resynchronization (test T62).
 //!
 //! * [`instance`]: instance identity, protocol version, and the handshake;
+//! * [`account`]: provider accounts and their authorization, redacted;
 //! * [`command`]: idempotent mutations and their results;
 //! * [`query`]: bounded, paginated reads;
 //! * [`request`]: command request bodies clients send, shared by transports;
 //! * [`event`]: durable events, progress samples, and resync rules;
 //! * [`error`]: structured errors.
 
+pub mod account;
 pub mod command;
 pub mod error;
 pub mod event;
