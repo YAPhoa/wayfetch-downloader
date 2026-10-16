@@ -1770,6 +1770,14 @@ fn account_cell(n: usize, text: &str) -> String {
     )
 }
 
+/// Runs the first account row's menu command `key`.
+async fn account_command(shell: &Shell, key: &str) {
+    shell.click("[data-key^=\"account-menu-\"]").await;
+    shell
+        .click(&format!("[data-key=\"menu-item-{key}\"]"))
+        .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs an X display and WebKitWebDriver"]
 async fn an_account_is_signed_in_and_managed_through_the_window() {
@@ -1818,16 +1826,16 @@ async fn an_account_is_signed_in_and_managed_through_the_window() {
         std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&key).unwrap().permissions());
     assert_eq!(mode & 0o777, 0o600);
 
-    shell.click("[data-key^=\"check-account-\"]").await;
+    account_command(&shell, "check-account").await;
     accounts_say(&shell, "Checked: Signed in.").await;
-    shell.click("[data-key^=\"toggle-account-\"]").await;
+    account_command(&shell, "toggle-account").await;
     accounts_say(&shell, "Disabled: kept, but not used.").await;
     shell.wait_for(&account_cell(3, "Disabled")).await;
-    shell.click("[data-key^=\"toggle-account-\"]").await;
+    account_command(&shell, "toggle-account").await;
     accounts_say(&shell, "Enabled.").await;
-    shell.click("[data-key^=\"replace-account-\"]").await;
+    account_command(&shell, "replace-account").await;
     accounts_say(&shell, "Signed in again.").await;
-    shell.click("[data-key^=\"remove-account-\"]").await;
+    account_command(&shell, "remove-account").await;
     shell.click("[data-key=\"remove-confirm\"]").await;
     accounts_say(&shell, "Removed.").await;
     shell
