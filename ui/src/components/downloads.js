@@ -37,7 +37,7 @@ import { openDialog } from './dialog.js';
 import { copyText, focusedKey, h, refocus, show } from './dom.js';
 import { icon } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
-import { Menu } from './menu.js';
+import { Menu, rowMenuHandlers } from './menu.js';
 import { SETTINGS_PATH, SettingsPage, sectionPath, settingsSection } from './settings.js';
 import { toolbar } from './toolbar.js';
 
@@ -1252,20 +1252,7 @@ export class Downloads {
           this.navigate(path);
         },
         // The row pressed, wherever in it; the browser's own menu otherwise.
-        oncontextmenu: (/** @type {MouseEvent} */ event) => {
-          event.preventDefault();
-          // A context-menu key press has no pointer position.
-          const anchor =
-            event.button === 0 && event.clientX === 0 && event.clientY === 0
-              ? more.getBoundingClientRect()
-              : { left: event.clientX, right: event.clientX, top: event.clientY, bottom: event.clientY };
-          this.openMenu(current(), anchor);
-        },
-        onkeydown: (/** @type {KeyboardEvent} */ event) => {
-          if (!(event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey))) return;
-          event.preventDefault();
-          this.openMenu(current(), more.getBoundingClientRect());
-        },
+        ...rowMenuHandlers(more, (anchor) => this.openMenu(current(), anchor)),
       },
       h(
         'td',
