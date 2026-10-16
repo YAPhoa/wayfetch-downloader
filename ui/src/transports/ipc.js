@@ -39,13 +39,19 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
  * @typedef {import('../client/generated/CollectRequest.js').CollectRequest} CollectRequest
  * @typedef {import('../client/generated/LinksCommandRequest.js').LinksCommandRequest} LinksCommandRequest
+ * @typedef {import('../client/generated/AuthorizeAccountRequest.js').AuthorizeAccountRequest} AuthorizeAccountRequest
+ * @typedef {import('../client/generated/AccountCommandRequest.js').AccountCommandRequest} AccountCommandRequest
+ * @typedef {import('../client/contract.js').AccountId} AccountId
+ * @typedef {import('../client/contract.js').AccountRef} AccountRef
+ * @typedef {import('../client/contract.js').AccountAction} AccountAction
+ * @typedef {import('../client/contract.js').AuthorizationId} AuthorizationId
  */
 
 /**
  * What the host grants the window: the local owner's permissions.
  * @type {readonly Permission[]}
  */
-const OWNER = Object.freeze(['read', 'submit', 'control', 'sources']);
+const OWNER = Object.freeze(['read', 'submit', 'control', 'sources', 'accounts']);
 
 /**
  * The parts of Tauri's global API (`window.__TAURI__.core`) this client
@@ -208,6 +214,50 @@ export class DesktopIpcClient {
       root,
     };
     return this.call('remove_root', { request });
+  }
+
+  accounts() {
+    /** @type {Query} */
+    const query = { type: 'accounts' };
+    return this.call('query', { query });
+  }
+
+  /**
+   * @param {{ idempotencyKey: string, target: string, service: string, account?: AccountRef, alias?: string }} request
+   */
+  authorizeAccount({ idempotencyKey, target, service, account, alias }) {
+    /** @type {AuthorizeAccountRequest} */
+    const request = { idempotency_key: idempotencyKey, target, service };
+    if (account) request.account = account;
+    if (alias) request.alias = alias;
+    return this.call('authorize_account', { request });
+  }
+
+  /** @param {AuthorizationId} id */
+  authorization(id) {
+    /** @type {Query} */
+    const query = { type: 'authorization', id };
+    return this.call('query', { query });
+  }
+
+  /** @param {AuthorizationId} id */
+  cancelAuthorization(id) {
+    return this.call('cancel_authorization', { authorization: id });
+  }
+
+  /**
+   * @param {AccountId} account
+   * @param {{ idempotencyKey: string, target: string, action: AccountAction, expectedRevision: number }} request
+   */
+  accountCommand(account, { idempotencyKey, target, action, expectedRevision }) {
+    /** @type {AccountCommandRequest} */
+    const request = { idempotency_key: idempotencyKey, target, action, expected_revision: expectedRevision };
+    return this.call('account_command', { account, request });
+  }
+
+  /** @param {AccountId} account */
+  refreshAccount(account) {
+    return this.call('refresh_account', { account });
   }
 
   /**

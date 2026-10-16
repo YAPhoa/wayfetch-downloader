@@ -48,6 +48,11 @@ pub enum ConfigError {
         /// What is wrong.
         problem: String,
     },
+    /// The credential key file is not an absolute path outside the state
+    /// directory: inside it, a copy of the directory would carry the key
+    /// with the credentials it protects.
+    #[error("credential key {} must be an absolute path outside the state directory", .0.display())]
+    CredentialKey(PathBuf),
 }
 
 /// Bounds on the engine's queues, buffers, and retained history.
@@ -111,6 +116,12 @@ pub struct EngineConfig {
     pub limits: Limits,
     /// Request deadlines.
     pub timeouts: Timeouts,
+    /// The file holding the key that encrypts provider credentials, kept
+    /// outside the state directory and its database. Without one, no
+    /// account can be added. The engine creates it, owner-only, only for a
+    /// state directory that never stored a key; once one did, a missing or
+    /// different key leaves accounts locked instead of being replaced.
+    pub credential_key: Option<PathBuf>,
     /// The operator's policy for preferences users change at run time.
     pub policy: Policy,
 }
@@ -352,6 +363,7 @@ impl EngineConfig {
             limits: Limits::DEFAULT,
             timeouts: Timeouts::DEFAULT,
             policy: Policy::DEFAULT,
+            credential_key: None,
         }
     }
 
@@ -375,6 +387,11 @@ impl EngineConfig {
             && !self.roots.contains(root)
         {
             return Err(ConfigError::UnknownDownloadRoot(root.clone()));
+        }
+        if let Some(key) = &self.credential_key
+            && (!key.is_absolute() || key.starts_with(&self.state_dir))
+        {
+            return Err(ConfigError::CredentialKey(key.clone()));
         }
         self.limits.validate()?;
         self.timeouts.validate()?;

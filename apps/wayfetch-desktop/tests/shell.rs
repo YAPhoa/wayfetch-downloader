@@ -19,8 +19,10 @@
 //! review on the Add links page fetching nothing, outliving a relaunch, and only the chosen
 //! ones starting, with the row menu from the keyboard and a narrow
 //! window; that the page loads
-//! only bundled assets; and that the host starts no daemon and listens on
-//! no TCP port.
+//! only bundled assets; that the host starts no daemon and listens on
+//! no TCP port; and a provider account signed in against a local stand-in
+//! for Real-Debrid, with its key beside the state directory, then shown,
+//! checked, disabled, signed in again, and removed.
 //!
 //! These tests need an X display (`DISPLAY`, for example from `xvfb-run`)
 //! and `WebKitWebDriver` on `PATH`, so they are ignored by default; see
@@ -30,6 +32,8 @@
 
 #[path = "../../../crates/engine/tests/support/mod.rs"]
 mod engine_support;
+#[path = "../../../crates/adapters/tests/support/mod.rs"]
+mod rd;
 #[path = "../../../crates/net/tests/support/mod.rs"]
 mod support;
 
@@ -63,6 +67,8 @@ struct Dirs {
     tmp: tempfile::TempDir,
     state: PathBuf,
     root: PathBuf,
+    /// Further arguments to `run`.
+    args: Vec<String>,
 }
 
 impl Dirs {
@@ -95,7 +101,12 @@ impl Dirs {
         .unwrap();
         std::fs::set_permissions(&opener, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        Self { tmp, state, root }
+        Self {
+            tmp,
+            state,
+            root,
+            args: Vec::new(),
+        }
     }
 
     /// What the app asked the desktop to open, one line each.
@@ -124,7 +135,9 @@ impl Dirs {
             "127.0.0.1/32",
         ]
         .map(String::from)
-        .to_vec()
+        .into_iter()
+        .chain(self.args.iter().cloned())
+        .collect()
     }
 
     fn published(&self, name: &str) -> Vec<u8> {
@@ -1701,4 +1714,111 @@ async fn refreshing_tables_keeps_pointer_interactions_intact() {
     shell.wait_for("location.pathname === '/jobs/job-1'").await;
     shell.js("testWorkspace.stop(); return true;").await;
     shell.close().await;
+}
+
+/// Waits until the accounts section says `said`.
+async fn accounts_say(shell: &Shell, said: &str) {
+    shell
+        .wait_for(&format!(
+            "document.querySelector('[data-key=\"accounts-message\"]')?.textContent === {}",
+            json!(said)
+        ))
+        .await;
+}
+
+/// The text of the first account row's cell `n`.
+fn account_cell(n: usize, text: &str) -> String {
+    format!(
+        "document.querySelector('.accounts-table tbody tr[data-account] td:nth-child({n})')?.textContent === {}",
+        json!(text)
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an X display and WebKitWebDriver"]
+async fn an_account_is_signed_in_and_managed_through_the_window() {
+    let provider = rd::Server::start().await;
+    let mut dirs = Dirs::new().await;
+    dirs.args.extend([
+        "--provider-endpoint".to_owned(),
+        format!("real-debrid={}", provider.base()),
+    ]);
+    let shell = Shell::launch(&dirs).await;
+    shell.click("[data-key=\"open-settings\"]").await;
+    shell
+        .click("[data-key=\"settings-section-accounts\"]")
+        .await;
+    shell
+        .wait_for("document.querySelector('[data-key=\"no-accounts\"]')")
+        .await;
+
+    // Real-Debrid from the catalogue; the address is shown, not opened in
+    // the app's own window.
+    shell.click("[data-key=\"add-account\"]").await;
+    shell.click("[data-key=\"pick-real-debrid\"]").await;
+    let alias = shell
+        .client
+        .wait()
+        .at_most(DEADLINE)
+        .for_element(Locator::Css("#account-alias"))
+        .await
+        .unwrap();
+    alias.send_keys("Main").await.unwrap();
+    shell.click("[data-key=\"sign-in-start\"]").await;
+    shell
+        .wait_for(&format!(
+            "document.querySelector('[data-key=\"sign-in-code\"]')?.textContent === {}
+             && document.querySelector('span[data-key=\"sign-in-page\"]')?.textContent === {}",
+            json!(rd::USER_CODE),
+            json!(format!("{}device", provider.base()))
+        ))
+        .await;
+    accounts_say(&shell, "Account added and signed in.").await;
+    shell.wait_for(&account_cell(1, "Real-Debrid")).await;
+    shell.wait_for(&account_cell(3, "Signed in")).await;
+    // The key was created beside the state directory, for its owner only.
+    let key = dirs.tmp.path().join("state.credential-key");
+    let mode =
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&key).unwrap().permissions());
+    assert_eq!(mode & 0o777, 0o600);
+
+    shell.click("[data-key^=\"check-account-\"]").await;
+    accounts_say(&shell, "Checked: Signed in.").await;
+    shell.click("[data-key^=\"toggle-account-\"]").await;
+    accounts_say(&shell, "Disabled: kept, but not used.").await;
+    shell.wait_for(&account_cell(3, "Disabled")).await;
+    shell.click("[data-key^=\"toggle-account-\"]").await;
+    accounts_say(&shell, "Enabled.").await;
+    shell.click("[data-key^=\"replace-account-\"]").await;
+    accounts_say(&shell, "Signed in again.").await;
+    shell.click("[data-key^=\"remove-account-\"]").await;
+    shell.click("[data-key=\"remove-confirm\"]").await;
+    accounts_say(&shell, "Removed.").await;
+    shell
+        .wait_for("document.querySelector('[data-key=\"no-accounts\"]')")
+        .await;
+
+    // Nothing the service issued reached the page or its storage.
+    let seen = shell
+        .js("return JSON.stringify([document.documentElement.outerHTML, location.href, Object.entries(localStorage), Object.entries(sessionStorage)])")
+        .await;
+    let seen = seen.as_str().unwrap();
+    for secret in [
+        rd::DEVICE_CODE,
+        rd::CLIENT_SECRET,
+        "synthetic-access-",
+        "synthetic-refresh-",
+    ] {
+        assert!(!seen.contains(secret), "{secret} in the page");
+    }
+    let notices = shell.close().await;
+    let printed = serde_json::to_string(&notices).unwrap();
+    for secret in [
+        rd::DEVICE_CODE,
+        rd::CLIENT_SECRET,
+        "synthetic-access-",
+        "synthetic-refresh-",
+    ] {
+        assert!(!printed.contains(secret), "{secret} printed");
+    }
 }

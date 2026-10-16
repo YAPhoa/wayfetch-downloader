@@ -25,7 +25,7 @@ import { openDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { browseServerFolders } from './folders.js';
 import { icon } from './icons.js';
-import { pickService } from './services.js';
+import { accountsSection } from './accounts.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -362,7 +362,11 @@ export class SettingsPage {
       downloads: this.downloadsSection(),
       folder: this.destinationSection(),
       display: this.displaySection(),
-      accounts: accountsSection(),
+      accounts: accountsSection({
+        client: this.context.client,
+        hello: this.context.hello,
+        onSignedOut: this.context.onSignedOut,
+      }),
     };
     show(
       this.content,
@@ -973,68 +977,6 @@ function settingRow(name, label, about, options, current, change) {
           h('span', null, text),
         ),
       ),
-    ),
-  );
-}
-
-/** The columns of the accounts table. */
-const ACCOUNT_COLUMNS = ['Service', 'Account', 'Status', 'Expires', 'Traffic left'];
-
-/**
- * Accounts with download services: a table of the accounts added, none
- * yet, and a way to add one by picking its service from the catalogue.
- * Nothing here asks for credentials until an integration exists to use
- * them.
- */
-function accountsSection() {
-  // Integrations the engine reports; it has none yet, so no account can
-  // be added.
-  /** @type {ReadonlySet<string>} */
-  const integrations = new Set();
-  return h(
-    'div',
-    { class: 'settings-section' },
-    h(
-      'div',
-      { class: 'settings-group accounts' },
-      h(
-        'div',
-        { class: 'group-head' },
-        h('span', { class: 'group-title' }, 'Accounts'),
-        h(
-          'button',
-          { type: 'button', 'data-key': 'add-account', onclick: () => pickService(integrations) },
-          icon('add'),
-          'Add account…',
-        ),
-      ),
-      h(
-        'div',
-        { class: 'table-scroll' },
-        h(
-          'table',
-          { class: 'accounts-table', 'aria-label': 'Accounts' },
-          h('thead', null, h('tr', null, ACCOUNT_COLUMNS.map((name) => h('th', { scope: 'col' }, name)))),
-          h(
-            'tbody',
-            null,
-            h(
-              'tr',
-              null,
-              h(
-                'td',
-                { class: 'empty', colspan: ACCOUNT_COLUMNS.length, 'data-key': 'no-accounts' },
-                'No accounts added yet.',
-              ),
-            ),
-          ),
-        ),
-      ),
-    ),
-    h(
-      'p',
-      { class: 'hint' },
-      'Links you add directly download without an account. To add one, pick its service from the list.',
     ),
   );
 }

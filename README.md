@@ -154,8 +154,9 @@ It listens on `127.0.0.1:7878` unless `--listen` says otherwise; anything
 beyond loopback has no TLS of its own and belongs behind an authenticated TLS
 reverse proxy. Every request needs `Authorization: Bearer TOKEN`. The token file
 holds one `TOKEN PERMISSION[,PERMISSION...]` per line, with permissions `read`,
-`submit`, `control`, and `sources` (reading back submitted links, which can
-carry signed tokens), and must be readable only by its owner. If it does not
+`submit`, `control`, `sources` (reading back submitted links, which can
+carry signed tokens), and `accounts` (provider sign-ins; no other permission
+implies it), and must be readable only by its owner. If it does not
 exist, `wayfetchd` creates it with one token holding every permission; the token
 is never printed.
 
@@ -177,6 +178,11 @@ is never printed.
 | `GET /v1/folders` | The folders inside `path` (absolute; the top of the filesystem if absent), without hidden ones, at most 1,000 (needs `control`) |
 | `POST /v1/roots` | Add the server folder `{"path"}` as a destination, returning it with its `id` (needs `control`) |
 | `POST /v1/roots/remove` | Stop offering a folder the user added (`{"idempotency_key", "target", "expected_revision", "root"}`); its files stay (needs `control`) |
+| `GET /v1/accounts` | The credential vault's state, the services accounts can be added for, and the accounts added, redacted (needs `accounts`) |
+| `POST /v1/accounts/authorizations` | Start a sign-in: `{"idempotency_key", "target", "service": "real-debrid", "alias"?}`, or `"account": {"account", "revision"}` to sign an account in again (needs `accounts`) |
+| `GET /v1/accounts/authorizations/{id}`, `POST .../{id}/cancel` | A sign-in's code and state, or cancel it (needs `accounts`) |
+| `POST /v1/accounts/{id}/commands` | `{"idempotency_key", "target", "action": "enable"\|"disable"\|"remove", "expected_revision"}` (needs `accounts`) |
+| `POST /v1/accounts/{id}/refresh` | Check the account with its provider now (needs `accounts`) |
 | `GET /v1/events` | Server-sent events: `hello`, `event`, `progress`, `resync` |
 | `GET /v1/ready` | Readiness, without a token: `200 {"ready":true}`, or `503` with a `reason` |
 | `GET /v1/auth/session`, `POST /v1/auth/{setup,login,logout}` | Browser sign-in; see [Browser access](#browser-access) |
@@ -200,6 +206,22 @@ each it refused, with a reason, so a link changed since its `revision` was
 read, or bound for an unavailable folder, stays collected. Each link starts
 at most one download. Collecting and starting need `submit`; removing or
 moving links, which may be someone else's, needs `control`.
+
+**Provider accounts.** Account credentials are encrypted with a key file,
+`credential-key` beside the token file, which `wayfetchd` creates
+owner-only (32 random bytes as 64 hex digits) when the first account is
+added, so there is nothing to set up; `--credential-key FILE` puts it
+elsewhere. The database never holds the key, so keep the key out of the
+state directory and back it up alongside it. Once an account is stored,
+`wayfetchd` never creates a new key: if the file is missing, readable by
+others, or a different key, accounts show as locked with the reason, and you
+can restore the file and restart, or remove the accounts and sign in again.
+Downloads without an account keep working either way. Real-Debrid is the only service so far.
+Signing in uses its device flow: the request answers with a code and a
+Real-Debrid page where you enter it, and no password or token ever passes
+through the API. Responses never carry stored credentials, and account
+routes are never cached. Signing in to Real-Debrid does not yet make
+downloads go through it.
 
 `target` is the instance from `/v1/capabilities` and `idempotency_key` a fresh
 UUID per logical command; a retry with the same key returns the first result.
@@ -384,12 +406,18 @@ typeface (`ui/src/fonts/`, SIL Open Font License 1.1).
 Settings chooses the default folder for new downloads among those the
 server permits, shown as server paths (jobs already added keep theirs),
 and the row density, which is kept in this browser. Its Accounts &
-services section is a table of the accounts added (none yet). Add
-account opens a searchable catalogue of file hosts, cloud storage and
-multi-host services to pick its service from, led by Real-Debrid, found
-by name, by any of their domains, or by a pasted link. Every entry says
-Not available yet and none can be added; direct links never need an
-account. Each row has a menu, from its "…"
+services section is a table of the accounts added, each with its status
+(Signed in, Sign in again, Could not check, Not checked, Disabled, or Locked),
+its plan and expiry when the provider reports them, and buttons to check
+it, sign in again, disable or enable it, and remove it. Add account opens
+a searchable catalogue of file hosts, cloud storage and multi-host
+services, found by name, by any of their domains, or by a pasted link.
+Only Real-Debrid can be signed in to so far; the others say Not available
+yet. Signing in shows a code to enter on Real-Debrid's own page and waits
+for your approval there; signing in does not yet make downloads use the
+account, and direct links never need one. This section needs the `accounts`
+permission, which a browser's owner session has. Each row of the
+download table has a menu, from its "…"
 button, a right-click, or Shift+F10 or the Menu key: rename a finished
 file in its folder (never replacing another file), copy the link it came
 from (with the `sources` permission), pause, resume, cancel, or retry a
@@ -451,6 +479,12 @@ the page reads a new snapshot and follows events from there. The host
 sends each page at most 64 event items it has not acknowledged and holds
 at most 4 subscriptions per page; a page that stops reading for 15 seconds
 loses its subscription, and a reload releases them all.
+
+Provider account credentials are encrypted with a key file beside the
+state directory, named after it (`/tmp/wf/state.credential-key` above),
+created owner-only when the first account is added; `--credential-key`
+names another. Keep the two together when moving the state, since accounts
+show as locked without their key.
 
 Settings' "Choose folder…" opens the system's folder dialog from the host;
 the page never sends a path. The engine marks the chosen folder as a
@@ -566,6 +600,10 @@ in `compose.yaml`:
               "--auth-dir", "/tokens/auth",
               "--browser-origin", "https://wayfetch.example.lan"]
 ```
+
+The key that encrypts provider account sign-ins is created as
+`$WAYFETCH_TOKENS/credential-key`, beside the token file and apart from the
+state; back it up with the state directory.
 
 The setup secret is then `$WAYFETCH_TOKENS/auth/setup-secret` on the host,
 and owner reset runs with the container stopped:

@@ -220,7 +220,7 @@ struct Outgoing<'a> {
 /// An HTTP(S) transport for the engine and a request broker for leases.
 pub struct HttpTransport {
     config: HttpConfig,
-    policy: Arc<EgressPolicy>,
+    pub(crate) policy: Arc<EgressPolicy>,
     tls: rustls::ClientConfig,
     /// The client for the last connect timeout asked for; the engine uses
     /// one, so the pool is normally kept.
@@ -283,7 +283,10 @@ impl HttpTransport {
             .build()
     }
 
-    fn client(&self, connect_timeout: Duration) -> Result<reqwest::Client, TransportError> {
+    pub(crate) fn client(
+        &self,
+        connect_timeout: Duration,
+    ) -> Result<reqwest::Client, TransportError> {
         let mut slot = self.client.lock().expect("unpoisoned");
         if let Some((timeout, client)) = &*slot
             && *timeout == connect_timeout
@@ -701,7 +704,7 @@ fn send_failure(err: reqwest::Error, replay_safe: bool) -> TransportError {
 
 /// The first `T` in `err`'s chain of causes, looking inside I/O errors,
 /// which hide their inner error from `source`.
-fn find<'e, T: StdError + 'static>(err: &'e (dyn StdError + 'static)) -> Option<&'e T> {
+pub(crate) fn find<'e, T: StdError + 'static>(err: &'e (dyn StdError + 'static)) -> Option<&'e T> {
     let mut next = Some(err);
     while let Some(e) = next {
         if let Some(found) = e.downcast_ref::<T>() {

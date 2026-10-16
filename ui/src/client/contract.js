@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 2, minor: 0 });
+export const PROTOCOL = Object.freeze({ major: 2, minor: 1 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -47,6 +47,14 @@ export const PROTOCOL = Object.freeze({ major: 2, minor: 0 });
  * @typedef {import('./generated/LinksAction.js').LinksAction} LinksAction
  * @typedef {import('./generated/RefusedLink.js').RefusedLink} RefusedLink
  * @typedef {import('./generated/EventKind.js').EventKind} EventKind
+ * @typedef {import('./generated/AccountId.js').AccountId} AccountId
+ * @typedef {import('./generated/AccountRef.js').AccountRef} AccountRef
+ * @typedef {import('./generated/AccountSummary.js').AccountSummary} AccountSummary
+ * @typedef {import('./generated/AccountAction.js').AccountAction} AccountAction
+ * @typedef {import('./generated/Accounts.js').Accounts} Accounts
+ * @typedef {import('./generated/Authorization.js').Authorization} Authorization
+ * @typedef {import('./generated/AuthorizationId.js').AuthorizationId} AuthorizationId
+ * @typedef {import('./generated/ServiceSupport.js').ServiceSupport} ServiceSupport
  * @typedef {Exclude<JobAction, 'rename' | 'remove'>} StateAction The
  *   actions that change whether a job runs.
  */
@@ -71,6 +79,10 @@ export const PROTOCOL = Object.freeze({ major: 2, minor: 0 });
  * `revealFile`; each takes a job or nothing, never a path. A server's
  * client instead has `browseFolders` and `addFolder`, which list the
  * server's folders and add one the owner chose as a download folder.
+ *
+ * The account methods need the `accounts` permission. None takes or
+ * returns a provider credential: signing in happens on the provider's
+ * site, and the engine keeps what the provider issues.
  * @typedef {{
  *   permissions: readonly Permission[],
  *   local: boolean,
@@ -114,6 +126,23 @@ export const PROTOCOL = Object.freeze({ major: 2, minor: 0 });
  *     expectedRevision: number,
  *     root: RootId,
  *   }) => Promise<CommandResult>,
+ *   accounts: () => Promise<Accounts>,
+ *   authorizeAccount: (request: {
+ *     idempotencyKey: string,
+ *     target: string,
+ *     service: string,
+ *     account?: AccountRef,
+ *     alias?: string,
+ *   }) => Promise<CommandResult>,
+ *   authorization: (id: AuthorizationId) => Promise<Authorization>,
+ *   cancelAuthorization: (id: AuthorizationId) => Promise<Authorization>,
+ *   accountCommand: (account: AccountId, request: {
+ *     idempotencyKey: string,
+ *     target: string,
+ *     action: AccountAction,
+ *     expectedRevision: number,
+ *   }) => Promise<CommandResult>,
+ *   refreshAccount: (account: AccountId) => Promise<AccountSummary>,
  *   subscribe: (after: EventCursor | null, sink: StreamSink) => Subscription,
  *   chooseDownloadFolder?: () => Promise<RootSummary | null>,
  *   openFile?: (job: JobId) => Promise<void>,

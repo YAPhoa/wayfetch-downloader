@@ -8,7 +8,7 @@ import { expect, test } from '@playwright/test';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { Daemon, Fixture, MIB, content, freePort } from './harness.js';
+import { Daemon, Fixture, MIB, RD_SECRETS, RD_USER_CODE, RealDebridFixture, content, freePort } from './harness.js';
 
 const PASSWORD = 'correct horse battery staple';
 /** A file name that is markup if mistaken for HTML, and fine on disk. */
@@ -19,18 +19,22 @@ const STALL = 17 * MIB + 5;
 
 /** @type {Fixture} */
 let fixture;
+/** @type {RealDebridFixture} */
+let realDebrid;
 /** @type {Daemon} */
 let daemon;
 
 test.beforeAll(async () => {
   fixture = await new Fixture().start();
-  daemon = await new Daemon(await freePort()).init();
+  realDebrid = await new RealDebridFixture().start();
+  daemon = await new Daemon(await freePort(), { realDebrid: realDebrid.base }).init();
   await daemon.start();
 });
 
 test.afterAll(async () => {
   await daemon?.remove();
   await fixture?.stop();
+  await realDebrid?.stop();
 });
 
 /**
@@ -109,8 +113,8 @@ async function expectFitsWindow(page) {
 /**
  * The service catalogue, opened to add an account from the Accounts &
  * services section: Real-Debrid first, search by name and address,
- * categories from the keyboard, the no-results state, nothing that can be
- * added or connected, and a narrow window. Focus returns to Add account
+ * categories from the keyboard, the no-results state, only Real-Debrid
+ * offered for signing in, and a narrow window. Focus returns to Add account
  * when it closes.
  * @param {import('@playwright/test').Page} page
  * @param {import('@playwright/test').Locator} accounts
@@ -134,13 +138,15 @@ async function expectServiceCatalogue(page, accounts) {
   // Real-Debrid leads, as the first planned integration.
   const featured = catalogue.locator('.service-card.featured');
   await expect(featured.locator('h4')).toHaveText('Real-Debrid');
-  await expect(featured.locator('.tag')).toHaveText(['Multi-host services', 'Planned', 'Not available yet']);
+  await expect(featured.locator('.tag')).toHaveText(['Multi-host services', 'Available', 'Sign-in only']);
   await expect(names.first()).toHaveText('Real-Debrid');
-  // Nothing in it can be added yet, or asks for an account.
-  await expect(catalogue.getByRole('button')).toHaveText(['×']);
+  // Only Real-Debrid can be signed in to, and nothing asks for a password.
+  await expect(catalogue.getByRole('button')).toHaveText(['×', 'Sign in…']);
+  await expect(featured.getByRole('button', { name: 'Sign in to Real-Debrid' })).toBeVisible();
+  await expect(featured.getByText(/cannot download through it yet/)).toBeVisible();
   await expect(catalogue.locator('input:not([type="search"], [type="radio"]), select, textarea')).toHaveCount(0);
-  await expect(catalogue.locator('.service-card .tag', { hasText: 'Not available yet' })).toHaveCount(20);
-  await expect(catalogue.locator('.service-card .tag.available')).toHaveCount(0);
+  await expect(catalogue.locator('.service-card .tag', { hasText: 'Not available yet' })).toHaveCount(19);
+  await expect(catalogue.locator('.service-card .tag.available')).toHaveCount(1);
   // By name, ignoring case and punctuation.
   await search.fill('real debrid');
   await expect(names).toHaveText(['Real-Debrid']);
@@ -502,7 +508,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   // Only accounts added are listed, in a table: none yet.
   const accounts = pane.locator('section', { has: page.getByRole('heading', { name: /Accounts & services/ }) });
   const table = accounts.getByRole('table', { name: 'Accounts' });
-  await expect(table.getByRole('columnheader')).toHaveText(['Service', 'Account', 'Status', 'Expires', 'Traffic left']);
+  await expect(table.getByRole('columnheader')).toHaveText(['Service', 'Account', 'Status', 'Expires', 'Actions']);
   await expect(table.locator('tbody tr')).toHaveText(['No accounts added yet.']);
   await expect(accounts.getByText(/Links you add directly download without an account/)).toBeVisible();
   await expect(accounts.locator('.service-card')).toHaveCount(0);
@@ -1156,5 +1162,145 @@ test('Retry continues a cancelled download, once, and says when it had to start 
     'the file on the server changed since the saved data was downloaded',
   );
   expect((await daemon.published(CHANGED, daemon.archive)).equals(content(0, 10 * MIB))).toBe(true);
+  await context.close();
+});
+
+test('accounts are signed in on the service, checked, disabled, signed in again, and removed', async ({
+  browser,
+}) => {
+  const context = await browser.newContext();
+  /** @type {string[]} */
+  const offOrigin = [];
+  context.on('request', (request) => {
+    if (!request.url().startsWith(`${daemon.origin}/`)) offOrigin.push(request.url());
+  });
+  const page = await context.newPage();
+  await page.goto(daemon.origin);
+  await page.getByLabel('Owner name').fill('owner');
+  await page.getByLabel('Password').fill(PASSWORD);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.locator('.statusbar .status')).toHaveText('Live');
+  await page.goto(`${daemon.origin}/settings/accounts`);
+  const pane = page.locator('.settings-content');
+  const accounts = pane.locator('section', { has: page.getByRole('heading', { name: /Accounts & services/ }) });
+  const table = accounts.getByRole('table', { name: 'Accounts' });
+  const status = accounts.locator('[data-key="accounts-message"]');
+  await expect(table.locator('tbody tr')).toHaveText(['No accounts added yet.']);
+  await expect(accounts.getByText(/Signing in to a service and downloading through it are separate/)).toBeVisible();
+
+  // Pick Real-Debrid, name the account, and approve on the service's site.
+  await accounts.getByRole('button', { name: 'Add account…' }).click();
+  await page.getByRole('dialog', { name: 'Add account' }).getByRole('button', { name: 'Sign in to Real-Debrid' }).click();
+  const signIn = page.getByRole('dialog', { name: 'Sign in to Real-Debrid' });
+
+  // Closed while it asks for a code: the sign-in that started anyway is
+  // cancelled when the answer arrives, not left holding a slot.
+  /** @type {() => void} */
+  let release = () => {};
+  const held = new Promise((resolve) => (release = () => resolve(undefined)));
+  await page.route('**/v1/accounts/authorizations', async (route) => {
+    await held;
+    await route.continue();
+  });
+  await signIn.getByRole('button', { name: 'Continue' }).click();
+  await expect(signIn.getByRole('status')).toHaveText('Asking for a code…');
+  await page.keyboard.press('Escape');
+  await expect(signIn).toHaveCount(0);
+  const cancel = page.waitForRequest(
+    (request) => request.method() === 'POST' && /\/v1\/accounts\/authorizations\/[^/]+\/cancel$/.test(request.url()),
+  );
+  release();
+  const cancelled = await (await cancel).response();
+  expect(cancelled?.status()).toBe(200);
+  expect((await cancelled?.json()).state).toBe('cancelled');
+  await page.unroute('**/v1/accounts/authorizations');
+  await accounts.getByRole('button', { name: 'Add account…' }).click();
+  await page.getByRole('dialog', { name: 'Add account' }).getByRole('button', { name: 'Sign in to Real-Debrid' }).click();
+
+  await expect(signIn.getByText('Wayfetch never asks for your password', { exact: false })).toBeVisible();
+  await expect(signIn.getByText(/Downloading through Real-Debrid is not supported yet/)).toBeVisible();
+  await expect(signIn.locator('input[type="password"]')).toHaveCount(0);
+  const name = signIn.getByLabel('Name in Wayfetch (optional)');
+  await expect(name).toBeFocused();
+  await name.fill('Main');
+  await signIn.getByRole('button', { name: 'Continue' }).click();
+  await expect(signIn.locator('.user-code')).toHaveText(RD_USER_CODE);
+  await expect(signIn.getByRole('link')).toHaveAttribute('href', `${realDebrid.base}device`);
+  await expect(signIn.getByRole('status')).toHaveText(/Waiting for you to approve Wayfetch on Real-Debrid/);
+  // The stand-in approves on its second poll; the dialog closes then.
+  await expect(signIn).toHaveCount(0);
+  await expect(status).toHaveText('Account added and signed in.');
+  const added = table.locator('tbody tr');
+  await expect(added).toHaveCount(1);
+  await expect(added.locator('td').nth(0)).toHaveText('Real-Debrid');
+  await expect(added.locator('td').nth(1)).toHaveText(/^Main synthetic-user\s*Premium$/);
+  await expect(added.locator('td').nth(2)).toHaveText('Signed in');
+  await expect(added.locator('td').nth(3)).not.toHaveText('—');
+
+  // Checked on request only; listing never asks the service.
+  const users = realDebrid.requested.filter((path) => path === '/rest/1.0/user').length;
+  await page.reload();
+  await expect(added.locator('td').nth(2)).toHaveText('Signed in');
+  expect(realDebrid.requested.filter((path) => path === '/rest/1.0/user').length).toBe(users);
+  await accounts.getByRole('button', { name: 'Check Main' }).click();
+  await expect(status).toHaveText('Checked: Signed in.');
+  expect(realDebrid.requested.filter((path) => path === '/rest/1.0/user').length).toBe(users + 1);
+
+  // Disabled: kept, but not used.
+  await accounts.getByRole('button', { name: 'Disable Main' }).click();
+  await expect(status).toHaveText('Disabled: kept, but not used.');
+  await expect(added.locator('td').nth(2)).toHaveText('Disabled');
+  await expect(accounts.getByRole('button', { name: 'Check Main' })).toHaveCount(0);
+  await expect(accounts.getByRole('button', { name: 'Sign in again to Main' })).toHaveCount(0);
+  await accounts.getByRole('button', { name: 'Enable Main' }).click();
+  await expect(added.locator('td').nth(2)).toHaveText('Signed in');
+
+  // Signed in again: new sign-in, same account.
+  await accounts.getByRole('button', { name: 'Sign in again to Main' }).click();
+  const again = page.getByRole('dialog', { name: 'Sign in to Real-Debrid again' });
+  await expect(again.locator('.user-code')).toHaveText(RD_USER_CODE);
+  await expect(again.getByRole('textbox')).toHaveCount(0);
+  await expect(again).toHaveCount(0);
+  await expect(status).toHaveText('Signed in again.');
+  await expect(table.locator('tbody tr')).toHaveCount(1);
+
+  // A sign-in closed before approval is cancelled.
+  const polls = realDebrid.requested.length;
+  await accounts.getByRole('button', { name: 'Add account…' }).click();
+  await page.getByRole('dialog', { name: 'Add account' }).getByRole('button', { name: 'Sign in to Real-Debrid' }).click();
+  await signIn.getByRole('button', { name: 'Continue' }).click();
+  await expect(signIn.locator('.user-code')).toHaveText(RD_USER_CODE);
+  await signIn.getByRole('button', { name: 'Cancel' }).click();
+  await expect(signIn).toHaveCount(0);
+  await page.waitForTimeout(2500);
+  const after = realDebrid.requested.length;
+  await page.waitForTimeout(2500);
+  expect(realDebrid.requested.length).toBe(after);
+  expect(after).toBeGreaterThan(polls);
+  await expect(table.locator('tbody tr')).toHaveCount(1);
+
+  // Removed after confirming.
+  await accounts.getByRole('button', { name: 'Remove Main' }).click();
+  const confirm = page.getByRole('dialog', { name: 'Remove account' });
+  await expect(confirm.getByText(/The account itself stays at the service/)).toBeVisible();
+  await confirm.getByRole('button', { name: 'Remove' }).click();
+  await expect(status).toHaveText('Removed.');
+  await expect(table.locator('tbody tr')).toHaveText(['No accounts added yet.']);
+
+  // Nothing the service issued reached the page, its storage, or its
+  // address, and the page itself contacted only the daemon.
+  const seen = await page.evaluate(() =>
+    JSON.stringify([
+      document.documentElement.outerHTML,
+      location.href,
+      Object.entries(localStorage),
+      Object.entries(sessionStorage),
+    ]),
+  );
+  for (const secret of Object.values(RD_SECRETS)) {
+    expect(seen).not.toContain(secret);
+    expect(daemon.log).not.toContain(secret);
+  }
+  expect(offOrigin).toEqual([]);
   await context.close();
 });

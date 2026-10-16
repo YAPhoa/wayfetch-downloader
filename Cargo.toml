@@ -5,6 +5,7 @@ members = [
     "crates/protocol",
     "crates/engine",
     "crates/net",
+    "crates/adapters",
     "crates/host",
     "crates/cli",
     "crates/api",
@@ -18,6 +19,7 @@ default-members = [
     "crates/protocol",
     "crates/engine",
     "crates/net",
+    "crates/adapters",
     "crates/host",
     "crates/cli",
     "crates/api",
@@ -37,6 +39,7 @@ wayfetch-domain = { path = "crates/domain" }
 wayfetch-protocol = { path = "crates/protocol" }
 wayfetch-engine = { path = "crates/engine" }
 wayfetch-net = { path = "crates/net" }
+wayfetch-adapters = { path = "crates/adapters" }
 wayfetch-host = { path = "crates/host" }
 wayfetch-api = { path = "crates/api" }
 bytes = "1.12.1"
