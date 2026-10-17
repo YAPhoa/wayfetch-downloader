@@ -44,7 +44,7 @@ use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
 use wayfetch_protocol::query::{
-    BoundedSetting, FolderListing, MAX_LISTED_FOLDERS, RootSummary, Settings,
+    BoundedSetting, FolderListing, MAX_LISTED_FOLDERS, RootSummary, Settings, SpeedLimitSetting,
 };
 use wayfetch_protocol::{ErrorCode, InstanceId, ProtocolError};
 
@@ -535,9 +535,11 @@ impl Destinations {
         &self,
         available: Vec<Result<(), String>>,
         max_active_downloads: BoundedSetting,
+        download_speed_limit: SpeedLimitSetting,
     ) -> Settings {
         Settings {
             max_active_downloads,
+            download_speed_limit,
             revision: self.revision,
             default_root: self.default_root(),
             roots: self

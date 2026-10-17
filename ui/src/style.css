@@ -1034,6 +1034,8 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 .setting-text .problem:empty { display: none; }
 .setting-row input.count { flex: none; width: 8ch; min-height: 32px; box-sizing: border-box; text-align: right; }
 .setting-row input.count[aria-invalid='true'] { border-color: var(--bad); }
+.speed-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.setting-row input.count.rate { width: 10ch; }
 
 /* Radios drawn as a row of joined buttons, like the toolbar's groups.
    Each radio covers its whole option, so it is what a pointer hits. */
@@ -1179,6 +1181,8 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
   .settings-nav { font-size: 13px; }
   .settings-link { min-height: 32px; }
   .setting-row .segmented { width: 100%; }
+  .speed-control { width: 100%; }
+  .speed-control input.count.rate { flex: 1; }
   .segmented label { flex: 1; justify-content: center; }
   .group-foot button { flex: 1; justify-content: center; }
   .group-foot .message { flex-basis: 100%; margin-right: 0; }

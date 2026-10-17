@@ -9,7 +9,8 @@
 //! incomplete coverage), T05 (representation changed during resume), T06
 //! (resume redirected to another origin or another resource on the same
 //! origin), T08 (truncated body), T09
-//! (stalled headers and body), and the egress policy (section 8.2).
+//! (stalled headers and body), the egress policy (section 8.2), and the
+//! total download speed limit shared by concurrent transfers.
 
 #[path = "../../engine/tests/support/mod.rs"]
 mod engine_support;
@@ -21,6 +22,8 @@ use bytes::Bytes;
 use engine_support::{CHECKPOINT, KIB, body, complete, jobs, settled, shutdown, wait_for};
 use sha2::{Digest, Sha256};
 use support::{Raw, Resource, Route, Server, https_env};
+use wayfetch_engine::protocol::query::SpeedLimit;
+use wayfetch_engine::transfer::throttle::quantum;
 use wayfetch_engine::{EngineOwner, Timeouts};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::JobId;
@@ -344,5 +347,38 @@ async fn destinations_outside_the_egress_policy_are_never_contacted() {
         FailureCode::UnsupportedCapability
     );
     assert!(env.server.log().is_empty());
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_https_downloads_share_the_total_speed_limit() {
+    let mut env = env().await;
+    let limit = 256 * KIB;
+    env.policy.download_speed_limit.default = Some(SpeedLimit::BytesPerSecond(limit as u64));
+    let data = body(192 * KIB);
+    let paths = ["/one.bin", "/two.bin", "/three.bin"];
+    for path in paths {
+        env.server.put(path, Resource::new(data.clone()));
+    }
+    let owner = env.start().await;
+    let started = tokio::time::Instant::now();
+    let ids = submit(&env, &owner, &paths).await;
+    for id in ids {
+        let done = complete(&owner, id).await;
+        assert_eq!(done.bytes_done, data.len() as u64);
+    }
+    let elapsed = started.elapsed();
+    // Starting without credit, the engine admits at most one quantum more
+    // than the limit allows: 576 KiB at 256 KiB/s take over two seconds,
+    // where each transfer alone at the limit would have taken under one.
+    let floor = (3 * data.len() - quantum(limit as u64) as usize) as f64 / limit as f64;
+    assert!(elapsed.as_secs_f64() >= floor, "{elapsed:?} < {floor}s");
+    for path in paths {
+        assert_eq!(
+            digest(&env.published(path.trim_start_matches('/'))),
+            digest(&data)
+        );
+        assert_eq!(env.server.hits(path), 1);
+    }
     shutdown(owner).await;
 }
