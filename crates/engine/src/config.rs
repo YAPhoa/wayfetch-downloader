@@ -11,6 +11,8 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use wayfetch_protocol::query::SpeedLimit;
+
 /// A configuration value is invalid.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
@@ -215,22 +217,124 @@ impl IntegerPolicy {
     }
 }
 
+/// The operator's policy for the total download speed limit, in bytes per
+/// second. Unlimited is the built-in default. A finite `max` is a ceiling
+/// Unlimited cannot bypass: with one, the default must be finite, and a
+/// saved Unlimited runs at `max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeedLimitPolicy {
+    /// The limit without a saved preference; Unlimited if `None`.
+    pub default: Option<SpeedLimit>,
+    /// Smallest finite limit a user may choose.
+    pub min: u64,
+    /// Largest finite limit a user may choose, which also forbids
+    /// Unlimited; `None` permits Unlimited and every supported finite
+    /// limit from `min`.
+    pub max: Option<u64>,
+    /// Whether the default is enforced: users cannot change it, and a
+    /// saved preference is not used.
+    pub locked: bool,
+}
+
+impl SpeedLimitPolicy {
+    /// The setting's name, as configuration and errors spell it.
+    pub const NAME: &'static str = "downloads.speed_limit";
+    /// Smallest finite limit the engine supports: 1 KiB/s.
+    pub const MIN: u64 = KIB;
+    /// Largest finite limit the engine supports: 1 TiB/s. It fits a
+    /// JavaScript number exactly.
+    pub const MAX: u64 = 1 << 40;
+
+    /// No restriction beyond what the engine supports.
+    pub const UNRESTRICTED: Self = Self {
+        default: None,
+        min: Self::MIN,
+        max: None,
+        locked: false,
+    };
+
+    /// The limit without a saved preference.
+    pub fn default_value(&self) -> SpeedLimit {
+        self.default.unwrap_or(SpeedLimit::Unlimited)
+    }
+
+    /// The largest finite limit permitted.
+    pub fn ceiling(&self) -> u64 {
+        self.max.unwrap_or(Self::MAX)
+    }
+
+    /// Whether `limit` is permitted.
+    pub fn permits(&self, limit: SpeedLimit) -> bool {
+        match limit {
+            SpeedLimit::Unlimited => self.max.is_none(),
+            SpeedLimit::BytesPerSecond(rate) => (self.min..=self.ceiling()).contains(&rate),
+        }
+    }
+
+    /// The permitted limit nearest `limit`: a finite one clamped into the
+    /// range, and Unlimited lowered to the ceiling when it is forbidden.
+    pub fn nearest(&self, limit: SpeedLimit) -> SpeedLimit {
+        match (limit, self.max) {
+            (SpeedLimit::Unlimited, None) => SpeedLimit::Unlimited,
+            (SpeedLimit::Unlimited, Some(max)) => SpeedLimit::BytesPerSecond(max),
+            (SpeedLimit::BytesPerSecond(rate), _) => {
+                SpeedLimit::BytesPerSecond(rate.clamp(self.min, self.ceiling()))
+            }
+        }
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        let problem = |problem: String| ConfigError::Policy {
+            setting: Self::NAME,
+            problem,
+        };
+        let supported = Self::MIN..=Self::MAX;
+        if !supported.contains(&self.min)
+            || !supported.contains(&self.ceiling())
+            || self.min > self.ceiling()
+        {
+            return Err(problem(format!(
+                "the permitted range {}..={} bytes per second must lie within {}..={}",
+                self.min,
+                self.ceiling(),
+                Self::MIN,
+                Self::MAX
+            )));
+        }
+        match self.default_value() {
+            limit if self.permits(limit) => Ok(()),
+            SpeedLimit::Unlimited => Err(problem(
+                "a maximum forbids Unlimited, so configure a finite default within it".to_owned(),
+            )),
+            SpeedLimit::BytesPerSecond(rate) => Err(problem(format!(
+                "the default {rate} lies outside the permitted range {}..={} bytes per second",
+                self.min,
+                self.ceiling()
+            ))),
+        }
+    }
+}
+
 /// The operator's policy for every run-time preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
     /// [`Preference::MAX_ACTIVE_DOWNLOADS`].
     pub max_active_downloads: IntegerPolicy,
+    /// The total download speed limit.
+    pub download_speed_limit: SpeedLimitPolicy,
 }
 
 impl Policy {
     /// Built-in defaults, and every supported value permitted.
     pub const DEFAULT: Self = Self {
         max_active_downloads: IntegerPolicy::unrestricted(Preference::MAX_ACTIVE_DOWNLOADS),
+        download_speed_limit: SpeedLimitPolicy::UNRESTRICTED,
     };
 
     fn validate(&self) -> Result<(), ConfigError> {
         self.max_active_downloads
-            .validate(Preference::MAX_ACTIVE_DOWNLOADS)
+            .validate(Preference::MAX_ACTIVE_DOWNLOADS)?;
+        self.download_speed_limit.validate()
     }
 }
 
@@ -495,6 +599,62 @@ mod tests {
                 "{default:?} {min} {max}"
             );
         }
+    }
+
+    #[test]
+    fn a_speed_limit_ceiling_forbids_unlimited() {
+        let speed = |default, min, max| {
+            let mut c = config();
+            c.policy.download_speed_limit = SpeedLimitPolicy {
+                default,
+                min,
+                max,
+                locked: false,
+            };
+            c.validate()
+        };
+        let mib = SpeedLimit::BytesPerSecond(MIB);
+        assert_eq!(speed(None, KIB, None), Ok(()));
+        assert_eq!(speed(Some(mib), KIB, Some(4 * MIB)), Ok(()));
+        assert_eq!(speed(Some(SpeedLimit::Unlimited), 64 * KIB, None), Ok(()));
+        for (default, min, max) in [
+            // Unlimited, built in or configured, would bypass a maximum.
+            (None, KIB, Some(4 * MIB)),
+            (Some(SpeedLimit::Unlimited), KIB, Some(4 * MIB)),
+            (
+                Some(SpeedLimit::BytesPerSecond(8 * MIB)),
+                KIB,
+                Some(4 * MIB),
+            ),
+            (Some(SpeedLimit::BytesPerSecond(KIB)), 2 * KIB, None),
+            (None, 0, None),
+            (None, KIB, Some(SpeedLimitPolicy::MAX + 1)),
+            (Some(mib), 2 * MIB, Some(MIB)),
+        ] {
+            assert!(
+                matches!(
+                    speed(default, min, max),
+                    Err(ConfigError::Policy {
+                        setting: "downloads.speed_limit",
+                        ..
+                    })
+                ),
+                "{default:?} {min} {max:?}"
+            );
+        }
+        let capped = SpeedLimitPolicy {
+            max: Some(4 * MIB),
+            ..SpeedLimitPolicy::UNRESTRICTED
+        };
+        assert!(!capped.permits(SpeedLimit::Unlimited));
+        assert_eq!(
+            capped.nearest(SpeedLimit::Unlimited),
+            SpeedLimit::BytesPerSecond(4 * MIB)
+        );
+        assert_eq!(
+            capped.nearest(SpeedLimit::BytesPerSecond(1)),
+            SpeedLimit::BytesPerSecond(KIB)
+        );
     }
 
     #[test]

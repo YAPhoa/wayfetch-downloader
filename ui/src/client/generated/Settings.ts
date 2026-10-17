@@ -3,6 +3,7 @@ import type { BoundedSetting } from "./BoundedSetting.js";
 import type { Revision } from "./Revision.js";
 import type { RootId } from "./RootId.js";
 import type { RootSummary } from "./RootSummary.js";
+import type { SpeedLimitSetting } from "./SpeedLimitSetting.js";
 
 /**
  * The user's settings. Added in protocol 0.3.
@@ -26,4 +27,9 @@ roots: Array<RootSummary>,
  * Most downloads transferring at once, engine-wide. Added in protocol
  * 2.0.
  */
-max_active_downloads: BoundedSetting, };
+max_active_downloads: BoundedSetting, 
+/**
+ * The combined rate of every download's body, engine-wide. Added in
+ * protocol 2.3.
+ */
+download_speed_limit: SpeedLimitSetting, };

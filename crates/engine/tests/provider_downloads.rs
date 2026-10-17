@@ -792,6 +792,41 @@ async fn direct_downloads_never_ask_the_provider() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn direct_and_account_downloads_share_the_total_speed_limit() {
+    use wayfetch_engine::transfer::throttle::{burst, quantum};
+    use wayfetch_protocol::query::SpeedLimit;
+
+    let mut env = env();
+    let limit = 64 * KIB as u64;
+    env.policy.download_speed_limit.default = Some(SpeedLimit::BytesPerSecond(limit));
+    let (provider, host) = (&env.server.provider, &env.server.host);
+    let data = body(96 * KIB);
+    host.serve(data.clone());
+    let owner = env.start().await;
+    let account = add_account(&owner, provider).await;
+    let began = tokio::time::Instant::now();
+    let direct = support::submit(&owner, ["https://files.example/direct.bin".to_owned()]).await[0];
+    let routed = start_one(&owner, Some(account)).await;
+    assert!(support::complete(&owner, direct).await.route.is_none());
+    assert_eq!(
+        support::complete(&owner, routed)
+            .await
+            .route
+            .unwrap()
+            .account,
+        account
+    );
+    // Both transfers must spend the same budget, including any credit
+    // accumulated while signing in. Separate budgets would finish sooner.
+    let floor = (2 * data.len() as u64 - burst(limit) - quantum(limit)) as f64 / limit as f64;
+    assert!(began.elapsed().as_secs_f64() >= floor);
+    assert_eq!(env.published("direct.bin"), data);
+    assert_eq!(env.published("Provider Name.bin"), data);
+    assert_eq!(provider.unrestricts(), 1);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn using_an_account_needs_the_provider_downloads_permission() {
     let env = env();
     let provider = &env.server.provider;
