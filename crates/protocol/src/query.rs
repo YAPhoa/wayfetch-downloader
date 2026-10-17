@@ -361,6 +361,9 @@ pub struct Settings {
     /// Most downloads transferring at once, engine-wide. Added in protocol
     /// 2.0.
     pub max_active_downloads: BoundedSetting,
+    /// The combined rate of every download's body, engine-wide. Added in
+    /// protocol 2.3.
+    pub download_speed_limit: SpeedLimitSetting,
 }
 
 /// An engine preference with a whole-number value, as the operator's
@@ -405,6 +408,55 @@ pub enum SettingSource {
     Server,
     /// The user's saved preference.
     Saved,
+}
+
+/// A cap on the combined rate of download bodies, in bytes per second.
+/// Added in protocol 2.3.
+///
+/// On the wire, `"unlimited"` or `{"bytes_per_second": n}`. No number
+/// stands for Unlimited: zero is refused like any value below the
+/// permitted range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum SpeedLimit {
+    /// No cap.
+    Unlimited,
+    /// At most this many bytes of download bodies per second, across every
+    /// download together.
+    BytesPerSecond(u64),
+}
+
+/// The total download speed limit, as the operator's policy and the
+/// user's saved choice resolve it. Added in protocol 2.3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct SpeedLimitSetting {
+    /// The limit in effect.
+    pub value: SpeedLimit,
+    /// Where `value` comes from.
+    pub source: SettingSource,
+    /// The limit without a saved preference: the operator's configured
+    /// default, else Unlimited. Choosing "use the default" applies it.
+    pub default: SpeedLimit,
+    /// The user's saved preference, if any. It is kept when the policy
+    /// changes, even if the policy no longer allows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub saved: Option<SpeedLimit>,
+    /// Smallest finite limit the policy permits, in bytes per second.
+    pub min: u64,
+    /// Largest finite limit the policy permits, in bytes per second.
+    pub max: u64,
+    /// Whether Unlimited is permitted. An operator's maximum forbids it.
+    pub unlimited: bool,
+    /// Whether the operator fixed the limit: it cannot be changed here,
+    /// and `value` is the configured one.
+    pub locked: bool,
+    /// Whether the saved preference is outside the policy, so `value` is
+    /// the nearest permitted limit instead (the configured one when
+    /// locked; the maximum for a saved Unlimited the policy forbids).
+    pub conflict: bool,
 }
 
 /// What is known about a collected link. Added in protocol 1.1.
@@ -683,6 +735,17 @@ mod tests {
                 locked: false,
                 conflict: false,
             },
+            download_speed_limit: SpeedLimitSetting {
+                value: SpeedLimit::BytesPerSecond(2_097_152),
+                source: SettingSource::Server,
+                default: SpeedLimit::BytesPerSecond(2_097_152),
+                saved: Some(SpeedLimit::Unlimited),
+                min: 1024,
+                max: 4_194_304,
+                unlimited: false,
+                locked: false,
+                conflict: true,
+            },
         });
         assert_eq!(
             serde_json::to_value(&settings).unwrap(),
@@ -694,6 +757,12 @@ mod tests {
                 "max_active_downloads": {
                     "value": 8, "source": "saved", "default": 4, "saved": 8,
                     "min": 1, "max": 16, "locked": false, "conflict": false,
+                },
+                "download_speed_limit": {
+                    "value": {"bytes_per_second": 2_097_152}, "source": "server",
+                    "default": {"bytes_per_second": 2_097_152}, "saved": "unlimited",
+                    "min": 1024, "max": 4_194_304, "unlimited": false,
+                    "locked": false, "conflict": true,
                 },
             })
         );

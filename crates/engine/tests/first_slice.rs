@@ -29,10 +29,10 @@ use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
-use wayfetch_engine::{EngineOwner, IntegerPolicy, Timeouts};
+use wayfetch_engine::{EngineOwner, IntegerPolicy, SpeedLimitPolicy, Timeouts};
 use wayfetch_protocol::command::{
     AppliedLink, CollectItems, LinkRef, LinkRefs, MAX_COLLECTED_LINKS, MAX_SUBMIT_ITEMS,
-    PreferenceChange,
+    PreferenceChange, SpeedLimitChange,
 };
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::{JobId, RootId};
@@ -41,7 +41,7 @@ use wayfetch_protocol::domain::version::Revision;
 use wayfetch_protocol::event::{EventKind, ResyncReason};
 use wayfetch_protocol::query::{
     BoundedSetting, CollectedLink, JobFilter, JobSummary, LinkCheck, LinkPage, PageSize,
-    SettingSource, Settings,
+    SettingSource, Settings, SpeedLimit, SpeedLimitSetting,
 };
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Permission, ProtocolError, Query,
@@ -107,6 +107,8 @@ struct Server {
     requests: Mutex<Vec<OpenRequest>>,
     open_bodies: AtomicUsize,
     most_open_bodies: AtomicUsize,
+    /// Body bytes handed to the engine, by URL path.
+    served: Mutex<HashMap<String, usize>>,
 }
 
 impl Server {
@@ -123,6 +125,14 @@ impl Server {
 
     fn stall_at(&self, path: &str) -> Option<usize> {
         self.resources.lock().unwrap()[path].stall_at
+    }
+
+    fn served(&self, path: &str) -> usize {
+        self.served.lock().unwrap().get(path).copied().unwrap_or(0)
+    }
+
+    fn served_total(&self) -> usize {
+        self.served.lock().unwrap().values().sum()
     }
 
     fn ranges_requested(&self) -> Vec<Option<(u64, Option<u64>)>> {
@@ -170,6 +180,13 @@ impl ChunkSource for Body {
                         }
                         let chunk = self.data.slice(self.position..end);
                         self.position = end;
+                        *self
+                            .server
+                            .served
+                            .lock()
+                            .unwrap()
+                            .entry(self.path.clone())
+                            .or_default() += chunk.len();
                         return Ok(Some(chunk));
                     }
                 }
@@ -545,6 +562,7 @@ fn max_active(
             expected_revision: revision,
             default_root: None,
             max_active_downloads: Some(change),
+            download_speed_limit: None,
         },
     )
 }
@@ -703,6 +721,7 @@ async fn the_operator_policy_bounds_and_locks_the_download_limit() {
                     expected_revision: settings(&owner).await.revision,
                     default_root: None,
                     max_active_downloads: None,
+                    download_speed_limit: None,
                 },
             ),
             ALL,
@@ -737,6 +756,327 @@ async fn the_operator_policy_bounds_and_locks_the_download_limit() {
     set_max_active(&owner, PreferenceChange::UseDefault).await;
     let cleared = settings(&owner).await.max_active_downloads;
     assert_eq!((cleared.saved, cleared.conflict), (None, false));
+    shutdown(owner).await;
+}
+
+fn speed_limit(
+    owner: &EngineOwner,
+    revision: Revision,
+    change: SpeedLimitChange,
+) -> CommandEnvelope {
+    envelope(
+        owner,
+        Command::UpdateSettings {
+            expected_revision: revision,
+            default_root: None,
+            max_active_downloads: None,
+            download_speed_limit: Some(change),
+        },
+    )
+}
+
+/// Changes the total download speed limit at the current revision.
+async fn set_speed_limit(owner: &EngineOwner, limit: SpeedLimit) {
+    let revision = settings(owner).await.revision;
+    owner
+        .handle()
+        .execute(
+            speed_limit(owner, revision, SpeedLimitChange::Set(limit)),
+            ALL,
+        )
+        .await
+        .unwrap();
+}
+
+fn rate(bytes: usize) -> SpeedLimit {
+    SpeedLimit::BytesPerSecond(bytes as u64)
+}
+
+/// Small reads and checkpoints, so throttled bytes show quickly.
+fn throttled_env() -> Env {
+    let mut env = env();
+    env.limits.read_buffer_bytes = NonZeroUsize::new(4 * KIB).unwrap();
+    env.limits.checkpoint_bytes = NonZeroU64::new(16 * KIB as u64).unwrap();
+    env
+}
+
+/// Most body bytes the engine may have taken in `seconds` at `limit` bytes
+/// per second from `transfers` transfers: the burst, one quantum, and one
+/// read buffer per transfer read ahead (`throttle` module documentation),
+/// plus `debt` admitted ahead of schedule before a change.
+fn allowance(limit: usize, seconds: usize, transfers: usize, debt: usize) -> usize {
+    use wayfetch_engine::transfer::throttle::{burst, quantum};
+    let limit = limit as u64;
+    (burst(limit) + quantum(limit)) as usize + limit as usize * seconds + transfers * 4 * KIB + debt
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn downloads_share_one_speed_limit_that_changes_while_they_run() {
+    let env = throttled_env();
+    let data = body(256 * KIB);
+    let paths = ["/a.bin", "/b.bin", "/c.bin"];
+    for path in paths {
+        env.server.put(path, Resource::new(data.clone()));
+    }
+    let owner = env.start().await;
+    set_speed_limit(&owner, rate(64 * KIB)).await;
+    let ids = submit(&owner, &paths).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Three downloads share 64 KiB/s instead of getting it each, and each
+    // makes progress.
+    let first = env.server.served_total();
+    assert!(first <= allowance(64 * KIB, 1, 3, 0), "{first}");
+    for path in paths {
+        assert!(env.server.served(path) > 0, "{path} starved");
+    }
+    for &id in &ids {
+        assert_eq!(job(&owner, id).await.stage, JobStage::Transferring);
+    }
+
+    // Lowering it applies to the running transfers.
+    set_speed_limit(&owner, rate(16 * KIB)).await;
+    let before = env.server.served_total();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let slower = env.server.served_total() - before;
+    let debt = wayfetch_engine::transfer::throttle::quantum(64 * KIB as u64) as usize;
+    assert!(slower <= allowance(16 * KIB, 1, 3, debt), "{slower}");
+
+    // Removing it lets them finish at once, on the same connections.
+    set_speed_limit(&owner, SpeedLimit::Unlimited).await;
+    for id in ids {
+        let done = complete(&owner, id).await;
+        assert_eq!(done.bytes_done, data.len() as u64);
+    }
+    for path in paths {
+        assert_eq!(env.published(path.trim_start_matches('/')), data);
+    }
+    assert_eq!(env.server.ranges_requested(), vec![None; 3]);
+    assert_eq!(env.server.served_total(), 3 * data.len());
+    shutdown(owner).await;
+
+    // The saved Unlimited is kept across a restart, as a choice.
+    let owner = env.start().await;
+    let saved = settings(&owner).await.download_speed_limit;
+    assert_eq!(
+        (saved.value, saved.saved, saved.source),
+        (
+            SpeedLimit::Unlimited,
+            Some(SpeedLimit::Unlimited),
+            SettingSource::Saved
+        )
+    );
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn throttling_is_not_inactivity_and_a_throttled_transfer_pauses_and_resumes() {
+    let mut env = throttled_env();
+    // Far shorter than the throttled transfers take.
+    env.timeouts.idle_read = Duration::from_millis(300);
+    let data = body(24 * KIB);
+    env.server.put("/slow.bin", Resource::new(data.clone()));
+    env.server.put("/paused.bin", Resource::new(data.clone()));
+    let owner = env.start().await;
+    set_speed_limit(&owner, rate(8 * KIB)).await;
+    let ids = submit(&owner, &["/slow.bin", "/paused.bin"]).await;
+    let (slow, paused) = (ids[0], ids[1]);
+    // The first checkpoint lands, so the pause keeps durable bytes.
+    wait_for(&owner, paused, |j| j.bytes_done >= 16 * KIB as u64).await;
+    let summary = job(&owner, paused).await;
+    let pause = Command::Pause {
+        job: paused,
+        expected_revision: summary.revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, pause), ALL)
+        .await
+        .unwrap();
+    // A pause interrupts a wait for bandwidth at once.
+    let held = wait_for(&owner, paused, |j| j.stage == JobStage::Paused).await;
+    assert!(held.bytes_done >= 16 * KIB as u64);
+    // Waiting for bandwidth longer than the idle deadline fails nothing.
+    let done = complete(&owner, slow).await;
+    assert_eq!(done.bytes_done, data.len() as u64);
+    assert_eq!(env.published("slow.bin"), data);
+
+    let summary = job(&owner, paused).await;
+    let resume = Command::Resume {
+        job: paused,
+        expected_revision: summary.revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, resume), ALL)
+        .await
+        .unwrap();
+    let done = complete(&owner, paused).await;
+    assert_eq!(done.generation, summary.generation);
+    assert_eq!(env.published("paused.bin"), data);
+    // The resume continued from the durable bytes, not from zero.
+    let ranges = env.server.ranges_requested();
+    assert_eq!(ranges.last().unwrap(), &Some((held.bytes_done, None)));
+
+    // A source that really stops still fails at the idle deadline.
+    let mut stalled = Resource::new(data.clone());
+    stalled.stall_at = Some(4 * KIB);
+    env.server.put("/stalled.bin", stalled);
+    let [id] = submit(&owner, &["/stalled.bin"]).await[..] else {
+        panic!()
+    };
+    let failed = wait_for(&owner, id, |j| j.stage == JobStage::Failed).await;
+    assert_eq!(
+        failed.failure.map(|f| f.code),
+        Some(FailureCode::RequestTimeout)
+    );
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_operator_policy_caps_the_speed_limit_and_unlimited_cannot_bypass_it() {
+    const MIB: usize = 1024 * KIB;
+    let mut env = env();
+    let owner = env.start().await;
+    assert_eq!(
+        settings(&owner).await.download_speed_limit,
+        SpeedLimitSetting {
+            value: SpeedLimit::Unlimited,
+            source: SettingSource::BuiltIn,
+            default: SpeedLimit::Unlimited,
+            saved: None,
+            min: 1024,
+            max: SpeedLimitPolicy::MAX,
+            unlimited: true,
+            locked: false,
+            conflict: false,
+        }
+    );
+    set_speed_limit(&owner, SpeedLimit::Unlimited).await;
+    shutdown(owner).await;
+
+    // A maximum keeps the saved Unlimited but runs at the maximum.
+    env.policy.download_speed_limit = SpeedLimitPolicy {
+        default: Some(rate(MIB)),
+        min: 64 * KIB as u64,
+        max: Some(4 * MIB as u64),
+        locked: false,
+    };
+    let owner = env.start().await;
+    let capped = settings(&owner).await.download_speed_limit;
+    assert_eq!(
+        (
+            capped.value,
+            capped.saved,
+            capped.conflict,
+            capped.unlimited
+        ),
+        (rate(4 * MIB), Some(SpeedLimit::Unlimited), true, false)
+    );
+    let revision = settings(&owner).await.revision;
+    for limit in [
+        SpeedLimit::Unlimited,
+        rate(0),
+        rate(KIB),
+        rate(4 * MIB + 1),
+        SpeedLimit::BytesPerSecond(u64::MAX),
+    ] {
+        let refused = owner
+            .handle()
+            .execute(
+                speed_limit(&owner, revision, SpeedLimitChange::Set(limit)),
+                ALL,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::InvalidRequest, "{limit:?}");
+    }
+    // Both preferences change together or not at all.
+    let both = |max_active, speed| {
+        envelope(
+            &owner,
+            Command::UpdateSettings {
+                expected_revision: revision,
+                default_root: None,
+                max_active_downloads: Some(PreferenceChange::Set(max_active)),
+                download_speed_limit: Some(SpeedLimitChange::Set(speed)),
+            },
+        )
+    };
+    let refused = owner
+        .handle()
+        .execute(both(2, SpeedLimit::Unlimited), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::InvalidRequest);
+    assert_eq!(settings(&owner).await.max_active_downloads.saved, None);
+    let accepted = both(2, rate(2 * MIB));
+    let first = owner.handle().execute(accepted.clone(), ALL).await.unwrap();
+    // A retry replays the result instead of changing anything again.
+    assert_eq!(owner.handle().execute(accepted, ALL).await.unwrap(), first);
+    let saved = settings(&owner).await;
+    assert_eq!(saved.revision, revision.next().unwrap());
+    assert_eq!(saved.max_active_downloads.value, 2);
+    assert_eq!(
+        (
+            saved.download_speed_limit.value,
+            saved.download_speed_limit.conflict
+        ),
+        (rate(2 * MIB), false)
+    );
+    // A stale revision is refused; reading-only callers may not change it.
+    let stale = owner
+        .handle()
+        .execute(
+            speed_limit(&owner, revision, SpeedLimitChange::Set(rate(MIB))),
+            ALL,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stale.code, ErrorCode::RevisionConflict);
+    let denied = owner
+        .handle()
+        .execute(
+            speed_limit(&owner, saved.revision, SpeedLimitChange::Set(rate(MIB))),
+            &[Permission::Read, Permission::Submit],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, ErrorCode::PermissionDenied);
+    // Returning to the default lets the configured one apply.
+    owner
+        .handle()
+        .execute(
+            speed_limit(&owner, saved.revision, SpeedLimitChange::UseDefault),
+            ALL,
+        )
+        .await
+        .unwrap();
+    let reset = settings(&owner).await.download_speed_limit;
+    assert_eq!(
+        (reset.value, reset.saved, reset.source),
+        (rate(MIB), None, SettingSource::Server)
+    );
+    set_speed_limit(&owner, rate(3 * MIB)).await;
+    shutdown(owner).await;
+
+    // A lock wins over the saved limit and refuses changes.
+    env.policy.download_speed_limit.locked = true;
+    let owner = env.start().await;
+    let locked = settings(&owner).await.download_speed_limit;
+    assert_eq!(
+        (locked.value, locked.saved, locked.locked, locked.conflict),
+        (rate(MIB), Some(rate(3 * MIB)), true, true)
+    );
+    let revision = settings(&owner).await.revision;
+    let refused = owner
+        .handle()
+        .execute(
+            speed_limit(&owner, revision, SpeedLimitChange::Set(rate(MIB))),
+            ALL,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::NotApplicable);
     shutdown(owner).await;
 }
 
@@ -1059,6 +1399,7 @@ fn choose(owner: &EngineOwner, revision: Revision, root: RootId) -> CommandEnvel
             expected_revision: revision,
             default_root: Some(root),
             max_active_downloads: None,
+            download_speed_limit: None,
         },
     )
 }

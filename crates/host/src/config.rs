@@ -23,7 +23,10 @@ use std::time::Duration;
 
 use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer};
-use wayfetch_engine::{EngineConfig, IntegerPolicy, Policy, Preference, Timeouts};
+use wayfetch_engine::protocol::query::SpeedLimit;
+use wayfetch_engine::{
+    EngineConfig, IntegerPolicy, Policy, Preference, SpeedLimitPolicy, Timeouts,
+};
 use wayfetch_net::ipnet::IpNet;
 
 /// The schema version this release reads.
@@ -103,6 +106,82 @@ pub struct TimeoutSeconds {
 pub struct Downloads {
     /// `[downloads.max_active]`: most downloads at once.
     pub max_active: Option<PolicyFile>,
+    /// `[downloads.speed_limit]`: the total download speed limit.
+    pub speed_limit: Option<SpeedLimitFile>,
+}
+
+/// The operator's policy for the total download speed limit, as written,
+/// in bytes per second. As for [`PolicyFile`], only `locked = true` fixes
+/// the value. A `max` is a ceiling Unlimited cannot bypass.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpeedLimitFile {
+    /// The limit until a user saves another: bytes per second, or
+    /// `"unlimited"`.
+    pub default: Option<RateFile>,
+    /// Smallest limit users may choose.
+    pub min: Option<u64>,
+    /// Largest limit users may choose; it also forbids Unlimited.
+    pub max: Option<u64>,
+    /// Whether users may not change it.
+    #[serde(default)]
+    pub locked: bool,
+}
+
+/// A speed limit as written: a whole number of bytes per second, or the
+/// word `"unlimited"`. No number means Unlimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateFile(pub SpeedLimit);
+
+impl<'de> Deserialize<'de> for RateFile {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = RateFile;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a whole number of bytes per second, or \"unlimited\"")
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, rate: u64) -> Result<RateFile, E> {
+                Ok(RateFile(SpeedLimit::BytesPerSecond(rate)))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, rate: i64) -> Result<RateFile, E> {
+                u64::try_from(rate)
+                    .map(|rate| RateFile(SpeedLimit::BytesPerSecond(rate)))
+                    .map_err(|_| E::custom("a speed limit cannot be negative"))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, word: &str) -> Result<RateFile, E> {
+                if word == "unlimited" {
+                    Ok(RateFile(SpeedLimit::Unlimited))
+                } else {
+                    Err(E::custom(
+                        "expected a whole number of bytes per second, or `unlimited`",
+                    ))
+                }
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+impl SpeedLimitFile {
+    fn policy(&self) -> Result<SpeedLimitPolicy, String> {
+        if self.locked && self.default.is_none() {
+            return Err(format!(
+                "{}: `locked = true` needs a `default` to lock",
+                SpeedLimitPolicy::NAME
+            ));
+        }
+        Ok(SpeedLimitPolicy {
+            default: self.default.map(|d| d.0),
+            min: self.min.unwrap_or(SpeedLimitPolicy::MIN),
+            max: self.max,
+            locked: self.locked,
+        })
+    }
 }
 
 /// The operator's policy for one preference, as written. A default alone
@@ -277,6 +356,9 @@ pub(crate) fn policy(file: &Downloads) -> Result<Policy, String> {
     if let Some(max_active) = &file.max_active {
         policy.max_active_downloads = max_active.policy(Preference::MAX_ACTIVE_DOWNLOADS)?;
     }
+    if let Some(speed_limit) = &file.speed_limit {
+        policy.download_speed_limit = speed_limit.policy()?;
+    }
     Ok(policy)
 }
 
@@ -383,6 +465,66 @@ ca_certs = ["ca.pem"]
             "unknown field `x`, expected `a`"
         );
         assert_eq!(redact(r#"odd "quote"#), r#"odd "…""#);
+    }
+
+    #[test]
+    fn the_speed_limit_policy_is_explicit_about_unlimited() {
+        let applied = |text: &str| {
+            let loaded = parse(&format!(
+                "schema_version = 1\n[downloads.speed_limit]\n{text}"
+            ))?;
+            let mut config = EngineConfig::new("/state");
+            apply(&loaded.file, &mut config)?;
+            Ok::<_, String>(config.policy.download_speed_limit)
+        };
+        assert_eq!(applied(""), Ok(SpeedLimitPolicy::UNRESTRICTED));
+        assert_eq!(
+            applied("default = 2097152\nmax = 8388608"),
+            Ok(SpeedLimitPolicy {
+                default: Some(SpeedLimit::BytesPerSecond(2_097_152)),
+                min: SpeedLimitPolicy::MIN,
+                max: Some(8_388_608),
+                locked: false,
+            })
+        );
+        assert_eq!(
+            applied("default = \"unlimited\"\nlocked = true").map(|p| (p.default, p.locked)),
+            Ok((Some(SpeedLimit::Unlimited), true))
+        );
+        // A maximum forbids Unlimited, whether the default says so or is
+        // left to the built-in one.
+        for text in ["max = 8388608", "default = \"unlimited\"\nmax = 8388608"] {
+            let refused = applied(text).unwrap_err();
+            assert!(refused.contains("forbids Unlimited"), "{refused}");
+        }
+        // Zero is not a way to write Unlimited, and fractions, negatives,
+        // other words, and units are refused.
+        assert!(
+            applied("default = 0")
+                .unwrap_err()
+                .contains("downloads.speed_limit")
+        );
+        for text in [
+            "default = 1.5",
+            "default = -1",
+            "default = \"none\"",
+            "default = \"2 MiB/s\"",
+            "min = 1.5",
+            "default = 18446744073709551616",
+        ] {
+            assert!(applied(text).is_err(), "{text}");
+        }
+        assert!(
+            applied("locked = true")
+                .unwrap_err()
+                .contains("needs a `default`")
+        );
+        assert!(
+            applied("max = 1099511627777")
+                .unwrap_err()
+                .contains("must lie within")
+        );
+        assert!(applied("bytes = 1").unwrap_err().contains("bytes"));
     }
 
     #[test]

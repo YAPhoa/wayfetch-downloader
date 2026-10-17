@@ -152,6 +152,16 @@ Settings is kept by the engine and wins over the default; it is never written
 to the file. Changing it takes effect at once, and lowering it stops nothing
 already running.
 
+`[downloads.speed_limit]` caps the combined speed of all downloads, in whole
+bytes per second: `default` is `"unlimited"` (the built-in default) or a
+number, `min` and `max` bound what users may choose (1 KiB/s to 1 TiB/s at
+most), and `locked = true` fixes the default. A `max` also forbids Unlimited,
+so it needs a finite `default`, and a user's saved Unlimited then runs at
+`max`. Changes made in Settings apply to running downloads at once, without
+restarting them. The limit covers download bodies, not protocol overhead or
+the engine's other requests, and allows a short burst of up to a quarter
+second's worth (at most 16 MiB).
+
 It listens on `127.0.0.1:7878` unless `--listen` says otherwise; anything
 beyond loopback has no TLS of its own and belongs behind an authenticated TLS
 reverse proxy. Every request needs `Authorization: Bearer TOKEN`. The token file
@@ -177,8 +187,8 @@ is never printed.
 | `GET /v1/staging/links` | A page of collected links: `after`, `page_size` |
 | `POST /v1/staging/commands` | `{"idempotency_key", "target", "action": "start"\|"remove"\|"move", "links": [{"link", "revision"}...]}`, plus `"destination"` for a move, and `"account"` to start through a provider account (needs `provider_downloads`) |
 | `GET /v1/staging/links/{id}/source` | A collected link as entered (needs `sources`) |
-| `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem`, and `max_active_downloads` with its source, default, saved value, range, lock, and conflict |
-| `PUT /v1/settings` | `{"idempotency_key", "target", "expected_revision"}` with `"default_root": "root-N"`, `"max_active_downloads": {"set": N}` or `"use_default"`, or both (needs `control`) |
+| `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem`, `max_active_downloads` with its source, default, saved value, range, lock, and conflict, and `download_speed_limit` likewise, with whether Unlimited is allowed |
+| `PUT /v1/settings` | `{"idempotency_key", "target", "expected_revision"}` with `"default_root": "root-N"`, `"max_active_downloads": {"set": N}` or `"use_default"`, `"download_speed_limit": {"set": "unlimited"}`, `{"set": {"bytes_per_second": N}}` or `"use_default"`, or any of them together, all or none (needs `control`) |
 | `GET /v1/folders` | The folders inside `path` (absolute; the top of the filesystem if absent), without hidden ones, at most 1,000 (needs `control`) |
 | `POST /v1/roots` | Add the server folder `{"path"}` as a destination, returning it with its `id` (needs `control`) |
 | `POST /v1/roots/remove` | Stop offering a folder the user added (`{"idempotency_key", "target", "expected_revision", "root"}`); its files stay (needs `control`) |

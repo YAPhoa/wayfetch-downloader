@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 2, minor: 2 });
+export const PROTOCOL = Object.freeze({ major: 2, minor: 3 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -37,6 +37,9 @@ export const PROTOCOL = Object.freeze({ major: 2, minor: 2 });
  * @typedef {import('./generated/Settings.js').Settings} Settings
  * @typedef {import('./generated/BoundedSetting.js').BoundedSetting} BoundedSetting
  * @typedef {import('./generated/PreferenceChange.js').PreferenceChange} PreferenceChange
+ * @typedef {import('./generated/SpeedLimit.js').SpeedLimit} SpeedLimit
+ * @typedef {import('./generated/SpeedLimitSetting.js').SpeedLimitSetting} SpeedLimitSetting
+ * @typedef {import('./generated/SpeedLimitChange.js').SpeedLimitChange} SpeedLimitChange
  * @typedef {import('./generated/UpdateSettingsRequest.js').UpdateSettingsRequest} UpdateSettingsRequest
  * @typedef {import('./generated/FolderListing.js').FolderListing} FolderListing
  * @typedef {import('./generated/Action.js').Action} JobAction
@@ -164,6 +167,7 @@ export const PROTOCOL = Object.freeze({ major: 2, minor: 2 });
  *   expectedRevision: number,
  *   defaultRoot?: RootId,
  *   maxActiveDownloads?: PreferenceChange,
+ *   downloadSpeedLimit?: SpeedLimitChange,
  * }} SettingsChange
  */
 
@@ -172,11 +176,19 @@ export const PROTOCOL = Object.freeze({ major: 2, minor: 2 });
  * @param {SettingsChange} change
  * @returns {UpdateSettingsRequest}
  */
-export function settingsRequest({ idempotencyKey, target, expectedRevision, defaultRoot, maxActiveDownloads }) {
+export function settingsRequest({
+  idempotencyKey,
+  target,
+  expectedRevision,
+  defaultRoot,
+  maxActiveDownloads,
+  downloadSpeedLimit,
+}) {
   /** @type {UpdateSettingsRequest} */
   const request = { idempotency_key: idempotencyKey, target, expected_revision: expectedRevision };
   if (defaultRoot !== undefined) request.default_root = defaultRoot;
   if (maxActiveDownloads !== undefined) request.max_active_downloads = maxActiveDownloads;
+  if (downloadSpeedLimit !== undefined) request.download_speed_limit = downloadSpeedLimit;
   return request;
 }
 

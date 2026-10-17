@@ -93,11 +93,13 @@ impl Store {
                 expected_revision,
                 default_root,
                 max_active_downloads,
+                download_speed_limit,
             } => roots::update_settings(
                 &tx,
                 *expected_revision,
                 *default_root,
                 *max_active_downloads,
+                *download_speed_limit,
                 now,
             )?,
             Command::Remove {

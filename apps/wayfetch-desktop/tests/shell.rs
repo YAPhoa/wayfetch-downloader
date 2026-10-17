@@ -1054,6 +1054,46 @@ async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
         assert_eq!(limit[refused], "invalid_request", "{refused}: {limit}");
     }
     assert_eq!(limit["after"]["value"], 6, "{limit}");
+
+    // So is the total speed limit, with Unlimited explicit and saved
+    // together with the count.
+    let speed = shell
+        .ipc(&format!(
+            "{choose}
+             const hello = await core.invoke('hello');
+             const change = async (fields) => {{
+               const {{ revision }} = await settings();
+               return core.invoke('update_settings', {{ request: {{
+                 idempotency_key: crypto.randomUUID(), target: hello.instance,
+                 expected_revision: revision, ...fields }} }})
+                 .then((r) => r.type, (e) => e.code);
+             }};
+             const initial = (await settings()).download_speed_limit;
+             const zero = await change({{ download_speed_limit: {{ set: {{ bytes_per_second: 0 }} }} }});
+             const both = await change({{ max_active_downloads: {{ set: 5 }},
+               download_speed_limit: {{ set: {{ bytes_per_second: 2097152 }} }} }});
+             const saved = await settings();
+             const unlimited = await change({{ download_speed_limit: {{ set: 'unlimited' }} }});
+             return {{ initial, zero, both, saved, unlimited,
+                       after: (await settings()).download_speed_limit }};"
+        ))
+        .await;
+    assert_eq!(speed["initial"]["value"], "unlimited", "{speed}");
+    assert_eq!(speed["initial"]["source"], "built_in", "{speed}");
+    assert_eq!(speed["zero"], "invalid_request", "{speed}");
+    assert_eq!(speed["both"], "settings_updated", "{speed}");
+    assert_eq!(
+        speed["saved"]["max_active_downloads"]["value"], 5,
+        "{speed}"
+    );
+    assert_eq!(
+        speed["saved"]["download_speed_limit"]["value"],
+        json!({"bytes_per_second": 2_097_152}),
+        "{speed}"
+    );
+    assert_eq!(speed["unlimited"], "settings_updated", "{speed}");
+    assert_eq!(speed["after"]["saved"], "unlimited", "{speed}");
+    assert_eq!(speed["after"]["source"], "saved", "{speed}");
     shell.close().await;
 
     // The chosen folder stays a destination, and the default, after a
@@ -1063,7 +1103,11 @@ async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
         .ipc(&format!("{choose} return await settings();"))
         .await;
     assert_eq!(after["default_root"], chosen["root"]["id"], "{after}");
-    assert_eq!(after["max_active_downloads"]["value"], 6, "{after}");
+    assert_eq!(after["max_active_downloads"]["value"], 5, "{after}");
+    assert_eq!(
+        after["download_speed_limit"]["saved"], "unlimited",
+        "{after}"
+    );
     let reset = shell
         .ipc(&format!(
             "{choose}
@@ -1071,13 +1115,19 @@ async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
              await core.invoke('update_settings', {{ request: {{
                idempotency_key: crypto.randomUUID(), target: hello.instance,
                expected_revision: (await settings()).revision,
-               max_active_downloads: 'use_default' }} }});
-             return (await settings()).max_active_downloads;"
+               max_active_downloads: 'use_default', download_speed_limit: 'use_default' }} }});
+             return await settings();"
         ))
         .await;
-    assert_eq!(reset["value"], 4, "{reset}");
-    assert_eq!(reset["source"], "built_in", "{reset}");
-    assert_eq!(reset.get("saved"), None, "{reset}");
+    let (count, speed) = (
+        &reset["max_active_downloads"],
+        &reset["download_speed_limit"],
+    );
+    assert_eq!(count["value"], 4, "{reset}");
+    assert_eq!(count["source"], "built_in", "{reset}");
+    assert_eq!(count.get("saved"), None, "{reset}");
+    assert_eq!(speed["value"], "unlimited", "{reset}");
+    assert_eq!(speed.get("saved"), None, "{reset}");
     shell.close().await;
 }
 
@@ -1138,6 +1188,41 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
     shell.click("input[name=theme][value=system]").await;
     shell
         .wait_for("document.documentElement.dataset.theme === (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')")
+        .await;
+
+    // The total speed limit is set from the page, and the running
+    // download goes on under it.
+    shell
+        .click("[data-key=\"settings-section-downloads\"]")
+        .await;
+    shell
+        .wait_for(&section_shown("downloads", "/settings/downloads"))
+        .await;
+    shell.click("[data-key=\"speed-limited\"]").await;
+    let rate = shell
+        .client
+        .find(Locator::Css("#speed-limit-rate"))
+        .await
+        .unwrap();
+    rate.send_keys("512").await.unwrap();
+    shell
+        .js("const unit = document.querySelector('#speed-limit-unit');
+             unit.value = 'KiB'; unit.dispatchEvent(new Event('change'));")
+        .await;
+    shell.click("[data-key=\"downloads-save\"]").await;
+    shell
+        .wait_for(
+            "document.querySelector('.downloads-form .message')?.textContent
+               === 'Saved. Downloads share at most 512 KiB/s.'",
+        )
+        .await;
+    shell.click("[data-key=\"speed-unlimited\"]").await;
+    shell.click("[data-key=\"downloads-save\"]").await;
+    shell
+        .wait_for(
+            "document.querySelector('.downloads-form .message')?.textContent
+               === 'Saved. Downloads are not speed limited.'",
+        )
         .await;
 
     // A folder chosen in the host's dialog, then saved.

@@ -21,7 +21,8 @@
 //! 5. An [`writer::IntervalWriter`] streams the body into the generation's
 //!    staging file ([`crate::fs`]) within its interval, with backpressure
 //!    and cancellation, and hands out synchronized checkpoints for the
-//!    store to commit.
+//!    store to commit. Every writer of an engine takes its bytes from the
+//!    one [`throttle::Bandwidth`], the total download speed limit.
 //!
 //! The HTTP client, redirects, egress policy, and the broker that holds
 //! prepared requests and open responses live in the `wayfetch-net` crate,
@@ -31,5 +32,6 @@
 
 pub mod lease;
 pub mod range;
+pub mod throttle;
 pub mod transport;
 pub mod writer;
