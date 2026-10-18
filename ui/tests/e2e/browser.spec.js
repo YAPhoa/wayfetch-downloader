@@ -1821,12 +1821,16 @@ test('removing a download requires an explicit file choice and deletes only its 
     await page.getByLabel('Repeat password').fill(PASSWORD);
     await page.getByRole('button', { name: 'Create owner' }).click();
     await expect(page.getByText('No downloads yet.')).toBeVisible();
+    // A name filter left on Downloads cannot hide what is started next.
+    await page.locator('#filter-names').fill('nothing matches this');
     await page.getByRole('button', { name: 'Add links' }).click();
     await page.getByLabel('Links, one per line').fill(fixture.put('delete-choice.bin', MIB));
     await page.getByRole('button', { name: 'Collect links' }).click();
     await expect(page.locator('.selection-summary strong')).toHaveText('1 link selected');
     await page.getByRole('button', { name: 'Start selected' }).click();
     await expect(page.getByText('Started 1 download.')).toBeVisible();
+    await expect(page.locator('#filter-names')).toHaveValue('');
+    await expect(row(page, 'job-1')).toBeVisible();
     await page.goto(`${own.origin}/links`);
     await expect(page.locator('.selection-summary')).not.toContainText('already in Downloads');
     await expect(page.locator('.links-page tr[data-link]')).toHaveCount(0);
