@@ -111,7 +111,6 @@ test('a YouTube link shows its title and formats, and downloads the one chosen',
     await row.getByRole('checkbox').check();
     await page.getByRole('button', { name: 'Start selected' }).click();
     await expect(page.getByText('Started 1 download.')).toBeVisible();
-    await page.getByRole('button', { name: 'View downloads' }).click();
     const job = page.locator('tr[data-job]');
     await expect(job.locator('td.name')).toHaveText('Wayfetch test video.mp4');
     await expect(job.locator('td[data-state]')).toHaveText('Done');
