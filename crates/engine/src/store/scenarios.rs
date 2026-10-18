@@ -14,8 +14,8 @@ use wayfetch_protocol::command::{InputUrl, SubmitItems};
 use wayfetch_protocol::event::EventKind;
 use wayfetch_protocol::query::{ArtifactSummary, FailureSummary, JobFilter, JobSummary, PageSize};
 use wayfetch_protocol::{
-    Command, CommandEnvelope, CommandResult, ErrorCode, IdempotencyKey, InstanceId, Query,
-    QueryResult,
+    Command, CommandEnvelope, CommandResult, ErrorCode, IdempotencyKey, InstanceId, ProtocolError,
+    Query, QueryResult,
 };
 
 use super::{RenameStart, Store, StoreError, outbox};
@@ -1668,4 +1668,190 @@ fn a_retried_job_releases_or_completes_an_unfinished_publication() {
     f.store
         .begin_publication(job, current, &path("a.bin"), 4, NOW)
         .unwrap();
+}
+
+fn delete_envelope(f: &Fixture, job: &JobSummary) -> CommandEnvelope {
+    CommandEnvelope {
+        idempotency_key: IdempotencyKey::generate(),
+        target: f.instance,
+        command: Command::DeleteFiles {
+            job: job.id,
+            expected_revision: job.revision,
+        },
+    }
+}
+
+#[test]
+fn deletion_intent_survives_unlink_crash_and_preserves_command_replay() {
+    let mut f = Fixture::new();
+    let done = published(&mut f, "owned.bin", b"owned");
+    let request = delete_envelope(&f, &done);
+    let super::DeleteStart::Started(intent) = f.store.begin_delete(&request, f.instance).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(intent.published.len(), 1);
+    assert!(intent.staging.is_empty());
+    // No stale command or alternate mutation can reuse the destructive authority.
+    let mut conflict = request.clone();
+    conflict.command = Command::Pause {
+        job: done.id,
+        expected_revision: done.revision,
+    };
+    assert_eq!(
+        f.store
+            .execute(&conflict, f.instance, &Default::default(), NOW)
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    assert_eq!(
+        f.store
+            .begin_rename(
+                &rename_envelope(&f, IdempotencyKey::generate(), &done, "else.bin"),
+                f.instance,
+                NOW
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::Busy
+    );
+    assert!(matches!(
+        f.store.published_file(done.id),
+        Err(StoreError::Busy(_))
+    ));
+    // Unlink and directory sync finish, but the process dies before its store commit.
+    f.root.delete_published(&intent.published[0].1).unwrap();
+    assert!(!f.root_dir.path().join("owned.bin").exists());
+    let mut f = f.reopen();
+    assert_eq!(f.summary(done.id).stage, JobStage::Complete);
+    let mut retry = request.clone();
+    retry.idempotency_key = IdempotencyKey::generate();
+    let super::DeleteStart::Started(intent) = f.store.begin_delete(&retry, f.instance).unwrap()
+    else {
+        panic!()
+    };
+    f.root.delete_published(&intent.published[0].1).unwrap();
+    let result = f.store.finish_delete(done.id, &retry, NOW).unwrap();
+    for replay in [&request, &retry] {
+        let super::DeleteStart::Done(found) = f.store.begin_delete(replay, f.instance).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(found, result);
+    }
+    assert!(matches!(
+        f.store
+            .query(&Query::InspectJob { job: done.id }, f.instance),
+        Err(ProtocolError {
+            code: ErrorCode::NotFound,
+            ..
+        })
+    ));
+    assert!(
+        f.events()
+            .iter()
+            .any(|e| matches!(e,EventKind::JobRemoved {job} if *job==done.id))
+    );
+    // Finished deletion releases the collision reservation for a future download.
+    let (next, generation) = transferring(&mut f, BootEpoch::INITIAL);
+    finished(&mut f, next, generation, b"new");
+    f.store
+        .begin_publication(next, generation, &path("OWNED.bin"), 3, NOW)
+        .unwrap();
+}
+
+#[test]
+fn explicit_deletion_includes_retained_partials_and_blocks_retry_until_abandoned() {
+    let mut f = Fixture::new();
+    let (id, generation) = failed_with(&mut f, b"partial");
+    let failed = f.summary(id);
+    let request = delete_envelope(&f, &failed);
+    let super::DeleteStart::Started(intent) = f.store.begin_delete(&request, f.instance).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(intent.staging.len(), 1);
+    assert!(intent.published.is_empty());
+    let command = retry_command(&mut f, id);
+    assert_eq!(
+        f.run(IdempotencyKey::generate(), command),
+        Err(ErrorCode::Busy)
+    );
+    assert!(staged(&f, id, generation).is_file());
+    // An explicit list-only choice cancels the intent and keeps all remaining data.
+    f.run(
+        IdempotencyKey::generate(),
+        Command::Remove {
+            job: id,
+            expected_revision: failed.revision,
+        },
+    )
+    .unwrap();
+    assert!(staged(&f, id, generation).is_file());
+    assert_eq!(
+        f.store.begin_delete(&request, f.instance).unwrap_err().code,
+        ErrorCode::NotFound
+    );
+
+    let (id, generation) = failed_with(&mut f, b"second");
+    let failed = f.summary(id);
+    let request = delete_envelope(&f, &failed);
+    let super::DeleteStart::Started(intent) = f.store.begin_delete(&request, f.instance).unwrap()
+    else {
+        panic!()
+    };
+    f.files.clear();
+    for record in intent.staging {
+        assert_eq!(f.root.remove_staging(&record).unwrap(), Removal::Removed);
+    }
+    f.store.finish_delete(id, &request, NOW).unwrap();
+    assert!(!staged(&f, id, generation).exists());
+    assert!(f.store.latest_staging(id).unwrap().is_none());
+}
+
+#[test]
+fn deletion_refuses_active_stale_and_wrong_instance_requests_without_intent() {
+    let mut f = Fixture::new();
+    let (id, _) = transferring(&mut f, BootEpoch::INITIAL);
+    let job = f.summary(id);
+    let unknown = CommandEnvelope {
+        idempotency_key: IdempotencyKey::generate(),
+        target: f.instance,
+        command: Command::DeleteFiles {
+            job: JobId::from_u64(u64::MAX).unwrap(),
+            expected_revision: Revision::INITIAL,
+        },
+    };
+    assert_eq!(
+        f.store.begin_delete(&unknown, f.instance).unwrap_err().code,
+        ErrorCode::NotFound
+    );
+    assert_eq!(
+        f.store
+            .begin_delete(&delete_envelope(&f, &job), f.instance)
+            .unwrap_err()
+            .code,
+        ErrorCode::NotApplicable
+    );
+    let done = published(&mut f, "done.bin", b"x");
+    let mut stale = delete_envelope(&f, &done);
+    if let Command::DeleteFiles {
+        expected_revision, ..
+    } = &mut stale.command
+    {
+        *expected_revision = expected_revision.next().unwrap();
+    }
+    assert_eq!(
+        f.store.begin_delete(&stale, f.instance).unwrap_err().code,
+        ErrorCode::RevisionConflict
+    );
+    let mut wrong = delete_envelope(&f, &done);
+    wrong.target = InstanceId::generate();
+    assert_eq!(
+        f.store.begin_delete(&wrong, f.instance).unwrap_err().code,
+        ErrorCode::WrongInstance
+    );
+    assert!(f.root_dir.path().join("done.bin").is_file());
+    assert!(!super::deletions::pending(&f.store.read().unwrap(), done.id).unwrap());
 }

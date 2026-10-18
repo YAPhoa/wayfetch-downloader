@@ -52,7 +52,7 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @type {readonly Permission[]}
  */
 const OWNER = Object.freeze([
-  'read', 'submit', 'control', 'sources', 'accounts', 'provider_downloads',
+  'read', 'submit', 'control', 'sources', 'accounts', 'provider_downloads', 'delete_files',
 ]);
 
 /**

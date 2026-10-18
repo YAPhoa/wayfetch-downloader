@@ -1062,6 +1062,31 @@ impl Coordinator {
                 let files = self.files();
                 self.answer(reply, async move { files.rename(*envelope).await });
             }
+            Request::Execute(envelope, reply)
+                if matches!(
+                    envelope.command,
+                    Command::Remove { .. } | Command::DeleteFiles { .. }
+                ) =>
+            {
+                let id = match envelope.command {
+                    Command::Remove { job, .. } | Command::DeleteFiles { job, .. } => job,
+                    _ => unreachable!(),
+                };
+                if self.running.contains_key(&id) {
+                    let checked = self
+                        .with_store(move |store| store.check_remove_request(&envelope, instance))
+                        .await;
+                    let result = checked.and(Err(ProtocolError::new(
+                        ErrorCode::Busy,
+                        "the download is still stopping; try again shortly",
+                    )));
+                    let _ = reply.send(result);
+                } else {
+                    self.refresh_destinations().await;
+                    let files = self.files();
+                    self.answer(reply, async move { files.remove(*envelope).await });
+                }
+            }
             Request::Execute(envelope, reply) => {
                 let target = match envelope.command {
                     Command::Pause { job, .. } | Command::Cancel { job, .. } => Some(job),
@@ -1070,6 +1095,7 @@ impl Coordinator {
                     | Command::Retry { .. }
                     | Command::UpdateSettings { .. }
                     | Command::Rename { .. }
+                    | Command::DeleteFiles { .. }
                     | Command::Remove { .. }
                     | Command::RemoveRoot { .. }
                     | Command::CollectLinks { .. }
@@ -1455,6 +1481,7 @@ impl Coordinator {
             Command::Pause { .. }
             | Command::Cancel { .. }
             | Command::Rename { .. }
+            | Command::DeleteFiles { .. }
             | Command::Remove { .. }
             | Command::RemoveLinks { .. }
             | Command::AuthorizeAccount { .. }
