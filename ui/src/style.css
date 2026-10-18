@@ -478,7 +478,8 @@ table.jobs {
 
 .jobs tbody tr { cursor: default; }
 .jobs tbody tr:hover { background: var(--hover); }
-.jobs tbody tr.selected { background: var(--selected); }
+.jobs tbody tr.selected,
+.jobs tbody tr.ticked { background: var(--selected); }
 
 .jobs td.state .dot { margin: -2px 6px 0 0; }
 
