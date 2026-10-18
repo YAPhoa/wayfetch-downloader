@@ -904,10 +904,10 @@ async fn links_are_collected_reviewed_and_started_over_http() {
     let (status, removed) = client.post("/v1/staging/commands", &remove).await;
     assert_eq!(status, StatusCode::OK, "{removed}");
     assert_eq!(removed["applied"].as_array().unwrap().len(), 2);
-    // The started link stays listed with its download.
+    // Accepted links move to Downloads; their source identity remains there.
     let (_, left) = client.get("/v1/staging/links").await;
-    assert_eq!(left["total"], 1);
-    assert_eq!(left["items"][0]["job"], job.as_str());
+    assert_eq!(left["total"], 0);
+    assert!(left["items"].as_array().unwrap().is_empty());
     assert_eq!(client.jobs().await.len(), 1);
     assert_eq!(server.log().len(), 1);
 
@@ -1020,7 +1020,7 @@ async fn a_missing_token_file_is_created_owner_only_and_never_printed() {
     let (token, scopes) = line.split_once(' ').unwrap();
     assert_eq!(
         scopes,
-        "read,submit,control,sources,accounts,provider_downloads"
+        "read,submit,control,sources,accounts,provider_downloads,delete_files"
     );
     let (status, _) = daemon.client(token).get("/v1/capabilities").await;
     assert_eq!(status, StatusCode::OK);
@@ -1574,7 +1574,8 @@ async fn browsers_set_up_the_owner_sign_in_and_use_the_api() {
             "control",
             "sources",
             "accounts",
-            "provider_downloads"
+            "provider_downloads",
+            "delete_files"
         ])
     );
     let mut events = browser.events().await;

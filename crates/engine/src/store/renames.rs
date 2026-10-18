@@ -153,6 +153,7 @@ impl Store {
         if let Some(result) = replayed(&tx, envelope, instance)? {
             return Ok(RenameStart::Done(result));
         }
+        super::deletions::check_idle(&tx, *id)?;
         let job = jobs::load_listed(&tx, *id)?;
         // Checks the revision and stage without keeping the new revision:
         // that is recorded once the file has its name.
@@ -327,6 +328,7 @@ impl Store {
     /// `Busy` while its file is being renamed.
     pub fn published_file(&mut self, id: JobId) -> Result<(RootId, PublishedFile), StoreError> {
         let tx = self.read()?;
+        super::deletions::check_idle(&tx, id)?;
         jobs::load_listed(&tx, id)?;
         if pending(&tx, id)? {
             return Err(StoreError::Busy("the file is being renamed"));

@@ -737,7 +737,6 @@ export class LinksPage {
     }
     // Started links already have their folder; the rest say where they go.
     const pending = chosen.filter((l) => !l.job);
-    const started = chosen.length - pending.length;
     const folders = [...new Set(pending.map((l) => this.linkFolder(l)))];
     const invalid = pending.filter((l) => l.check === 'invalid').length;
     const homeless = pending.filter((l) => l.check !== 'invalid' && this.removed(l.destination)).length;
@@ -751,7 +750,6 @@ export class LinksPage {
       folders.length > 0 && h('span', { class: 'label' }, 'Saving to'),
       folders.length > 0 && (typeof where === 'string' ? h('span', { class: 'path', title: where }, where) : where),
       !this.context.client.local && folders.length === 1 && h('span', { class: 'tag' }, 'Server path'),
-      started > 0 && h('span', null, `${count(started, 'link is', 'links are')} already in Downloads.`),
       invalid > 0 && h('span', { class: 'problem' }, `${count(invalid, 'invalid link')} will not start.`),
       homeless > 0 &&
         h(

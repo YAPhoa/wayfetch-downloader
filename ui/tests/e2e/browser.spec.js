@@ -724,7 +724,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   menu = await openMenu(page);
   await expect(menu.getByRole('menuitem', { name: /^Rename/ })).toHaveAttribute('aria-disabled', 'true');
   await expect(menu.getByRole('menuitem', { name: /^Rename/ })).toContainText('Once it has finished');
-  await expect(menu.getByRole('menuitem', { name: /^Remove from list/ })).not.toHaveAttribute('aria-disabled');
+  await expect(menu.getByRole('menuitem', { name: /^Remove…/ })).not.toHaveAttribute('aria-disabled');
   // A press outside closes it.
   await page.locator('.filters').click({ position: { x: 5, y: 5 } });
   await expect(menu).toBeHidden();
@@ -772,7 +772,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await page.keyboard.press('ArrowDown');
   await expect(menu.getByRole('menuitem', { name: 'Copy source link' })).toBeFocused();
   await page.keyboard.press('End');
-  await expect(menu.getByRole('menuitem', { name: /^Remove from list/ })).toBeFocused();
+  await expect(menu.getByRole('menuitem', { name: /^Remove…/ })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(menu).toBeHidden();
   await expect(more).toBeFocused();
@@ -808,9 +808,19 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(page.getByRole('button', { name: 'Done (53)' })).toBeVisible();
   await row(page, job).getByRole('button', { name: 'Actions for renamed.bin' }).click();
   menu = await openMenu(page);
-  await menu.getByRole('menuitem', { name: /^Remove from list/ }).click();
+  await menu.getByRole('menuitem', { name: /^Remove…/ }).click();
+  let removal = page.getByRole('dialog', { name: 'Remove download' });
+  await expect(removal.getByRole('radio', { name: 'Remove from list only (keep files)' })).toBeChecked();
+  await removal.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(row(page, job)).toHaveCount(1);
+  expect((await daemon.published('renamed.bin', daemon.archive)).equals(content(0, MIB))).toBe(true);
+  await row(page, job).getByRole('button', { name: 'Actions for renamed.bin' }).click();
+  menu = await openMenu(page);
+  await menu.getByRole('menuitem', { name: /^Remove…/ }).click();
+  removal = page.getByRole('dialog', { name: 'Remove download' });
+  await removal.getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(row(page, job)).toHaveCount(0);
-  await expect(page.getByText('Removed renamed.bin from the list. Its file stays in its folder.')).toBeVisible();
+  await expect(page.getByText('Removed renamed.bin from the list. Remaining files stay in their folder.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'All (53)' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Done (52)' })).toBeVisible();
   expect((await daemon.published('renamed.bin', daemon.archive)).equals(content(0, MIB))).toBe(true);
@@ -843,13 +853,8 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(`${daemon.origin}/links`);
   await expect(views.getByRole('link', { name: 'Links' })).toHaveAttribute('aria-current', 'page');
-  // Links the earlier tests started stay listed, added to Downloads, until
-  // removed; removing them leaves their downloads.
-  await expect(page.locator('tr.started').first()).toBeVisible();
-  await expect(page.locator('tr.started td.link-status').first()).toHaveText('Added to Downloads');
-  await page.locator('[data-key="select-all-links"]').check();
-  await expect(page.getByRole('button', { name: 'Start selected' })).toBeDisabled();
-  await page.getByRole('button', { name: 'Remove', exact: true }).click();
+  // Previously accepted links moved to Downloads and remain absent after navigation.
+  await expect(page.locator('tr.started')).toHaveCount(0);
   await expect(page.getByText('No links collected.')).toBeVisible();
   // With nothing to select, no empty summary line sits above the table.
   await expect(page.locator('.selection-summary')).toBeHidden();
@@ -948,10 +953,9 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(start).toBeEnabled();
   await start.click();
   await expect(page.getByText('Started 1 download.')).toBeVisible();
-  await expect(linkRow('review-a.bin').locator('td.link-status')).toHaveText('Added to Downloads');
-  await expect(linkRow('review-a.bin').getByRole('checkbox')).not.toBeChecked();
+  await expect(linkRow('review-a.bin')).toHaveCount(0);
   await expect(linkRow('review-b.bin').locator('td.link-status')).toHaveText('Not checked');
-  await expect(views.getByRole('link', { name: 'Links (2)' })).toBeVisible();
+  await expect(views.getByRole('link', { name: 'Links (1)' })).toBeVisible();
   await expect
     .poll(async () => (await daemon.published('review-a.bin', daemon.root).catch(() => null))?.equals(content(0, MIB)))
     .toBe(true);
@@ -969,9 +973,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.emulateMedia({ colorScheme: 'light' });
 
-  // Both are removed from the list: nothing more is downloaded, and
-  // Downloads keeps the one started.
-  await linkRow('review-a.bin').getByRole('checkbox').check();
+  // Remove the remaining unstarted link; Downloads keeps the accepted one.
   await linkRow('review-b.bin').getByRole('checkbox').check();
   await page.getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(page.getByText('No links collected.')).toBeVisible();
@@ -1667,6 +1669,58 @@ test('Settings stays at the right end of the toolbar in every view and state', a
     await expect(job.locator('td[data-state]')).toHaveText('Done');
     await expectSame();
   } finally {
+    await own.remove();
+  }
+});
+
+test('removing a download requires an explicit file choice and deletes only its data', async ({ browser }) => {
+  const own = await new Daemon(await freePort()).init();
+  await own.start();
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    await page.goto(own.origin);
+    await page.getByLabel('Setup secret').fill((await own.setupSecret()).trim());
+    await page.getByLabel('Owner name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
+    await page.getByLabel('Repeat password').fill(PASSWORD);
+    await page.getByRole('button', { name: 'Create owner' }).click();
+    await expect(page.getByText('No downloads yet.')).toBeVisible();
+    await page.getByRole('button', { name: 'Add links' }).click();
+    await page.getByLabel('Links, one per line').fill(fixture.put('delete-choice.bin', MIB));
+    await page.getByRole('button', { name: 'Collect links' }).click();
+    await page.locator('.batch-head input[type="checkbox"]').check();
+    await page.getByRole('button', { name: 'Start selected' }).click();
+    await expect(page.getByText('Started 1 download.')).toBeVisible();
+    await expect(page.locator('.links-page tr[data-link]')).toHaveCount(0);
+    await expect(page.locator('.selection-summary')).not.toContainText('already in Downloads');
+    await page.reload();
+    await expect(page.locator('.links-page tr[data-link]')).toHaveCount(0);
+    await page.getByRole('link', { name: 'Downloads', exact: true }).click();
+    await expectState(page, 'job-1', 'Done');
+    await writeFile(join(/** @type {string} */ (own.root), 'unrelated.bin'), 'keep me');
+    await row(page, 'job-1').getByRole('button', { name: 'Actions for delete-choice.bin' }).click();
+    await page.getByRole('menuitem', { name: /^Remove…/ }).click();
+    const dialog = page.getByRole('dialog', { name: 'Remove download' });
+    await expect(dialog.getByRole('radio', { name: 'Remove from list only (keep files)' })).toBeChecked();
+    await dialog.getByRole('radio', { name: 'Delete downloaded file/data and remove from list' }).check();
+    await expect(dialog.getByRole('button', { name: 'Delete files and remove' })).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    expect((await own.published('delete-choice.bin')).equals(content(0, MIB))).toBe(true);
+    await expect(row(page, 'job-1')).toHaveCount(1);
+    await row(page, 'job-1').getByRole('button', { name: 'Actions for delete-choice.bin' }).click();
+    await page.getByRole('menuitem', { name: /^Remove…/ }).click();
+    await expect(dialog.getByRole('radio', { name: 'Remove from list only (keep files)' })).toBeChecked();
+    await dialog.getByRole('radio', { name: 'Delete downloaded file/data and remove from list' }).check();
+    await dialog.getByRole('button', { name: 'Delete files and remove' }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(row(page, 'job-1')).toHaveCount(0);
+    await expect(own.published('delete-choice.bin')).rejects.toThrow();
+    expect(await readFile(join(/** @type {string} */ (own.root), 'unrelated.bin'), 'utf8')).toBe('keep me');
+    await page.reload();
+    await expect(page.getByText('No downloads yet.')).toBeVisible();
+  } finally {
+    await context.close();
     await own.remove();
   }
 });

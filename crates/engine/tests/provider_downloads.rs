@@ -874,7 +874,8 @@ async fn using_an_account_needs_the_provider_downloads_permission() {
         )
         .await
         .unwrap();
-    let id = listed(&owner).await[0].job.unwrap();
+    assert!(listed(&owner).await.is_empty());
+    let id = support::jobs(&owner).await[0].id;
     support::complete(&owner, id).await;
     assert_eq!(provider.unrestricts(), 1);
     // A client without it still starts links directly.

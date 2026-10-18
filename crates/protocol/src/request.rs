@@ -77,6 +77,8 @@ pub enum Action {
     Rename,
     /// [`Command::Remove`]. Added in protocol 1.0.
     Remove,
+    /// [`Command::DeleteFiles`]. Added in protocol 2.4.
+    DeleteFiles,
     /// [`Command::Retry`]. Added in protocol 1.2.
     Retry,
 }
@@ -147,6 +149,10 @@ impl JobCommandRequest {
                 expected_revision,
             },
             (Action::Cancel, None) => Command::Cancel {
+                job,
+                expected_revision,
+            },
+            (Action::DeleteFiles, None) => Command::DeleteFiles {
                 job,
                 expected_revision,
             },

@@ -55,6 +55,7 @@ const HELLO = /** @type {any} */ ({ type: 'hello', instance: 'i', boot_epoch: 1 
 test('queries and commands carry the protocol JSON', async () => {
   const core = new FakeCore({ query: () => ({ type: 'jobs' }), job_command: () => ({}), submit: () => ({}) });
   const client = new DesktopIpcClient(core);
+  assert.ok(client.permissions.includes('delete_files'));
   await client.listJobs({ after: /** @type {any} */ ('job-3'), pageSize: 50, stages: ['paused'] });
   await client.listJobs({ after: null, pageSize: 50, stages: null });
   await client.inspectJob(/** @type {any} */ ('job-1'));

@@ -102,6 +102,8 @@ pub enum Permission {
     /// permission implies it; it neither lists nor manages accounts, which
     /// is [`Permission::Accounts`]. Added in protocol 2.2.
     ProviderDownloads,
+    /// Explicitly delete engine-owned downloaded data. Added in protocol 2.4.
+    DeleteFiles,
 }
 
 /// One URL to ingest.
@@ -391,6 +393,13 @@ pub enum Command {
         /// The job revision the client last saw.
         expected_revision: Revision,
     },
+    /// Delete owned downloaded data and remove an ended job. Added in protocol 2.4.
+    DeleteFiles {
+        /// The job whose recorded artifacts may be deleted.
+        job: JobId,
+        /// The revision the client last saw.
+        expected_revision: Revision,
+    },
     /// Stop offering a folder the user added as a destination. Its files
     /// stay; a folder the operator configured, the current default, or one
     /// that unfinished jobs save to is refused. Added in protocol 1.1.
@@ -528,6 +537,9 @@ impl Command {
             } => *repeat_provider_operation,
             _ => false,
         };
+        if matches!(self, Self::DeleteFiles { .. }) {
+            required.push(Permission::DeleteFiles);
+        }
         if uses_account {
             required.push(Permission::ProviderDownloads);
         }
@@ -551,6 +563,7 @@ impl Command {
             | Self::Retry { .. }
             | Self::UpdateSettings { .. }
             | Self::Rename { .. }
+            | Self::DeleteFiles { .. }
             | Self::Remove { .. }
             | Self::RemoveRoot { .. } => Permission::Control,
             Self::AuthorizeAccount { .. }
