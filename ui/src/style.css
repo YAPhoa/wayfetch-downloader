@@ -815,7 +815,7 @@ dd .link-text { overflow-wrap: anywhere; }
 .collect-destination label { display: inline; }
 .collect-destination select { flex: 1 1 240px; font-family: ui-monospace, monospace; }
 
-/* The Links page: collected links by batch, with what is selected and
+/* The Links page: collected links, with what is selected and
    where it will be saved above them. */
 
 .selection-summary {
@@ -839,18 +839,24 @@ dd .link-text { overflow-wrap: anywhere; }
 .jobs .check { width: 1%; padding-right: 0; }
 .jobs .check input { display: block; }
 
-table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px solid var(--surface); }
-
-.links .batch-head > * {
-  background: var(--chrome);
-  color: var(--muted);
-  font-weight: 500;
+/* A sortable column's header is a button that looks like the header. */
+th button.sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
 
-.links .batch-head th { position: static; }
-.batch-title { color: var(--ink); font-weight: 600; margin-right: 12px; }
-.batch-count { margin-right: 12px; }
-.batch-count.problem { color: var(--bad); }
+th button.sort:hover:not(:disabled) { background: transparent; color: var(--ink); }
+th[aria-sort] button.sort { color: var(--ink); }
+
+.links td.added { color: var(--muted); }
 
 .links td.name.unknown { color: var(--muted); font-weight: 400; }
 .links tr.invalid td.name { font-family: ui-monospace, monospace; font-weight: 400; }
