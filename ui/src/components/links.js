@@ -652,7 +652,7 @@ export class LinksPage {
       key: 'remove-links',
       label: `Remove${many || ' link'} from list`,
       disabled: !changeable,
-      hint: !this.canControl ? NO_CONTROL : 'Nothing is downloaded or deleted',
+      hint: !this.canControl ? NO_CONTROL : undefined,
       danger: true,
       run: () => void this.act('remove', targets),
     });

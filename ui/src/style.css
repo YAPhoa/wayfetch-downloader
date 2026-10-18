@@ -300,6 +300,16 @@ code { font-family: ui-monospace, monospace; }
   overflow: hidden;
 }
 
+/* Both queue views reserve the same action width, so their different
+   commands do not move the search field or change when it wraps. */
+.queue-toolbar .tool-group {
+  flex: 0 0 352px;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.queue-toolbar .tool-group button { flex: 1 0 auto; justify-content: center; }
+
 .tool-group button {
   border: 0;
   border-radius: 0;
