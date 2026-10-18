@@ -1,6 +1,6 @@
 // What the views say about collected links: how entered text becomes
-// entries, how a link is named and described, how the list is grouped by
-// batch, and what a command's refusals mean. No DOM, so it is tested
+// entries, how a link is named and described, and what a command's
+// refusals mean. No DOM, so it is tested
 // under Node.
 
 import { durationText } from './media.js';
@@ -93,23 +93,6 @@ export function startable(link) {
 }
 
 /**
- * `links` in batches, in list order. A batch split across pages shows on
- * each.
- * @param {readonly CollectedLink[]} links
- * @returns {{ batch: string, collectedAt: number, links: CollectedLink[] }[]}
- */
-export function batches(links) {
-  /** @type {{ batch: string, collectedAt: number, links: CollectedLink[] }[]} */
-  const groups = [];
-  for (const link of links) {
-    const last = groups.at(-1);
-    if (last?.batch === link.batch) last.links.push(link);
-    else groups.push({ batch: link.batch, collectedAt: link.collected_at, links: [link] });
-  }
-  return groups;
-}
-
-/**
  * Whether `link` matches filter text `query`, already lower case: by
  * name (a video's title), host, or problem.
  * @param {CollectedLink} link
@@ -143,13 +126,14 @@ export function refusals(refused) {
 }
 
 /**
- * When a batch was collected, for its heading.
+ * When a link was added, for its Added at column: the time alone for
+ * today, with the date otherwise.
  * @param {number} millis
  * @param {Date} [now]
  */
-export function collectedWhen(millis, now = new Date()) {
+export function addedWhen(millis, now = new Date()) {
   const at = new Date(millis);
   const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  if (at.toDateString() === now.toDateString()) return `today at ${time}`;
-  return `${at.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })} at ${time}`;
+  if (at.toDateString() === now.toDateString()) return `Today, ${time}`;
+  return `${at.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })}, ${time}`;
 }

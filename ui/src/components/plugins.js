@@ -69,7 +69,6 @@ export function pluginsTable(plugins) {
     h(
       'div',
       { class: 'settings-group plugins' },
-      h('div', { class: 'group-head' }, h('span', { class: 'group-title' }, 'Plugins')),
       h(
         'div',
         { class: 'table-scroll' },
@@ -84,10 +83,7 @@ export function pluginsTable(plugins) {
     h(
       'p',
       { class: 'hint' },
-      'Video links, such as YouTube’s, are read by yt-dlp; Wayfetch then downloads them itself, with the same speed limit and resume as any download. ' +
-        (missing
-          ? 'Without yt-dlp, video links cannot be checked or downloaded; without ffmpeg, only formats that need no joining or converting are offered. '
-          : '') +
+      (missing ? 'What a plugin is used for is unavailable until it is installed and working. ' : '') +
         'Plugins are checked when Wayfetch starts.',
     ),
   ];

@@ -1,5 +1,6 @@
-// The Links page: links collected for review, grouped by the batch they
-// were added in, until they are started or removed. The engine holds the
+// The Links page: links collected for review, until they are started or
+// removed. Clicking a column's header sorts the shown page by it, and
+// clicking it again reverses the order; the order is kept for next time. The engine holds the
 // list; this page shows one page of it and never keeps its own copy as
 // the authority.
 //
@@ -24,8 +25,7 @@
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import {
-  batches,
-  collectedWhen,
+  addedWhen,
   count,
   linkName,
   linkStatus,
@@ -35,8 +35,9 @@ import {
 } from '../client/links.js';
 import { choiceKey, choiceLabel, optionFor } from '../client/media.js';
 import { accountName, canChooseRoute, routeAccounts } from '../client/routes.js';
+import { saveSort, savedSort, sortedBy, toggleSort } from '../client/sort.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, refocus, show } from './dom.js';
+import { copyText, focusedKey, h, refocus, show, sortHeader } from './dom.js';
 import { icon } from './icons.js';
 import { rowMenuHandlers } from './menu.js';
 import { loadServices } from './services.js';
@@ -57,6 +58,7 @@ import { loadServices } from './services.js';
  * @typedef {import('./menu.js').Menu} Menu
  * @typedef {import('./menu.js').MenuEntry} MenuEntry
  * @typedef {import('./menu.js').Anchor} Anchor
+ * @typedef {'name' | 'host' | 'status' | 'folder' | 'added'} LinkColumn
  */
 
 /**
@@ -79,6 +81,12 @@ export const LINKS_PATH = '/links';
 
 /** Links per page. */
 export const LINKS_PAGE_SIZE = 100;
+
+/** The columns links can be sorted by. @type {readonly LinkColumn[]} */
+export const LINK_SORT_COLUMNS = ['name', 'host', 'status', 'folder', 'added'];
+
+/** Where the chosen order is kept. */
+const SORT_KEY = 'wayfetch.links-sort';
 
 /** How often the list is read again while shown, in milliseconds. */
 export const LINKS_REFRESH = 5000;
@@ -138,6 +146,8 @@ export class LinksPage {
     this.tableState = '';
     /** Filter text, lower case. */
     this.query = '';
+    /** The order of the shown links; list order is oldest added first. */
+    this.sort = savedSort(SORT_KEY, LINK_SORT_COLUMNS, { column: /** @type {LinkColumn} */ ('added'), descending: false });
     /** The outcome of the last command or read. */
     this.notice = { text: '', ok: false, warn: false, downloads: false };
     /** A command is being sent; commands wait for it. */
@@ -326,6 +336,19 @@ export class LinksPage {
   /** The selected links that are shown: what commands act on. */
   chosen() {
     return this.visible.filter((link) => this.selected.has(link.id));
+  }
+
+  /**
+   * Selects the shown links collected as `batch`, in place of any
+   * selection, and focuses the first of them.
+   * @param {string} batch
+   */
+  selectBatch(batch) {
+    const links = this.sorted(this.visible).filter((link) => link.batch === batch);
+    if (links.length === 0) return;
+    this.selected = new Set(links.map((link) => link.id));
+    this.render();
+    refocus(this.element, `select-${links[0].id}`);
   }
 
   /** @param {boolean} on */
@@ -811,13 +834,15 @@ export class LinksPage {
     // Polling and settings reads often return the same table. Keep its
     // controls connected so a refresh cannot interrupt a checkbox click.
     // Only the current, bounded page is retained.
-    const tableState = JSON.stringify([visible, [...this.selected], this.context.settings()?.roots, new Date().toDateString()]);
+    const tableState = JSON.stringify([visible, [...this.selected], this.context.settings()?.roots, this.sort, new Date().toDateString()]);
     if (tableState === this.tableState) return;
     this.tableState = tableState;
     const chosen = visible.filter((l) => this.selected.has(l.id)).length;
     this.selectAll.checked = visible.length > 0 && chosen === visible.length;
     this.selectAll.indeterminate = chosen > 0 && chosen < visible.length;
     this.selectAll.disabled = visible.length === 0;
+    const sortable = (/** @type {LinkColumn} */ column, /** @type {string} */ label, /** @type {string} */ className) =>
+      sortHeader({ column, label, className, sort: this.sort, onSort: (c) => this.sortBy(c) });
     const head = h(
       'thead',
       null,
@@ -825,57 +850,49 @@ export class LinksPage {
         'tr',
         null,
         h('th', { scope: 'col', class: 'check' }, this.selectAll),
-        h('th', { scope: 'col', class: 'name' }, 'Name'),
-        h('th', { scope: 'col', class: 'host' }, 'Host'),
+        sortable('name', 'Name', 'name'),
+        sortable('host', 'Host', 'host'),
         h('th', { scope: 'col', class: 'format' }, 'Format'),
         h('th', { scope: 'col', class: 'num' }, 'Size'),
-        h('th', { scope: 'col', class: 'link-status' }, 'Status'),
-        h('th', { scope: 'col', class: 'folder' }, 'Save to'),
+        sortable('status', 'Status', 'link-status'),
+        sortable('folder', 'Save to', 'folder'),
+        sortable('added', 'Added at', 'added'),
         h('th', { scope: 'col', class: 'row-actions' }, h('span', { class: 'visually-hidden' }, 'Actions')),
       ),
     );
     show(
       this.table,
-      h('caption', { class: 'visually-hidden' }, 'Collected links, by batch'),
+      h('caption', { class: 'visually-hidden' }, 'Collected links'),
       head,
-      batches(visible).map((group) => this.batch(group)),
+      h('tbody', null, this.sorted(visible).map((link) => this.row(link))),
     );
   }
 
   /**
-   * One batch: a heading row that selects its links, then their rows.
-   * @param {{ batch: string, collectedAt: number, links: CollectedLink[] }} group
+   * `links` in the chosen order.
+   * @param {readonly CollectedLink[]} links
    */
-  batch({ batch, collectedAt, links }) {
-    const selected = links.filter((l) => this.selected.has(l.id)).length;
-    const invalid = links.filter((l) => l.check === 'invalid').length;
-    const label = `Added ${collectedWhen(collectedAt)}`;
-    const box = h('input', {
-      type: 'checkbox',
-      'data-key': `select-${batch}`,
-      'aria-label': `Select the ${count(links.length, 'link')} added ${collectedWhen(collectedAt)}`,
-      checked: selected === links.length,
-      onchange: (/** @type {Event} */ event) =>
-        this.select(links, /** @type {HTMLInputElement} */ (event.currentTarget).checked),
-    });
-    box.indeterminate = selected > 0 && selected < links.length;
-    return h(
-      'tbody',
-      { class: 'batch', 'data-batch': batch },
-      h(
-        'tr',
-        { class: 'batch-head' },
-        h('td', { class: 'check' }, box),
-        h(
-          'th',
-          { scope: 'rowgroup', colspan: 7 },
-          h('span', { class: 'batch-title' }, label),
-          h('span', { class: 'batch-count' }, count(links.length, 'link')),
-          invalid > 0 && h('span', { class: 'batch-count problem' }, `${invalid} invalid`),
-        ),
-      ),
-      links.map((link) => this.row(link)),
-    );
+  sorted(links) {
+    const { column, descending } = this.sort;
+    /** @type {Record<LinkColumn, (link: CollectedLink) => string | number | null | undefined>} */
+    const keys = {
+      name: (l) => linkName(l) ?? l.host,
+      host: (l) => l.host,
+      status: (l) => linkStatus(l).label,
+      folder: (l) => this.linkFolder(l),
+      added: (l) => l.collected_at,
+    };
+    return sortedBy(links, keys[column], descending);
+  }
+
+  /**
+   * Sorts by `column`, or reverses the order when already sorted by it.
+   * @param {LinkColumn} column
+   */
+  sortBy(column) {
+    this.sort = toggleSort(this.sort, column);
+    saveSort(SORT_KEY, this.sort);
+    this.render();
   }
 
   /** @param {CollectedLink} link */
@@ -976,6 +993,7 @@ export class LinksPage {
         root && !root.available && h('span', { class: 'problem' }, ' (unavailable)'),
         this.removed(link.destination) && h('span', { class: 'problem' }, ' (removed; choose another)'),
       ),
+      h('td', { class: 'added', title: new Date(link.collected_at).toLocaleString() }, addedWhen(link.collected_at)),
       h('td', { class: 'row-actions' }, more),
     );
   }
