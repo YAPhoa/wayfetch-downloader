@@ -280,6 +280,8 @@ pub(super) fn start(
     links: &LinkRefs,
     unusable: &Unusable,
     route: Option<&JobRoute>,
+    routes: &BTreeMap<SourceLinkId, Result<Option<JobRoute>, ProtocolError>>,
+    automatic: bool,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     if let Some(route) = route {
@@ -344,6 +346,39 @@ pub(super) fn start(
             )
             .map_err(StoreError::from)?;
             return Ok(Err((ErrorCode::NotApplicable, problem)));
+        }
+        let route = match routes.get(&link.link) {
+            Some(Ok(route)) => route.as_ref(),
+            Some(Err(error)) => return Ok(Err((error.code, error.message.as_str().to_owned()))),
+            None if automatic => {
+                return Ok(Err((
+                    ErrorCode::Busy,
+                    "The automatic route is not ready; start again or choose Download via Direct."
+                        .into(),
+                )));
+            }
+            None => route,
+        };
+        // Automatic routing is revalidated in the same transaction as the
+        // job. The coordinator also opened its current sealed credential.
+        if automatic && let Some(route) = route {
+            let usable: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?1 AND service = ?2 \
+                     AND enabled = 1 AND status = 'authenticated' \
+                     AND (expires_at IS NULL OR expires_at > ?3))",
+                    params![
+                        sql(route.account)?,
+                        route.service.as_str(),
+                        now.unix_millis()
+                    ],
+                    |r| r.get(0),
+                )
+                .map_err(StoreError::from)?;
+            if !usable {
+                return Ok(Err((ErrorCode::NotApplicable,
+                        "The automatically chosen account is no longer usable; check Accounts and start again.".into())));
+            }
         }
         let job = jobs::create(
             tx,
@@ -562,6 +597,31 @@ pub(super) fn source(tx: &Transaction<'_>, link: SourceLinkId) -> Result<String,
 }
 
 impl Store {
+    /// Original valid URLs still held for a start, by link ID.
+    pub(crate) fn start_urls(
+        &mut self,
+        links: &[SourceLinkId],
+    ) -> Result<Vec<(SourceLinkId, Url)>, StoreError> {
+        let tx = self.read()?;
+        let mut urls = Vec::new();
+        for id in links {
+            let Ok(sql_id) = sql(*id) else {
+                continue;
+            };
+            let raw: Option<String> = tx.query_row(
+                "SELECT input_url FROM source_links WHERE id = ?1 AND held = 1 AND listed = 1 AND invalid = 0 \
+                 AND NOT EXISTS(SELECT 1 FROM jobs WHERE source_link_id = source_links.id)",
+                [sql_id], |r| r.get(0)).optional()?;
+            if let Some(raw) = raw {
+                urls.push((
+                    *id,
+                    Url::parse(&raw).map_err(|_| StoreError::Corrupt("source URL"))?,
+                ));
+            }
+        }
+        Ok(urls)
+    }
+
     /// The destinations of those of `links` that a start could create a
     /// download for, so the coordinator can check them first.
     pub fn link_roots(&mut self, links: &[SourceLinkId]) -> Result<Vec<RootId>, StoreError> {

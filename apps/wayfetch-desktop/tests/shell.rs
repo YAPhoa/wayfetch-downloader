@@ -317,14 +317,19 @@ impl Shell {
     /// redraw is looked up again.
     async fn click(&self, css: &str) {
         eventually(|| async {
-            let element = self
+            // A redraw can invalidate the WebDriver reference while it
+            // is being returned, as well as between lookup and click.
+            let clicked = match self
                 .client
                 .wait()
                 .at_most(DEADLINE)
                 .for_element(Locator::Css(css))
                 .await
-                .unwrap();
-            match element.click().await {
+            {
+                Ok(element) => element.click().await,
+                Err(error) => Err(error),
+            };
+            match clicked {
                 Ok(()) => Some(()),
                 Err(fantoccini::error::CmdError::Standard(e))
                     if e.error == fantoccini::error::ErrorStatus::StaleElementReference =>
@@ -1762,6 +1767,14 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
     shell
         .wait_for("document.querySelector('.links-page .notice > span')?.textContent.startsWith('Started 1 download.')")
         .await;
+    // Ordinary Start uses the engine's automatic default without a route
+    // prompt. With no accounts, this fixture is fetched directly below.
+    assert_eq!(
+        shell
+            .js("return document.querySelectorAll('dialog[open]').length")
+            .await,
+        json!(0)
+    );
     // The accepted source moves out of Links; no redundant started banner.
     shell
         .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 1")
@@ -1785,6 +1798,30 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
         .click(".workspace > :not([hidden]) [data-key=\"view-downloads\"]")
         .await;
     shell.wait_for_state("job-1", "Done").await;
+    // A person scrolls the narrow table before pressing More. WebDriver
+    // otherwise scrolls while clicking, whose deferred scroll event can
+    // dismiss the menu it just opened. Deliver that scroll first.
+    let reachable = shell
+        .client
+        .execute_async(
+            r#"const done = arguments[arguments.length - 1];
+           const more = document.querySelector('[data-key="menu-job-1"]');
+           more.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+           requestAnimationFrame(() => requestAnimationFrame(() => {
+             const r = more.getBoundingClientRect();
+             const x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2;
+             done(x >= 0 && x < innerWidth && y >= 0 && y < innerHeight
+               && more.contains(document.elementFromPoint(x, y)));
+           }));"#,
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reachable,
+        json!(true),
+        "More's click target must be visible"
+    );
     shell.click("[data-key=\"menu-job-1\"]").await;
     shell.click("[data-key=\"menu-item-remove\"]").await;
     shell
@@ -1985,7 +2022,7 @@ async fn an_account_is_signed_in_and_managed_through_the_window() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs an X display and WebKitWebDriver"]
-async fn a_link_downloads_through_a_chosen_account_in_the_window() {
+async fn a_link_automatically_downloads_through_a_matching_account_in_the_window() {
     let provider = rd::Server::start().await;
     let file = body(MIB);
     provider.with(|rd| {
@@ -2028,20 +2065,16 @@ async fn a_link_downloads_through_a_chosen_account_in_the_window() {
     shell
         .click(".links-page [data-key=\"links-start\"]:not([disabled])")
         .await;
-    // Direct is the default; the account is chosen instead.
-    shell
-        .wait_for(
-            "document.querySelector('.start-links input[value=\"direct\"]')?.checked === true",
-        )
-        .await;
-    assert_eq!(provider.hits(rd::UNRESTRICT_PATH), 0);
-    shell
-        .click(".start-links input[name=\"links-route\"]:not([value=\"direct\"])")
-        .await;
-    shell.click(".start-links button[type=\"submit\"]").await;
     shell
         .wait_for("document.querySelector('.links-page .notice > span')?.textContent.startsWith('Started 1 download.')")
         .await;
+    assert_eq!(
+        shell
+            .js("return document.querySelectorAll('dialog[open]').length")
+            .await,
+        json!(0)
+    );
+    assert_eq!(provider.hits("/rest/1.0/hosts/domains"), 1);
     let saved = eventually(|| async {
         std::fs::read(dirs.root.join("Synthetic File.bin"))
             .ok()

@@ -27,7 +27,7 @@ use url::Url;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
     AccountProvider, ApiClient, ApiMethod, ApiResponse, Checked, DeviceAuthorization, PollOutcome,
-    Profile, ProviderError, Reconciled, Unrestricted, WithCredentials,
+    Profile, ProviderError, Reconciled, SupportedHosts, Unrestricted, WithCredentials,
 };
 use wayfetch_engine::domain::name::ProviderId;
 use wayfetch_engine::domain::time::UtcTimestamp;
@@ -450,6 +450,25 @@ impl AccountProvider for RealDebrid {
 
     fn check<'a>(&'a self, credential: &'a Secret) -> BoxFuture<'a, Checked> {
         Box::pin(self.check(credential))
+    }
+
+    fn supported_hosts(&self) -> BoxFuture<'_, Result<SupportedHosts, ProviderError>> {
+        Box::pin(async {
+            // Official API: GET /hosts/domains, no authentication required.
+            let response = self
+                .api
+                .call(
+                    ApiMethod::Get,
+                    self.api.endpoint().url("rest/1.0/hosts/domains"),
+                    None,
+                    None,
+                )
+                .await?;
+            if response.status != 200 {
+                return Err(self.api.unexpected(&response, "supported hosts", ""));
+            }
+            SupportedHosts::new(self.api.parse(&response, "supported hosts")?)
+        })
     }
 
     fn unrestrict<'a>(

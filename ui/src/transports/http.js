@@ -9,6 +9,7 @@
 import { WayfetchError, settingsRequest } from '../client/contract.js';
 
 /**
+ * @typedef {import('../client/generated/StartRouting.js').StartRouting} StartRouting
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
  * @typedef {import('../client/contract.js').EventCursor} EventCursor
  * @typedef {import('../client/contract.js').StreamSink} StreamSink
@@ -156,13 +157,14 @@ export class HttpClient {
   }
 
   /**
-   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId, account?: AccountId }} request
+   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId, account?: AccountId, routing?: StartRouting }} request
    */
-  linksCommand({ idempotencyKey, target, action, links, destination, account }) {
+  linksCommand({ idempotencyKey, target, action, links, destination, account, routing }) {
     /** @type {LinksCommandRequest} */
     const body = { idempotency_key: idempotencyKey, target, action, links };
     if (destination !== undefined) body.destination = destination;
     if (account !== undefined) body.account = account;
+    if (routing !== undefined) body.routing = routing;
     return this.request('POST', '/v1/staging/commands', { body });
   }
 

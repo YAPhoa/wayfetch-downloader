@@ -405,3 +405,47 @@ fn downloads_are_supported() {
     assert!(support.downloads);
     assert_eq!(support.service.as_str(), "real-debrid");
 }
+
+#[tokio::test]
+async fn supported_domains_use_the_documented_public_bounded_endpoint() {
+    let server = Server::start().await;
+    let rd = provider(&server);
+    let hosts = AccountProvider::supported_hosts(&rd).await.unwrap();
+    assert!(hosts.supports(&url::Url::parse("https://sub.hoster.example/file").unwrap()));
+    let log = server.log();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].method, "GET");
+    assert_eq!(log[0].path, "/rest/1.0/hosts/domains");
+    assert!(log[0].authorization.is_none());
+    assert!(log[0].form.is_empty());
+}
+
+#[tokio::test]
+async fn unsupported_domain_answers_and_outages_remain_unknown() {
+    for (status, body) in [
+        (503, "{}".to_owned()),
+        (200, "{}".to_owned()),
+        (200, r#"["*.example"]"#.to_owned()),
+        (
+            200,
+            serde_json::to_string(&vec!["hoster.example"; 1025]).unwrap(),
+        ),
+        (
+            200,
+            serde_json::to_string(&vec!["hoster.example"; 8192]).unwrap(),
+        ),
+    ] {
+        let server = Server::start().await;
+        server.with(|state| {
+            state
+                .always
+                .insert("/rest/1.0/hosts/domains", Answer::json(status, body));
+        });
+        assert!(
+            AccountProvider::supported_hosts(&provider(&server))
+                .await
+                .is_err()
+        );
+        assert_eq!(server.log().len(), 1, "never silently retry");
+    }
+}

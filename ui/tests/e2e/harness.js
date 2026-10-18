@@ -209,6 +209,9 @@ export class RealDebridFixture {
       response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(data));
     };
     switch (url.pathname) {
+      case '/rest/1.0/hosts/domains':
+        answer(200, ['hoster.example']);
+        return;
       case '/oauth/v2/device/code':
         this.polls = 0;
         answer(200, {

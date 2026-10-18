@@ -1457,25 +1457,27 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
   const asked = () => realDebrid.requested.filter((path) => path === '/rest/1.0/unrestrict/link').length;
   const original = 'https://hoster.example/file/through-account';
   const lost = 'https://hoster.example/file/answer-lost';
-  await collect(page, `${original}\n${lost}`, 'Collected 2 links for review.');
+  const mixedDirect = fixture.put('mixed-direct.bin', MIB);
+  await collect(page, `${original}\n${lost}\n${mixedDirect}`, 'Collected 3 links for review.');
   expect(asked()).toBe(0);
   const linkRow = (/** @type {string} */ name) =>
     page.locator('tr[data-link]', { has: page.locator('td.name', { hasText: new RegExp(`^${name}$`) }) });
 
-  // Starting offers Direct, chosen by default, and the account.
+  // Explicit override remains in the existing menu. Cancelling it keeps
+  // the link; ordinary Start routes automatically without a prompt.
   await linkRow('through-account').locator('input[type="checkbox"]').check();
-  await page.getByRole('button', { name: 'Start selected' }).click();
+  await linkRow('through-account').getByRole('button', { name: 'Actions for through-account' }).click();
+  await page.getByRole('menuitem', { name: 'Download via…' }).click();
   const choose = page.getByRole('dialog', { name: 'Start 1 link' });
   await expect(choose.getByRole('radio', { name: /^Direct/ })).toBeChecked();
   await expect(choose.getByRole('radio')).toHaveCount(2);
   expect(asked()).toBe(0);
-  // Cancelled: nothing starts and the link stays.
   await choose.getByRole('button', { name: 'Cancel' }).click();
   await expect(linkRow('through-account').locator('td.link-status')).toHaveText('Not checked');
+  await linkRow('mixed-direct.bin').locator('input[type="checkbox"]').check();
   await page.getByRole('button', { name: 'Start selected' }).click();
-  await choose.getByRole('radio', { name: 'Real-Debrid: Main' }).check();
-  await choose.getByRole('button', { name: 'Start' }).click();
-  await expect(page.getByText('Started 1 download.')).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('Started 2 downloads.')).toBeVisible();
   // Downloads routed through an account, as the API reports them.
   const routed = async () => {
     const response = await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`);
@@ -1486,6 +1488,14 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
   const [through] = await routed();
   expect(through.route.service).toBe('real-debrid');
   expect(asked()).toBe(1);
+  await expect.poll(async () => {
+    const jobs = (await (await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`)).json()).items;
+    return jobs.find((/** @type {{ artifact?: { path: string } }} */ job) => job.artifact?.path === 'mixed-direct.bin')?.stage;
+  }).toBe('complete');
+  const mixedJobs = (await (await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`)).json()).items;
+  const mixedJob = mixedJobs.find((/** @type {{ artifact?: { path: string } }} */ job) => job.artifact?.path === 'mixed-direct.bin');
+  expect(mixedJob).toBeDefined();
+  expect(mixedJob.route).toBeUndefined();
   // The provider's file name, saved in the folder the link was collected to.
   expect(through.artifact.path).toBe(realDebrid.filename);
   const settings = await (await page.request.get(`${daemon.origin}/v1/settings`)).json();
@@ -1502,8 +1512,7 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
   await page.goto(`${daemon.origin}/links`);
   await linkRow('answer-lost').locator('input[type="checkbox"]').check();
   await page.getByRole('button', { name: 'Start selected' }).click();
-  await choose.getByRole('radio', { name: 'Real-Debrid: Main' }).check();
-  await choose.getByRole('button', { name: 'Start' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByText('Started 1 download.')).toBeVisible();
   await expect.poll(async () => (await routed()).length).toBe(2);
   const lostJob = (await routed()).find((/** @type {{ id: string }} */ j) => j.id !== through.id);
@@ -1525,6 +1534,25 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
     .toBe('complete');
   expect(asked()).toBe(3);
   expect(realDebrid.downloadAuth).toEqual([undefined, undefined]);
+
+  // An explicit Direct override on a supported host bypasses the account
+  // through the real HTTP transport. The synthetic hostname cannot resolve,
+  // but the job still keeps Direct and never asks the provider.
+  await page.goto(`${daemon.origin}/links`);
+  await collect(page, 'https://hoster.example/file/direct-override', 'Collected 1 link for review.');
+  const beforeDirect = (await (await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`)).json()).items.map((/** @type {{ id: string }} */ job) => job.id);
+  await linkRow('direct-override').getByRole('button', { name: 'Actions for direct-override' }).click();
+  await page.getByRole('menuitem', { name: 'Download via…' }).click();
+  await choose.getByRole('radio', { name: /^Direct/ }).check();
+  await choose.getByRole('button', { name: 'Start' }).click();
+  await expect(page.getByText('Started 1 download.')).toBeVisible();
+  const allJobs = (await (await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`)).json()).items;
+  const explicitDirect = allJobs.find((/** @type {{ id: string }} */ job) => !beforeDirect.includes(job.id));
+  expect(explicitDirect).toBeDefined();
+  expect(explicitDirect.route).toBeUndefined();
+  expect(asked()).toBe(3);
+  await page.goto(`${daemon.origin}/jobs/${explicitDirect.id}`);
+  await expect(page.locator('[data-fact="download-via"]')).toHaveText('Direct');
 
   // No generated link or credential reached the page, its storage, or the
   // daemon's output.

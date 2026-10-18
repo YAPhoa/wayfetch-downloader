@@ -8,7 +8,7 @@
 //! is rolled back and leaves no record, so its key can be retried.
 
 use rusqlite::{OptionalExtension, Transaction, params};
-use wayfetch_domain::id::{JobId, PackageId, RootId};
+use wayfetch_domain::id::{JobId, PackageId, RootId, SourceLinkId};
 use wayfetch_domain::job::{JobError, JobState, Outcome};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
@@ -37,6 +37,8 @@ pub struct CommandContext {
     /// The provider account links being started download through, as the
     /// coordinator found it; `None` to download them directly.
     pub route: Option<JobRoute>,
+    /// Per-link automatic decisions; failures keep that link collected.
+    pub routes: std::collections::BTreeMap<SourceLinkId, Result<Option<JobRoute>, ProtocolError>>,
 }
 
 impl Store {
@@ -63,8 +65,22 @@ impl Store {
                 items,
                 destination: chosen,
             } => links::collect(&tx, items, chosen.or(destination), now)?,
-            Command::StartLinks { links, .. } => {
-                links::start(&tx, links, &context.unusable, context.route.as_ref(), now)?
+            Command::StartLinks {
+                links,
+                account,
+                routing,
+            } => {
+                let automatic = account.is_none()
+                    && *routing != Some(wayfetch_protocol::command::StartRouting::Direct);
+                links::start(
+                    &tx,
+                    links,
+                    &context.unusable,
+                    context.route.as_ref(),
+                    &context.routes,
+                    automatic,
+                    now,
+                )?
             }
             Command::RemoveLinks { links } => links::remove(&tx, links)?,
             Command::MoveLinks { links, destination } => links::relocate(&tx, links, *destination)?,

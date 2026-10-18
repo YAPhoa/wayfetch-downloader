@@ -37,6 +37,7 @@ import { rowMenuHandlers } from './menu.js';
 import { loadServices } from './services.js';
 
 /**
+ * @typedef {import('../client/generated/StartRouting.js').StartRouting} StartRouting
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
  * @typedef {import('../client/contract.js').Hello} Hello
  * @typedef {import('../client/contract.js').Settings} Settings
@@ -83,8 +84,10 @@ const NO_CONTROL = 'You may not change or remove links';
  * What to tell the user about a command refused as a whole.
  * @param {WayfetchError} error
  * @param {AccountId} [account] the account the links were to start through
+ * @param {boolean} [automatic] whether a start used automatic routing
  */
-function refused(error, account) {
+function refused(error, account, automatic = false) {
+  if (automatic && error.code === 'permission_denied') return error.message;
   if (account !== undefined) {
     switch (error.code) {
       case 'permission_denied':
@@ -349,8 +352,9 @@ export class LinksPage {
    * @param {readonly CollectedLink[]} links
    * @param {RootId} [destination]
    * @param {AccountId} [account] for a start: the account to download through
+   * @param {StartRouting} [routing] explicit route override
    */
-  async act(action, links, destination, account) {
+  async act(action, links, destination, account, routing) {
     const hello = this.context.hello();
     if (links.length === 0 || this.busy) return;
     if (!hello) {
@@ -369,13 +373,14 @@ export class LinksPage {
         links: links.map((l) => ({ link: l.id, revision: l.revision })),
         destination,
         account,
+        routing,
       });
     } catch (error) {
       if (error instanceof WayfetchError && error.code === 'unauthenticated') {
         this.context.onSignedOut();
         return;
       }
-      this.say(error instanceof WayfetchError ? refused(error, account) : String(error));
+      this.say(error instanceof WayfetchError ? refused(error, account, action === 'start' && account === undefined && routing !== 'direct') : String(error));
     } finally {
       this.busy = false;
     }
@@ -417,34 +422,31 @@ export class LinksPage {
   }
 
   /**
-   * Starts `links`: directly, unless the client may download through
-   * accounts and one can be used, when the user chooses how first. Direct
-   * stays the default, and a choice is never changed afterwards.
+   * Start immediately. The engine selects a route for each original URL.
    * @param {readonly CollectedLink[]} links
    */
   async start(links) {
+    await this.act('start', links);
+  }
+
+  /**
+   * Open the explicit Direct/account override from the existing row menu.
+   * @param {readonly CollectedLink[]} links
+   */
+  async downloadVia(links) {
     if (links.length === 0 || this.busy) return;
-    if (!canChooseRoute(this.context.client.permissions)) {
-      await this.act('start', links);
-      return;
-    }
     /** @type {AccountSummary[]} */
-    let accounts;
-    try {
-      accounts = routeAccounts(await this.context.client.accounts());
-    } catch (error) {
-      if (error instanceof WayfetchError && error.code === 'unauthenticated') {
-        this.context.onSignedOut();
-        return;
+    let accounts = [];
+    if (canChooseRoute(this.context.client.permissions)) {
+      try {
+        accounts = routeAccounts(await this.context.client.accounts());
+      } catch (error) {
+        if (error instanceof WayfetchError && error.code === 'unauthenticated') {
+          this.context.onSignedOut();
+          return;
+        }
+        this.say('Accounts could not be read. Direct is still available.');
       }
-      this.say(
-        `Nothing started: the accounts to download through could not be read (${error instanceof Error ? error.message : String(error)}). Try again.`,
-      );
-      return;
-    }
-    if (accounts.length === 0) {
-      await this.act('start', links);
-      return;
     }
     /** @type {Map<string, string>} */
     const names = new Map();
@@ -477,7 +479,7 @@ export class LinksPage {
           const picked = /** @type {HTMLInputElement | null} */ (form.querySelector('input:checked'));
           dialog.close();
           const account = picked && picked.value !== 'direct' ? /** @type {AccountId} */ (picked.value) : undefined;
-          void this.act('start', links, undefined, account);
+          void this.act('start', links, undefined, account, account ? undefined : 'direct');
         },
       },
       h(
@@ -636,6 +638,13 @@ export class LinksPage {
               ? 'Not a valid link'
               : undefined,
         run: () => void this.start(starts),
+      },
+      {
+        key: 'route-links',
+        label: 'Download via…',
+        disabled: !allowed || starts.length === 0,
+        hint: !this.canSubmit ? NO_SUBMIT : undefined,
+        run: () => void this.downloadVia(starts),
       },
       {
         key: 'move-links',

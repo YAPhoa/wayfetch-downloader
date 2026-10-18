@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use url::Url;
 use wayfetch_domain::failure::FailureCode;
-use wayfetch_domain::name::ProviderId;
+use wayfetch_domain::name::{HostName, ProviderId};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_protocol::account::{AccountPlan, ServiceSupport};
 
@@ -301,6 +301,69 @@ impl<T> WithCredentials<T> {
     }
 }
 
+/// A bounded, validated provider host-domain catalogue. Host identity is
+/// parsed separately from URLs; matches include subdomains at a dot boundary.
+#[derive(Debug, Clone)]
+pub struct SupportedHosts(Vec<HostName>);
+
+impl SupportedHosts {
+    /// Validate at most 1024 DNS domains, each at most 253 bytes. An invalid
+    /// catalogue is unknown support, never an empty/nonmatching catalogue.
+    pub fn new(domains: Vec<String>) -> Result<Self, ProviderError> {
+        if domains.len() > 1024 {
+            return Err(ProviderError::Malformed(
+                "too many supported host domains".into(),
+            ));
+        }
+        let hosts = domains
+            .into_iter()
+            .map(|domain| {
+                if domain.len() > 253
+                    || !domain
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+                {
+                    return Err(ProviderError::Malformed(
+                        "invalid supported host domain".into(),
+                    ));
+                }
+                let host = HostName::new(domain).map_err(|_| {
+                    ProviderError::Malformed("invalid supported host domain".into())
+                })?;
+                if !matches!(url::Host::parse(host.as_str()), Ok(url::Host::Domain(_)))
+                    || host
+                        .as_str()
+                        .split('.')
+                        .any(|label| label.starts_with('-') || label.ends_with('-'))
+                {
+                    return Err(ProviderError::Malformed(
+                        "supported host must be a DNS domain".into(),
+                    ));
+                }
+                Ok(host)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self(hosts))
+    }
+
+    /// Whether a parsed URL's hostname is this domain or a subdomain.
+    pub fn supports(&self, url: &Url) -> bool {
+        let Some(raw) = url.host_str() else {
+            return false;
+        };
+        let Ok(host) = HostName::new(raw) else {
+            return false;
+        };
+        self.0.iter().any(|domain| {
+            host == *domain
+                || host
+                    .as_str()
+                    .strip_suffix(domain.as_str())
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })
+    }
+}
+
 /// One provider's account authorization.
 pub trait AccountProvider: Send + Sync + 'static {
     /// The service, as named in the UI's catalogue.
@@ -308,6 +371,16 @@ pub trait AccountProvider: Send + Sync + 'static {
 
     /// What the integration supports.
     fn support(&self) -> ServiceSupport;
+
+    /// Read the provider's supported domains without generating a download
+    /// or consuming account quota. Failure means unknown support.
+    fn supported_hosts(&self) -> BoxFuture<'_, Result<SupportedHosts, ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError::Unavailable(
+                "supported hosts are not available for this service".into(),
+            ))
+        })
+    }
 
     /// Starts a device authorization.
     fn begin(&self) -> BoxFuture<'_, Result<DeviceAuthorization, ProviderError>>;
@@ -353,5 +426,62 @@ pub trait AccountProvider: Send + Sync + 'static {
                 "this service keeps no record of generated links".into(),
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    #[test]
+    fn domains_match_only_parsed_hostname_boundaries() {
+        let hosts = SupportedHosts::new(vec!["HOSTER.Example.".into()]).unwrap();
+        for url in [
+            "https://hoster.example/a",
+            "https://HOSTER.EXAMPLE/a",
+            "https://cdn.hoster.example/a",
+            "https://hoster.example./a",
+        ] {
+            assert!(hosts.supports(&Url::parse(url).unwrap()), "{url}");
+        }
+        for url in [
+            "https://nothoster.example/a",
+            "https://hoster.example.evil.test/a",
+            "https://evil.test/?next=https://hoster.example/",
+            "https://hoster.example@evil.test/a",
+            "https://127.0.0.1/a",
+        ] {
+            assert!(!hosts.supports(&Url::parse(url).unwrap()), "{url}");
+        }
+    }
+
+    #[test]
+    fn invalid_or_oversized_catalogues_are_unknown_not_no_match() {
+        for domain in [
+            "",
+            "*.example",
+            "https://example.com",
+            "example.com/a",
+            "example.com:443",
+            "example..com",
+            "-bad.example",
+            "bad-.example",
+            "127.0.0.1",
+            "::1",
+            "example.com@evil.test",
+            " example.com",
+        ] {
+            assert!(
+                SupportedHosts::new(vec![domain.into()]).is_err(),
+                "{domain}"
+            );
+        }
+        assert!(SupportedHosts::new(vec!["example.com".into(); 1025]).is_err());
+        assert!(SupportedHosts::new(vec![format!("{}.example", "a".repeat(254))]).is_err());
+        assert!(
+            !SupportedHosts::new(Vec::new())
+                .unwrap()
+                .supports(&Url::parse("https://hoster.example/").unwrap())
+        );
     }
 }

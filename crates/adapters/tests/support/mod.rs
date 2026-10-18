@@ -142,6 +142,7 @@ impl Rd {
         let q = |name: &str| request.query.get(name).map(String::as_str);
         let f = |name: &str| request.form.get(name).map(String::as_str);
         match request.path.as_str() {
+            "/rest/1.0/hosts/domains" => Answer::json(200, r#"["hoster.example"]"#),
             DEVICE_PATH => {
                 if q("client_id") != Some(wayfetch_adapters::real_debrid::OPEN_SOURCE_CLIENT_ID)
                     || q("new_credentials") != Some("yes")

@@ -169,7 +169,7 @@ holds one `TOKEN PERMISSION[,PERMISSION...]` per line, with permissions `read`,
 `submit`, `control`, `sources` (reading back submitted links, which can
 carry signed tokens), `accounts` (provider sign-ins), `delete_files` (explicitly
 deleting downloaded data, alongside `control`), and `provider_downloads`
-(choosing an account to download through when starting links, which spends
+(automatic or explicit account routing when starting links, which can spend
 that account's provider work); these scopes are independent. The token file must
 be readable only by its owner. If it does not
 exist, `wayfetchd` creates it with one token holding every permission; the token
@@ -186,7 +186,7 @@ is never printed.
 | `GET /v1/jobs/{id}/source` | The link the job was submitted with (needs `sources`) |
 | `POST /v1/staging/links` | Collect links for review without downloading them: `{"idempotency_key", "target", "items": [text...], "destination"?: "root-N"}` |
 | `GET /v1/staging/links` | A page of collected links: `after`, `page_size` |
-| `POST /v1/staging/commands` | `{"idempotency_key", "target", "action": "start"\|"remove"\|"move", "links": [{"link", "revision"}...]}`, plus `"destination"` for a move, and `"account"` to start through a provider account (needs `provider_downloads`) |
+| `POST /v1/staging/commands` | `{"idempotency_key", "target", "action": "start"\|"remove"\|"move", "links": [{"link", "revision"}...]}`, plus `"destination"` for a move, and optional `"routing": "direct"\|"automatic"` or `"account"` for a start; automatic is the default and needs `provider_downloads`, explicit Direct needs only `submit` |
 | `GET /v1/staging/links/{id}/source` | A collected link as entered (needs `sources`) |
 | `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem`, `max_active_downloads` with its source, default, saved value, range, lock, and conflict, and `download_speed_limit` likewise, with whether Unlimited is allowed |
 | `PUT /v1/settings` | `{"idempotency_key", "target", "expected_revision"}` with `"default_root": "root-N"`, `"max_active_downloads": {"set": N}` or `"use_default"`, `"download_speed_limit": {"set": "unlimited"}`, `{"set": {"bytes_per_second": N}}` or `"use_default"`, or any of them together, all or none (needs `control`) |
@@ -237,7 +237,7 @@ state directory and back it up alongside it. Once an account is stored,
 `wayfetchd` never creates a new key: if the file is missing, readable by
 others, or a different key, accounts show as locked with the reason, and you
 can restore the file and restart, or remove the accounts and sign in again.
-Downloads without an account keep working either way. Real-Debrid is the only service so far.
+Explicit Direct downloads and unmatched hosts keep working either way. Real-Debrid is the only service so far.
 Signing in uses its device flow: the request answers with a code and a
 Real-Debrid page where you enter it, and no password or token ever passes
 through the API. Responses never carry stored credentials, and account
@@ -247,8 +247,19 @@ Starting collected links with `"account"` downloads each through that
 Real-Debrid account: when a download starts, Real-Debrid makes a download
 link for it, which Wayfetch keeps encrypted and never shows. The job keeps
 the account as its `route`, and a provider failure stops the job and says
-what to do; it never falls back to a direct download. Without `"account"`,
-and for `/v1/inputs`, links download directly as before. If Real-Debrid's
+what to do; it never falls back to a direct download. In protocol 3.0,
+starting without `"account"` selects automatically: the engine matches each
+original URL's hostname against the provider's supported domains, chooses
+the lowest-ID usable enabled account supporting it, and uses Direct for a
+known nonmatch. Matching uses exact domains and subdomains at a dot boundary.
+Disabled accounts opt out. Matching hosts with unusable accounts (invalid or
+expired status, unreadable credentials, or a locked vault) stay collected
+with a reason; unknown host support also stays collected. Supported domains
+are fetched without generating a link and cached for five minutes; failures
+are retained for 15 seconds. Automatic starts need `submit` and
+`provider_downloads`; a token missing the latter must explicitly choose
+`"routing": "direct"`. An explicit account cannot be combined with `routing`.
+`/v1/inputs` continues to submit Direct jobs. If Real-Debrid's
 answer was lost, the job fails as `operation_ambiguous` once Wayfetch has
 checked Real-Debrid's downloads list and found no matching link; retrying it
 needs `"repeat_provider_operation": true`, since Real-Debrid may then do the
@@ -446,9 +457,10 @@ a searchable catalogue of file hosts, cloud storage and multi-host
 services, found by name, by any of their domains, or by a pasted link.
 Only Real-Debrid can be signed in to so far; the others say Not available
 yet. Signing in shows a code to enter on Real-Debrid's own page and waits
-for your approval there. Once an enabled account can download, Start on the
-Links page asks how to download: Direct, the default, or through one of
-those accounts; a download's details say which (Download via). Retrying a
+for your approval there. Start on the Links page immediately selects a route
+for each link in the engine. The existing row menu's Download via… action
+lets you explicitly choose Direct or an account; a download's details say
+which route was saved (Download via). Retrying a
 download whose request to the provider had its answer lost asks first, as
 the provider may do that work twice. Direct links never need an account. This section needs the `accounts`
 permission, which a browser's owner session has. Each row of the
@@ -700,12 +712,13 @@ The desktop host is a workspace member but not a default member, so plain
 `cargo build` and the commands above leave it out; check it on its own.
 Its window tests drive the real app through `WebKitWebDriver` (Debian and
 Ubuntu package `webkit2gtk-driver`) on an X display, so they are ignored by
-default:
+default. Run them serially because the windows share keyboard focus on the
+X display; `scripted-picker` includes the confined test folder-picker cases:
 
 ```sh
 cargo clippy --locked -p wayfetch-desktop --all-targets -- -D warnings
 cargo test --locked -p wayfetch-desktop                       # unit tests
-xvfb-run -a cargo test --locked -p wayfetch-desktop --test shell -- --ignored
+xvfb-run -a cargo test --locked -p wayfetch-desktop --features scripted-picker --test shell -- --ignored --test-threads=1
 ```
 
 The container tests need Docker with the Compose plugin, so they are ignored
