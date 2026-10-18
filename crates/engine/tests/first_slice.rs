@@ -2657,11 +2657,10 @@ async fn collected_links_wait_for_review_and_survive_restart() {
     let finished = complete(&owner, id).await;
     assert_eq!(finished.destination, Some(ROOT));
     assert_eq!(env.published("a.bin"), body(5 * KIB));
-    // The started link stays listed with its download until removed.
+    // Accepted links move out of Links atomically; refused links stay.
     let left = links(&owner).await;
-    assert_eq!(left.total, 3);
-    assert_eq!(left.items[0].job, Some(id));
-    assert_eq!(left.items[1..], [c.clone(), b.clone()]);
+    assert_eq!(left.total, 2);
+    assert_eq!(left.items, [c.clone(), b.clone()]);
     assert!(
         env.server
             .requests
@@ -2686,9 +2685,9 @@ async fn collected_links_wait_for_review_and_survive_restart() {
     shutdown(owner).await;
     let owner = env.start().await;
     let kept = links(&owner).await;
-    assert_eq!(kept.total, 3);
-    assert_eq!(kept.items[0].job, Some(id));
-    assert_eq!(kept.items[2].job, first.0[0].job);
+    assert_eq!(kept.total, 1);
+    assert_eq!(kept.items.as_slice(), std::slice::from_ref(c));
+    assert_eq!(jobs(&owner).await.len(), 2);
     shutdown(owner).await;
 }
 
@@ -2786,12 +2785,11 @@ async fn link_destinations_change_only_the_chosen_links() {
     let done = complete(&owner, started[0].job.unwrap()).await;
     assert_eq!(done.destination, Some(media_id));
     assert_eq!(std::fs::read(media.join("a.bin")).unwrap(), body(5 * KIB));
-    let started = links(&owner).await.items[0].clone();
-    assert!(started.problem.is_none());
-    // Once started, it keeps its folder.
+    assert_eq!(links(&owner).await.total, 1);
+    // The retained source identity no longer permits moving its destination.
     assert_eq!(
-        refused_one(&owner, to_media(&[&started], ROOT)).await,
-        ErrorCode::NotApplicable
+        refused_one(&owner, to_media(&[&current], ROOT)).await,
+        ErrorCode::NotFound
     );
     shutdown(owner).await;
 }
@@ -2841,9 +2839,8 @@ async fn removing_links_removes_only_their_collected_records() {
             .unwrap_err();
         assert_eq!(denied.code, ErrorCode::PermissionDenied);
     }
-    assert_eq!(links(&owner).await.total, 2);
-    // The started link leaves the list too; its download keeps its source.
-    let a = &links(&owner).await.items[0].clone();
+    assert_eq!(links(&owner).await.total, 1);
+    // Removing an already moved source is harmless; the job keeps it.
     let (removed, refused_links) = applied(&owner, remove(&[a, b])).await;
     assert_eq!(removed.len(), 2);
     assert!(refused_links.is_empty());
@@ -3292,7 +3289,7 @@ async fn a_retry_into_an_unmounted_folder_blocks_without_writing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_retried_collected_link_keeps_its_entry_across_restart() {
+async fn a_retried_download_keeps_its_source_and_stays_out_of_links_across_restart() {
     let env = failing_env();
     let data = body(20 * KIB);
     let mut resource = Resource::new(data.clone());
@@ -3320,20 +3317,114 @@ async fn a_retried_collected_link_keeps_its_entry_across_restart() {
         .await
         .unwrap();
     complete(&owner, id).await;
-    // The same entry, pointing at the same job; nothing was collected or
-    // removed by the retry.
-    let after = links(&owner).await.items;
-    assert_eq!(after.len(), 1);
-    assert_eq!(after[0].id, before[0].id);
-    assert_eq!(after[0].job, Some(id));
+    // Retry preserves the source without returning it to the collection.
+    assert!(before.is_empty());
+    assert!(links(&owner).await.items.is_empty());
     assert_eq!(jobs(&owner).await.len(), 1);
     shutdown(owner).await;
     let owner = env.start().await;
-    let restarted = links(&owner).await.items;
-    assert_eq!(
-        (restarted[0].id, restarted[0].job),
-        (before[0].id, Some(id))
-    );
+    assert!(links(&owner).await.items.is_empty());
     assert_eq!(env.published("kept.bin"), data);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_data_deletion_is_confined_permission_checked_and_replayable() {
+    let env = env();
+    env.server.put("/delete.bin", Resource::new(body(3 * KIB)));
+    let owner = env.start().await;
+    let id = submit(&owner, &["/delete.bin"]).await[0];
+    let done = complete(&owner, id).await;
+    let request = envelope(
+        &owner,
+        Command::DeleteFiles {
+            job: id,
+            expected_revision: done.revision,
+        },
+    );
+    for grants in [&[Permission::Control][..], &[Permission::DeleteFiles][..]] {
+        assert_eq!(
+            owner
+                .handle()
+                .execute(request.clone(), grants)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
+        assert!(env.root.join("delete.bin").is_file());
+    }
+    std::fs::write(env.root.join("unrelated.bin"), b"user data").unwrap();
+    let result = owner.handle().execute(request.clone(), ALL).await.unwrap();
+    assert!(!env.root.join("delete.bin").exists());
+    assert_eq!(
+        std::fs::read(env.root.join("unrelated.bin")).unwrap(),
+        b"user data"
+    );
+    assert_eq!(
+        owner.handle().execute(request.clone(), ALL).await.unwrap(),
+        result
+    );
+    // Permission is rechecked before returning a recorded destructive result.
+    assert_eq!(
+        owner
+            .handle()
+            .execute(request.clone(), &[Permission::Control])
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::PermissionDenied
+    );
+    shutdown(owner).await;
+    let owner = env.start().await;
+    assert_eq!(owner.handle().execute(request, ALL).await.unwrap(), result);
+    assert_eq!(counted(&owner).await, 0);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_data_deletion_keeps_job_visible_and_allows_an_explicit_keep_choice() {
+    let env = env();
+    env.server.put("/changed.bin", Resource::new(body(3 * KIB)));
+    let owner = env.start().await;
+    let id = submit(&owner, &["/changed.bin"]).await[0];
+    let done = complete(&owner, id).await;
+    let request = envelope(
+        &owner,
+        Command::DeleteFiles {
+            job: id,
+            expected_revision: done.revision,
+        },
+    );
+    // Same name and length, different file identity.
+    std::fs::write(env.root.join("replacement.bin"), body(3 * KIB)).unwrap();
+    std::fs::rename(
+        env.root.join("replacement.bin"),
+        env.root.join("changed.bin"),
+    )
+    .unwrap();
+    assert_eq!(
+        refused(&owner, request.clone()).await,
+        ErrorCode::NotApplicable
+    );
+    assert_eq!(job(&owner, id).await.stage, JobStage::Complete);
+    assert!(env.root.join("changed.bin").is_file());
+    assert_eq!(
+        refused(&owner, rename(&owner, &done, "new.bin")).await,
+        ErrorCode::Busy
+    );
+    // A fresh-key delete retry is safe and reports the same changed-file refusal.
+    assert_eq!(
+        refused(&owner, envelope(&owner, request.command.clone())).await,
+        ErrorCode::NotApplicable
+    );
+    owner
+        .handle()
+        .execute(remove(&owner, &done), ALL)
+        .await
+        .unwrap();
+    assert_eq!(counted(&owner).await, 0);
+    assert!(env.root.join("changed.bin").is_file());
+    assert_eq!(refused(&owner, request).await, ErrorCode::NotFound);
     shutdown(owner).await;
 }

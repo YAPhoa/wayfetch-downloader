@@ -3,4 +3,4 @@
 /**
  * What a principal must be allowed to do to run a command or query.
  */
-export type Permission = "read" | "submit" | "control" | "sources" | "accounts" | "provider_downloads";
+export type Permission = "read" | "submit" | "control" | "sources" | "accounts" | "provider_downloads" | "delete_files";

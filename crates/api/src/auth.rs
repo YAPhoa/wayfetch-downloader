@@ -282,9 +282,9 @@ mod tests {
         assert_eq!(token.len(), 2 * secret::SECRET_BYTES);
         assert_eq!(
             scopes,
-            "read,submit,control,sources,accounts,provider_downloads"
+            "read,submit,control,sources,accounts,provider_downloads,delete_files"
         );
-        assert_eq!(created.grant(token).unwrap().0.len(), 6);
+        assert_eq!(created.grant(token).unwrap().0.len(), 7);
 
         let (again, fresh) = Tokens::load_or_create(&path).unwrap();
         assert!(!fresh);

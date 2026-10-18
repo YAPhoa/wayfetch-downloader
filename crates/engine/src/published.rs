@@ -31,7 +31,7 @@ use wayfetch_protocol::{
 use crate::destinations::{Claims, Destinations, Probes, Slot};
 use crate::fs::{FsError, RenameCheck, Root};
 use crate::lifecycle::StoreClient;
-use crate::store::{RenameIntent, RenameStart, Store, StoreError};
+use crate::store::{DeleteStart, RenameIntent, RenameStart, Store, StoreError};
 
 fn now() -> UtcTimestamp {
     UtcTimestamp::from_system_time(SystemTime::now())
@@ -49,7 +49,7 @@ fn refusal(err: &FsError) -> ProtocolError {
             ErrorCode::NotApplicable,
             "the file is no longer in its folder",
         ),
-        FsError::PublishedChanged(_) => (
+        FsError::PublishedChanged(_) | FsError::StagingReplaced(_) => (
             ErrorCode::NotApplicable,
             "the file was changed or replaced outside Wayfetch",
         ),
@@ -255,6 +255,55 @@ impl Files {
                 _ => Err(e),
             },
         }
+    }
+
+    /// Removes metadata by default, or explicitly authorized recorded data.
+    /// The coordinator proved no download task still holds the job.
+    pub(crate) async fn remove(
+        &self,
+        envelope: CommandEnvelope,
+    ) -> Result<CommandResult, ProtocolError> {
+        let id = match envelope.command {
+            Command::Remove { job, .. } | Command::DeleteFiles { job, .. } => job,
+            _ => {
+                return Err(ProtocolError::new(
+                    ErrorCode::Internal,
+                    "expected removal command",
+                ));
+            }
+        };
+        let _slot = self.claim(id)?;
+        let instance = self.instance;
+        if matches!(envelope.command, Command::Remove { .. }) {
+            return self
+                .store(move |store| store.execute(&envelope, instance, &Default::default(), now()))
+                .await?;
+        }
+        let request = envelope.clone();
+        let intent = match self
+            .store(move |store| store.begin_delete(&request, instance))
+            .await??
+        {
+            DeleteStart::Done(result) => return Ok(result),
+            DeleteStart::Started(intent) => intent,
+        };
+        for (root_id, file) in intent.published {
+            self.on_root(root_id, move |root| root.delete_published(&file))
+                .await?;
+        }
+        for record in intent.staging {
+            self.on_root(record.root, move |root| {
+                root.verify()?;
+                match root.remove_staging(&record)? {
+                    crate::fs::Removal::Foreign => Err(FsError::StagingReplaced(record.name)),
+                    _ => Ok(()),
+                }
+            })
+            .await?;
+        }
+        self.store(move |store| store.finish_delete(id, &envelope, now()))
+            .await?
+            .map_err(Into::into)
     }
 
     /// The absolute path of a listed, complete job's file, checked to

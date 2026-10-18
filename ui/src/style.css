@@ -1204,3 +1204,11 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* The final explicit file-deletion choice in the removal dialog. */
+.dialog button.delete-confirm:not(:disabled),
+.dialog button.delete-confirm:hover:not(:disabled) {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: var(--surface);
+}

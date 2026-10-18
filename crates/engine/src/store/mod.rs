@@ -55,6 +55,7 @@
 
 mod accounts;
 mod commands;
+mod deletions;
 mod files;
 mod jobs;
 mod links;
@@ -69,6 +70,7 @@ pub mod schema;
 
 pub(crate) use accounts::{AccountRow, CheckResult, StoredCredential};
 pub use commands::CommandContext;
+pub use deletions::DeleteStart;
 pub use files::Partial;
 pub use jobs::Admission;
 pub use links::Unusable;
