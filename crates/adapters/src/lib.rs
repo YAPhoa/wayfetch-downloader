@@ -15,6 +15,7 @@
 //! * [`common`]: endpoints, bounded requests, and answer checks.
 //! * [`real_debrid`]: Real-Debrid account sign-in, status, and downloads
 //!   through an account.
+//! * [`youtube`]: recognizing YouTube video links.
 
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ use wayfetch_engine::accounts::provider::{AccountProvider, ApiClient};
 
 pub mod common;
 pub mod real_debrid;
+pub mod youtube;
 
 pub use common::Endpoint;
 
