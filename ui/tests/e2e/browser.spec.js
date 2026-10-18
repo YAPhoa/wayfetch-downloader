@@ -1916,6 +1916,20 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(a.locator('td[data-state]')).toHaveText('Cancelled');
     await expect(b.locator('td[data-state]')).toHaveText('Cancelled');
 
+    // Ticks hidden by the name filter leave the toolbar nothing to act on;
+    // it never falls back to the download in the details.
+    await page.getByRole('button', { name: 'Clear selection' }).click();
+    await b.locator('td.name a').click();
+    await expect(page.getByRole('button', { name: 'Retry bulk-b.bin' })).toBeEnabled();
+    await a.getByRole('checkbox').check();
+    await page.locator('#filter-names').fill('bulk-c');
+    await expect(summary).toContainText('1 selected download hidden by the filter is left out.');
+    for (const action of ['Pause', 'Resume', 'Cancel', 'Retry']) {
+      await expect(page.locator(`.downloads-view [data-action="${action.toLowerCase()}"]`)).toBeDisabled();
+    }
+    await page.locator('#filter-names').fill('');
+    await page.getByRole('button', { name: 'Close details' }).click();
+
     // An unticked row's menu acts on that row alone.
     await page.getByRole('button', { name: 'Clear selection' }).click();
     await expect(summary).toBeEmpty();

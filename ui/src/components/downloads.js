@@ -766,13 +766,13 @@ export class Downloads {
   }
 
   /**
-   * What the toolbar acts on: the ticked downloads shown, otherwise the
-   * one in the details.
+   * What the toolbar acts on: the ticked downloads shown, otherwise, with
+   * nothing ticked at all, the one in the details. Ticks the name filter
+   * hides leave nothing to act on rather than the download in the details.
    * @returns {JobSummary[]}
    */
   targets() {
-    const ticked = this.selection.chosen(this.shownJobs);
-    if (ticked.length > 0) return ticked;
+    if (this.selection.size > 0) return this.selection.chosen(this.shownJobs);
     const job = this.feed.watchedJob;
     return job ? [job] : [];
   }
