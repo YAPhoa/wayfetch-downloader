@@ -297,6 +297,19 @@ export class Downloads {
     this.density = 'compact';
     this.setDensity(savedDensity());
 
+    /** The name filter, cleared when links just started are shown. */
+    this.search = h('input', {
+      type: 'search',
+      id: 'filter-names',
+      placeholder: 'Filter this page by name',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      oninput: (/** @type {InputEvent} */ event) => {
+        this.query = /** @type {HTMLInputElement} */ (event.currentTarget).value.trim().toLowerCase();
+        this.schedule();
+      },
+    });
+
     /** The Downloads view: everything but the status bar. */
     this.view = h(
       'div',
@@ -665,17 +678,7 @@ export class Downloads {
   }
 
   downloadsToolbar() {
-    const search = h('input', {
-      type: 'search',
-      id: 'filter-names',
-      placeholder: 'Filter this page by name',
-      autocomplete: 'off',
-      spellcheck: 'false',
-      oninput: (/** @type {InputEvent} */ event) => {
-        this.query = /** @type {HTMLInputElement} */ (event.currentTarget).value.trim().toLowerCase();
-        this.schedule();
-      },
-    });
+    const { search } = this;
     return this.toolbar(
       h('div', { class: 'tool-group', role: 'group', 'aria-label': 'Selected downloads' }, this.actionButtons),
       h(
@@ -745,11 +748,13 @@ export class Downloads {
 
   /**
    * Shows the whole Downloads list once links were started, saying how
-   * many.
+   * many: no state or name filter hides the new downloads.
    * @param {string} text
    */
   started(text) {
     this.filter('all');
+    this.query = '';
+    this.search.value = '';
     this.navigate('/');
     this.done(text);
     this.schedule();
