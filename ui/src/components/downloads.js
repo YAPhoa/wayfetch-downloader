@@ -598,7 +598,7 @@ export class Downloads {
   toolbar(tools, search) {
     const views = h('nav', { class: 'views', 'aria-label': 'Views' });
     this.viewSwitchers.push(views);
-    return toolbar(
+    const bar = toolbar(
       [
         h(
           'button',
@@ -612,6 +612,8 @@ export class Downloads {
       ],
       this.settingsButton(),
     );
+    bar.classList.add('queue-toolbar');
+    return bar;
   }
 
   /** Opens Settings, at the end of each page's toolbar but its own. */
