@@ -2060,3 +2060,44 @@ async fn a_link_downloads_through_a_chosen_account_in_the_window() {
         assert!(!printed.contains(secret), "{secret} printed");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an X display and WebKitWebDriver"]
+async fn switching_queue_tabs_keeps_toolbar_geometry() {
+    let dirs = Dirs::new().await;
+    let shell = Shell::launch(&dirs).await;
+    shell
+        .collect(
+            "https://example.test/queued.bin",
+            "Collected 1 link for review.",
+        )
+        .await;
+    shell
+        .wait_for("document.querySelector('.links-page .views .count')?.textContent === '1'")
+        .await;
+    let mut moved = Vec::new();
+    for width in [1100, 721, 720, 640] {
+        shell.client.set_window_size(width, 720).await.unwrap();
+        let geometry = "const bar = [...document.querySelectorAll('.queue-toolbar')]
+                         .find((el) => el.offsetParent !== null);
+                        return ['.views', '.tool-group', '.search'].map((css) => {
+                          const r = bar.querySelector(css).getBoundingClientRect();
+                          return { x: r.x, width: r.width };
+                        });";
+        let links = shell.js(geometry).await;
+        shell
+            .click(".links-page [data-key=\"view-downloads\"]")
+            .await;
+        shell.wait_for("location.pathname === '/'").await;
+        let downloads = shell.js(geometry).await;
+        if links != downloads {
+            moved.push((width, links, downloads));
+        }
+        shell
+            .click(".downloads-view [data-key=\"view-links\"]")
+            .await;
+        shell.wait_for("location.pathname === '/links'").await;
+    }
+    shell.close().await;
+    assert!(moved.is_empty(), "toolbar moved: {moved:?}");
+}

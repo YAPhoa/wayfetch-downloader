@@ -15,6 +15,11 @@ test('Downloads and Links keep toolbar widths as the window narrows', async ({ p
     await page.getByLabel('Repeat password').fill('correct horse battery staple');
     await page.getByRole('button', { name: 'Create owner' }).click();
     await expect(page.locator('.statusbar .status')).toHaveText('Live');
+    await page.getByRole('button', { name: 'Add links' }).click();
+    await page.getByLabel('Links, one per line').fill('https://example.test/queued.bin');
+    await page.getByRole('button', { name: 'Collect links' }).click();
+    await expect(page.locator('.links-page .views .count')).toHaveText('1');
+    await page.locator('.links-page [data-key="view-downloads"]').click();
     await page.evaluate(() => document.fonts.ready);
 
     for (const width of [1366, 1280, 1100, 1000, 900, 721, 720, 640, 360]) {
@@ -23,20 +28,22 @@ test('Downloads and Links keep toolbar widths as the window narrows', async ({ p
       const before = await Promise.all([
         downloads.locator('.search').boundingBox(),
         downloads.locator('.tool-group').boundingBox(),
+        downloads.locator('.views').boundingBox(),
       ]);
-      await downloads.getByRole('link', { name: 'Links', exact: true }).click();
+      await downloads.getByRole('link', { name: 'Links (1)', exact: true }).click();
       const links = page.locator('.links-page .toolbar');
       await expect(links).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
       const after = await Promise.all([
         links.locator('.search').boundingBox(),
         links.locator('.tool-group').boundingBox(),
+        links.locator('.views').boundingBox(),
       ]);
       for (const [index, box] of before.entries()) {
         const next = after[index];
         assert(box && next);
         for (const dimension of /** @type {const} */ (['x', 'width'])) {
-          expect(next[dimension], `${width}px toolbar ${index} ${dimension}`).toBeCloseTo(box[dimension], 0);
+          expect(Math.abs(next[dimension] - box[dimension]), `${width}px toolbar ${index} ${dimension}`).toBeLessThanOrEqual(0.01);
         }
       }
       for (const button of await links.locator('.tool-group button').all()) {

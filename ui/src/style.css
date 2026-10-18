@@ -344,6 +344,8 @@ code { font-family: ui-monospace, monospace; }
 }
 
 .view {
+  /* Keep tab metrics stable when the current view changes. */
+  font-weight: 600;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -355,7 +357,7 @@ code { font-family: ui-monospace, monospace; }
 
 .view:hover { color: var(--ink); }
 .view:focus-visible { outline-offset: -2px; }
-.view[aria-current='page'] { border-bottom-color: var(--accent); color: var(--ink); font-weight: 600; }
+.view[aria-current='page'] { border-bottom-color: var(--accent); color: var(--ink); }
 
 .view .count {
   min-width: 18px;
