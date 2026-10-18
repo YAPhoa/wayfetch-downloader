@@ -1,7 +1,8 @@
 //! The `wayfetchd` image run through `deploy/compose.yaml`, with every
 //! restriction it documents: a configured non-root UID/GID, a read-only
 //! root filesystem, no capabilities, and separate state, download, and
-//! token mounts. The image serves its bundled web UI. A fixture download
+//! token mounts. The image serves its bundled web UI and runs its bundled
+//! plugins. A fixture download
 //! survives the container's removal and
 //! recreation and resumes from its durable bytes; `docker compose stop`
 //! shuts down gracefully; a second container cannot take a state directory
@@ -316,6 +317,41 @@ impl Stack {
     }
 
     /// Checks the restrictions the Compose file promises.
+    /// The bundled plugins run under the same restrictions: Settings shows
+    /// yt-dlp and ffmpeg ready, and deno, which yt-dlp runs for YouTube's
+    /// player code, runs with its cache in the state directory, where the
+    /// engine points it.
+    async fn runs_its_plugins(&self, client: &Client) {
+        let (status, settings) = client.get("/v1/settings").await;
+        assert_eq!(status, StatusCode::OK);
+        let plugins: Vec<_> = settings["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (p["id"].as_str().unwrap(), p["state"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            plugins,
+            [("yt-dlp", "ready"), ("ffmpeg", "ready")],
+            "{settings}"
+        );
+        let deno = self.ok(&[
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+            "--env",
+            "DENO_DIR=/state/cache/yt-dlp/deno",
+            "--entrypoint",
+            "/usr/local/bin/deno",
+            "wayfetchd",
+            "eval",
+            "--no-remote",
+            "console.log(6 * 7)",
+        ]);
+        assert_eq!(deno.trim(), "42");
+    }
+
     fn assert_restricted(&self) {
         let config = self.inspect(
             "{{.Config.User}} {{.HostConfig.ReadonlyRootfs}} {{json .HostConfig.CapDrop}} \
@@ -371,6 +407,7 @@ async fn a_recreated_container_resumes_and_publishes() {
     let client = stack.up().await;
     stack.assert_restricted();
     client.serves_the_ui().await;
+    stack.runs_its_plugins(&client).await;
     let id = client.submit(&server.url("/r.bin")).await;
     let settled = client.settled(&id).await;
     assert!(settled >= SETTLED);

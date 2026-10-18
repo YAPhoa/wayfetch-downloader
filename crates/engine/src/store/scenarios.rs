@@ -619,7 +619,9 @@ fn publication_reserves_its_target_and_completes_the_job() {
     // The completion event carries the published file too.
     assert_eq!(
         f.events().last(),
-        Some(&EventKind::JobChanged { job: done.clone() })
+        Some(&EventKind::JobChanged {
+            job: Box::new(done.clone())
+        })
     );
     assert_eq!(f.summary(sibling).artifact, None);
     assert_eq!(f.store.pending_publication(job).unwrap(), None);

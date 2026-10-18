@@ -36,6 +36,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0013_speed_limit.sql")),
     M::up(include_str!("migrations/0014_download_removal.sql")),
     M::up(include_str!("migrations/0015_job_names.sql")),
+    M::up(include_str!("migrations/0016_media_links.sql")),
 ];
 
 /// Newest schema version this engine knows.
@@ -306,8 +307,9 @@ mod tests {
             })
         };
         let mut before = provider_state(&conn);
-        // The later naming migration adds an empty hint to this queued job.
-        before[2][0].push(rusqlite::types::Value::Null);
+        // The later naming migration adds an empty hint to this queued job,
+        // and the media migration an empty media service and choice.
+        before[2][0].extend(std::iter::repeat_n(rusqlite::types::Value::Null, 3));
         assert_eq!(migrate(&mut conn).unwrap(), LATEST);
         assert_eq!(migrate(&mut conn).unwrap(), LATEST);
         assert_eq!(provider_state(&conn), before);

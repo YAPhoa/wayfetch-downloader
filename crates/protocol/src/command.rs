@@ -27,6 +27,7 @@ use wayfetch_domain::version::Revision;
 use crate::account::{AccountAlias, AccountRef, Authorization};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
+use crate::media::MediaChoice;
 use crate::query::SpeedLimit;
 
 /// How a collected link's download route is chosen. Added in protocol 3.0.
@@ -470,6 +471,15 @@ pub enum Command {
         /// A permitted root that is available now.
         destination: RootId,
     },
+    /// Choose what collected media links are downloaded as. A link that is
+    /// not a media link, does not offer the choice, or was started is
+    /// refused. Added in protocol 4.0.
+    ChooseLinkMedia {
+        /// The links.
+        links: LinkRefs,
+        /// What to download them as.
+        choice: MediaChoice,
+    },
     /// Sign in to a provider: a new account of `service`, or `account`
     /// again to replace its credentials. Starts an authorization that the
     /// person approves on the provider's site; the account is added, or
@@ -577,6 +587,7 @@ impl Command {
             // else collected is control, like changing their downloads.
             Self::RemoveLinks { .. }
             | Self::MoveLinks { .. }
+            | Self::ChooseLinkMedia { .. }
             | Self::Pause { .. }
             | Self::Resume { .. }
             | Self::Cancel { .. }

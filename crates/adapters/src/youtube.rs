@@ -1,11 +1,23 @@
-//! YouTube: recognizing video links.
+//! YouTube: recognizing video links, and the media service that reads
+//! them through yt-dlp ([`crate::ytdlp`]).
 //!
 //! Recognition is pure: it reads only the parsed URL, never the network,
 //! so automatic routing can claim a YouTube link before anything is asked
 //! of YouTube. A recognized link names one video by its ID; the original
-//! link is kept separately as the source.
+//! link is kept separately as the source, and yt-dlp is only ever given
+//! the video's canonical watch page, so a playlist or tracking parameter
+//! never changes what it reads.
+
+use std::sync::Arc;
 
 use url::Url;
+use wayfetch_engine::domain::failure::FailureCode;
+use wayfetch_engine::domain::name::ProviderId;
+use wayfetch_engine::media::{MediaError, MediaInfo, MediaPlan, MediaService};
+use wayfetch_engine::protocol::media::{MediaChoice, PluginSummary};
+use wayfetch_engine::transfer::writer::BoxFuture;
+
+use crate::ytdlp::YtDlp;
 
 /// The service's ID, as in the UI's catalogue.
 pub const SERVICE: &str = "youtube";
@@ -72,6 +84,64 @@ pub fn video_id(link: &Url) -> Option<VideoId> {
         _ => return None,
     };
     VideoId::new(&id)
+}
+
+/// YouTube videos, read through yt-dlp.
+pub struct YouTube {
+    id: ProviderId,
+    ytdlp: Arc<YtDlp>,
+}
+
+impl YouTube {
+    /// The service, reading videos with `ytdlp`.
+    pub fn new(ytdlp: Arc<YtDlp>) -> Self {
+        Self {
+            id: ProviderId::new(SERVICE).expect("a valid service ID"),
+            ytdlp,
+        }
+    }
+
+    /// The canonical page of the video `link` names.
+    fn page(link: &Url) -> Result<Url, MediaError> {
+        video_id(link).map(|id| id.watch_url()).ok_or_else(|| {
+            MediaError::new(
+                FailureCode::UnsupportedCapability,
+                "not a YouTube video link",
+            )
+        })
+    }
+}
+
+impl MediaService for YouTube {
+    fn service(&self) -> &ProviderId {
+        &self.id
+    }
+
+    fn recognizes(&self, link: &Url) -> bool {
+        video_id(link).is_some()
+    }
+
+    fn plugins(&self) -> Vec<PluginSummary> {
+        vec![self.ytdlp.program().summary(vec![self.id.clone()])]
+    }
+
+    fn probe<'a>(&'a self, link: &'a Url) -> BoxFuture<'a, Result<MediaInfo, MediaError>> {
+        Box::pin(async move { self.ytdlp.describe(&Self::page(link)?).await?.info() })
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        link: &'a Url,
+        choice: MediaChoice,
+        converter: bool,
+    ) -> BoxFuture<'a, Result<MediaPlan, MediaError>> {
+        Box::pin(async move {
+            self.ytdlp
+                .describe(&Self::page(link)?)
+                .await?
+                .plan(choice, converter)
+        })
+    }
 }
 
 #[cfg(test)]

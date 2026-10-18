@@ -3,4 +3,4 @@
 /**
  * What to do with collected links. Added in protocol 1.1.
  */
-export type LinksAction = "start" | "remove" | "move";
+export type LinksAction = "start" | "remove" | "move" | "choose_media";

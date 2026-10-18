@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 3, minor: 0 });
+export const PROTOCOL = Object.freeze({ major: 4, minor: 0 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -49,6 +49,8 @@ export const PROTOCOL = Object.freeze({ major: 3, minor: 0 });
  * @typedef {import('./generated/LinkRef.js').LinkRef} LinkRef
  * @typedef {import('./generated/LinksAction.js').LinksAction} LinksAction
  * @typedef {import('./generated/StartRouting.js').StartRouting} StartRouting
+ * @typedef {import('./generated/MediaChoice.js').MediaChoice} MediaChoice
+ * @typedef {import('./generated/PluginSummary.js').PluginSummary} PluginSummary
  * @typedef {import('./generated/RefusedLink.js').RefusedLink} RefusedLink
  * @typedef {import('./generated/EventKind.js').EventKind} EventKind
  * @typedef {import('./generated/AccountId.js').AccountId} AccountId
@@ -115,6 +117,7 @@ export const PROTOCOL = Object.freeze({ major: 3, minor: 0 });
  *     destination?: RootId,
  *     account?: AccountId,
  *     routing?: StartRouting,
+ *     media?: MediaChoice,
  *   }) => Promise<CommandResult>,
  *   linkSource: (link: LinkId) => Promise<string>,
  *   jobCommand: (job: JobId, request: {

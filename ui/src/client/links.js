@@ -3,6 +3,8 @@
 // batch, and what a command's refusals mean. No DOM, so it is tested
 // under Node.
 
+import { durationText } from './media.js';
+
 /**
  * @typedef {import('./contract.js').CollectedLink} CollectedLink
  * @typedef {import('./contract.js').LinkId} LinkId
@@ -38,17 +40,21 @@ export function entriesProblem(items, limits) {
 }
 
 /**
- * A link's name: the file name its path suggests, the text of an invalid
- * entry, or `null` when neither is known.
+ * A link's name: a video's title once checked, the file name its path
+ * suggests, the text of an invalid entry, or `null` when none is known. A
+ * video page's path names no file, so it is not used.
  * @param {CollectedLink} link
  */
 export function linkName(link) {
+  if (link.media) return link.media.title ?? null;
   return link.name_hint ?? link.text ?? null;
 }
 
 /**
  * What a link's status column says. `Not checked` is all that is known
- * about a valid link: collecting never contacts its server. A started
+ * about a valid link: collecting never contacts its server. A video link,
+ * such as YouTube's, is the exception: its service reads its title and
+ * formats in the background. A started
  * link stays listed, added to Downloads, until removed.
  * @param {CollectedLink} link
  * @returns {{ label: string, tone: Tone, detail: string | null }}
@@ -57,6 +63,19 @@ export function linkStatus(link) {
   if (link.job) return { label: 'Added to Downloads', tone: 'ok', detail: null };
   if (link.check === 'invalid') {
     return { label: 'Invalid link', tone: 'bad', detail: link.problem ?? null };
+  }
+  const media = link.media;
+  if (media?.state === 'checking') return { label: 'Checking video', tone: 'calm', detail: null };
+  if (media?.state === 'unavailable') {
+    return { label: 'Video not read', tone: 'warn', detail: media.problem ?? null };
+  }
+  if (media) {
+    const length = media.duration_seconds === undefined ? null : durationText(media.duration_seconds);
+    return {
+      label: 'Video found',
+      tone: link.problem ? 'warn' : 'ok',
+      detail: link.problem ? `Not started: ${link.problem}` : length,
+    };
   }
   return {
     label: 'Not checked',
@@ -92,7 +111,7 @@ export function batches(links) {
 
 /**
  * Whether `link` matches filter text `query`, already lower case: by
- * name, host, or problem.
+ * name (a video's title), host, or problem.
  * @param {CollectedLink} link
  * @param {string} query
  */

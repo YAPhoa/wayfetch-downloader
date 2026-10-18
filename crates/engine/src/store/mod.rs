@@ -59,6 +59,7 @@ mod deletions;
 mod files;
 mod jobs;
 mod links;
+mod media;
 mod operations;
 mod outbox;
 mod progress;
@@ -74,6 +75,7 @@ pub use deletions::DeleteStart;
 pub use files::Partial;
 pub use jobs::Admission;
 pub use links::Unusable;
+pub(crate) use media::ConversionState;
 pub(crate) use operations::{Operation, OperationOutcome, OperationState};
 pub use renames::{RenameIntent, RenameStart};
 pub(crate) use roots::path_text;
@@ -200,6 +202,8 @@ pub struct StoreInfo {
 pub struct Store {
     conn: Connection,
     info: StoreInfo,
+    /// Whether media choices needing the converter can be made.
+    media_converter: bool,
 }
 
 impl Store {
@@ -229,7 +233,11 @@ impl Store {
             synchronous,
             schema_version,
         };
-        Ok(Self { conn, info })
+        Ok(Self {
+            conn,
+            info,
+            media_converter: false,
+        })
     }
 
     /// Settings in effect.

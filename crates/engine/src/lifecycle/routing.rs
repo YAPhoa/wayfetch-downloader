@@ -61,6 +61,17 @@ impl Coordinator {
                 return;
             }
         };
+        // A media link is made by its media service, which needs no
+        // account or host catalogue.
+        let media: BTreeSet<_> = urls
+            .iter()
+            .filter(|(_, url)| self.media.recognize(url).is_some())
+            .map(|(link, _)| *link)
+            .collect();
+        let urls: Vec<_> = urls
+            .into_iter()
+            .filter(|(link, _)| !media.contains(link))
+            .collect();
         let native: BTreeMap<_, _> = urls
             .iter()
             .filter_map(|(link, url)| {
@@ -191,7 +202,7 @@ impl Coordinator {
                 usable.insert(id);
             }
         }
-        let mut routes = Routes::new();
+        let mut routes: Routes = media.into_iter().map(|link| (link, Ok(None))).collect();
         for (link, url) in urls {
             if let Some(service) = native.get(&link) {
                 let route = accounts

@@ -98,6 +98,24 @@ impl RawStaging {
     }
 }
 
+/// The newest staging record of `job` a generation may still reopen.
+pub(super) fn newest(
+    tx: &Transaction<'_>,
+    job: JobId,
+) -> Result<Option<StagingRecord>, StoreError> {
+    tx.query_row(
+        &format!(
+            "SELECT {STAGING_COLUMNS} FROM staging_files WHERE job_id = ?1 \
+             AND cleanup IS NULL ORDER BY generation DESC LIMIT 1"
+        ),
+        [sql(job)?],
+        read_staging,
+    )
+    .optional()?
+    .map(RawStaging::decode)
+    .transpose()
+}
+
 /// The staging record of `job` at `generation`, if any.
 pub(super) fn staging(
     tx: &Transaction<'_>,
@@ -196,7 +214,7 @@ fn hand_over(
 }
 
 /// Loads `id` and checks it is at `generation` in one of `stages`.
-fn job_at(
+pub(super) fn job_at(
     tx: &Transaction<'_>,
     id: JobId,
     generation: Generation,
@@ -651,13 +669,19 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<StagingRecord>, StoreError> {
         let tx = self.read()?;
-        let mut statement = tx.prepare(&format!(
-            "SELECT {STAGING_COLUMNS} FROM staging_files s \
+        // A record's media file (`aux_*`) is listed before the record, which
+        // is listed once it has none.
+        let mut statement = tx.prepare(
+            "SELECT job_id, generation, root_id, COALESCE(aux_name, name), \
+             CASE WHEN aux_name IS NULL THEN file_device ELSE aux_device END, \
+             CASE WHEN aux_name IS NULL THEN file_inode ELSE aux_inode END, \
+             CASE WHEN aux_name IS NULL THEN file_birth_ns ELSE aux_birth_ns END \
+             FROM staging_files s \
              WHERE root_id = ?1 AND cleanup = 'pending' AND NOT EXISTS (SELECT 1 FROM deletions d WHERE d.job_id = s.job_id) AND NOT EXISTS ( \
                  SELECT 1 FROM publications p WHERE p.state = 'intended' \
                  AND p.root_id = s.root_id AND p.staging_name = s.name) \
-             ORDER BY job_id, generation LIMIT ?2"
-        ))?;
+             ORDER BY job_id, generation LIMIT ?2",
+        )?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let raw = statement
             .query_map(params![sql(root)?, limit], read_staging)?
@@ -675,6 +699,27 @@ impl Store {
         found: Removal,
     ) -> Result<(), StoreError> {
         let tx = self.write()?;
+        // A media file goes first; whatever was found, the record forgets
+        // it, and a foreign file under its name is left alone.
+        let aux = tx.execute(
+            "UPDATE staging_files SET aux_name = NULL, aux_device = NULL, aux_inode = NULL, \
+             aux_birth_ns = NULL, \
+             media_phase = CASE media_phase WHEN 'converting' THEN NULL ELSE media_phase END \
+             WHERE job_id = ?1 AND generation = ?2 AND root_id = ?3 AND aux_name = ?4 \
+             AND aux_device = ?5 AND aux_inode = ?6 AND cleanup = 'pending'",
+            params![
+                sql(record.job)?,
+                sql(record.generation)?,
+                sql(record.root)?,
+                record.name,
+                record.identity.device.cast_signed(),
+                record.identity.inode.cast_signed(),
+            ],
+        )?;
+        if aux == 1 {
+            tx.commit()?;
+            return Ok(());
+        }
         let key = params![
             sql(record.job)?,
             sql(record.generation)?,

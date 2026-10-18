@@ -490,6 +490,30 @@ details say why when it had to start over), and remove
 a finished, failed, or cancelled job from the list, which keeps its file. A browser cannot open
 files on the server, so it does not offer to.
 
+**Video links.** A YouTube link (a `youtube.com/watch`, `youtu.be`,
+`/shorts/`, `/live/`, or `/embed/` link, one video, never a playlist) is
+recognized when it is added: Links shows it as Checking video until the
+yt-dlp plugin has read it, then shows the video's title as its name and a
+Format choice: Best video, a height limit such as 1080p, or MP3 audio.
+yt-dlp only reads the title and the formats; Wayfetch downloads the streams
+itself, so the speed limit, pause, and resume apply as to any download, and
+ffmpeg then joins the picture with its sound or makes the MP3. Only formats
+served as whole files are used, never DRM-protected ones; a live stream or
+a video that needs signing in is refused with yt-dlp's reason. A download
+resumed later reads the video again for fresh links, and starts over if
+YouTube now serves different streams. Without ffmpeg only Best video
+(the best format with sound included, usually 360p) and the limits it
+covers are offered.
+
+Settings > Plugins lists yt-dlp and ffmpeg with the version each reports
+and whether it can be used. They are found on `PATH`, or where the
+`[plugins]` section of the configuration file says (`yt_dlp`, `ffmpeg`,
+and `yt_dlp_js_runtimes`, yt-dlp's `--js-runtimes` value), and are checked
+once when Wayfetch starts. yt-dlp needs a JavaScript runtime for YouTube's
+player code: [Deno](https://deno.com) on `PATH`, which runs that code with
+no file or network access, is what the container image bundles. yt-dlp
+keeps its cache, and Deno's, in the state directory's `cache/yt-dlp`.
+
 The UI adds direct links (one per line), lists jobs a page of 50 at a time in
 the order they were added, shows one job at `/jobs/job-N`, and pauses,
 resumes, or cancels them. It follows the event stream and reconnects on its
@@ -560,8 +584,11 @@ and the host opens only the file the engine published for it.
 
 ## Running in a container
 
-The image holds only `wayfetchd` on a distroless Debian base with the system
-CA bundle: no shell or package manager. It is built with the toolchain in
+The image holds `wayfetchd` and its plugins on a distroless Debian base
+with Python 3.11 and the system CA bundle: no shell or package manager. The
+plugins are yt-dlp with its YouTube player scripts (`yt-dlp-ejs`), Deno, and
+a static ffmpeg, each pinned by version and hash in the `Dockerfile`; a
+newer plugin comes with a rebuilt image. It is built with the toolchain in
 `rust-toolchain.toml` and `--locked` dependencies. `deploy/compose.yaml` runs
 it as a configurable UID/GID with a read-only root filesystem, a 16 MiB
 `/tmp`, no capabilities, `no-new-privileges`, a process limit, an init
@@ -787,3 +814,13 @@ Use `cargo fmt --all` to apply formatting.
 
 Wayfetch Downloader is dual-licensed under [MIT](LICENSE-MIT) or
 [Apache-2.0](LICENSE-APACHE), at your option.
+
+The container image also contains, unmodified and run as separate programs,
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) and
+[yt-dlp-ejs](https://github.com/yt-dlp/ejs) (Unlicense; yt-dlp-ejs bundles
+MIT- and ISC-licensed JavaScript), [Deno](https://github.com/denoland/deno)
+(MIT), and the [static-ffmpeg](https://github.com/wader/static-ffmpeg)
+build of [FFmpeg](https://ffmpeg.org/legal.html) (GPL-3.0 or later, as built
+with libmp3lame, x264, and other GPL components; its source is linked from
+that project). Their license files are in the image's
+`/usr/local/share/licenses`; `ffmpeg -L` prints FFmpeg's.

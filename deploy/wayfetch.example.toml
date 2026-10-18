@@ -68,6 +68,16 @@ default = "unlimited"
 min = 1024
 locked = false
 
+# Helper programs for video links such as YouTube, shown in Settings >
+# Plugins. Each is found on PATH unless given here; without yt-dlp, video
+# links are collected but cannot be checked or downloaded, and without
+# ffmpeg only formats that need no joining or converting are offered.
+[plugins]
+yt_dlp = "/usr/local/bin/yt-dlp"
+# yt-dlp's --js-runtimes option, for reading YouTube's player code.
+# yt_dlp_js_runtimes = "quickjs:/usr/local/bin/qjs"
+ffmpeg = "/usr/local/bin/ffmpeg"
+
 # wayfetchd only; the other programs refuse this section.
 [server]
 # Loopback by default. Anything else belongs behind an authenticated TLS

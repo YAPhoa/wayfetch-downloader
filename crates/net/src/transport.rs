@@ -600,11 +600,21 @@ impl Transport for HttpTransport {
         &'a self,
         request: &'a OpenRequest,
     ) -> BoxFuture<'a, Result<Response, TransportError>> {
+        let mut headers = HeaderMap::new();
+        // A link made for one client's `User-Agent` is sent with it; an
+        // unusable value is dropped rather than sent altered.
+        if let Some(agent) = request
+            .user_agent
+            .as_deref()
+            .and_then(|a| HeaderValue::from_str(a).ok())
+        {
+            headers.insert(header::USER_AGENT, agent);
+        }
         Box::pin(self.fetch(
             Outgoing {
                 method: Method::GET,
                 url: request.url.clone(),
-                headers: HeaderMap::new(),
+                headers,
                 body: None,
                 range: request.range,
                 validators: request.validators.as_ref(),

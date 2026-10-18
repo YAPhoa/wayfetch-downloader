@@ -12,11 +12,14 @@ publish.workspace = true
 wayfetch-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "process", "time"] }
 url.workspace = true
 zeroize = "1.9.1"
 
 [dev-dependencies]
 httparse.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 wayfetch-net.workspace = true
 

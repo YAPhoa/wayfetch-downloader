@@ -28,7 +28,7 @@ test('Settings paths name their section; others are not Settings', () => {
 test('sections come in the order of the settings they hold', () => {
   assert.deepEqual(
     SECTIONS.map(({ label }) => label),
-    ['Downloads', 'Download folders', 'Accounts & services', 'Display'],
+    ['Downloads', 'Download folders', 'Accounts & services', 'Plugins', 'Display'],
   );
 });
 

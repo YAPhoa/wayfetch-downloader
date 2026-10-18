@@ -66,6 +66,7 @@ use wayfetch_protocol::{
 };
 
 mod accounts;
+mod media;
 mod resolve;
 mod routing;
 
@@ -78,6 +79,7 @@ use crate::config::{ConfigError, EngineConfig, Preference};
 use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::fs::Root;
+use crate::media::{Converter, MediaService};
 use crate::state_dir::{Identity, StateDir, StateDirError};
 use crate::store::{Admission, CommandContext, Store, StoreError, StoreInfo, Unusable};
 use crate::subscription::Subscription;
@@ -127,6 +129,8 @@ pub struct EngineBuilder {
     runtime: Handle,
     transport: Option<Arc<dyn Transport>>,
     providers: Vec<Arc<dyn AccountProvider>>,
+    media_services: Vec<Arc<dyn MediaService>>,
+    converter: Option<Arc<dyn Converter>>,
 }
 
 impl std::fmt::Debug for EngineBuilder {
@@ -135,6 +139,8 @@ impl std::fmt::Debug for EngineBuilder {
             .field("config", &self.config)
             .field("transport", &self.transport.is_some())
             .field("providers", &self.providers.len())
+            .field("media_services", &self.media_services.len())
+            .field("converter", &self.converter.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -147,7 +153,25 @@ impl EngineBuilder {
             runtime,
             transport: None,
             providers: Vec::new(),
+            media_services: Vec::new(),
+            converter: None,
         }
+    }
+
+    /// Adds a media service: links it recognizes are checked when
+    /// collected and downloaded through it. A later one for the same
+    /// service replaces it.
+    pub fn media_service(mut self, service: Arc<dyn MediaService>) -> Self {
+        self.media_services
+            .retain(|s| s.service() != service.service());
+        self.media_services.push(service);
+        self
+    }
+
+    /// The converter media downloads join and convert streams with.
+    pub fn converter(mut self, converter: Arc<dyn Converter>) -> Self {
+        self.converter = Some(converter);
+        self
     }
 
     /// Adds an account integration: accounts of its service can then be
@@ -170,11 +194,15 @@ impl EngineBuilder {
     pub async fn start(self) -> Result<EngineOwner, StartError> {
         self.config.validate()?;
         let config = self.config.clone();
+        let converter_ready = self.converter.as_ref().is_some_and(|c| c.ready());
         let (state_dir, store, head, destinations, saved, vault) = self
             .runtime
             .spawn_blocking(move || -> Result<_, StartError> {
                 let state_dir = StateDir::open(&config.state_dir)?;
                 let mut store = Store::open(state_dir.path())?;
+                store.set_media_converter(converter_ready);
+                // A plugin may have been installed since a check failed.
+                store.retry_failed_media()?;
                 store.recover_after_restart(now())?;
                 stage_all(&mut store)?;
                 prune(&mut store, &config.limits)?;
@@ -250,6 +278,7 @@ impl EngineBuilder {
             pruned_at: Instant::now(),
             accounts: accounts::AccountService::new(self.providers, vault, credential_key),
             routing: routing::RoutingService::default(),
+            media: media::MediaServices::new(self.media_services, self.converter),
         };
         owner.supervisor.spawn(coordinator.run());
         // Unless a task already failed.
@@ -901,6 +930,11 @@ enum Internal {
     Resolve(ResolveRequest),
     /// A provider call for a download's link ended.
     Resolved(Box<resolve::Resolved>),
+    /// A media link's check ended.
+    MediaChecked(
+        wayfetch_domain::id::SourceLinkId,
+        Result<crate::media::MediaInfo, String>,
+    ),
 }
 
 /// A download's way to the store: each call is queued to the coordinator
@@ -1007,6 +1041,8 @@ struct Coordinator {
     accounts: accounts::AccountService,
     /// Bounded cached capability discovery for automatic starts.
     routing: routing::RoutingService,
+    /// Media services, their converter, and the links being checked.
+    media: media::MediaServices,
 }
 
 impl Coordinator {
@@ -1187,6 +1223,7 @@ impl Coordinator {
             | Command::StartLinks { .. }
             | Command::RemoveLinks { .. }
             | Command::MoveLinks { .. }
+            | Command::ChooseLinkMedia { .. }
             | Command::AuthorizeAccount { .. }
             | Command::SetAccountEnabled { .. }
             | Command::RemoveAccount { .. } => None,
@@ -1208,6 +1245,7 @@ impl Coordinator {
             unusable,
             route,
             routes,
+            media: self.media.collected(&envelope),
         };
         let settings = matches!(
             envelope.command,
@@ -1372,6 +1410,7 @@ impl Coordinator {
             } => self.checked(account, generation, result).await,
             Internal::Resolve(request) => self.resolve(request).await,
             Internal::Resolved(resolved) => self.resolved(resolved).await,
+            Internal::MediaChecked(link, found) => self.media_checked(link, found).await,
         }
         self.changed().await;
     }
@@ -1535,6 +1574,7 @@ impl Coordinator {
             | Command::DeleteFiles { .. }
             | Command::Remove { .. }
             | Command::RemoveLinks { .. }
+            | Command::ChooseLinkMedia { .. }
             | Command::AuthorizeAccount { .. }
             | Command::SetAccountEnabled { .. }
             | Command::RemoveAccount { .. } => {}
@@ -1600,6 +1640,7 @@ impl Coordinator {
         let instance = self.identity.instance;
         let max_active_downloads = self.max_active_downloads();
         let download_speed_limit = self.download_speed_limit();
+        let plugins = self.media.plugins();
         self.supervisor.spawn(async move {
             let mut checks = tokio::task::JoinSet::new();
             for (i, root) in destinations.all().into_iter().enumerate() {
@@ -1609,8 +1650,12 @@ impl Coordinator {
             let mut available = checks.join_all().await;
             available.sort_by_key(|(i, _)| *i);
             let available = available.into_iter().map(|(_, a)| a).collect();
-            let settings =
-                destinations.settings(available, max_active_downloads, download_speed_limit);
+            let settings = destinations.settings(
+                available,
+                max_active_downloads,
+                download_speed_limit,
+                plugins,
+            );
             let _ = reply.send(Ok(QueryResult::Settings(settings)));
         });
     }
@@ -1756,6 +1801,7 @@ impl Coordinator {
     /// events, and prune history when due.
     async fn changed(&mut self) {
         self.admit().await;
+        self.check_media().await;
         self.publish_events().await;
         if self.pruned_at.elapsed() >= PRUNE_INTERVAL {
             self.pruned_at = Instant::now();
@@ -1802,6 +1848,11 @@ impl Coordinator {
                 bandwidth: self.bandwidth.clone(),
                 cancel,
                 guard: self.supervisor.guard(),
+                media: job.media.as_ref().map(|m| crate::download::MediaJob {
+                    service: self.media.service(&m.service).cloned(),
+                    choice: m.choice,
+                    converter: self.media.converter().cloned(),
+                }),
                 job,
                 attempt,
             };

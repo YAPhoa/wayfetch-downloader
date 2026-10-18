@@ -108,7 +108,36 @@ impl Root {
         job: JobId,
         generation: Generation,
     ) -> Result<StagingFile, FsError> {
-        let name = staging_name(job, generation);
+        self.create_named(job, generation, staging_name(job, generation))
+    }
+
+    /// Creates the private file a media conversion of `job` at
+    /// `generation` writes, beside its staging file, exclusively and with
+    /// its directory entry synchronized, like [`Root::create_staging`].
+    pub fn create_media_output(
+        &self,
+        job: JobId,
+        generation: Generation,
+    ) -> Result<StagingFile, FsError> {
+        self.create_named(job, generation, format!("{job}.g{generation}.media"))
+    }
+
+    /// Where the staging file `name` is, for a helper program that opens
+    /// it by path. The path is only as trustworthy as the root: the file's
+    /// identity is checked again before its contents are used.
+    pub fn staging_file_path(&self, name: &str) -> std::path::PathBuf {
+        self.path()
+            .join(super::PRIVATE_DIR)
+            .join("staging")
+            .join(name)
+    }
+
+    fn create_named(
+        &self,
+        job: JobId,
+        generation: Generation,
+        name: String,
+    ) -> Result<StagingFile, FsError> {
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         let file = self
