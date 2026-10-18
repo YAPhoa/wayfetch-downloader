@@ -32,7 +32,7 @@ use wayfetch_engine::domain::time::UtcTimestamp;
 use zeroize::Zeroize;
 
 use super::{ErrorBody, FORMAT, RealDebrid, Stored};
-use crate::common::{form, millis, now_millis, serialize};
+use crate::common::{authorization_failure, form, millis, now_millis, serialize};
 
 /// Longest generated link accepted.
 const MAX_LINK: usize = 4096;
@@ -239,7 +239,7 @@ impl RealDebrid {
         let code = serde_json::from_slice::<ErrorBody>(response.body.expose())
             .ok()
             .and_then(|e| e.error_code);
-        refusal(response.status, code)
+        refusal(self.api.name(), response.status, code)
     }
 
     /// A generated link, if it is one Wayfetch will use.
@@ -446,7 +446,7 @@ fn identity(recorded: &Url, link: &Url) -> Identity {
 /// here is a refusal: Real-Debrid generated nothing. A server error
 /// without a known code, 503 included, may have happened after it did, so
 /// it is ambiguous.
-fn refusal(status: u16, code: Option<i64>) -> Unrestricted {
+fn refusal(name: &str, status: u16, code: Option<i64>) -> Unrestricted {
     use FailureCode::*;
     let (failure, message) = match code {
         Some(5 | 34) => {
@@ -525,17 +525,6 @@ fn refusal(status: u16, code: Option<i64>) -> Unrestricted {
             UnsupportedCapability,
             "Real-Debrid has disabled link generation for now.",
         ),
-        // Known provider codes above keep their more specific meaning.
-        // Otherwise HTTP authorization refusals are actionable account
-        // errors, even when the response is bare or unfamiliar.
-        _ if status == 401 => (
-            InvalidCredentials,
-            "Authorization failed at Real-Debrid (HTTP 401). Sign this account in again in Settings > Accounts & services.",
-        ),
-        _ if status == 403 => (
-            InvalidCredentials,
-            "Forbidden by Real-Debrid (HTTP 403): access denied for this account. Check the account in Settings > Accounts & services.",
-        ),
         _ if status == 429 => {
             return Unrestricted::Refused {
                 code: QuotaExhausted,
@@ -550,16 +539,17 @@ fn refusal(status: u16, code: Option<i64>) -> Unrestricted {
                 "Real-Debrid failed with HTTP {status} after receiving the request"
             ));
         }
-        Some(code) => {
+        _ => {
+            // Documented provider codes above refine the shared HTTP policy.
+            if let Some(message) = authorization_failure(name, status) {
+                return Unrestricted::refused(InvalidCredentials, message);
+            }
+            let detail = code
+                .map(|c| format!(", error code {c}"))
+                .unwrap_or_default();
             return Unrestricted::refused(
                 AdapterParseFailure,
-                format!("Real-Debrid refused the link (HTTP {status}, error code {code})."),
-            );
-        }
-        None => {
-            return Unrestricted::refused(
-                AdapterParseFailure,
-                format!("Real-Debrid refused the link (HTTP {status})."),
+                format!("Real-Debrid refused the link (HTTP {status}{detail})."),
             );
         }
     };
@@ -661,13 +651,19 @@ mod tests {
             2, 5, 8, 9, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 28, 34, 35, 36, 37,
         ] {
             assert!(
-                matches!(refusal(403, Some(code)), Unrestricted::Refused { .. }),
+                matches!(
+                    refusal("Real-Debrid", 403, Some(code)),
+                    Unrestricted::Refused { .. }
+                ),
                 "{code}"
             );
         }
-        assert!(matches!(refusal(500, None), Unrestricted::Ambiguous(_)));
         assert!(matches!(
-            refusal(429, None),
+            refusal("Real-Debrid", 500, None),
+            Unrestricted::Ambiguous(_)
+        ));
+        assert!(matches!(
+            refusal("Real-Debrid", 429, None),
             Unrestricted::Refused {
                 code: FailureCode::QuotaExhausted,
                 retry_after: Some(_),

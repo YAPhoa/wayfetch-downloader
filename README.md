@@ -266,10 +266,11 @@ are fetched without generating a link and cached for five minutes; failures
 are retained for 15 seconds. Automatic starts need `submit` and
 `provider_downloads`; a token missing the latter must explicitly choose
 `"routing": "direct"`. An explicit account cannot be combined with `routing`.
-Unknown HTTP 401 authorization failures after the one token-refresh retry, and
-403 Forbidden/access-denied responses, explain the account action in Settings >
-Accounts & services. Known quota, premium, and locked-account errors retain
-their specific meaning. These provider refusals do not sign the person out of
+The shared adapter policy maps unknown HTTP 401 to authorization failed and
+403 to Forbidden/access denied, with the account action in Settings > Accounts &
+services. Provider-specific protocols may refresh first (Real-Debrid retries
+once); known quota, premium, and locked-account codes refine this policy and
+retain their specific meaning. These provider refusals do not sign the person out of
 Wayfetch. If Real-Debrid's
 answer was lost, the job fails as `operation_ambiguous` once Wayfetch has
 checked Real-Debrid's downloads list and found no matching link; retrying it
