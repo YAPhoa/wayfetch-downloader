@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  batches,
+  addedWhen,
   count,
   entries,
   entriesProblem,
@@ -72,19 +72,14 @@ test('a started link stays listed as added to Downloads, and starts no more', ()
   assert.equal(startable(link({ check: 'invalid', text: 'x' })), false);
 });
 
-test('links are grouped by batch in list order', () => {
-  const grouped = batches([
-    link({ id: 'src-1', batch: 'batch-1', collected_at: 5 }),
-    link({ id: 'src-2', batch: 'batch-1', collected_at: 5 }),
-    link({ id: 'src-3', batch: 'batch-2', collected_at: 9 }),
-  ]);
-  assert.deepEqual(
-    grouped.map((g) => [g.batch, g.collectedAt, g.links.map((l) => l.id)]),
-    [
-      ['batch-1', 5, ['src-1', 'src-2']],
-      ['batch-2', 9, ['src-3']],
-    ],
-  );
+test('the Added at column gives the time alone for today', () => {
+  const now = new Date(2026, 9, 18, 16, 0);
+  const time = (/** @type {Date} */ at) => at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const today = new Date(2026, 9, 18, 0, 43);
+  assert.equal(addedWhen(today.getTime(), now), `Today, ${time(today)}`);
+  const earlier = new Date(2026, 9, 17, 23, 5);
+  const date = earlier.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' });
+  assert.equal(addedWhen(earlier.getTime(), now), `${date}, ${time(earlier)}`);
 });
 
 test('the filter matches name, host, or problem', () => {

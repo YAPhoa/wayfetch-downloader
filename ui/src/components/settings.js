@@ -78,7 +78,7 @@ export const SECTIONS = [
   {
     id: 'plugins',
     label: 'Plugins',
-    about: 'Programs Wayfetch runs for video links, such as YouTube.',
+    about: 'Programs Wayfetch runs for links that need them.',
     icon: 'plugins',
   },
   { id: 'display', label: 'Display', about: 'Appearance and downloads list layout.', icon: 'display' },

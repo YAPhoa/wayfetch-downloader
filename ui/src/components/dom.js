@@ -3,6 +3,8 @@
 // exactly as they are; the page's Trusted Types policy makes any HTML
 // parsing of strings fail outright.
 
+import { icon } from './icons.js';
+
 /**
  * @typedef {Node | string | number | null | undefined | false} Child
  * @typedef {Child | Child[]} Children
@@ -103,6 +105,30 @@ export function refocus(root, key) {
   if (key === null || focusedKey(root) === key) return;
   const target = root.querySelector(`[data-key="${CSS.escape(key)}"]`);
   if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+}
+
+/**
+ * A column header that sorts its table: a button that sorts by `column`,
+ * marked with the order while the table is sorted by it.
+ * @template {string} C
+ * @param {{ column: C, label: string, sort: import('../client/sort.js').Sort<C>, onSort: (column: C) => void, className?: string }} header
+ */
+export function sortHeader({ column, label, sort, onSort, className }) {
+  const active = sort.column === column;
+  return h(
+    'th',
+    {
+      scope: 'col',
+      class: className ? `sortable ${className}` : 'sortable',
+      'aria-sort': active ? (sort.descending ? 'descending' : 'ascending') : null,
+    },
+    h(
+      'button',
+      { type: 'button', class: 'sort', 'data-key': `sort-${column}`, onclick: () => onSort(column) },
+      label,
+      active && icon(sort.descending ? 'down' : 'up'),
+    ),
+  );
 }
 
 /**
