@@ -8,7 +8,6 @@ import { durationText } from './media.js';
 /**
  * @typedef {import('./contract.js').CollectedLink} CollectedLink
  * @typedef {import('./contract.js').LinkId} LinkId
- * @typedef {import('./contract.js').RefusedLink} RefusedLink
  * @typedef {import('./contract.js').Hello} Hello
  * @typedef {import('./jobs.js').Tone} Tone
  */
@@ -114,15 +113,16 @@ export function count(n, one, many = `${one}s`) {
 }
 
 /**
- * Why links were refused, in one sentence per kind of reason, so many
- * refusals for one reason read as one line.
- * @param {readonly RefusedLink[]} refused
+ * Why links, or other records, were refused, in one sentence per kind of
+ * reason, so many refusals for one reason read as one line.
+ * @param {readonly { message: string }[]} refused
+ * @param {string} [many] what the records are called
  */
-export function refusals(refused) {
+export function refusals(refused, many = 'links') {
   /** @type {Map<string, number>} */
   const reasons = new Map();
   for (const { message } of refused) reasons.set(message, (reasons.get(message) ?? 0) + 1);
-  return [...reasons].map(([message, n]) => (n === 1 ? message : `${n} links: ${message}`)).join(' ');
+  return [...reasons].map(([message, n]) => (n === 1 ? message : `${n} ${many}: ${message}`)).join(' ');
 }
 
 /**

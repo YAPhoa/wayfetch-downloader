@@ -36,6 +36,7 @@ import {
 } from '../client/links.js';
 import { choiceKey, choiceLabel, optionFor } from '../client/media.js';
 import { accountName, canChooseRoute, routeAccounts } from '../client/routes.js';
+import { Selection } from '../client/selection.js';
 import { saveSort, savedSort, sortedBy, toggleSort } from '../client/sort.js';
 import { openDialog } from './dialog.js';
 import { copyText, focusedKey, h, refocus, show, sortHeader } from './dom.js';
@@ -143,8 +144,8 @@ export class LinksPage {
     this.nextAfter = null;
     /** `pageAfter` of each earlier page, for going back. @type {(LinkId | null)[]} */
     this.earlier = [];
-    /** @type {Set<LinkId>} */
-    this.selected = new Set();
+    /** @type {Selection<LinkId>} */
+    this.selected = new Selection();
     this.tableState = '';
     /** Filter text, lower case. */
     this.query = '';
@@ -303,8 +304,7 @@ export class LinksPage {
     this.links = page.items;
     this.total = Number(page.total);
     this.nextAfter = page.next_after ?? null;
-    const present = new Set(page.items.map((l) => l.id));
-    for (const id of this.selected) if (!present.has(id)) this.selected.delete(id);
+    this.selected.keepOnly(page.items.map((l) => l.id));
     this.context.onTotal(this.total);
   }
 
@@ -337,7 +337,7 @@ export class LinksPage {
 
   /** The selected links that are shown: what commands act on. */
   chosen() {
-    return this.visible.filter((link) => this.selected.has(link.id));
+    return this.selected.chosen(this.visible);
   }
 
   /**
@@ -348,17 +348,15 @@ export class LinksPage {
   selectBatch(batch) {
     const links = this.sorted(this.visible).filter((link) => link.batch === batch);
     if (links.length === 0) return;
-    this.selected = new Set(links.map((link) => link.id));
+    this.selected.clear();
+    this.selected.pick(links, true);
     this.render();
     refocus(this.element, `select-${links[0].id}`);
   }
 
   /** @param {boolean} on */
   selectShown(on) {
-    for (const link of this.visible) {
-      if (on) this.selected.add(link.id);
-      else this.selected.delete(link.id);
-    }
+    this.selected.pick(this.visible, on);
     this.render();
   }
 
@@ -367,10 +365,7 @@ export class LinksPage {
    * @param {boolean} on
    */
   select(links, on) {
-    for (const link of links) {
-      if (on) this.selected.add(link.id);
-      else this.selected.delete(link.id);
-    }
+    this.selected.pick(links, on);
     this.render();
   }
 
@@ -846,10 +841,7 @@ export class LinksPage {
     const tableState = JSON.stringify([visible, [...this.selected], this.context.settings()?.roots, this.sort, new Date().toDateString()]);
     if (tableState === this.tableState) return;
     this.tableState = tableState;
-    const chosen = visible.filter((l) => this.selected.has(l.id)).length;
-    this.selectAll.checked = visible.length > 0 && chosen === visible.length;
-    this.selectAll.indeterminate = chosen > 0 && chosen < visible.length;
-    this.selectAll.disabled = visible.length === 0;
+    Object.assign(this.selectAll, this.selected.allState(visible));
     const sortable = (/** @type {LinkColumn} */ column, /** @type {string} */ label, /** @type {string} */ className) =>
       sortHeader({ column, label, className, sort: this.sort, onSort: (c) => this.sortBy(c) });
     const head = h(
