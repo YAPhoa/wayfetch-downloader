@@ -27,7 +27,7 @@ use url::Url;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
     AccountProvider, ApiClient, ApiMethod, ApiResponse, Checked, DeviceAuthorization, PollOutcome,
-    Profile, ProviderError, Reconciled, Unrestricted, WithCredentials,
+    Profile, ProviderError, Reconciled, SupportedHosts, Unrestricted, WithCredentials,
 };
 use wayfetch_engine::domain::name::ProviderId;
 use wayfetch_engine::domain::time::UtcTimestamp;
@@ -437,6 +437,18 @@ impl AccountProvider for RealDebrid {
         }
     }
 
+    fn requires_account(&self, link: &Url) -> bool {
+        let id = link.path().strip_prefix("/d/");
+        matches!(link.scheme(), "http" | "https")
+            && link
+                .host_str()
+                .is_some_and(|host| host.strip_suffix('.').unwrap_or(host) == "real-debrid.com")
+            && link.port().is_none()
+            && link.username().is_empty()
+            && link.password().is_none()
+            && id.is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+    }
+
     fn begin(&self) -> BoxFuture<'_, Result<DeviceAuthorization, ProviderError>> {
         Box::pin(self.begin())
     }
@@ -450,6 +462,25 @@ impl AccountProvider for RealDebrid {
 
     fn check<'a>(&'a self, credential: &'a Secret) -> BoxFuture<'a, Checked> {
         Box::pin(self.check(credential))
+    }
+
+    fn supported_hosts(&self) -> BoxFuture<'_, Result<SupportedHosts, ProviderError>> {
+        Box::pin(async {
+            // Official API: GET /hosts/domains, no authentication required.
+            let response = self
+                .api
+                .call(
+                    ApiMethod::Get,
+                    self.api.endpoint().url("rest/1.0/hosts/domains"),
+                    None,
+                    None,
+                )
+                .await?;
+            if response.status != 200 {
+                return Err(self.api.unexpected(&response, "supported hosts", ""));
+            }
+            SupportedHosts::new(self.api.parse(&response, "supported hosts")?)
+        })
     }
 
     fn unrestrict<'a>(

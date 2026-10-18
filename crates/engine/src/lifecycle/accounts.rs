@@ -130,6 +130,11 @@ impl AccountService {
         }
     }
 
+    /// Installed adapters, including providers with no signed-in account.
+    pub(super) fn providers(&self) -> &[Arc<dyn AccountProvider>] {
+        &self.providers
+    }
+
     pub(super) fn provider(&self, service: &ProviderId) -> Option<Arc<dyn AccountProvider>> {
         self.providers
             .iter()

@@ -14,6 +14,7 @@ import {
   formatDuration,
   GROUPS,
   groupCount,
+  jobName,
   progress,
   restartNote,
   retryPlan,
@@ -106,6 +107,16 @@ test('the file name is the artifact path’s last component', () => {
   assert.equal(fileName(job({ artifact: { root: 'root-1', path: 'a/b &lt;c&gt;.bin', size: 1 } })), 'b &lt;c&gt;.bin');
 });
 
+test('job names follow engine hints until publication or rename supplies the final file', () => {
+  assert.equal(jobName(job({})), 'job-1');
+  assert.equal(jobName(job({ name: 'Early Name.zip' })), 'Early Name.zip');
+  const updated = job({ name: 'Provider Name.zip' });
+  assert.equal(jobName(updated), 'Provider Name.zip');
+  assert.equal(fileName(updated), undefined);
+  assert.equal(canRename(updated), false);
+  assert.equal(jobName(job({ ...updated, artifact: { root: 'root-1', path: 'renamed.zip', size: 1 } })), 'renamed.zip');
+});
+
 test('states read as plain words with what went wrong', () => {
   const clock = () => '17:42';
   assert.deepEqual(describe(job({ stage: 'transferring', display: 'transferring' })), {
@@ -124,6 +135,21 @@ test('states read as plain words with what went wrong', () => {
     'Waiting until 17:42',
   );
   assert.match(explain(expired), /Add the link again/);
+});
+
+test('account refusals retain the engine’s redacted authorization details and next step', () => {
+  for (const message of [
+    'Authorization failed at Real-Debrid (HTTP 401). Sign this account in again in Settings > Accounts & services.',
+    'Forbidden by Real-Debrid (HTTP 403): access denied for this account. Check the account in Settings > Accounts & services.',
+  ]) {
+    assert.equal(explain({ code: 'invalid_credentials', message }), message);
+  }
+  for (const message of [undefined, null, '', '   ']) {
+    assert.equal(
+      explain({ code: 'invalid_credentials', message }),
+      'The provider rejected the account. Check its credentials.',
+    );
+  }
 });
 
 test('each state filter counts the stages it shows', () => {

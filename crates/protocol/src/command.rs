@@ -29,6 +29,19 @@ use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
 use crate::query::SpeedLimit;
 
+/// How a collected link's download route is chosen. Added in protocol 3.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum StartRouting {
+    /// Download from the original host without consulting providers.
+    Direct,
+    /// Choose a usable enabled account supporting the parsed hostname.
+    /// Known nonmatches use Direct; unknown or unusable matches are refused.
+    /// Requires provider-download permission.
+    Automatic,
+}
+
 /// Maximum inputs in one [`Command::Submit`].
 pub const MAX_SUBMIT_ITEMS: usize = 1000;
 /// Maximum length of one submitted URL in bytes.
@@ -426,8 +439,8 @@ pub enum Command {
     StartLinks {
         /// The links.
         links: LinkRefs,
-        /// The provider account to download them through; directly from
-        /// their hosts if absent. It must be an enabled account of a
+        /// The provider account to download them through; selected
+        /// automatically if absent unless routing explicitly requests Direct. It must be an enabled account of a
         /// service whose downloads the engine supports. The choice is kept
         /// with each download, and never changed silently: a provider
         /// failure fails the download instead of trying another route.
@@ -435,6 +448,11 @@ pub enum Command {
         /// protocol 2.2.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<AccountId>,
+        /// Explicit route intent. Absent selects automatically in protocol
+        /// 3.0 (or uses the explicitly named account). Cannot accompany an
+        /// account; automatic selection never falls back after provider failure.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        routing: Option<StartRouting>,
     },
     /// Remove collected links from the list. Only their collected records
     /// go; downloads already started are not affected. Added in protocol
@@ -530,7 +548,9 @@ impl Command {
     pub fn required_permissions(&self) -> Vec<Permission> {
         let mut required = vec![self.required_permission()];
         let uses_account = match self {
-            Self::StartLinks { account, .. } => account.is_some(),
+            Self::StartLinks {
+                account, routing, ..
+            } => account.is_some() || *routing != Some(StartRouting::Direct),
             Self::Retry {
                 repeat_provider_operation,
                 ..
@@ -965,20 +985,34 @@ mod tests {
             revision: Revision::INITIAL,
         }])
         .unwrap();
-        let direct = Command::StartLinks {
+        let automatic = Command::StartLinks {
             links: links.clone(),
             account: None,
+            routing: None,
         };
         assert_eq!(
-            serde_json::to_string(&direct).unwrap(),
+            serde_json::to_string(&automatic).unwrap(),
             r#"{"type":"start_links","links":[{"link":"src-3","revision":1}]}"#
         );
-        assert_eq!(direct.required_permissions(), [Permission::Submit]);
+        assert_eq!(
+            automatic.required_permissions(),
+            [Permission::Submit, Permission::ProviderDownloads]
+        );
         let via = Command::StartLinks {
             links,
             account: AccountId::from_u64(2),
+            routing: None,
         };
-        assert_ne!(via.fingerprint(), direct.fingerprint());
+        assert_ne!(via.fingerprint(), automatic.fingerprint());
+        let explicit = Command::StartLinks {
+            links: match automatic {
+                Command::StartLinks { links, .. } => links,
+                _ => unreachable!(),
+            },
+            account: None,
+            routing: Some(StartRouting::Direct),
+        };
+        assert_eq!(explicit.required_permissions(), [Permission::Submit]);
     }
 
     #[test]

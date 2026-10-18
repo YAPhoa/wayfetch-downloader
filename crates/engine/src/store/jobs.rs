@@ -31,7 +31,7 @@ const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.gener
      COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
                ORDER BY p.generation DESC LIMIT 1), 0), \
      a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id, j.removed_at IS NOT NULL, \
-     j.restart_reason, j.route_service, j.route_account";
+     j.restart_reason, j.route_service, j.route_account, j.suggested_name";
 
 /// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
 /// has exactly one source link.
@@ -83,6 +83,7 @@ pub(super) struct StoredJob {
     restart_reason: Option<DiagnosticText>,
     /// The provider account it downloads through.
     route: Option<JobRoute>,
+    name: Option<String>,
 }
 
 impl StoredJob {
@@ -90,6 +91,7 @@ impl StoredJob {
         JobSummary {
             id: self.id,
             package: self.package,
+            name: self.name.as_deref().map(Into::into),
             stage: self.state.stage(),
             desired: self.state.desired(),
             display: self.state.display(),
@@ -126,6 +128,7 @@ struct RawJob {
     removed: bool,
     restart_reason: Option<String>,
     route: (Option<String>, Option<i64>),
+    name: Option<String>,
 }
 
 impl RawJob {
@@ -151,6 +154,7 @@ impl RawJob {
             removed: row.get(16)?,
             restart_reason: row.get(17)?,
             route: (row.get(18)?, row.get(19)?),
+            name: row.get(20)?,
         })
     }
 
@@ -166,6 +170,12 @@ impl RawJob {
             .ok()
             .and_then(|url| HostName::new(url.host_str()?).ok())
             .ok_or(StoreError::Corrupt("source link"))?;
+        let name = self
+            .name
+            .as_deref()
+            .and_then(crate::download::file_name)
+            .or_else(|| source_name(&self.input_url))
+            .map(|name| name.as_str().to_owned());
         Ok(StoredJob {
             id: key(self.id)?,
             state,
@@ -198,8 +208,23 @@ impl RawJob {
             removed: self.removed,
             restart_reason: self.restart_reason.as_deref().map(DiagnosticText::new),
             route: operations::decode_route(self.route.0, self.route.1)?,
+            name,
         })
     }
+}
+
+/// Only filename-like source segments are useful public hints. Opaque path
+/// IDs without extensions are omitted. The query, fragment, and user
+/// information never enter the hint.
+fn source_name(source: &str) -> Option<crate::fs::RelativePath> {
+    let url = url::Url::parse(source).ok()?;
+    let name = crate::download::url_file_name(&url)?;
+    let (stem, extension) = name.as_str().rsplit_once('.')?;
+    (!stem.is_empty()
+        && !extension.is_empty()
+        && extension.len() <= 16
+        && extension.bytes().all(|b| b.is_ascii_alphanumeric()))
+    .then_some(name)
 }
 
 /// Loads a job, or `NotFound`.
@@ -350,6 +375,39 @@ pub(super) fn announce(
 }
 
 impl Store {
+    /// Records an accepted provider's filename before requesting its bytes.
+    /// Late work cannot rename a paused, cancelled, removed, or newer job.
+    pub(crate) fn record_suggested_name(
+        &mut self,
+        id: JobId,
+        generation: wayfetch_domain::version::Generation,
+        name: &str,
+        now: UtcTimestamp,
+    ) -> Result<(), StoreError> {
+        let Some(name) = crate::download::file_name(name) else {
+            return Ok(());
+        };
+        let tx = self.write()?;
+        let job = load(&tx, id)?;
+        if job.state.generation() == generation
+            && job.state.stage().is_active()
+            && job.state.stage() != JobStage::Publishing
+            && job.state.desired() == DesiredState::Running
+            && !job.removed
+        {
+            let updated = tx.execute(
+                "UPDATE jobs SET suggested_name = ?1, updated_at = ?2 WHERE id = ?3 \
+                 AND suggested_name IS NOT ?1",
+                params![name.as_str(), now.unix_millis(), sql(id)?],
+            )?;
+            if updated != 0 {
+                announce(&tx, id, now)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// The ingestion step for direct links: creates a queued job for up to
     /// `limit` submitted links that have none, oldest first, each with a
     /// `job_added` event. Collected links wait to be started instead. Safe

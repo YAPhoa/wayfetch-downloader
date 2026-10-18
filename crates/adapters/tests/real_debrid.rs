@@ -405,3 +405,89 @@ fn downloads_are_supported() {
     assert!(support.downloads);
     assert_eq!(support.service.as_str(), "real-debrid");
 }
+
+#[tokio::test]
+async fn supported_domains_use_the_documented_public_bounded_endpoint() {
+    let server = Server::start().await;
+    let rd = provider(&server);
+    let hosts = AccountProvider::supported_hosts(&rd).await.unwrap();
+    assert!(hosts.supports(&url::Url::parse("https://sub.hoster.example/file").unwrap()));
+    let log = server.log();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].method, "GET");
+    assert_eq!(log[0].path, "/rest/1.0/hosts/domains");
+    assert!(log[0].authorization.is_none());
+    assert!(log[0].form.is_empty());
+}
+
+#[tokio::test]
+async fn unsupported_domain_answers_and_outages_remain_unknown() {
+    for (status, body) in [
+        (503, "{}".to_owned()),
+        (200, "{}".to_owned()),
+        (200, r#"["*.example"]"#.to_owned()),
+        (
+            200,
+            serde_json::to_string(&vec!["hoster.example"; 1025]).unwrap(),
+        ),
+        (
+            200,
+            serde_json::to_string(&vec!["hoster.example"; 8192]).unwrap(),
+        ),
+    ] {
+        let server = Server::start().await;
+        server.with(|state| {
+            state
+                .always
+                .insert("/rest/1.0/hosts/domains", Answer::json(status, body));
+        });
+        assert!(
+            AccountProvider::supported_hosts(&provider(&server))
+                .await
+                .is_err()
+        );
+        assert_eq!(server.log().len(), 1, "never silently retry");
+    }
+}
+
+#[tokio::test]
+async fn native_file_links_require_this_account_without_contacting_the_api() {
+    let server = Server::start().await;
+    let rd = provider(&server);
+    for link in [
+        "https://real-debrid.com/d/SYNTHETIC123",
+        "https://REAL-DEBRID.COM/d/Synthetic123",
+        "https://real-debrid.com./d/SYNTHETIC123",
+        "http://real-debrid.com/d/SYNTHETIC123",
+        "https://real-debrid.com/d/SYNTHETIC123?download=1",
+    ] {
+        assert!(
+            rd.requires_account(&url::Url::parse(link).unwrap()),
+            "{link}"
+        );
+    }
+    for link in [
+        "https://real-debrid.com.evil.test/d/SYNTHETIC123",
+        "https://notreal-debrid.com/d/SYNTHETIC123",
+        "https://www.real-debrid.com/d/SYNTHETIC123",
+        "https://real-debrid.download/d/SYNTHETIC123",
+        "https://cdn.real-debrid.com/d/SYNTHETIC123",
+        "https://real-debrid.com@evil.test/d/SYNTHETIC123",
+        "https://spoof@real-debrid.com/d/SYNTHETIC123",
+        "https://real-debrid.com/?next=/d/SYNTHETIC123",
+        "https://evil.test/?next=https://real-debrid.com/d/SYNTHETIC123",
+        "https://real-debrid.com/downloads/SYNTHETIC123",
+        "https://real-debrid.com/d/",
+        "https://real-debrid.com/d/SYNTHETIC123/extra",
+        "https://real-debrid.com/d/SYNTHETIC-123",
+        "https://real-debrid.com/d/%53YNTHETIC123",
+        "https://real-debrid.com:8443/d/SYNTHETIC123",
+        "ftp://real-debrid.com/d/SYNTHETIC123",
+    ] {
+        assert!(
+            !rd.requires_account(&url::Url::parse(link).unwrap()),
+            "{link}"
+        );
+    }
+    assert!(server.log().is_empty(), "recognition is pure");
+}

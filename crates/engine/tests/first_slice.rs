@@ -2521,6 +2521,7 @@ fn start_links(owner: &EngineOwner, links: &[&CollectedLink]) -> CommandEnvelope
     envelope(
         owner,
         Command::StartLinks {
+            routing: Some(wayfetch_protocol::command::StartRouting::Direct),
             links: refs(links),
             account: None,
         },
