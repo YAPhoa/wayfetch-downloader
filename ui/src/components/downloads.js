@@ -699,15 +699,15 @@ export class Downloads {
   }
 
   /**
-   * Shows links just collected on the Links page, with focus on their
-   * batch.
+   * Shows links just collected on the Links page, selected and with focus
+   * on the first of them.
    * @param {import('./collect.js').Collected} result
    */
   collected(result) {
     this.returnFocus = null;
     this.navigate(LINKS_PATH);
     this.linksPage.say(collectedText(result), { ok: result.invalid === 0, warn: result.invalid > 0 });
-    void this.linksPage.refresh().then(() => refocus(this.linksPage.element, `select-${result.batch}`));
+    void this.linksPage.refresh().then(() => this.linksPage.selectBatch(result.batch));
   }
 
   /** Whether this client may change downloads. */

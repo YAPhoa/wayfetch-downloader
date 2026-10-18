@@ -86,7 +86,7 @@ async function select(page, job) {
 async function add(page, text, count = 1) {
   const links = count === 1 ? '1 link' : `${count} links`;
   await collect(page, text, `Collected ${links} for review.`);
-  await page.locator('tbody.batch').last().locator('.batch-head input[type="checkbox"]').check();
+  // The links just collected are selected.
   await expect(page.locator('.selection-summary strong')).toHaveText(`${links} selected`);
   await page.getByRole('button', { name: 'Start selected' }).click();
   await expect(page.getByText(`Started ${count === 1 ? '1 download' : `${count} downloads`}.`)).toBeVisible();
@@ -904,13 +904,36 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(linkRow('review-b.bin')).toHaveCount(1);
   await expect(page.locator('.links-page')).not.toContainText('secret');
   expect(fixture.requested.filter((name) => name === 'review-a.bin' || name === 'review-b.bin')).toEqual([]);
-  // Focus is on the new batch, for selecting it from the keyboard.
-  await expect(page.locator('.batch-head input')).toBeFocused();
+  // The new links are selected, with focus on the first.
+  await expect(page.locator('.selection-summary strong')).toHaveText('3 links selected');
+  await expect(page.locator('tr[data-link] input[type="checkbox"]').first()).toBeFocused();
 
   // They outlive a reload; the engine holds them.
   await page.reload();
   await expect(linkRow('review-a.bin')).toHaveCount(1);
   await expect(linkRow('example\\.com/missing-scheme\\.bin')).toHaveCount(1);
+
+  // A column header sorts by it, again reverses, and the order is kept.
+  const names = page.locator('.links-page tr[data-link] td.name');
+  const nameHeader = page.locator('.links-page th', { has: page.getByRole('button', { name: 'Name', exact: true }) });
+  await expect(page.locator('.links-page th[aria-sort]')).toHaveText('Added at');
+  // The whole header cell is the button.
+  const [cell, button] = await Promise.all([nameHeader.boundingBox(), nameHeader.getByRole('button').boundingBox()]);
+  // (The cell's height also holds its 1px bottom border.)
+  expect(Math.abs(Number(button?.width) - Number(cell?.width))).toBeLessThanOrEqual(1);
+  expect(Math.abs(Number(button?.height) - Number(cell?.height))).toBeLessThanOrEqual(1);
+  await nameHeader.getByRole('button').click();
+  await expect(nameHeader).toHaveAttribute('aria-sort', 'ascending');
+  await expect(names).toHaveText(['example.com/missing-scheme.bin', 'review-a.bin', 'review-b.bin']);
+  await expect(nameHeader.getByRole('button')).toBeFocused();
+  await nameHeader.getByRole('button').click();
+  await expect(nameHeader).toHaveAttribute('aria-sort', 'descending');
+  await expect(names).toHaveText(['review-b.bin', 'review-a.bin', 'example.com/missing-scheme.bin']);
+  await page.reload();
+  await expect(names).toHaveText(['review-b.bin', 'review-a.bin', 'example.com/missing-scheme.bin']);
+  await page.getByRole('button', { name: 'Added at', exact: true }).click();
+  await expect(page.locator('.links-page th[aria-sort="ascending"]')).toHaveText('Added at');
+  await expect(page.locator('.links-page tr[data-link] td.added').first()).toHaveText(/^Today, /);
 
   // Filtering never acts on what it hides.
   const start = page.getByRole('button', { name: 'Start selected' });
@@ -1548,6 +1571,7 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
 
   // Explicit override remains in the existing menu. Cancelling it keeps
   // the link; ordinary Start routes automatically without a prompt.
+  await page.getByRole('checkbox', { name: 'Select all links shown' }).uncheck();
   await linkRow('through-account').locator('input[type="checkbox"]').check();
   await linkRow('through-account').getByRole('button', { name: 'Actions for through-account' }).click();
   await page.getByRole('menuitem', { name: 'Download via…' }).click();
@@ -1751,7 +1775,6 @@ test('Settings stays at the right end of the toolbar in every view and state', a
     await expect(page.getByRole('link', { name: 'Links (1)' })).toBeVisible();
     await expectSame();
     await expectSearchInFirstRow(page);
-    await page.locator('tbody.batch .batch-head input[type="checkbox"]').check();
     await expect(page.locator('.selection-summary strong')).toHaveText('1 link selected');
     await expectSame();
 
@@ -1800,7 +1823,7 @@ test('removing a download requires an explicit file choice and deletes only its 
     await page.getByRole('button', { name: 'Add links' }).click();
     await page.getByLabel('Links, one per line').fill(fixture.put('delete-choice.bin', MIB));
     await page.getByRole('button', { name: 'Collect links' }).click();
-    await page.locator('.batch-head input[type="checkbox"]').check();
+    await expect(page.locator('.selection-summary strong')).toHaveText('1 link selected');
     await page.getByRole('button', { name: 'Start selected' }).click();
     await expect(page.getByText('Started 1 download.')).toBeVisible();
     await expect(page.locator('.links-page tr[data-link]')).toHaveCount(0);

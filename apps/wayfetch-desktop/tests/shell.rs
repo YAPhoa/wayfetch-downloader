@@ -374,9 +374,14 @@ impl Shell {
         ))
         .await;
         // Collection navigates before its list query finishes. Wait for
-        // the new batch to be rendered and focused, not an older last row.
-        self.wait_for("document.activeElement?.dataset.key?.startsWith('select-batch-')")
-            .await;
+        // the new links to be rendered and selected, with focus on the
+        // first of them, not on an older row.
+        self.wait_for(
+            "document.activeElement?.closest('.links-page tr[data-link]')
+             && document.activeElement.dataset.key?.startsWith('select-')
+             && document.activeElement.checked",
+        )
+        .await;
         self.js("return document.activeElement.dataset.key")
             .await
             .as_str()
@@ -391,11 +396,13 @@ impl Shell {
             1 => ("1 link".to_owned(), "1 download".to_owned()),
             n => (format!("{n} links"), format!("{n} downloads")),
         };
-        let batch = self
-            .collect(urls, &format!("Collected {links} for review."))
+        // Collecting selects the new links.
+        self.collect(urls, &format!("Collected {links} for review."))
             .await;
-        self.click(&format!(".links-page input[data-key=\"{batch}\"]"))
-            .await;
+        self.wait_for(&format!(
+            "document.querySelector('.links-page .selection-summary strong')?.textContent === '{links} selected'"
+        ))
+        .await;
         self.click(".links-page [data-key=\"links-start\"]:not([disabled])")
             .await;
         self.wait_for(&format!(
@@ -1866,8 +1873,14 @@ async fn refreshing_tables_keeps_pointer_interactions_intact() {
     shell
         .wait_for("document.querySelector('.statusbar .status')?.textContent === 'Live'")
         .await;
-    let batch = shell
+    let link = shell
         .collect(&server.url("/click.bin"), "Collected 1 link for review.")
+        .await;
+    // Collecting selected the link; clear it so the click under test
+    // selects it again.
+    shell.click(&format!("input[data-key=\"{link}\"]")).await;
+    shell
+        .wait_for("document.querySelector('[data-key=\"links-start\"]').disabled")
         .await;
     shell
         .js("window.connectedDuringRefresh = null;
@@ -1878,7 +1891,7 @@ async fn refreshing_tables_keeps_pointer_interactions_intact() {
         window.connectedDuringRefresh = e.target.isConnected;
       }, { once: true, capture: true }); return true;")
         .await;
-    shell.click(&format!("input[data-key=\"{batch}\"]")).await;
+    shell.click(&format!("input[data-key=\"{link}\"]")).await;
     assert_eq!(shell.js("return window.connectedDuringRefresh").await, true);
     shell
         .wait_for("!document.querySelector('[data-key=\"links-start\"]').disabled")
@@ -2060,7 +2073,7 @@ async fn a_link_automatically_downloads_through_a_matching_account_in_the_window
         )
         .await;
     assert_eq!(provider.hits(rd::UNRESTRICT_PATH), 0);
-    tick(&shell, "abc").await;
+    // Collecting selected the link.
     shell
         .click(".links-page [data-key=\"links-start\"]:not([disabled])")
         .await;
