@@ -331,13 +331,20 @@ impl Store {
         now: UtcTimestamp,
     ) -> Result<(), StoreError> {
         let tx = self.write()?;
-        job_at(
+        let current = job_at(
             &tx,
             job,
             generation,
             &[JobStage::Transferring],
             "recording a response needs a transferring job",
         )?;
+        let name = suggested_name
+            .filter(|_| {
+                current.state.desired() == wayfetch_domain::job::DesiredState::Running
+                    && !current.removed
+            })
+            .and_then(crate::download::file_name)
+            .map(|n| n.as_str().to_owned());
         let length = representation
             .length
             .map(i64::try_from)
@@ -363,8 +370,9 @@ impl Store {
             ));
         }
         tx.execute(
-            "UPDATE jobs SET bytes_total = ?1, updated_at = ?2 WHERE id = ?3",
-            params![length, now.unix_millis(), sql(job)?],
+            "UPDATE jobs SET bytes_total = ?1, updated_at = ?2, \
+             suggested_name = COALESCE(?4, suggested_name) WHERE id = ?3",
+            params![length, now.unix_millis(), sql(job)?, name],
         )?;
         jobs::announce(&tx, job, now)?;
         tx.commit()?;

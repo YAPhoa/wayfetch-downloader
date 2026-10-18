@@ -35,6 +35,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0012_provider_downloads.sql")),
     M::up(include_str!("migrations/0013_speed_limit.sql")),
     M::up(include_str!("migrations/0014_download_removal.sql")),
+    M::up(include_str!("migrations/0015_job_names.sql")),
 ];
 
 /// Newest schema version this engine knows.
@@ -110,6 +111,50 @@ mod tests {
             .query_row("SELECT count(*) FROM accounts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(accounts, 0);
+    }
+
+    #[test]
+    fn name_upgrade_preserves_existing_job_identity_and_source() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATIONS[..14])
+            .to_latest(&mut conn)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO packages (id, name, created_at) VALUES (1, 'p', 0);
+             INSERT INTO input_batches (id, package_id, input_count, created_at) VALUES (1, 1, 1, 0);
+             INSERT INTO source_links (id, batch_id, ordinal, input_url)
+                 VALUES (11, 1, 0, 'https://files.example/Existing.zip?secret=private');
+             INSERT INTO jobs (id, source_link_id, package_id, desired_state, stage,
+                 generation, revision, created_at, updated_at)
+                 VALUES (21, 11, 1, 'running', 'queued', 3, 9, 0, 0);",
+        ).unwrap();
+        conn.execute_batch(
+            "INSERT INTO staging_files (job_id, generation, root_id, name, file_device,
+                 file_inode, boot_epoch, created_at, representation_known, suggested_name)
+                 VALUES (21, 1, 1, 'stage-1', 1, 1, 1, 0, 1, 'Older.zip'),
+                        (21, 2, 1, 'stage-2', 1, 2, 1, 0, 1, 'Existing Response.zip');",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
+        let saved: (i64, i64, i64, Option<String>, String) = conn
+            .query_row(
+                "SELECT j.id, j.generation, j.revision, j.suggested_name, s.input_url \
+             FROM jobs j JOIN source_links s ON s.id = j.source_link_id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            saved,
+            (
+                21,
+                3,
+                9,
+                Some("Existing Response.zip".into()),
+                "https://files.example/Existing.zip?secret=private".into()
+            )
+        );
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
     }
 
     #[test]
@@ -260,7 +305,9 @@ mod tests {
                     .unwrap()
             })
         };
-        let before = provider_state(&conn);
+        let mut before = provider_state(&conn);
+        // The later naming migration adds an empty hint to this queued job.
+        before[2][0].push(rusqlite::types::Value::Null);
         assert_eq!(migrate(&mut conn).unwrap(), LATEST);
         assert_eq!(migrate(&mut conn).unwrap(), LATEST);
         assert_eq!(provider_state(&conn), before);

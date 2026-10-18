@@ -37,7 +37,7 @@ export function content(start, end) {
 }
 
 /**
- * @typedef {{ size: number, stallAt: number | null, etag: string, waiters: (() => void)[] }} FixtureFile
+ * @typedef {{ size: number, stallAt: number | null, etag: string, filename: string | null, waiters: (() => void)[] }} FixtureFile
  */
 
 /**
@@ -69,9 +69,10 @@ export class Fixture {
    * @param {string} name
    * @param {number} size
    * @param {number | null} [stallAt]
+   * @param {string | null} [filename]
    */
-  put(name, size, stallAt = null) {
-    this.files.set(name, { size, stallAt, etag: '"v1"', waiters: [] });
+  put(name, size, stallAt = null, filename = null) {
+    this.files.set(name, { size, stallAt, filename, etag: '"v1"', waiters: [] });
     return `${this.base}/files/${encodeURIComponent(name)}`;
   }
 
@@ -109,7 +110,12 @@ export class Fixture {
     let start = 0;
     const range = /^bytes=(\d+)-$/.exec(request.headers.range ?? '');
     const ifRange = request.headers['if-range'];
-    const headers = { ETag: file.etag, 'Accept-Ranges': 'bytes', 'Content-Type': 'application/octet-stream' };
+    const headers = {
+      ETag: file.etag,
+      'Accept-Ranges': 'bytes',
+      'Content-Type': 'application/octet-stream',
+      ...(file.filename === null ? {} : { 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}` }),
+    };
     if (range && (ifRange === undefined || ifRange === file.etag)) {
       start = Number(range[1]);
       response.writeHead(206, {

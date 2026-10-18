@@ -14,6 +14,7 @@ import {
   formatDuration,
   GROUPS,
   groupCount,
+  jobName,
   progress,
   restartNote,
   retryPlan,
@@ -104,6 +105,16 @@ test('progress uses durable bytes unless a sample is ahead', () => {
 test('the file name is the artifact path’s last component', () => {
   assert.equal(fileName(job({})), undefined);
   assert.equal(fileName(job({ artifact: { root: 'root-1', path: 'a/b &lt;c&gt;.bin', size: 1 } })), 'b &lt;c&gt;.bin');
+});
+
+test('job names follow engine hints until publication or rename supplies the final file', () => {
+  assert.equal(jobName(job({})), 'job-1');
+  assert.equal(jobName(job({ name: 'Early Name.zip' })), 'Early Name.zip');
+  const updated = job({ name: 'Provider Name.zip' });
+  assert.equal(jobName(updated), 'Provider Name.zip');
+  assert.equal(fileName(updated), undefined);
+  assert.equal(canRename(updated), false);
+  assert.equal(jobName(job({ ...updated, artifact: { root: 'root-1', path: 'renamed.zip', size: 1 } })), 'renamed.zip');
 });
 
 test('states read as plain words with what went wrong', () => {

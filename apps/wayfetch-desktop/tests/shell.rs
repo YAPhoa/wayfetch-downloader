@@ -411,21 +411,20 @@ impl Shell {
         self.add_many(url, 1).await;
     }
 
-    /// Selects a job, so the toolbar acts on it.
+    /// Selects a job, so the toolbar acts on it. Names can change as
+    /// metadata arrives; the selected route keeps the stable job identity.
     async fn select(&self, job: &str) {
         self.click(&format!("tr[data-job=\"{job}\"] td.name a"))
             .await;
-        self.wait_for(&format!(
-            "document.querySelector('button[data-action=\"pause\"]')?.getAttribute('aria-label')?.endsWith('{job}')"
-        ))
-        .await;
+        self.wait_for(&format!("location.pathname === '/jobs/{job}'"))
+            .await;
     }
 
     async fn act(&self, action: &str, job: &str) {
-        self.click(&format!(
-            "button[data-action=\"{action}\"][aria-label$=\"{job}\"]:not([disabled])"
-        ))
-        .await;
+        self.wait_for(&format!("location.pathname === '/jobs/{job}'"))
+            .await;
+        self.click(&format!("button[data-action=\"{action}\"]:not([disabled])"))
+            .await;
     }
 
     /// Reloads the page, as a person pressing F5 would.

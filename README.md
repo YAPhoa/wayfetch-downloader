@@ -458,6 +458,11 @@ path. The add form says which folder new downloads go to. It
 follows the system's light or dark theme and uses the bundled IBM Plex Sans
 typeface (`ui/src/fonts/`, SIL Open Font License 1.1).
 
+Jobs show a filename-like source path immediately and update from provider or
+response filename metadata while downloading. These safe hints survive restart;
+published or renamed file names take precedence. Opaque links keep their job ID
+until a name is available. No extra source requests are made for names.
+
 Settings chooses the default folder for new downloads among those the
 server permits, shown as server paths (jobs already added keep theirs),
 and the row density, which is kept in this browser. Its Accounts &

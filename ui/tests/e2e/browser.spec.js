@@ -23,6 +23,8 @@ import {
 const PASSWORD = 'correct horse battery staple';
 /** A file name that is markup if mistaken for HTML, and fine on disk. */
 const TRICKY = `report &lt;img src=x onerror=window.__xss=1&gt; & 'q'.bin`;
+const SOURCE_NAME = 'early-source.bin';
+const SOURCE_SUFFIX = '?private-token=secret#private-fragment';
 const SIZE = 20 * MIB + 11;
 /** Past two 8 MiB checkpoints, so at least 16 MiB is durable while it stalls. */
 const STALL = 17 * MIB + 5;
@@ -265,15 +267,25 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   expect(loaded).toContain('400');
 
   // A download that stalls after two checkpoints.
-  await add(page, fixture.put(TRICKY, SIZE, STALL));
+  await add(page, `${fixture.put(SOURCE_NAME, SIZE, STALL, TRICKY)}${SOURCE_SUFFIX}`);
   await expectState(page, 'job-1', 'Downloading');
   await expect(row(page, 'job-1').locator('.bytes')).toHaveText(/^1[67]\.\d MiB of 20\.0 MiB$/);
+  // Response metadata updates the name while bytes are still in flight.
+  await expect(row(page, 'job-1').locator('td.name')).toHaveText(TRICKY);
+  await select(page, 'job-1');
+  await expect(page.locator('dd[data-fact="file"]')).toHaveText(TRICKY);
+  const search = page.locator('#filter-names');
+  await search.fill('report');
+  await expect(row(page, 'job-1')).toBeVisible();
+  await search.fill('early-source');
+  await expect(row(page, 'job-1')).toHaveCount(0);
+  await search.fill('');
 
   // Pause and resume the selected job through the API's commands.
   await select(page, 'job-1');
-  await page.getByRole('button', { name: 'Pause job-1' }).click();
+  await page.getByRole('button', { name: `Pause ${TRICKY}` }).click();
   await expectState(page, 'job-1', 'Paused');
-  await page.getByRole('button', { name: 'Resume job-1' }).click();
+  await page.getByRole('button', { name: `Resume ${TRICKY}` }).click();
   await expectState(page, 'job-1', 'Downloading');
 
   // Reloading or closing the tab changes nothing about the download.
@@ -301,7 +313,7 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await expectState(page, 'job-1', 'Downloading');
 
   // It completes once the server sends the rest, under its literal name.
-  fixture.release(TRICKY);
+  fixture.release(SOURCE_NAME);
   await expectState(page, 'job-1', 'Done');
   await expect(row(page, 'job-1').locator('td.name')).toHaveText(TRICKY);
   // The host of the link, not the link.
@@ -319,7 +331,7 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await expect(page.locator('dd[data-fact="saved-in"]').getByText('Server path')).toBeVisible();
   await expect(page.locator('dd[data-fact="saved-in"] button')).toHaveCount(0);
   await expect(page.locator('dd[data-fact="source"] .path')).toHaveText(
-    `${fixture.base}/files/${encodeURIComponent(TRICKY)}`,
+    `${fixture.base}/files/${SOURCE_NAME}?…`,
   );
   await page.reload();
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
@@ -349,9 +361,9 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   // While only cancelled jobs are listed, the job joins the list once cancelled.
   await page.getByRole('button', { name: /^Cancelled \(/ }).click();
   await expect(page.getByText('No downloads in this state.')).toBeVisible();
-  await page.getByRole('button', { name: 'Cancel job-2' }).click();
+  await page.getByRole('button', { name: 'Cancel second.bin' }).click();
   await expectState(page, 'job-2', 'Cancelled');
-  await expect(page.getByRole('button', { name: 'Cancel job-2' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Cancel second.bin' })).toBeDisabled();
   await page.getByRole('button', { name: /^All \(/ }).click();
   // The counts follow the change.
   await expect(page.getByRole('button', { name: 'Cancelled (1)' })).toBeVisible();
@@ -716,7 +728,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(menu).toBeHidden();
   await expect(page.getByText(`Copied the link of ${TRICKY}.`)).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
-    `${fixture.base}/files/${encodeURIComponent(TRICKY)}`,
+    `${fixture.base}/files/${SOURCE_NAME}${SOURCE_SUFFIX}`,
   );
 
   // Items that do not apply say why.
@@ -1155,15 +1167,15 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   const NAME = 'again.bin';
   await add(page, fixture.put(NAME, 10 * MIB, 9 * MIB));
   await page.getByRole('button', { name: /^Active \(/ }).click();
-  // Until it is published, a download is named by its job.
+  // The source filename is available while the stable job ID identifies it.
   const again = page.locator('tr[data-job]');
   await expect(again).toHaveCount(1);
   await expect(again.locator('.bytes')).toHaveText(/^[89]\.\d MiB of 10\.0 MiB$/);
   const job = /** @type {string} */ (await again.getAttribute('data-job'));
   await select(page, job);
-  const retry = page.getByRole('button', { name: `Retry ${job}` });
+  const retry = page.getByRole('button', { name: `Retry ${NAME}` });
   await expect(retry).toBeDisabled();
-  await page.getByRole('button', { name: `Cancel ${job}` }).click();
+  await page.getByRole('button', { name: `Cancel ${NAME}` }).click();
   await page.getByRole('button', { name: /^Cancelled \(/ }).click();
   await expectState(page, job, 'Cancelled');
   await expect(retry).toBeEnabled();
@@ -1184,7 +1196,7 @@ test('Retry continues a cancelled download, once, and says when it had to start 
     await route.continue({ postData: JSON.stringify({ ...body, expected_revision: body.expected_revision - 1 }) });
   });
   await retry.click();
-  await expect(page.getByText(`${job} changed in the meantime and is still stopped.`, { exact: false })).toBeVisible();
+  await expect(page.getByText(`${NAME} changed in the meantime and is still stopped.`, { exact: false })).toBeVisible();
   await page.unroute(commands);
   await expectState(page, job, 'Cancelled');
 
@@ -1210,7 +1222,7 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   await expect(menu.getByRole('menuitem', { name: /^Retry/ })).toContainText('Waiting for the server to answer');
   await page.keyboard.press('Escape');
   answer();
-  await expect(page.getByText(`Retrying ${job}. It continues from the`, { exact: false })).toBeVisible();
+  await expect(page.getByText(`Retrying ${NAME}. It continues from the`, { exact: false })).toBeVisible();
   await page.unroute(commands);
   expect(held).toBe(1);
 
@@ -1229,7 +1241,7 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
   expect((await daemon.published(NAME, daemon.archive)).equals(content(0, 10 * MIB))).toBe(true);
   await expect(page.locator('[data-note="restart"]')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: `Retry ${job}` })).toBeDisabled();
+  await expect(page.getByRole('button', { name: `Retry ${NAME}` })).toBeDisabled();
   await page.getByRole('button', { name: 'Close details' }).click();
 
   // A file replaced on the server cannot be continued: Retry starts over,
@@ -1242,11 +1254,11 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   await expect(changed.locator('.bytes')).toHaveText(/^[89]\.\d MiB of 10\.0 MiB$/);
   const second = /** @type {string} */ (await changed.getAttribute('data-job'));
   await select(page, second);
-  await page.getByRole('button', { name: `Cancel ${second}` }).click();
+  await page.getByRole('button', { name: `Cancel ${CHANGED}` }).click();
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Cancelled');
   fixture.replace(CHANGED);
   fixture.release(CHANGED);
-  await page.getByRole('button', { name: `Retry ${second}` }).click();
+  await page.getByRole('button', { name: `Retry ${CHANGED}` }).click();
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
   await expect(page.locator('[data-note="restart"]')).toHaveText(
     'Started over from the beginning: the file on the server changed since the saved data was downloaded.',
@@ -1749,7 +1761,7 @@ test('Settings stays at the right end of the toolbar in every view and state', a
     await expect(job.locator('td[data-state]')).toHaveText('Downloading');
     await expectSame();
     await job.locator('td.name a').click();
-    await expect(page.getByRole('button', { name: 'Pause job-1' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: `Pause ${NAME}` })).toBeEnabled();
     await expectSame();
     await expectSearchInFirstRow(page);
 

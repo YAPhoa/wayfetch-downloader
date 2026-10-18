@@ -27,6 +27,13 @@ id: JobId,
  */
 package: PackageId, 
 /**
+ * A safe file-name hint from the source path or accepted provider/response
+ * metadata. Absent for opaque links without a meaningful file name.
+ * The published artifact's path takes precedence. Boxed to keep event
+ * summaries small. Added in protocol 3.0.
+ */
+name?: string | null, 
+/**
  * Observed stage.
  */
 stage: JobStage, 

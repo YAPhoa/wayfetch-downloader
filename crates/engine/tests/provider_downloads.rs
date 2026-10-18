@@ -357,6 +357,7 @@ impl AccountProvider for Provider {
 /// One file the download host serves.
 #[derive(Debug, Clone)]
 struct File {
+    filename: Option<String>,
     body: Bytes,
     etag: String,
     stall_at: Option<usize>,
@@ -376,6 +377,7 @@ struct Host {
 impl Host {
     fn serve(&self, data: Bytes) {
         *self.default.lock().unwrap() = Some(File {
+            filename: None,
             body: data,
             etag: "\"v1\"".into(),
             stall_at: None,
@@ -501,7 +503,7 @@ impl Transport for HostTransport {
             Ok(Response {
                 framing,
                 representation,
-                filename: None,
+                filename: file.filename,
                 body: Box::new(Body {
                     host: host.clone(),
                     path,
@@ -780,6 +782,7 @@ async fn a_link_started_through_an_account_downloads_its_exact_bytes() {
             account
         }))
     );
+    assert_eq!(done.name.as_deref(), Some("Provider Name.bin"));
     // The provider's name for the file, since the host gave none.
     assert_eq!(done.artifact.as_ref().unwrap().path, "Provider Name.bin");
     assert_eq!(env.published("Provider Name.bin"), data);
@@ -1413,11 +1416,15 @@ async fn pause_and_restart_continue_on_the_same_link() {
     let (provider, host) = (&env.server.provider, &env.server.host);
     let data = body(64 * KIB);
     host.serve(data.clone());
-    host.change(|f| f.stall_at = Some(20 * KIB));
+    host.change(|f| {
+        f.stall_at = Some(20 * KIB);
+        f.filename = Some("Response Name.bin".into());
+    });
     let owner = env.start().await;
     let account = add_account(&owner, provider).await;
     let id = start_one(&owner, Some(account)).await;
     let paused = wait_for(&owner, id, |j| j.bytes_done >= 16 * KIB as u64).await;
+    assert_eq!(paused.name.as_deref(), Some("Response Name.bin"));
     let pause = Command::Pause {
         job: id,
         expected_revision: paused.revision,
@@ -1438,13 +1445,15 @@ async fn pause_and_restart_continue_on_the_same_link() {
         .execute(envelope(&owner, resume), ALL)
         .await
         .unwrap();
-    wait_for(&owner, id, |j| j.bytes_done >= 36 * KIB as u64).await;
+    let resumed = wait_for(&owner, id, |j| j.bytes_done >= 36 * KIB as u64).await;
+    assert_eq!(resumed.name.as_deref(), Some("Response Name.bin"));
     // The engine stops mid-transfer and continues after restarting.
     shutdown(owner).await;
     host.change(|f| f.stall_at = None);
     let owner = env.start().await;
     let done = support::complete(&owner, id).await;
-    assert_eq!(env.published("Provider Name.bin"), data);
+    assert_eq!(env.published("Response Name.bin"), data);
+    assert_eq!(done.name.as_deref(), Some("Response Name.bin"));
     assert_eq!(done.restart_reason, None);
     assert_eq!(provider.unrestricts(), 1);
     let requests = host.requests();
@@ -1526,6 +1535,9 @@ async fn a_link_the_host_refuses_is_replaced_once() {
         .unwrap()[0];
     let job = failed(&owner, id).await;
     assert_eq!(job.failure.unwrap().code, FailureCode::LeaseExpired);
+    // The accepted provider name is visible even when opening its bytes
+    // never returns a successful response or creates a staging file.
+    assert_eq!(job.name.as_deref(), Some("Provider Name.bin"));
     assert_eq!(provider.unrestricts(), 4);
     shutdown(owner).await;
 }
@@ -1558,6 +1570,7 @@ async fn a_cancel_while_resolving_never_publishes_the_late_answer() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let after = job(&owner, id).await;
     assert_eq!(after.stage, JobStage::Cancelled);
+    assert_eq!(after.name, None);
     assert!(after.artifact.is_none());
     assert!(host.requests().is_empty());
     shutdown(owner).await;

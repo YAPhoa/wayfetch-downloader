@@ -882,6 +882,8 @@ on_transfer_failure(context, attempt_summary, failure)
 
 An adapter-private checkpoint must be versioned, bounded, sanitized, and actually sufficient to resume the provider workflow. Otherwise report that the operation must restart. Do not persist a continuation that merely hides arbitrary live object state.
 
+Implemented single-file jobs expose an optional safe `JobSummary.name` before publication: a percent-decoded filename-like original path segment supplies an early hint, accepted provider filename metadata updates it before fetching bytes, and validated `Content-Disposition` takes precedence. Query, fragment, and user information never enter the hint; extensionless path IDs retain the job-ID fallback. Hints are persisted with metadata events, survive restart, and do not replace the name of a reused response representation. The published artifact path, including a completed-file rename, wins in the UI. No extra source probes or per-row metadata requests are made.
+
 `MetadataObservation` contains provenance/time/confidence for filename, size, availability, hashes, and canonicalization. `Unknown` is different from `Offline`. User filename overrides win over later metadata updates unless the user explicitly restores automatic naming.
 
 ### 6.5 Transfer offer and HTTP broker

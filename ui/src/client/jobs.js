@@ -308,11 +308,11 @@ export function fileName(job) {
 }
 
 /**
- * What to call a job: its file name once published, else its ID.
+ * What to call a job: its published file, the engine's filename hint, or its ID.
  * @param {JobSummary} job
  */
 export function jobName(job) {
-  return fileName(job) ?? job.id;
+  return fileName(job) ?? job.name ?? job.id;
 }
 
 /**
