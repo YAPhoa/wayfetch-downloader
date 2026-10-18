@@ -1,9 +1,10 @@
 // The Downloads workspace: a toolbar to add links, switch between the
-// Downloads and Links views, act on the selected download, and open
-// Settings; state filters; a table of one page of jobs, each with a menu
-// of what can be done with it; an inspector for the selected job; and a
-// status bar. It talks to the engine only through a `WayfetchClient`, so
-// any transport can host it.
+// Downloads and Links views, act on the ticked downloads (or else the one
+// in the details), and open Settings; state filters; a table of one page
+// of jobs, each with a box to tick and a menu of what can be done with it
+// (with the ticked ones, when it is one of them); an inspector for the
+// selected job; and a status bar. It talks to the engine only through a
+// `WayfetchClient`, so any transport can host it.
 //
 // Adding links, on a page of its own, collects them on the Links page
 // for review; nothing downloads until they are started there.
@@ -32,7 +33,9 @@ import {
   restartNote,
   retryPlan,
 } from '../client/jobs.js';
+import { count, refusals } from '../client/links.js';
 import { routeLabel } from '../client/routes.js';
+import { Selection } from '../client/selection.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
 import { copyText, focusedKey, h, refocus, show } from './dom.js';
@@ -64,10 +67,20 @@ export const PAGE_SIZE = 50;
 /** @type {Record<StateAction, string>} */
 const ACTION_LABELS = { pause: 'Pause', resume: 'Resume', cancel: 'Cancel', retry: 'Retry' };
 
+/** The state commands, in toolbar order. @type {readonly StateAction[]} */
+const STATE_ACTIONS = ['pause', 'resume', 'cancel', 'retry'];
+
+/** What a state command did, and did not do, to several downloads. */
+/** @type {Record<StateAction, [string, string]>} */
+const ACTION_OUTCOMES = {
+  pause: ['Paused', 'not paused'],
+  resume: ['Resumed', 'not resumed'],
+  cancel: ['Cancelled', 'not cancelled'],
+  retry: ['Retrying', 'not retried'],
+};
+
 /** Why a menu item does not apply, when the job's state is the reason. */
 const NOT_FINISHED = 'Once it has finished';
-const NOT_ENDED = 'Once it has finished, failed, or been cancelled';
-const NOT_STOPPED = 'Once it has failed or been cancelled';
 const PENDING = 'Waiting for the server to answer';
 const NO_CONTROL = 'You may only view downloads';
 
@@ -117,6 +130,15 @@ function commandFailed(error) {
 function jobFromPath(path) {
   const match = /^\/jobs\/(job-[1-9][0-9]*)$/.exec(path);
   return match ? /** @type {JobId} */ (match[1]) : null;
+}
+
+/**
+ * Whether retrying `job` may ask its provider for a link again, which the
+ * user confirms first: its last request's answer was lost.
+ * @param {JobSummary} job
+ */
+function asksProviderAgain(job) {
+  return !!job.route && job.failure?.code === 'operation_ambiguous';
 }
 
 /** @param {Tone} tone */
@@ -237,7 +259,16 @@ export class Downloads {
      * @type {Set<JobId>}
      */
     this.inFlight = new Set();
-    this.actionButtons = /** @type {const} */ (['pause', 'resume', 'cancel', 'retry']).map((action) =>
+    /** Downloads ticked for commands on several at once. @type {Selection<JobId>} */
+    this.selection = new Selection();
+    this.selectAll = h('input', {
+      type: 'checkbox',
+      'data-key': 'select-all-jobs',
+      'aria-label': 'Select all downloads shown',
+      onchange: () => this.tick(this.shownJobs, this.selectAll.checked),
+    });
+    this.selectionLine = h('p', { class: 'selection-summary', role: 'status' });
+    this.actionButtons = STATE_ACTIONS.map((action) =>
       h(
         'button',
         {
@@ -280,6 +311,7 @@ export class Downloads {
           'main',
           { class: 'list' },
           this.noticeLine,
+          this.selectionLine,
           h('div', { class: 'table-scroll' }, this.buildTable(), this.listStatus),
           this.pager,
           this.inspector,
@@ -645,7 +677,7 @@ export class Downloads {
       },
     });
     return this.toolbar(
-      h('div', { class: 'tool-group', role: 'group', 'aria-label': 'Selected download' }, this.actionButtons),
+      h('div', { class: 'tool-group', role: 'group', 'aria-label': 'Selected downloads' }, this.actionButtons),
       h(
         'div',
         { class: 'search' },
@@ -728,30 +760,102 @@ export class Downloads {
     return this.client.permissions.includes('control');
   }
 
-  /** Enables the toolbar's commands the selected job accepts. */
-  renderActions() {
+  /**
+   * What the toolbar acts on: the ticked downloads shown, otherwise the
+   * one in the details.
+   * @returns {JobSummary[]}
+   */
+  targets() {
+    const ticked = this.selection.chosen(this.shownJobs);
+    if (ticked.length > 0) return ticked;
     const job = this.feed.watchedJob;
-    const allowed = new Set(job && this.canControl && !this.inFlight.has(job.id) ? availableActions(job) : []);
+    return job ? [job] : [];
+  }
+
+  /**
+   * Those of `jobs` that take `action` from this view now.
+   * @param {readonly JobSummary[]} jobs
+   * @param {StateAction} action
+   */
+  accepting(jobs, action) {
+    if (!this.canControl) return [];
+    return jobs.filter((job) => !this.inFlight.has(job.id) && availableActions(job).includes(action));
+  }
+
+  /**
+   * What a state command is called for `jobs`: with the name of one, or
+   * with how many of several it applies to.
+   * @param {StateAction} action
+   * @param {readonly JobSummary[]} jobs
+   */
+  actionLabel(action, jobs) {
+    const label = ACTION_LABELS[action];
+    if (jobs.length === 1) return `${label} ${jobName(jobs[0])}`;
+    const n = this.accepting(jobs, action).length;
+    return jobs.length > 1 ? `${label} ${count(n || jobs.length, 'download')}` : label;
+  }
+
+  /** Enables the toolbar's commands that its downloads accept. */
+  renderActions() {
+    const jobs = this.targets();
     for (const button of this.actionButtons) {
       const action = /** @type {StateAction} */ (button.dataset.action);
-      button.disabled = !allowed.has(action);
-      const label = ACTION_LABELS[action];
-      button.setAttribute('aria-label', job ? `${label} ${jobName(job)}` : label);
-      if (action === 'retry') button.title = job && allowed.has('retry') ? retryPlan(job) : '';
+      const accepting = this.accepting(jobs, action);
+      button.disabled = accepting.length === 0;
+      button.setAttribute('aria-label', this.actionLabel(action, jobs));
+      if (action === 'retry') button.title = jobs.length === 1 && accepting.length > 0 ? retryPlan(jobs[0]) : '';
     }
   }
 
   /**
-   * Sends a state command for the selected job from the toolbar.
+   * Sends a state command from the toolbar.
    * @param {StateAction} action
    * @param {HTMLButtonElement} button
    */
   async command(action, button) {
-    const job = this.feed.watchedJob;
-    if (!job) return;
+    const jobs = this.targets();
+    if (jobs.length === 0) return;
     button.disabled = true;
-    if (action === 'retry') await this.retry(job);
-    else await this.send(job, action);
+    await this.sendAll(jobs, action);
+  }
+
+  /**
+   * Sends `action` for each of `jobs` that takes it, and says in one line
+   * what happened: how many it applied to, why the engine refused any,
+   * and which were left alone. One job is handled as before, with its own
+   * name in what is said. Retrying a download whose provider may be asked
+   * again is confirmed for each such download on its own.
+   * @param {readonly JobSummary[]} jobs
+   * @param {StateAction} action
+   */
+  async sendAll(jobs, action) {
+    if (jobs.length === 1) {
+      if (action === 'retry') await this.retry(jobs[0]);
+      else await this.send(jobs[0], action);
+      return;
+    }
+    const accepting = this.accepting(jobs, action);
+    const confirm = action === 'retry' ? accepting.filter(asksProviderAgain) : [];
+    const sent = accepting.filter((job) => !confirm.includes(job));
+    /** @type {{ message: string }[]} */
+    const refused = [];
+    const accepted = await Promise.all(
+      sent.map((job) => this.send(job, action, { refused: (message) => refused.push({ message }) })),
+    );
+    const n = accepted.filter(Boolean).length;
+    const [did, didNot] = ACTION_OUTCOMES[action];
+    const skipped = jobs.length - accepting.length;
+    const parts = [
+      n > 0 && `${did} ${count(n, 'download')}.`,
+      refused.length > 0 && `${count(refused.length, 'download')} ${didNot}: ${refusals(refused, 'downloads')}`,
+      skipped > 0 && `${count(skipped, 'selected download')} ${skipped === 1 ? 'was' : 'were'} left as ${skipped === 1 ? 'it was' : 'they were'}: ${ACTION_LABELS[action]} does not apply.`,
+      confirm.length > 0 &&
+        `${count(confirm.length, 'download')} through an account must be retried on ${confirm.length === 1 ? 'its' : 'their'} own, since the provider may be asked again.`,
+    ].filter(Boolean);
+    const text = parts.join(' ');
+    if (n > 0 && parts.length === 1) this.done(text);
+    else this.notice = text;
+    this.schedule();
   }
 
   /**
@@ -831,7 +935,7 @@ export class Downloads {
    */
   async retry(job, repeat = false) {
     const name = jobName(job);
-    if (job.route && job.failure?.code === 'operation_ambiguous' && !repeat) {
+    if (asksProviderAgain(job) && !repeat) {
       if (this.client.permissions.includes('provider_downloads')) this.confirmRepeat(job);
       else this.notice = `${name}: retrying asks the provider for its link again, which needs permission to download through accounts.`;
       // The toolbar's Retry, disabled while acting, is drawn enabled again.
@@ -905,13 +1009,52 @@ export class Downloads {
    * @param {import('./menu.js').Anchor} anchor
    */
   openMenu(job, anchor) {
+    const targets = this.menuTargets(job);
     const restore = () => {
       const button = /** @type {HTMLElement | null} */ (
         this.tableBody.querySelector(`[data-key="menu-${job.id}"]`)
       );
       (button ?? this.tableBody.querySelector(`[data-key="open-${job.id}"]`))?.focus?.();
     };
-    this.menu.show(this.menuEntries(job), anchor, { owner: job.id, restore });
+    const entries = targets.length > 1 ? this.manyEntries(targets) : this.menuEntries(job);
+    this.menu.show(entries, anchor, { owner: job.id, restore });
+  }
+
+  /**
+   * The downloads a menu opened on `job` acts on: the ticked ones shown,
+   * when `job` is one of them, otherwise `job` alone.
+   * @param {JobSummary} job
+   */
+  menuTargets(job) {
+    const ticked = this.selection.chosen(this.shownJobs);
+    return ticked.some((j) => j.id === job.id) ? ticked : [job];
+  }
+
+  /**
+   * What can be done with several downloads at once: the state commands
+   * and removal, each for those it applies to.
+   * @param {readonly JobSummary[]} jobs
+   * @returns {MenuEntry[]}
+   */
+  manyEntries(jobs) {
+    const control = this.canControl;
+    const removable = jobs.filter(canRemove);
+    /** @type {MenuEntry[]} */
+    const entries = STATE_ACTIONS.map((action) => ({
+      key: action,
+      label: this.actionLabel(action, jobs),
+      disabled: this.accepting(jobs, action).length === 0,
+      hint: control ? undefined : NO_CONTROL,
+      run: () => void this.sendAll(jobs, action),
+    }));
+    entries.push('separator', {
+      key: 'remove',
+      label: removable.length > 1 ? `Remove ${count(removable.length, 'download')}…` : 'Remove…',
+      disabled: !control || removable.length === 0,
+      danger: true,
+      run: () => void this.remove(removable),
+    });
+    return entries;
   }
 
   /**
@@ -981,16 +1124,14 @@ export class Downloads {
         key: 'retry',
         label: 'Retry',
         disabled: !actions.has('retry'),
-        hint: why(actions.has('retry') ? retryPlan(job) : NOT_STOPPED),
         run: () => void this.retry(job),
       },
       {
         key: 'remove',
         label: 'Remove…',
         disabled: !control || !canRemove(job),
-        hint: !control ? NO_CONTROL : canRemove(job) ? 'Choose whether to keep files' : NOT_ENDED,
         danger: true,
-        run: () => void this.remove(job),
+        run: () => void this.remove([job]),
       },
     );
     return entries;
@@ -1039,11 +1180,16 @@ export class Downloads {
   }
 
   /**
-   * Asks whether to keep or explicitly delete an ended download’s files.
-   * @param {JobSummary} job
+   * Asks whether to keep or explicitly delete ended downloads' files, then
+   * removes them. Downloads not removed stay in the dialog, with why.
+   * @param {readonly JobSummary[]} jobs
    */
-  remove(job) {
-    const name = jobName(job);
+  remove(jobs) {
+    if (jobs.length === 0) return;
+    const one = jobs.length === 1;
+    const name = one ? jobName(jobs[0]) : count(jobs.length, 'download');
+    /** Those not removed yet. */
+    let left = [...jobs];
     const message = h('p', { class: 'message', role: 'alert' });
     const keep = h('input', { type: 'radio', name: 'removal', value: 'keep', checked: true });
     const mayDelete = this.client.permissions.includes('delete_files');
@@ -1057,46 +1203,77 @@ export class Downloads {
         event.preventDefault();
         if (sending) return;
         const deleting = erase.checked && mayDelete;
+        const unfinished = deleting
+          ? ' Deletion did not finish; some data may already have been deleted. You can retry or remove the entry only.'
+          : '';
         sending = true;
         save.disabled = cancel.disabled = keep.disabled = erase.disabled = true;
         const close = dialog.querySelector('button.close');
         if (close instanceof HTMLButtonElement) close.disabled = true;
         show(message, '');
-        let done = false;
-        try {
-          done = await this.send(job, deleting ? 'delete_files' : 'remove', {
-            refused: (text) => show(message, deleting
-              ? `${text} Deletion did not finish; some data may already have been deleted. You can retry or remove the entry only.`
-              : text),
-          });
-        } catch {
-          show(message, deleting
-            ? 'Deletion could not be confirmed; some data may already have been deleted. Check the download, then retry or remove the entry only.'
-            : 'The removal could not be confirmed. Check the download and try again.');
-        } finally {
-          sending = false;
-          save.disabled = cancel.disabled = keep.disabled = false;
-          erase.disabled = !mayDelete;
-          if (close instanceof HTMLButtonElement) close.disabled = false;
-        }
-        if (done) {
+        /** @type {{ message: string }[]} */
+        const refused = [];
+        let unconfirmed = 0;
+        const sent = left;
+        const outcomes = await Promise.all(
+          sent.map((job) =>
+            this.send(job, deleting ? 'delete_files' : 'remove', {
+              refused: (text) => refused.push({ message: text }),
+            }).catch(() => {
+              unconfirmed += 1;
+              return false;
+            }),
+          ),
+        );
+        sending = false;
+        save.disabled = cancel.disabled = keep.disabled = false;
+        erase.disabled = !mayDelete;
+        if (close instanceof HTMLButtonElement) close.disabled = false;
+        const removed = sent.filter((_, i) => outcomes[i]);
+        left = sent.filter((_, i) => !outcomes[i]);
+        if (removed.some((job) => job.id === this.feed.watched)) this.navigate('/');
+        if (left.length === 0) {
           dialog.close();
-          if (this.feed.watched === job.id) this.navigate('/');
-          this.done(deleting ? `Deleted downloaded data for ${name} and removed it from the list.`
-            : `Removed ${name} from the list. Remaining files stay in their folder.`);
+          this.done(
+            one
+              ? deleting
+                ? `Deleted downloaded data for ${name} and removed it from the list.`
+                : `Removed ${name} from the list. Remaining files stay in their folder.`
+              : deleting
+                ? `Deleted downloaded data for ${name} and removed them from the list.`
+                : `Removed ${name} from the list. Remaining files stay in their folders.`,
+          );
           this.schedule();
+          return;
         }
+        const notConfirmed = deleting
+          ? 'Deletion could not be confirmed; some data may already have been deleted. Check the download, then retry or remove the entry only.'
+          : 'The removal could not be confirmed. Check the download and try again.';
+        if (one) {
+          show(message, unconfirmed > 0 ? notConfirmed : `${refused[0]?.message ?? ''}${unfinished}`);
+          return;
+        }
+        show(
+          message,
+          [
+            removed.length > 0 && `Removed ${count(removed.length, 'download')}.`,
+            `${count(left.length, 'download')} not removed${refused.length > 0 ? `: ${refusals(refused, 'downloads')}` : '.'}`,
+            unconfirmed > 0 ? notConfirmed : unfinished.trim(),
+          ]
+            .filter(Boolean)
+            .join(' '),
+        );
       },
     },
     h('p', {}, `Remove ${name} from Downloads?`),
     h('label', { class: 'row' }, keep, 'Remove from list only (keep files)'),
-    h('label', { class: 'row' }, erase, 'Delete downloaded file/data and remove from list'),
+    h('label', { class: 'row' }, erase, `Delete downloaded ${one ? 'file/data' : 'files/data'} and remove from list`),
     h('p', { class: 'hint' }, mayDelete
-      ? 'If you choose to delete files, the downloaded file and partial data will be permanently deleted. This cannot be undone.'
+      ? `If you choose to delete files, the downloaded ${one ? 'file' : 'files'} and partial data will be permanently deleted. This cannot be undone.`
       : 'Your access does not allow deleting downloaded data.'),
     message,
     h('div', { class: 'row' }, save, cancel));
-    const dialog = openDialog({ title: 'Remove download', closeLabel: 'Cancel removal' }, form);
+    const dialog = openDialog({ title: one ? 'Remove download' : `Remove ${name}`, closeLabel: 'Cancel removal' }, form);
     dialog.addEventListener('cancel', (event) => { if (sending) event.preventDefault(); });
     const choiceChanged = () => {
       save.textContent = erase.checked ? 'Delete files and remove' : 'Remove';
@@ -1241,6 +1418,7 @@ export class Downloads {
         h(
           'tr',
           null,
+          h('th', { scope: 'col', class: 'check' }, this.selectAll),
           columns.map(([title, kind]) => h('th', { scope: 'col', class: kind }, title)),
           actions,
         ),
@@ -1249,12 +1427,51 @@ export class Downloads {
     );
   }
 
+  /** The jobs of the page that the name filter shows. */
+  get shownJobs() {
+    return this.feed.jobs.filter((job) => this.query === '' || jobName(job).toLowerCase().includes(this.query));
+  }
+
+  /**
+   * Ticks or unticks `jobs`.
+   * @param {readonly JobSummary[]} jobs
+   * @param {boolean} on
+   */
+  tick(jobs, on) {
+    this.selection.pick(jobs, on);
+    this.render();
+  }
+
+  /**
+   * How many downloads are ticked, with a way to untick them, and how
+   * many of them the name filter hides, which commands leave out.
+   * @param {readonly JobSummary[]} shown
+   */
+  renderSelection(shown) {
+    const ticked = this.selection.chosen(shown).length;
+    const hidden = this.selection.size - ticked;
+    show(
+      this.selectionLine,
+      ticked > 0 && h('strong', null, `${count(ticked, 'download')} selected`),
+      hidden > 0 &&
+        h('span', { class: 'warn-text' }, `${count(hidden, 'selected download')} hidden by the filter ${hidden === 1 ? 'is' : 'are'} left out.`),
+      this.selection.size > 0 &&
+        h(
+          'button',
+          { type: 'button', class: 'link', 'data-key': 'clear-selection', onclick: () => this.tick(this.feed.jobs, false) },
+          'Clear selection',
+        ),
+    );
+  }
+
   renderList() {
     const { feed } = this;
     const selected = feed.watched;
-    const jobs = feed.jobs.filter(
-      (job) => this.query === '' || jobName(job).toLowerCase().includes(this.query),
-    );
+    // Ticks last only while their downloads are on the page.
+    this.selection.keepOnly(feed.jobs.map((job) => job.id));
+    const jobs = this.shownJobs;
+    Object.assign(this.selectAll, this.selection.allState(jobs));
+    this.renderSelection(jobs);
     const rows = new Map();
     for (const job of jobs) {
       const sample = feed.sample(job.id);
@@ -1283,14 +1500,17 @@ export class Downloads {
           // These cells contain display values only; the interactive
           // cells and their ancestors stay connected.
           const cells = [...row.cells];
-          for (let i = 1; i < 7; i++) old.row.cells[i].replaceWith(cells[i]);
+          for (let i = 2; i < 8; i++) old.row.cells[i].replaceWith(cells[i]);
           row = old.row;
         }
       }
-      // Kept up to date in place, so opening a menu redraws no row.
+      // Kept up to date in place, so opening a menu or ticking redraws no row.
       const menuOpen = this.menu.owner === job.id;
       row.classList.toggle('menu-open', menuOpen);
       row.querySelector('button.more')?.setAttribute('aria-expanded', String(menuOpen));
+      const ticked = this.selection.has(job.id);
+      row.classList.toggle('ticked', ticked);
+      /** @type {HTMLInputElement} */ (row.querySelector('td.check input')).checked = ticked;
       rows.set(job.id, { job, sample, selected: isSelected, row });
     }
     this.rows = rows;
@@ -1379,12 +1599,25 @@ export class Downloads {
         'data-job': job.id,
         class: selected ? 'selected' : null,
         onclick: (/** @type {MouseEvent} */ event) => {
-          if (/** @type {Element} */ (event.target).closest('a, button')) return;
-          this.navigate(path);
+          if (/** @type {Element} */ (event.target).closest('a, button, input')) return;
+          // Ctrl- or Cmd-click ticks, as in file managers; a click shows details.
+          if (event.ctrlKey || event.metaKey) this.tick([current()], !this.selection.has(job.id));
+          else this.navigate(path);
         },
         // The row pressed, wherever in it; the browser's own menu otherwise.
         ...rowMenuHandlers(more, (anchor) => this.openMenu(current(), anchor)),
       },
+      h(
+        'td',
+        { class: 'check' },
+        h('input', {
+          type: 'checkbox',
+          'data-key': `select-${job.id}`,
+          'aria-label': `Select ${name}`,
+          onchange: (/** @type {Event} */ event) =>
+            this.tick([current()], /** @type {HTMLInputElement} */ (event.currentTarget).checked),
+        }),
+      ),
       h(
         'td',
         { class: 'name', title: name },
