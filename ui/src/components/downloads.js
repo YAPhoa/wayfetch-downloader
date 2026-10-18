@@ -748,7 +748,7 @@ export class Downloads {
    * answered, the job takes no other command from this view, so a second
    * click cannot send a second request.
    * @param {JobSummary} job
-   * @param {StateAction | 'rename' | 'remove'} action
+   * @param {StateAction | 'rename' | 'remove' | 'delete_files'} action
    * @param {{
    *   name?: string,
    *   repeatProviderOperation?: boolean,
@@ -790,7 +790,7 @@ export class Downloads {
       this.inFlight.delete(job.id);
     }
     this.schedule();
-    if (action !== 'remove' || !accepted) {
+    if ((action !== 'remove' && action !== 'delete_files') || !accepted) {
       await this.feed.refresh(job.id).catch((error) => this.report(error));
     }
     return accepted;
@@ -973,9 +973,9 @@ export class Downloads {
       },
       {
         key: 'remove',
-        label: 'Remove from list',
+        label: 'Remove…',
         disabled: !control || !canRemove(job),
-        hint: !control ? NO_CONTROL : canRemove(job) ? 'Keeps the file' : NOT_ENDED,
+        hint: !control ? NO_CONTROL : canRemove(job) ? 'Choose whether to keep files' : NOT_ENDED,
         danger: true,
         run: () => void this.remove(job),
       },
@@ -1026,16 +1026,72 @@ export class Downloads {
   }
 
   /**
-   * Hides an ended job from lists; its file stays in its folder.
+   * Asks whether to keep or explicitly delete an ended download’s files.
    * @param {JobSummary} job
    */
-  async remove(job) {
+  remove(job) {
     const name = jobName(job);
-    if (!(await this.send(job, 'remove'))) return;
-    // Closing its details clears the notice, so this comes after.
-    if (this.feed.watched === job.id) this.navigate('/');
-    this.done(`Removed ${name} from the list. Its file stays in its folder.`);
-    this.schedule();
+    const message = h('p', { class: 'message', role: 'alert' });
+    const keep = h('input', { type: 'radio', name: 'removal', value: 'keep', checked: true });
+    const mayDelete = this.client.permissions.includes('delete_files');
+    const erase = h('input', { type: 'radio', name: 'removal', value: 'delete', disabled: !mayDelete });
+    const save = h('button', { type: 'submit', class: 'primary' }, 'Remove');
+    const cancel = h('button', { type: 'button', onclick: () => dialog.close() }, 'Cancel');
+    let sending = false;
+    const form = h('form', {
+      class: 'rename-form',
+      onsubmit: async (/** @type {SubmitEvent} */ event) => {
+        event.preventDefault();
+        if (sending) return;
+        const deleting = erase.checked && mayDelete;
+        sending = true;
+        save.disabled = cancel.disabled = keep.disabled = erase.disabled = true;
+        const close = dialog.querySelector('button.close');
+        if (close instanceof HTMLButtonElement) close.disabled = true;
+        show(message, '');
+        let done = false;
+        try {
+          done = await this.send(job, deleting ? 'delete_files' : 'remove', {
+            refused: (text) => show(message, deleting
+              ? `${text} Deletion did not finish; some data may already have been deleted. You can retry or remove the entry only.`
+              : text),
+          });
+        } catch {
+          show(message, deleting
+            ? 'Deletion could not be confirmed; some data may already have been deleted. Check the download, then retry or remove the entry only.'
+            : 'The removal could not be confirmed. Check the download and try again.');
+        } finally {
+          sending = false;
+          save.disabled = cancel.disabled = keep.disabled = false;
+          erase.disabled = !mayDelete;
+          if (close instanceof HTMLButtonElement) close.disabled = false;
+        }
+        if (done) {
+          dialog.close();
+          if (this.feed.watched === job.id) this.navigate('/');
+          this.done(deleting ? `Deleted downloaded data for ${name} and removed it from the list.`
+            : `Removed ${name} from the list. Remaining files stay in their folder.`);
+          this.schedule();
+        }
+      },
+    },
+    h('p', {}, `Remove ${name} from Downloads?`),
+    h('label', { class: 'row' }, keep, 'Remove from list only (keep files)'),
+    h('label', { class: 'row' }, erase, 'Delete downloaded file/data and remove from list'),
+    h('p', { class: 'hint' }, mayDelete
+      ? 'If you choose to delete files, the downloaded file and partial data will be permanently deleted. This cannot be undone.'
+      : 'Your access does not allow deleting downloaded data.'),
+    message,
+    h('div', { class: 'row' }, save, cancel));
+    const dialog = openDialog({ title: 'Remove download', closeLabel: 'Cancel removal' }, form);
+    dialog.addEventListener('cancel', (event) => { if (sending) event.preventDefault(); });
+    const choiceChanged = () => {
+      save.textContent = erase.checked ? 'Delete files and remove' : 'Remove';
+      save.className = erase.checked ? 'primary delete-confirm' : 'primary';
+    };
+    keep.addEventListener('change', choiceChanged);
+    erase.addEventListener('change', choiceChanged);
+    keep.focus();
   }
 
   /**

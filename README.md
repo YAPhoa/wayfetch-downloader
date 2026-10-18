@@ -167,10 +167,11 @@ beyond loopback has no TLS of its own and belongs behind an authenticated TLS
 reverse proxy. Every request needs `Authorization: Bearer TOKEN`. The token file
 holds one `TOKEN PERMISSION[,PERMISSION...]` per line, with permissions `read`,
 `submit`, `control`, `sources` (reading back submitted links, which can
-carry signed tokens), `accounts` (provider sign-ins), and `provider_downloads`
+carry signed tokens), `accounts` (provider sign-ins), `delete_files` (explicitly
+deleting downloaded data, alongside `control`), and `provider_downloads`
 (choosing an account to download through when starting links, which spends
-that account's provider work); no other permission implies either of the last
-two. The file must be readable only by its owner. If it does not
+that account's provider work); these scopes are independent. The token file must
+be readable only by its owner. If it does not
 exist, `wayfetchd` creates it with one token holding every permission; the token
 is never printed.
 
@@ -181,7 +182,7 @@ is never printed.
 | `GET /v1/jobs` | A page of jobs: `after`, `page_size`, `stage=a,b`, `package` |
 | `GET /v1/jobs/{id}` | One job |
 | `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
-| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"rename", "expected_revision"}`, plus `"name"` for a rename, and `"repeat_provider_operation": true` to retry a provider request whose answer was lost (needs `provider_downloads`) |
+| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"delete_files"\|"rename", "expected_revision"}`, plus `"name"` for a rename, and `"repeat_provider_operation": true` to retry a provider request whose answer was lost (needs `provider_downloads`) |
 | `GET /v1/jobs/{id}/source` | The link the job was submitted with (needs `sources`) |
 | `POST /v1/staging/links` | Collect links for review without downloading them: `{"idempotency_key", "target", "items": [text...], "destination"?: "root-N"}` |
 | `GET /v1/staging/links` | A page of collected links: `after`, `page_size` |
@@ -204,17 +205,23 @@ is never printed.
 `rename` gives a completed job's file a new name in the same folder; it never
 replaces a file, and refuses one changed outside Wayfetch. `remove` takes a
 complete, failed, or cancelled job off lists and counts and keeps its files.
+The UI opens a choice dialog with keeping files selected by default.
+`delete_files` additionally needs `delete_files` permission and explicitly deletes
+its owned downloaded file and retained partial data before removing it from lists.
+A file changed outside Wayfetch or an unavailable folder leaves the job visible
+with an error. Retry deletion, or choose list-only removal to keep remaining files.
 `retry` starts a failed, or fully stopped cancelled, job again as the same
-job, with the same link, folder, and collected-links entry. It continues
+job, with the same source link and folder. It continues
 the data already saved when the server still offers the same file and
 accepts the request for the rest, and otherwise starts from zero, with the
 reason in the job's `restart_reason`. A failure that names a time to wait
 until is refused with `not_applicable` and that `retry_at`. Like the other
 job actions it needs `control`.
 
-`/v1/inputs` starts downloads at once. Collected links instead stay listed
-until removed, survive restarts, and are never fetched until started; a
-started link stays listed with its `job`, and an entry that is not a link is
+`/v1/inputs` starts downloads at once. Collected links instead survive restarts
+and are never fetched until started;
+accepted links move out of Links into Downloads, while refused links remain
+collected. An entry that is not a link is
 kept with its problem. A staging command reports each link it applied and
 each it refused, with a reason, so a link changed since its `revision` was
 read, or bound for an unavailable folder, stays collected. Each link starts

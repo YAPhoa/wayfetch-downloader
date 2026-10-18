@@ -225,6 +225,34 @@ impl Root {
         Ok(RenameCheck::Renamed)
     }
 
+    /// Deletes a target only while it still holds the recorded regular file.
+    /// A durable intent permits missing names after interrupted deletion.
+    /// External writers must be trusted, as for rename: portable filesystems
+    /// provide no atomic compare-identity-and-unlink operation.
+    pub fn delete_published(&self, file: &PublishedFile) -> Result<(), FsError> {
+        self.verify()?;
+        let (parent, name) = file.path.split_last();
+        let dir = self
+            .parent_dir(parent, false)?
+            .ok_or_else(|| FsError::PublishedMissing(file.path.clone()))?;
+        match dir.symlink_metadata(name) {
+            Ok(meta) => {
+                if !meta.is_file()
+                    || !sys::identity(&meta)?.matches(&file.identity)
+                    || meta.len() != file.size
+                {
+                    return Err(FsError::PublishedChanged(file.path.clone()));
+                }
+                dir.remove_file(name)
+                    .map_err(FsError::io("delete downloaded file"))?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(FsError::io("inspect downloaded file")(e)),
+        }
+        sys::sync_dir(&dir).map_err(FsError::io("sync download folder"))?;
+        Ok(())
+    }
+
     /// The absolute path of the published file `file`, for a host to open
     /// on its user's request, after checking that the root is mounted and
     /// the name still holds the file at its published size.
@@ -547,7 +575,7 @@ mod tests {
     }
 
     /// Publishes `bytes` at `at` and returns the published file.
-    fn published(root: &Root, at: &str, bytes: &[u8]) -> PublishedFile {
+    pub(super) fn published(root: &Root, at: &str, bytes: &[u8]) -> PublishedFile {
         let staging = staged(root, 1, bytes);
         let identity = staging.record().identity;
         root.publish(staging, &path(at), bytes.len() as u64)
@@ -700,5 +728,65 @@ mod tests {
         let staging = staged(&root, 1, b"x");
         assert!(root.publish(staging, &path("escape/a.bin"), 1).is_err());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::tests::published;
+    use super::*;
+    use crate::fs::staging::tests::root;
+
+    #[test]
+    fn delete_checks_identity_type_size_and_synchronizes_missing_names() {
+        let (tmp, root) = root();
+        let file = published(&root, "owned.bin", b"owned");
+        std::fs::write(tmp.path().join("unrelated.bin"), b"user").unwrap();
+        std::fs::write(tmp.path().join("replacement.bin"), b"owned").unwrap();
+        std::fs::rename(
+            tmp.path().join("replacement.bin"),
+            tmp.path().join("owned.bin"),
+        )
+        .unwrap();
+        assert!(matches!(
+            root.delete_published(&file),
+            Err(FsError::PublishedChanged(_))
+        ));
+        assert_eq!(
+            std::fs::read(tmp.path().join("owned.bin")).unwrap(),
+            b"owned"
+        );
+        std::fs::remove_file(tmp.path().join("owned.bin")).unwrap();
+        root.delete_published(&file).unwrap();
+        assert_eq!(
+            std::fs::read(tmp.path().join("unrelated.bin")).unwrap(),
+            b"user"
+        );
+        let file = published(&root, "size.bin", b"original");
+        std::fs::write(tmp.path().join("size.bin"), b"changed size").unwrap();
+        assert!(matches!(
+            root.delete_published(&file),
+            Err(FsError::PublishedChanged(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_never_follows_symlinks_or_an_unmounted_root() {
+        let (tmp, root) = root();
+        let file = published(&root, "owned.bin", b"owned");
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), b"outside").unwrap();
+        std::fs::remove_file(tmp.path().join("owned.bin")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("owned.bin")).unwrap();
+        assert!(root.delete_published(&file).is_err());
+        assert_eq!(std::fs::read(outside.path()).unwrap(), b"outside");
+        // Move the opened root away and put another directory at its path.
+        let mounted = tmp.path().with_extension("mounted");
+        std::fs::rename(tmp.path(), &mounted).unwrap();
+        std::fs::create_dir(tmp.path()).unwrap();
+        assert!(root.delete_published(&file).is_err());
+        std::fs::remove_dir(tmp.path()).unwrap();
+        std::fs::rename(mounted, tmp.path()).unwrap();
     }
 }

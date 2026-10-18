@@ -1613,6 +1613,19 @@ async fn the_row_menu_opens_renames_and_removes_through_the_host() {
     shell.click("[data-key=\"menu-job-1\"]").await;
     shell.click("[data-key=\"menu-item-remove\"]").await;
     shell
+        .wait_for("document.querySelector('dialog input[value=\"keep\"]')?.checked === true")
+        .await;
+    press(&shell, Key::Escape).await;
+    shell
+        .wait_for(
+            "!document.querySelector('dialog') && document.querySelector('tr[data-job=\"job-1\"]')",
+        )
+        .await;
+    assert_eq!(dirs.published("desk-renamed.bin"), body(MIB));
+    shell.click("[data-key=\"menu-job-1\"]").await;
+    shell.click("[data-key=\"menu-item-remove\"]").await;
+    shell.click("dialog button[type=\"submit\"]").await;
+    shell
         .wait_for("!document.querySelector('tr[data-job=\"job-1\"]')")
         .await;
     assert_eq!(dirs.published("desk-renamed.bin"), body(MIB));
@@ -1749,14 +1762,12 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
     shell
         .wait_for("document.querySelector('.links-page .notice > span')?.textContent.startsWith('Started 1 download.')")
         .await;
-    // The started link stays listed, added to Downloads.
-    assert_eq!(collected(&shell).await, json!(["keep.bin", "start.bin"]));
-    assert_eq!(
-        shell
-            .js("return [...document.querySelectorAll('.links-page tr.started td.link-status')].map((c) => c.textContent);")
-            .await,
-        json!(["Added to Downloads"])
-    );
+    // The accepted source moves out of Links; no redundant started banner.
+    shell
+        .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 1")
+        .await;
+    assert_eq!(collected(&shell).await, json!(["keep.bin"]));
+    assert_eq!(shell.js("return document.querySelector('.selection-summary').textContent.includes('already in Downloads')").await, false);
     eventually(|| async {
         std::fs::read(dirs.root.join("start.bin"))
             .ok()
@@ -1774,6 +1785,25 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
         .click(".workspace > :not([hidden]) [data-key=\"view-downloads\"]")
         .await;
     shell.wait_for_state("job-1", "Done").await;
+    shell.click("[data-key=\"menu-job-1\"]").await;
+    shell.click("[data-key=\"menu-item-remove\"]").await;
+    shell
+        .wait_for("document.querySelector('dialog input[value=\"keep\"]')?.checked === true")
+        .await;
+    shell.click("dialog input[value=\"delete\"]").await;
+    shell.wait_for("document.querySelector('dialog button[type=\"submit\"]')?.textContent === 'Delete files and remove'").await;
+    shell.click("dialog button[type=\"submit\"]").await;
+    shell.wait_for("!document.querySelector('dialog') && !document.querySelector('tr[data-job=\"job-1\"]')").await;
+    assert!(!dirs.root.join("start.bin").exists());
+    shell.close().await;
+    let shell = Shell::launch(&dirs).await;
+    shell
+        .click(".workspace > :not([hidden]) [data-key=\"view-links\"]")
+        .await;
+    shell
+        .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 1")
+        .await;
+    assert_eq!(collected(&shell).await, json!(["keep.bin"]));
     shell.close().await;
 }
 

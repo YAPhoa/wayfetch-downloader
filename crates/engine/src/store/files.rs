@@ -645,7 +645,7 @@ impl Store {
         let tx = self.read()?;
         let mut statement = tx.prepare(&format!(
             "SELECT {STAGING_COLUMNS} FROM staging_files s \
-             WHERE root_id = ?1 AND cleanup = 'pending' AND NOT EXISTS ( \
+             WHERE root_id = ?1 AND cleanup = 'pending' AND NOT EXISTS (SELECT 1 FROM deletions d WHERE d.job_id = s.job_id) AND NOT EXISTS ( \
                  SELECT 1 FROM publications p WHERE p.state = 'intended' \
                  AND p.root_id = s.root_id AND p.staging_name = s.name) \
              ORDER BY job_id, generation LIMIT ?2"

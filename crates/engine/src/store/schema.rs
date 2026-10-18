@@ -34,6 +34,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0011_accounts.sql")),
     M::up(include_str!("migrations/0012_provider_downloads.sql")),
     M::up(include_str!("migrations/0013_speed_limit.sql")),
+    M::up(include_str!("migrations/0014_download_removal.sql")),
 ];
 
 /// Newest schema version this engine knows.
@@ -109,6 +110,49 @@ mod tests {
             .query_row("SELECT count(*) FROM accounts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(accounts, 0);
+    }
+
+    #[test]
+    fn download_removal_upgrade_hides_only_started_sources_without_changing_identity() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATIONS[..13])
+            .to_latest(&mut conn)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO packages (id, name, created_at) VALUES (1, 'p', 0);
+             INSERT INTO input_batches (id, package_id, input_count, created_at) VALUES (1, 1, 2, 0);
+             INSERT INTO source_links (id, batch_id, ordinal, input_url, held, listed, revision)
+                 VALUES (11, 1, 0, 'https://files.example/started', 0, 1, 5),
+                        (12, 1, 1, 'https://files.example/held', 1, 1, 7);
+             INSERT INTO jobs (id, source_link_id, package_id, desired_state, stage,
+                 generation, revision, created_at, updated_at)
+                 VALUES (21, 11, 1, 'running', 'queued', 3, 9, 0, 0);",
+        ).unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
+        let sources = conn
+            .prepare("SELECT id, held, listed, revision FROM source_links ORDER BY id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(sources, [(11, 0, 0, 5), (12, 1, 1, 7)]);
+        let job: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT id,source_link_id,generation,revision FROM jobs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(job, (21, 11, 3, 9));
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
     }
 
     #[test]
@@ -217,8 +261,8 @@ mod tests {
             })
         };
         let before = provider_state(&conn);
-        assert_eq!(migrate(&mut conn).unwrap(), 13);
-        assert_eq!(migrate(&mut conn).unwrap(), 13);
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
         assert_eq!(provider_state(&conn), before);
         let saved: (i64, i64, Option<i64>) = conn
             .query_row(

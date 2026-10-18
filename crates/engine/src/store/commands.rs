@@ -21,7 +21,9 @@ use wayfetch_protocol::{
 
 use super::links::{self, Unusable};
 use super::operations::{self, OperationState};
-use super::{Store, StoreError, accounts, files, jobs, key, outbox, renames, roots, sql};
+use super::{
+    Store, StoreError, accounts, deletions, files, jobs, key, outbox, renames, roots, sql,
+};
 
 /// What the coordinator knows about destinations when a command runs.
 #[derive(Debug, Clone, Default)]
@@ -119,11 +121,11 @@ impl Store {
                 account,
                 expected_revision,
             } => accounts::remove(&tx, *account, *expected_revision)?,
-            // The file is renamed between the store's two steps.
-            Command::Rename { .. } => {
+            // File mutations run between the store’s intent and completion steps.
+            Command::Rename { .. } | Command::DeleteFiles { .. } => {
                 return Err(ProtocolError::new(
                     ErrorCode::Internal,
-                    "a rename runs through Store::begin_rename",
+                    "file mutations run through their intent and completion methods",
                 ));
             }
             // The account is stored once the person approved it.
@@ -155,6 +157,15 @@ pub(super) fn replayed(
         ));
     }
     let key = envelope.idempotency_key.as_uuid().to_string();
+    if let Some(fingerprint) = deletions::holding(tx, &key)? {
+        if fingerprint != envelope.command.fingerprint().as_bytes() {
+            return Err(ProtocolError::new(
+                ErrorCode::IdempotencyConflict,
+                "idempotency key was used for a different command",
+            ));
+        }
+        return Err(StoreError::Busy("data deletion is unfinished; retry deletion").into());
+    }
     // An unfinished rename records its result under its key when it ends.
     if let Some(fingerprint) = renames::holding(tx, &key)? {
         if fingerprint != envelope.command.fingerprint().as_bytes() {
@@ -293,6 +304,7 @@ fn request(
     now: UtcTimestamp,
     apply: impl FnOnce(&mut JobState) -> Result<Outcome, JobError>,
 ) -> Result<CommandResult, StoreError> {
+    deletions::check_idle(tx, id)?;
     let mut job = jobs::load_listed(tx, id)?;
     let previous = job.state;
     let outcome = apply(&mut job.state)?;
@@ -324,6 +336,7 @@ fn retry(
     repeat: bool,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
+    deletions::check_idle(tx, id)?;
     let mut job = jobs::load_listed(tx, id)?;
     let previous = job.state;
     // Revision and stage first: a stale or inapplicable request says so.
@@ -370,7 +383,7 @@ fn retry(
 
 /// Removes a finished, failed, or cancelled job from lists and counts, with
 /// a `job_removed` event. Its files and records stay.
-fn remove(
+pub(super) fn remove(
     tx: &Transaction<'_>,
     id: JobId,
     expected: Revision,
@@ -383,6 +396,8 @@ fn remove(
             "the job's file is being renamed; try again once that finishes",
         ));
     }
+    // List-only removal explicitly abandons an unfinished destructive intent.
+    tx.execute("DELETE FROM deletions WHERE job_id = ?1", [sql(id)?])?;
     tx.execute(
         "UPDATE jobs SET removed_at = ?1, updated_at = ?1 WHERE id = ?2",
         params![now.unix_millis(), sql(id)?],
