@@ -7,6 +7,7 @@ import type { FailureSummary } from "./FailureSummary.js";
 import type { Generation } from "./Generation.js";
 import type { HostName } from "./HostName.js";
 import type { JobId } from "./JobId.js";
+import type { JobMedia } from "./JobMedia.js";
 import type { JobRoute } from "./JobRoute.js";
 import type { JobStage } from "./JobStage.js";
 import type { PackageId } from "./PackageId.js";
@@ -94,4 +95,9 @@ restart_reason?: DiagnosticText | null,
  * accounts. Boxed, as most jobs have none, to keep summaries and the
  * events carrying them small. Added in protocol 2.2.
  */
-route?: JobRoute, };
+route?: JobRoute, 
+/**
+ * For a download of a media link: its service and what it is made
+ * as. Added in protocol 4.0.
+ */
+media?: JobMedia, };

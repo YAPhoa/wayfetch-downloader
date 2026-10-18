@@ -12,6 +12,7 @@
 //! * [`query`]: bounded, paginated reads;
 //! * [`request`]: command request bodies clients send, shared by transports;
 //! * [`event`]: durable events, progress samples, and resync rules;
+//! * [`media`]: media links, their choices, and the plugins they need;
 //! * [`error`]: structured errors.
 
 pub mod account;
@@ -19,6 +20,7 @@ pub mod command;
 pub mod error;
 pub mod event;
 pub mod instance;
+pub mod media;
 pub mod query;
 pub mod request;
 

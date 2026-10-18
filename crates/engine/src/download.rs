@@ -49,6 +49,7 @@ use crate::config::{Limits, Timeouts};
 use crate::destinations::Destination;
 use crate::fs::{FsError, PublicationCheck, RelativePath, Root, StagingFile, StagingRecord};
 use crate::lifecycle::{Resolution, ResolvedLink, SoleAttempt, StoreClient};
+use crate::media::{Converter, MediaService};
 use crate::store::{Admission, Partial, Store, StoreError};
 use crate::transfer::lease::{
     LeaseSource, Parallelism, ReplayPolicy, Representation, RequestRef, ResumePolicy, Transfer,
@@ -58,6 +59,8 @@ use crate::transfer::range::{self, Plan};
 use crate::transfer::throttle::Bandwidth;
 use crate::transfer::transport::{OpenRequest, Response, Transport};
 use crate::transfer::writer::{IntervalWriter, StreamEnd, WriteError};
+
+mod media;
 
 /// The host's one egress route; routes are not configurable yet.
 const DEFAULT_ROUTE: RouteId = RouteId::new(std::num::NonZeroU64::MIN);
@@ -104,6 +107,8 @@ mod why {
     pub(super) const NOTHING_LEFT: &str = "the server said nothing was left to send, but the saved data could not be confirmed complete";
     pub(super) const PUBLICATION_LOST: &str =
         "the finished file was missing or damaged before it could be saved";
+    pub(super) const MEDIA_CHANGED: &str =
+        "the video's formats changed since the saved data was downloaded";
     pub(super) const NEW_LINK: &str = "the download host no longer accepted the provider's link, \
          and a new link cannot continue the saved data";
 }
@@ -190,6 +195,19 @@ pub(crate) struct Download {
     pub(crate) job: Admission,
     /// No earlier task of the job runs in this process.
     pub(crate) attempt: SoleAttempt,
+    /// For a download of a media link: what makes it.
+    pub(crate) media: Option<MediaJob>,
+}
+
+/// What makes a media download.
+#[derive(Clone)]
+pub(crate) struct MediaJob {
+    /// The media service; `None` if the host no longer registers it.
+    pub(crate) service: Option<Arc<dyn MediaService>>,
+    /// What to make.
+    pub(crate) choice: wayfetch_protocol::media::MediaChoice,
+    /// The converter, if one can be used.
+    pub(crate) converter: Option<Arc<dyn Converter>>,
 }
 
 impl Download {
@@ -245,17 +263,13 @@ impl Download {
         let url =
             Url::parse(&self.job.url).map_err(|e| failed(FailureCode::AdapterParseFailure, e))?;
         let root = Arc::new(self.open_root().await?);
-        if self.job.stage == JobStage::Recovering {
-            if self.reconcile_publication(&root).await? {
-                return Ok(());
-            }
-            if self.job.desired != DesiredState::Running {
-                return Err(Stop::Interrupted);
-            }
-        } else if self.settle_retried_publication(&root).await? {
+        if self.settle_publication(&root).await? {
             return Ok(());
         }
-        let continued = match self.continue_partial(&root).await? {
+        if self.media.is_some() {
+            return self.drive_media(&root, &url).await;
+        }
+        let continued = match self.continue_partial(&root, false).await? {
             // Every byte is already durable, for example after a crash
             // between the last checkpoint and publication.
             Some(c) if c.partial.is_complete() => {
@@ -432,6 +446,21 @@ impl Download {
             })
     }
 
+    /// Settles a publication an earlier run or attempt left unfinished.
+    /// Returns `true` if the job is now complete.
+    async fn settle_publication(&mut self, root: &Arc<Root>) -> Result<bool, Stop> {
+        if self.job.stage == JobStage::Recovering {
+            if self.reconcile_publication(root).await? {
+                return Ok(true);
+            }
+            if self.job.desired != DesiredState::Running {
+                return Err(Stop::Interrupted);
+            }
+            return Ok(false);
+        }
+        self.settle_retried_publication(root).await
+    }
+
     /// Opens the job's destination root, blocking the job if it is
     /// unavailable.
     async fn open_root(&self) -> Result<Root, Stop> {
@@ -587,8 +616,14 @@ impl Download {
     /// the generation's own file (a resumed pause), after a restart the
     /// previous run's file, or after a retry the file the retry reserved,
     /// adopted by this generation. A partial that cannot be continued
-    /// queues the job again, saying why.
-    async fn continue_partial(&mut self, root: &Arc<Root>) -> Result<Option<Continued>, Stop> {
+    /// queues the job again, saying why. A media download's partial is
+    /// identified by its media service's identity, which the caller
+    /// compares with a fresh plan.
+    async fn continue_partial(
+        &mut self,
+        root: &Arc<Root>,
+        media: bool,
+    ) -> Result<Option<Continued>, Stop> {
         let (job, generation, epoch) = (self.job.job, self.job.generation, self.boot_epoch);
         let Some(partial) = self.call(move |s| s.latest_staging(job)).await?? else {
             return Ok(None);
@@ -606,10 +641,13 @@ impl Download {
         if reserved && partial.durable_end == 0 {
             return Ok(None);
         }
-        let trusted = partial
-            .representation
-            .as_ref()
-            .is_some_and(|r| r.is_trustworthy() || r.length == Some(partial.durable_end));
+        let trusted = partial.representation.as_ref().is_some_and(|r| {
+            if media {
+                r.resource.is_some() && r.length.is_some()
+            } else {
+                r.is_trustworthy() || r.length == Some(partial.durable_end)
+            }
+        });
         if partial.durable_end == 0 {
             return Err(Stop::Restart(why::NOTHING_SAVED));
         }
@@ -679,12 +717,35 @@ impl Download {
             validators: stored.clone(),
             connect_timeout: self.timeouts.connect,
             read_buffer: self.limits.read_buffer_bytes.get(),
+            user_agent: None,
         };
+        let response = self.send(&request).await?;
+        // A provider's link must serve what the provider described.
+        if let Some(transfer) = transfer
+            && transfer.observe(response.representation.clone()).is_err()
+        {
+            return Err(failed(
+                FailureCode::IntegrityMismatch,
+                "the download host's file is not the size the provider reported",
+            ));
+        }
+        let changed = stored
+            .as_ref()
+            .is_some_and(|stored| *stored != response.representation);
+        let known = stored.as_ref().and_then(|r| r.length);
+        let plan = range::plan(requested, response.framing, known)
+            .map_err(|e| failed(FailureCode::IntegrityMismatch, e))?;
+        self.opened(response, plan, continued, stored.as_ref(), changed)
+    }
+
+    /// Sends `request` within the response deadline, unless the job is
+    /// interrupted first, with oversized validators dropped.
+    async fn send(&self, request: &OpenRequest) -> Result<Response, Stop> {
         let deadline = self.timeouts.response;
-        let response = tokio::select! {
+        Ok(tokio::select! {
             biased;
             () = self.cancel.cancelled() => return Err(Stop::Interrupted),
-            opened = tokio::time::timeout(deadline, self.transport.open(&request)) => match opened {
+            opened = tokio::time::timeout(deadline, self.transport.open(request)) => match opened {
                 Err(_) => {
                     return Err(failed(
                         FailureCode::RequestTimeout,
@@ -705,22 +766,19 @@ impl Download {
                     response
                 }
             },
-        };
-        // A provider's link must serve what the provider described.
-        if let Some(transfer) = transfer
-            && transfer.observe(response.representation.clone()).is_err()
-        {
-            return Err(failed(
-                FailureCode::IntegrityMismatch,
-                "the download host's file is not the size the provider reported",
-            ));
-        }
-        let changed = stored
-            .as_ref()
-            .is_some_and(|stored| *stored != response.representation);
-        let known = stored.as_ref().and_then(|r| r.length);
-        let plan = range::plan(requested, response.framing, known)
-            .map_err(|e| failed(FailureCode::IntegrityMismatch, e))?;
+        })
+    }
+
+    /// What a response planned as `plan` opens: a body to write, the
+    /// continued partial already covering it, or a reason to restart.
+    fn opened(
+        &self,
+        response: Response,
+        plan: Plan,
+        continued: Option<&Continued>,
+        stored: Option<&Representation>,
+        changed: bool,
+    ) -> Result<Opened, Stop> {
         let (start, end, complete) = match plan {
             Plan::Write {
                 start,
@@ -734,7 +792,7 @@ impl Download {
                 complete: Some(complete),
             } if continued
                 .is_some_and(|c| c.partial.contiguous && c.partial.durable_end == complete)
-                && stored.as_ref().is_some_and(|s| {
+                && stored.is_some_and(|s| {
                     s.resource.is_some()
                         && s.resource == response.representation.resource
                         && !s.contradicts(&response.representation)
@@ -1198,6 +1256,7 @@ mod tests {
             bandwidth: Arc::new(Bandwidth::new(SpeedLimit::Unlimited)),
             cancel: CancellationToken::new(),
             guard: Arc::new(()),
+            media: None,
             job: Admission {
                 job,
                 stage,
@@ -1206,6 +1265,7 @@ mod tests {
                 url: URL.into(),
                 root: Some(root_id),
                 route: None,
+                media: None,
             },
             attempt: SoleAttempt::assume(job),
         };

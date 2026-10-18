@@ -146,7 +146,7 @@ impl Message for Output<'_> {
                  can. Initialize a new root with `wayfetch init-root`."
             ),
             Self::Event { event } => match &event.kind {
-                EventKind::BatchAccepted { .. } => return None,
+                EventKind::BatchAccepted { .. } | EventKind::LinksChanged => return None,
                 EventKind::JobAdded { job } => format!("added {}", job_line(job)),
                 EventKind::JobChanged { job } => job_line(job),
                 EventKind::JobRemoved { job } => format!("{job}: removed from the list"),

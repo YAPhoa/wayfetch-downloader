@@ -865,6 +865,9 @@ table.links tbody.batch:not(:first-of-type) .batch-head > * { border-top: 6px so
 .links td.link-status.tone-bad .status-detail { color: var(--bad); }
 
 .links td.folder { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.links td.format { white-space: nowrap; }
+.links td.format select { max-width: 160px; }
+.links td.format .unknown { color: var(--muted); }
 .links td.folder .path { font-family: ui-monospace, monospace; color: var(--muted); }
 
 /* The Settings page: a menu of sections beside the selected one. */

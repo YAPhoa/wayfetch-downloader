@@ -18,6 +18,7 @@ use crate::command::{
 };
 use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
+use crate::media::MediaChoice;
 
 /// Submits a batch of URLs.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -290,6 +291,9 @@ pub enum LinksAction {
     Remove,
     /// [`Command::MoveLinks`], with the request's `destination`.
     Move,
+    /// [`Command::ChooseLinkMedia`], with the request's `media`. Added in
+    /// protocol 4.0.
+    ChooseMedia,
 }
 
 /// Starts, removes, or moves collected links at the revisions the client
@@ -321,6 +325,11 @@ pub struct LinksCommandRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub routing: Option<StartRouting>,
+    /// What to download media links as, for [`LinksAction::ChooseMedia`]
+    /// only. Added in protocol 4.0.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub media: Option<MediaChoice>,
 }
 
 impl LinksCommandRequest {
@@ -338,6 +347,12 @@ impl LinksCommandRequest {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidRequest,
                 "only a start takes an account",
+            ));
+        }
+        if self.media.is_some() != (self.action == LinksAction::ChooseMedia) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "a media choice is needed for, and only taken by, choosing media",
             ));
         }
         let command = match (self.action, self.destination) {
@@ -360,6 +375,10 @@ impl LinksCommandRequest {
                 routing: self.routing,
             },
             (LinksAction::Remove, None) => Command::RemoveLinks { links },
+            (LinksAction::ChooseMedia, None) => Command::ChooseLinkMedia {
+                links,
+                choice: self.media.unwrap_or_default(),
+            },
         };
         Ok(CommandEnvelope {
             idempotency_key: self.idempotency_key,

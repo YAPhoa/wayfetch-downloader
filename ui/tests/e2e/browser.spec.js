@@ -475,6 +475,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
     'Downloads',
     'Download folders',
     'Accounts & services',
+    'Plugins',
     'Display',
   ]);
   const pane = page.locator('.settings-content');

@@ -167,10 +167,10 @@ export class Downloads {
     this.feed = new JobFeed(client, {
       pageSize: PAGE_SIZE,
       onChange: () => this.schedule(),
-      // Collecting and starting links change the Links list; reconnecting
-      // may have missed either.
+      // Collecting and starting links change the Links list, and so does
+      // a video link's title arriving; reconnecting may have missed any.
       onEvent: (kind) => {
-        if (kind === null || kind.type === 'batch_accepted' || kind.type === 'job_added') {
+        if (kind === null || kind.type === 'batch_accepted' || kind.type === 'job_added' || kind.type === 'links_changed') {
           void this.linksPage.refresh();
         }
         // Another client, or window, changed the settings.

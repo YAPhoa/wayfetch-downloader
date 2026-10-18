@@ -1,6 +1,6 @@
 // The Settings page: how many downloads run at once and how fast they may
 // download together, where new downloads are saved, accounts with
-// download services, and how the list looks.
+// download services, the plugins video links use, and how the list looks.
 // Only what Wayfetch supports today can be changed here. A menu of
 // sections sits beside the selected section, as in a desktop app's
 // preferences.
@@ -27,6 +27,7 @@ import { focusedKey, h, refocus, show } from './dom.js';
 import { browseServerFolders } from './folders.js';
 import { icon } from './icons.js';
 import { accountsSection } from './accounts.js';
+import { pluginsSection } from './plugins.js';
 import { toolbar } from './toolbar.js';
 
 /**
@@ -43,7 +44,7 @@ import { toolbar } from './toolbar.js';
  * @typedef {Pick<import('../client/contract.js').SettingsChange, 'maxActiveDownloads' | 'downloadSpeedLimit'>} Change
  * @typedef {'KiB' | 'MiB'} RateUnit
  * @typedef {'compact' | 'comfortable'} Density
- * @typedef {'downloads' | 'folder' | 'display' | 'accounts'} Section
+ * @typedef {'downloads' | 'folder' | 'display' | 'accounts' | 'plugins'} Section
  */
 
 /**
@@ -63,7 +64,7 @@ import { toolbar } from './toolbar.js';
 
 /**
  * The sections, in menu order.
- * @type {{ id: Section, label: string, about: string, icon: 'brand' | 'folder' | 'display' | 'accounts' }[]}
+ * @type {{ id: Section, label: string, about: string, icon: 'brand' | 'folder' | 'display' | 'accounts' | 'plugins' }[]}
  */
 export const SECTIONS = [
   { id: 'downloads', label: 'Downloads', about: 'How downloads run.', icon: 'brand' },
@@ -73,6 +74,12 @@ export const SECTIONS = [
     label: 'Accounts & services',
     about: 'Download services you can use with an account, such as multi-host services.',
     icon: 'accounts',
+  },
+  {
+    id: 'plugins',
+    label: 'Plugins',
+    about: 'Programs Wayfetch runs for video links, such as YouTube.',
+    icon: 'plugins',
   },
   { id: 'display', label: 'Display', about: 'Appearance and downloads list layout.', icon: 'display' },
 ];
@@ -498,6 +505,7 @@ export class SettingsPage {
         hello: this.context.hello,
         onSignedOut: this.context.onSignedOut,
       }),
+      plugins: pluginsSection({ client: this.context.client, onSignedOut: this.context.onSignedOut }),
     };
     show(
       this.content,

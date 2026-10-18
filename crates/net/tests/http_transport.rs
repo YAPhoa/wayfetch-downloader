@@ -43,6 +43,7 @@ fn request(url: &str) -> OpenRequest {
         validators: None,
         connect_timeout: Duration::from_secs(5),
         read_buffer: READ_BUFFER,
+        user_agent: None,
     }
 }
 

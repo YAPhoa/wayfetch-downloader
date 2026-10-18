@@ -4,6 +4,7 @@ import type { IdempotencyKey } from "./IdempotencyKey.js";
 import type { InstanceId } from "./InstanceId.js";
 import type { LinkRef } from "./LinkRef.js";
 import type { LinksAction } from "./LinksAction.js";
+import type { MediaChoice } from "./MediaChoice.js";
 import type { RootId } from "./RootId.js";
 import type { StartRouting } from "./StartRouting.js";
 
@@ -42,4 +43,9 @@ account?: AccountId,
  * Explicit route intent for a start. Absent uses
  * automatic selection; cannot be combined with an account. Added in 3.0.
  */
-routing?: StartRouting, };
+routing?: StartRouting, 
+/**
+ * What to download media links as, for [`LinksAction::ChooseMedia`]
+ * only. Added in protocol 4.0.
+ */
+media?: MediaChoice, };

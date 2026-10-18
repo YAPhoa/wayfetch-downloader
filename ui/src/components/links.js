@@ -15,6 +15,10 @@
 // - The page re-reads the list when shown, after events that can change
 //   it, and now and then while shown, since removals and moves made in
 //   another window have no event of their own.
+// - A video link, such as YouTube's, shows its title once its service
+//   has read it, and a Format list: the best video, a picture height, or
+//   sound only as MP3 or M4A. Formats that need a missing plugin are
+//   listed but cannot be chosen.
 //
 // Route: `/links`.
 
@@ -29,6 +33,7 @@ import {
   matches,
   refusals,
 } from '../client/links.js';
+import { choiceKey, choiceLabel, optionFor } from '../client/media.js';
 import { accountName, canChooseRoute, routeAccounts } from '../client/routes.js';
 import { openDialog } from './dialog.js';
 import { copyText, focusedKey, h, refocus, show } from './dom.js';
@@ -48,6 +53,7 @@ import { loadServices } from './services.js';
  * @typedef {import('../client/contract.js').CommandResult} CommandResult
  * @typedef {import('../client/contract.js').AccountId} AccountId
  * @typedef {import('../client/contract.js').AccountSummary} AccountSummary
+ * @typedef {import('../client/contract.js').MediaChoice} MediaChoice
  * @typedef {import('./menu.js').Menu} Menu
  * @typedef {import('./menu.js').MenuEntry} MenuEntry
  * @typedef {import('./menu.js').Anchor} Anchor
@@ -353,8 +359,9 @@ export class LinksPage {
    * @param {RootId} [destination]
    * @param {AccountId} [account] for a start: the account to download through
    * @param {StartRouting} [routing] explicit route override
+   * @param {MediaChoice} [media] for choosing media: what to download
    */
-  async act(action, links, destination, account, routing) {
+  async act(action, links, destination, account, routing, media) {
     const hello = this.context.hello();
     if (links.length === 0 || this.busy) return;
     if (!hello) {
@@ -374,6 +381,7 @@ export class LinksPage {
         destination,
         account,
         routing,
+        media,
       });
     } catch (error) {
       if (error instanceof WayfetchError && error.code === 'unauthenticated') {
@@ -384,7 +392,7 @@ export class LinksPage {
     } finally {
       this.busy = false;
     }
-    const outcome = result?.type === 'links_applied' ? this.applied(action, result, destination) : null;
+    const outcome = result?.type === 'links_applied' ? this.applied(action, result, destination, media) : null;
     await this.refresh();
     // Said once the list shows it.
     if (outcome) this.say(outcome.text, outcome);
@@ -396,20 +404,23 @@ export class LinksPage {
    * @param {LinksAction} action
    * @param {Extract<CommandResult, { type: 'links_applied' }>} result
    * @param {RootId} [destination]
+   * @param {MediaChoice} [media]
    */
-  applied(action, { applied, refused: notApplied }, destination) {
-    // Moved links stay selected, ready to start.
-    if (action !== 'move') for (const { link } of applied) this.selected.delete(link);
+  applied(action, { applied, refused: notApplied }, destination, media) {
+    // Moved links, and links given a format, stay selected, ready to start.
+    if (action !== 'move' && action !== 'choose_media') for (const { link } of applied) this.selected.delete(link);
     const n = applied.length;
     const done = {
       start: n > 0 && `Started ${count(n, 'download')}.`,
       remove: n > 0 && `Removed ${count(n, 'link')} from the list.`,
       move: n > 0 && destination && `${count(n, 'link')} will be saved to ${this.context.rootPath(destination)}.`,
+      choose_media: n > 0 && media && `${count(n, 'video')} will download as ${choiceLabel(media)}.`,
     }[action];
     const not = {
       start: 'not started',
       remove: 'not removed',
       move: 'not changed',
+      choose_media: 'not changed',
     }[action];
     const problems =
       notApplied.length > 0 && `${count(notApplied.length, 'link')} ${not}: ${refusals(notApplied)}`;
@@ -816,6 +827,7 @@ export class LinksPage {
         h('th', { scope: 'col', class: 'check' }, this.selectAll),
         h('th', { scope: 'col', class: 'name' }, 'Name'),
         h('th', { scope: 'col', class: 'host' }, 'Host'),
+        h('th', { scope: 'col', class: 'format' }, 'Format'),
         h('th', { scope: 'col', class: 'num' }, 'Size'),
         h('th', { scope: 'col', class: 'link-status' }, 'Status'),
         h('th', { scope: 'col', class: 'folder' }, 'Save to'),
@@ -856,7 +868,7 @@ export class LinksPage {
         h('td', { class: 'check' }, box),
         h(
           'th',
-          { scope: 'rowgroup', colspan: 6 },
+          { scope: 'rowgroup', colspan: 7 },
           h('span', { class: 'batch-title' }, label),
           h('span', { class: 'batch-count' }, count(links.length, 'link')),
           invalid > 0 && h('span', { class: 'batch-count problem' }, `${invalid} invalid`),
@@ -930,6 +942,7 @@ export class LinksPage {
         shownName,
       ),
       h('td', { class: 'host', title: link.host ?? null }, link.host ?? ''),
+      h('td', { class: 'format' }, this.format(link, shownName)),
       h('td', { class: 'num unknown' }, 'Unknown'),
       h(
         'td',
@@ -965,6 +978,44 @@ export class LinksPage {
       ),
       h('td', { class: 'row-actions' }, more),
     );
+  }
+
+  /**
+   * A video link's Format list, or what it downloads as once started;
+   * nothing for other links.
+   * @param {CollectedLink} link
+   * @param {string} shownName
+   */
+  format(link, shownName) {
+    const media = link.media;
+    if (!media) return null;
+    const current = choiceKey(media.choice);
+    if (link.job || !this.canControl) return h('span', { class: 'choice-label' }, choiceLabel(media.choice));
+    if (media.options.length === 0) {
+      return h('span', { class: 'choice-label unknown' }, media.state === 'checking' ? 'Checking…' : choiceLabel(media.choice));
+    }
+    const select = h(
+      'select',
+      {
+        'data-key': `link-format-${link.id}`,
+        'aria-label': `Format of ${shownName}`,
+        title: media.needs ?? null,
+        disabled: this.busy,
+        onchange: () => {
+          const option = optionFor(media.options, select.value);
+          if (option) void this.act('choose_media', [link], undefined, undefined, undefined, option.choice);
+        },
+      },
+      media.options.map((option) => {
+        const key = choiceKey(option.choice);
+        return h(
+          'option',
+          { value: key, selected: key === current, disabled: !option.available },
+          option.available ? choiceLabel(option.choice) : `${choiceLabel(option.choice)} (needs a plugin)`,
+        );
+      }),
+    );
+    return select;
   }
 
   /** @param {'next' | 'back'} direction */
