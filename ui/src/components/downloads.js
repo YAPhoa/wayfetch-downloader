@@ -328,6 +328,7 @@ export class Downloads {
         this.linkTotal = total;
         this.renderViews();
       },
+      onStarted: (text) => this.started(text),
       toolbar: (tools, search) => this.toolbar(tools, search),
       menu: this.linksMenu,
     });
@@ -708,6 +709,18 @@ export class Downloads {
     this.navigate(LINKS_PATH);
     this.linksPage.say(collectedText(result), { ok: result.invalid === 0, warn: result.invalid > 0 });
     void this.linksPage.refresh().then(() => this.linksPage.selectBatch(result.batch));
+  }
+
+  /**
+   * Shows the whole Downloads list once links were started, saying how
+   * many.
+   * @param {string} text
+   */
+  started(text) {
+    this.filter('all');
+    this.navigate('/');
+    this.done(text);
+    this.schedule();
   }
 
   /** Whether this client may change downloads. */
