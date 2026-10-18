@@ -320,6 +320,17 @@ impl Download {
         let mut refused = None;
         loop {
             let link = self.resolve(original, refused).await?;
+            // Continued bytes retain their response name, which outranks
+            // the provider's suggestion.
+            if continued
+                .and_then(|c| c.partial.suggested_name.as_ref())
+                .is_none()
+                && let Some(name) = link.link.filename.clone()
+            {
+                let (job, generation) = (self.job.job, self.job.generation);
+                self.call(move |s| s.record_suggested_name(job, generation, &name, now()))
+                    .await??;
+            }
             let mut transfer = self.lease(&link).await?;
             match self
                 .request(&link.link.url, continued, Some(&mut transfer))
@@ -994,7 +1005,7 @@ pub(crate) fn url_file_name(url: &Url) -> Option<RelativePath> {
 
 /// `name` as a single valid path component, which cannot choose a
 /// directory.
-fn file_name(name: &str) -> Option<RelativePath> {
+pub(crate) fn file_name(name: &str) -> Option<RelativePath> {
     if name.contains('/') {
         return None;
     }

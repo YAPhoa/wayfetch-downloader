@@ -885,7 +885,14 @@ async fn links_are_collected_reviewed_and_started_over_http() {
             .map(|l| json!({"link": l["id"], "revision": l["revision"]}))
             .collect::<Vec<_>>()
     };
-    let start = client.command(json!({"action": "start", "links": refs(&[a])}));
+    // Default automatic routing cannot expand this submit-only token's
+    // provider authority, even with no accounts. Direct is explicit.
+    let automatic = client.command(json!({"action": "start", "links": refs(&[a])}));
+    let (status, denied) = client.post("/v1/staging/commands", &automatic).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert!(denied["message"].as_str().unwrap().contains("Direct"));
+    let start =
+        client.command(json!({"action": "start", "links": refs(&[a]), "routing": "direct"}));
     let (status, started) = client.post("/v1/staging/commands", &start).await;
     assert_eq!(status, StatusCode::OK, "{started}");
     let job = started["applied"][0]["job"].as_str().unwrap().to_owned();
@@ -2049,8 +2056,7 @@ async fn links_are_downloaded_through_a_real_debrid_account_over_http() {
         downloader.get("/v1/accounts").await.0,
         StatusCode::FORBIDDEN
     );
-    let start =
-        downloader.command(json!({"action": "start", "links": refs(first), "account": account}));
+    let start = downloader.command(json!({"action": "start", "links": refs(first)}));
     let (status, started) = downloader.post("/v1/staging/commands", &start).await;
     assert_eq!(status, StatusCode::OK, "{started}");
     let job = started["applied"][0]["job"].as_str().unwrap().to_owned();
@@ -2066,6 +2072,7 @@ async fn links_are_downloaded_through_a_real_debrid_account_over_http() {
         json!({"service": "real-debrid", "account": account})
     );
     assert_eq!(provider.hits(rd::UNRESTRICT_PATH), 1);
+    assert_eq!(provider.hits("/rest/1.0/hosts/domains"), 1);
     let unrestricted = provider
         .log()
         .into_iter()

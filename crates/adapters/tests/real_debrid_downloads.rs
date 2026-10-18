@@ -170,6 +170,103 @@ async fn every_refusal_says_what_to_do_and_is_not_repeated() {
 }
 
 #[tokio::test]
+async fn bare_and_unknown_authorization_refusals_are_actionable_and_bounded() {
+    const PRIVATE: &str = "synthetic-private-response-never-echoed";
+    for status in [401, 403] {
+        for body in [
+            String::new(),
+            format!("access refused: {PRIVATE}"),
+            format!(r#"{{"error":"{PRIVATE}"}}"#),
+            format!(r#"{{"error":"{PRIVATE}","error_code":9876}}"#),
+        ] {
+            let server = Server::start().await;
+            let rd = provider(&server);
+            let credential = sign_in(&rd).await;
+            server.with(|state| {
+                state
+                    .always
+                    .insert(UNRESTRICT_PATH, Answer::json(status, body));
+            });
+            let answer = unrestrict(&rd, &credential).await;
+            let Unrestricted::Refused {
+                code,
+                message,
+                retry_after,
+            } = &answer.result
+            else {
+                panic!("{:?}", answer.result);
+            };
+            assert_eq!(*code, FailureCode::InvalidCredentials);
+            assert!(retry_after.is_none());
+            assert!(
+                message.contains("Settings > Accounts & services"),
+                "{message}"
+            );
+            assert!(message.contains(&format!("HTTP {status}")), "{message}");
+            if status == 401 {
+                assert!(message.contains("Authorization failed"), "{message}");
+                assert!(message.contains("Sign this account in again"), "{message}");
+                assert!(answer.refreshed.is_some());
+                assert_eq!(server.hits(TOKEN_PATH), 2, "one refresh after sign-in");
+                assert_eq!(server.hits(UNRESTRICT_PATH), 2, "refresh and retry once");
+            } else {
+                assert!(message.contains("Forbidden"), "{message}");
+                assert!(message.contains("access denied"), "{message}");
+                assert!(!message.contains("password"), "{message}");
+                assert!(answer.refreshed.is_none());
+                assert_eq!(server.hits(TOKEN_PATH), 1, "no refresh for Forbidden");
+                assert_eq!(server.hits(UNRESTRICT_PATH), 1, "never replay Forbidden");
+            }
+            assert_eq!(server.with(|state| state.generated.len()), 0);
+            let shown = format!("{answer:?}");
+            for secret in [
+                PRIVATE,
+                "synthetic-access-",
+                "synthetic-refresh-",
+                SIGNATURE,
+            ] {
+                assert!(!shown.contains(secret), "secret in diagnostic");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn known_authorization_refusal_codes_keep_their_specific_meaning() {
+    for (status, code, failure, detail) in [
+        (401, 20, FailureCode::HostUnavailableViaProvider, "premium"),
+        (403, 20, FailureCode::HostUnavailableViaProvider, "premium"),
+        (403, 23, FailureCode::QuotaExhausted, "traffic"),
+        (403, 14, FailureCode::InvalidCredentials, "locked"),
+    ] {
+        let server = Server::start().await;
+        let rd = provider(&server);
+        let credential = sign_in(&rd).await;
+        server.with(|state| {
+            state.always.insert(
+                UNRESTRICT_PATH,
+                Answer::json(
+                    status,
+                    format!(r#"{{"error":"synthetic","error_code":{code}}}"#),
+                ),
+            );
+        });
+        let answer = unrestrict(&rd, &credential).await;
+        let Unrestricted::Refused { code, message, .. } = answer.result else {
+            panic!()
+        };
+        assert_eq!(code, failure);
+        assert!(message.contains(detail), "{message}");
+        assert_eq!(
+            server.hits(UNRESTRICT_PATH),
+            if status == 401 { 2 } else { 1 }
+        );
+        assert_eq!(server.hits(TOKEN_PATH), if status == 401 { 2 } else { 1 });
+        assert_eq!(server.with(|state| state.generated.len()), 0);
+    }
+}
+
+#[tokio::test]
 async fn a_rate_limit_says_when_to_try_again() {
     let server = Server::start().await;
     let rd = provider(&server);

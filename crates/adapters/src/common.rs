@@ -193,17 +193,37 @@ impl Api {
         }
     }
 
-    /// Classifies a status the integration did not expect: rate limits and
-    /// server errors are temporary, anything else malformed. `detail` is
-    /// the provider's own error code, if it gave one.
+    /// Classifies a status the integration did not expect: authorization
+    /// refusals need account action, rate limits and server errors are
+    /// temporary, and anything else is malformed. `detail` is the
+    /// provider's own error code, if it gave one.
     pub fn unexpected(&self, response: &ApiResponse, what: &str, detail: &str) -> ProviderError {
         let (name, status) = (self.name, response.status);
+        if let Some(message) = authorization_failure(name, status) {
+            return ProviderError::InvalidCredentials(message);
+        }
         let message = format!("{name} answered {what} with HTTP {status}{detail}");
         if status == 429 || status >= 500 {
             ProviderError::Unavailable(message)
         } else {
             ProviderError::Malformed(message)
         }
+    }
+}
+
+/// The shared account action for an HTTP authorization refusal. A provider
+/// may refine this with its documented error codes or refresh protocol.
+/// Only a trusted display name and status enter the message, never a body,
+/// URL, token, or other request/response context.
+pub fn authorization_failure(name: &str, status: u16) -> Option<String> {
+    match status {
+        401 => Some(format!(
+            "Authorization failed at {name} (HTTP 401). Sign this account in again in Settings > Accounts & services."
+        )),
+        403 => Some(format!(
+            "Forbidden by {name} (HTTP 403): access denied for this account. Check the account in Settings > Accounts & services."
+        )),
+        _ => None,
     }
 }
 
@@ -278,6 +298,67 @@ mod tests {
             Result<ApiResponse, wayfetch_engine::accounts::provider::ApiError>,
         > {
             unreachable!("no request is sent")
+        }
+    }
+
+    #[test]
+    fn authorization_status_policy_is_shared_and_excludes_response_context() {
+        for name in ["Alpha Provider", "Beta Provider"] {
+            let api = Api::new(
+                Arc::new(Unused),
+                name,
+                Endpoint::official("https://fixture.example/"),
+            );
+            for (status, expected) in [
+                (
+                    401,
+                    format!(
+                        "Authorization failed at {name} (HTTP 401). Sign this account in again in Settings > Accounts & services."
+                    ),
+                ),
+                (
+                    403,
+                    format!(
+                        "Forbidden by {name} (HTTP 403): access denied for this account. Check the account in Settings > Accounts & services."
+                    ),
+                ),
+            ] {
+                let response = ApiResponse {
+                    status,
+                    body: Secret::from_text("private-response-token"),
+                };
+                assert_eq!(
+                    api.unexpected(&response, "private-request-url", "private-error-detail"),
+                    ProviderError::InvalidCredentials(expected),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_http_statuses_keep_their_existing_classification() {
+        let api = Api::new(
+            Arc::new(Unused),
+            "Alpha Provider",
+            Endpoint::official("https://fixture.example/"),
+        );
+        for status in [200, 400, 404, 429, 500, 503] {
+            assert_eq!(authorization_failure(api.name(), status), None);
+            let response = ApiResponse {
+                status,
+                body: Secret::from_text("private-response-token"),
+            };
+            let message =
+                format!("Alpha Provider answered the request with HTTP {status}, error code 7");
+            let expected = if status == 429 || status >= 500 {
+                ProviderError::Unavailable(message)
+            } else {
+                ProviderError::Malformed(message)
+            };
+            assert_eq!(
+                api.unexpected(&response, "the request", ", error code 7"),
+                expected
+            );
         }
     }
 

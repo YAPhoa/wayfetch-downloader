@@ -23,6 +23,8 @@ import {
 const PASSWORD = 'correct horse battery staple';
 /** A file name that is markup if mistaken for HTML, and fine on disk. */
 const TRICKY = `report &lt;img src=x onerror=window.__xss=1&gt; & 'q'.bin`;
+const SOURCE_NAME = 'early-source.bin';
+const SOURCE_SUFFIX = '?private-token=secret#private-fragment';
 const SIZE = 20 * MIB + 11;
 /** Past two 8 MiB checkpoints, so at least 16 MiB is durable while it stalls. */
 const STALL = 17 * MIB + 5;
@@ -265,15 +267,25 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   expect(loaded).toContain('400');
 
   // A download that stalls after two checkpoints.
-  await add(page, fixture.put(TRICKY, SIZE, STALL));
+  await add(page, `${fixture.put(SOURCE_NAME, SIZE, STALL, TRICKY)}${SOURCE_SUFFIX}`);
   await expectState(page, 'job-1', 'Downloading');
   await expect(row(page, 'job-1').locator('.bytes')).toHaveText(/^1[67]\.\d MiB of 20\.0 MiB$/);
+  // Response metadata updates the name while bytes are still in flight.
+  await expect(row(page, 'job-1').locator('td.name')).toHaveText(TRICKY);
+  await select(page, 'job-1');
+  await expect(page.locator('dd[data-fact="file"]')).toHaveText(TRICKY);
+  const search = page.locator('#filter-names');
+  await search.fill('report');
+  await expect(row(page, 'job-1')).toBeVisible();
+  await search.fill('early-source');
+  await expect(row(page, 'job-1')).toHaveCount(0);
+  await search.fill('');
 
   // Pause and resume the selected job through the API's commands.
   await select(page, 'job-1');
-  await page.getByRole('button', { name: 'Pause job-1' }).click();
+  await page.getByRole('button', { name: `Pause ${TRICKY}` }).click();
   await expectState(page, 'job-1', 'Paused');
-  await page.getByRole('button', { name: 'Resume job-1' }).click();
+  await page.getByRole('button', { name: `Resume ${TRICKY}` }).click();
   await expectState(page, 'job-1', 'Downloading');
 
   // Reloading or closing the tab changes nothing about the download.
@@ -301,7 +313,7 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await expectState(page, 'job-1', 'Downloading');
 
   // It completes once the server sends the rest, under its literal name.
-  fixture.release(TRICKY);
+  fixture.release(SOURCE_NAME);
   await expectState(page, 'job-1', 'Done');
   await expect(row(page, 'job-1').locator('td.name')).toHaveText(TRICKY);
   // The host of the link, not the link.
@@ -319,7 +331,7 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await expect(page.locator('dd[data-fact="saved-in"]').getByText('Server path')).toBeVisible();
   await expect(page.locator('dd[data-fact="saved-in"] button')).toHaveCount(0);
   await expect(page.locator('dd[data-fact="source"] .path')).toHaveText(
-    `${fixture.base}/files/${encodeURIComponent(TRICKY)}`,
+    `${fixture.base}/files/${SOURCE_NAME}?…`,
   );
   await page.reload();
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
@@ -349,9 +361,9 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   // While only cancelled jobs are listed, the job joins the list once cancelled.
   await page.getByRole('button', { name: /^Cancelled \(/ }).click();
   await expect(page.getByText('No downloads in this state.')).toBeVisible();
-  await page.getByRole('button', { name: 'Cancel job-2' }).click();
+  await page.getByRole('button', { name: 'Cancel second.bin' }).click();
   await expectState(page, 'job-2', 'Cancelled');
-  await expect(page.getByRole('button', { name: 'Cancel job-2' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Cancel second.bin' })).toBeDisabled();
   await page.getByRole('button', { name: /^All \(/ }).click();
   // The counts follow the change.
   await expect(page.getByRole('button', { name: 'Cancelled (1)' })).toBeVisible();
@@ -716,7 +728,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(menu).toBeHidden();
   await expect(page.getByText(`Copied the link of ${TRICKY}.`)).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
-    `${fixture.base}/files/${encodeURIComponent(TRICKY)}`,
+    `${fixture.base}/files/${SOURCE_NAME}${SOURCE_SUFFIX}`,
   );
 
   // Items that do not apply say why.
@@ -1155,15 +1167,15 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   const NAME = 'again.bin';
   await add(page, fixture.put(NAME, 10 * MIB, 9 * MIB));
   await page.getByRole('button', { name: /^Active \(/ }).click();
-  // Until it is published, a download is named by its job.
+  // The source filename is available while the stable job ID identifies it.
   const again = page.locator('tr[data-job]');
   await expect(again).toHaveCount(1);
   await expect(again.locator('.bytes')).toHaveText(/^[89]\.\d MiB of 10\.0 MiB$/);
   const job = /** @type {string} */ (await again.getAttribute('data-job'));
   await select(page, job);
-  const retry = page.getByRole('button', { name: `Retry ${job}` });
+  const retry = page.getByRole('button', { name: `Retry ${NAME}` });
   await expect(retry).toBeDisabled();
-  await page.getByRole('button', { name: `Cancel ${job}` }).click();
+  await page.getByRole('button', { name: `Cancel ${NAME}` }).click();
   await page.getByRole('button', { name: /^Cancelled \(/ }).click();
   await expectState(page, job, 'Cancelled');
   await expect(retry).toBeEnabled();
@@ -1184,7 +1196,7 @@ test('Retry continues a cancelled download, once, and says when it had to start 
     await route.continue({ postData: JSON.stringify({ ...body, expected_revision: body.expected_revision - 1 }) });
   });
   await retry.click();
-  await expect(page.getByText(`${job} changed in the meantime and is still stopped.`, { exact: false })).toBeVisible();
+  await expect(page.getByText(`${NAME} changed in the meantime and is still stopped.`, { exact: false })).toBeVisible();
   await page.unroute(commands);
   await expectState(page, job, 'Cancelled');
 
@@ -1210,7 +1222,7 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   await expect(menu.getByRole('menuitem', { name: /^Retry/ })).toContainText('Waiting for the server to answer');
   await page.keyboard.press('Escape');
   answer();
-  await expect(page.getByText(`Retrying ${job}. It continues from the`, { exact: false })).toBeVisible();
+  await expect(page.getByText(`Retrying ${NAME}. It continues from the`, { exact: false })).toBeVisible();
   await page.unroute(commands);
   expect(held).toBe(1);
 
@@ -1229,7 +1241,7 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
   expect((await daemon.published(NAME, daemon.archive)).equals(content(0, 10 * MIB))).toBe(true);
   await expect(page.locator('[data-note="restart"]')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: `Retry ${job}` })).toBeDisabled();
+  await expect(page.getByRole('button', { name: `Retry ${NAME}` })).toBeDisabled();
   await page.getByRole('button', { name: 'Close details' }).click();
 
   // A file replaced on the server cannot be continued: Retry starts over,
@@ -1242,11 +1254,11 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   await expect(changed.locator('.bytes')).toHaveText(/^[89]\.\d MiB of 10\.0 MiB$/);
   const second = /** @type {string} */ (await changed.getAttribute('data-job'));
   await select(page, second);
-  await page.getByRole('button', { name: `Cancel ${second}` }).click();
+  await page.getByRole('button', { name: `Cancel ${CHANGED}` }).click();
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Cancelled');
   fixture.replace(CHANGED);
   fixture.release(CHANGED);
-  await page.getByRole('button', { name: `Retry ${second}` }).click();
+  await page.getByRole('button', { name: `Retry ${CHANGED}` }).click();
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
   await expect(page.locator('[data-note="restart"]')).toHaveText(
     'Started over from the beginning: the file on the server changed since the saved data was downloaded.',
@@ -1426,6 +1438,76 @@ test('accounts are signed in on the service, checked, disabled, signed in again,
   await context.close();
 });
 
+test('native provider links require sign-in and provider Forbidden keeps the Wayfetch session', async ({ browser }) => {
+  const nativeProvider = await new RealDebridFixture().start();
+  const local = await new Daemon(await freePort(), { realDebrid: nativeProvider.base }).init();
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await local.start();
+    await page.goto(local.origin);
+    await page.getByLabel('Setup secret').fill((await local.setupSecret()).trim());
+    await page.getByLabel('Owner name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
+    await page.getByLabel('Repeat password').fill(PASSWORD);
+    await page.getByRole('button', { name: 'Create owner' }).click();
+    await expect(page.locator('.statusbar .status')).toHaveText('Live');
+    /** @param {string} link */
+    const collectOne = async (link) => {
+      await page.goto(`${local.origin}/links`);
+      await page.getByRole('button', { name: 'Add links' }).click();
+      await page.getByLabel('Links, one per line').fill(link);
+      await page.getByRole('button', { name: 'Collect links' }).click();
+      await expect(page.getByText('Collected 1 link for review.')).toBeVisible();
+      await page.locator('tr[data-link] input[type="checkbox"]').check();
+      await page.getByRole('button', { name: 'Start selected' }).click();
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    };
+    const jobs = async () => (await (await page.request.get(`${local.origin}/v1/jobs?page_size=500`)).json()).items;
+    await collectOne('https://real-debrid.com/d/SYNTHETICNATIVE123');
+    await expect(page.locator('.links-page .notice')).toContainText('Sign-in required');
+    await expect(page.locator('.links-page .notice')).toContainText('Settings > Accounts & services');
+    await expect(page.locator('tr[data-link]')).toHaveCount(1);
+    expect(await jobs()).toEqual([]);
+    expect(nativeProvider.requested).toEqual([]);
+
+    await page.goto(`${local.origin}/settings/accounts`);
+    await page.getByRole('button', { name: 'Add account…' }).click();
+    await page.getByRole('dialog', { name: 'Add account' }).getByRole('button', { name: 'Sign in to Real-Debrid' }).click();
+    const signIn = page.getByRole('dialog', { name: 'Sign in to Real-Debrid' });
+    await signIn.getByRole('button', { name: 'Continue' }).click();
+    await expect(signIn).toHaveCount(0);
+    await expect(page.locator('[data-key="accounts-message"]')).toHaveText('Account added and signed in.');
+    await page.goto(`${local.origin}/links`);
+    await page.locator('tr[data-link] input[type="checkbox"]').check();
+    await page.getByRole('button', { name: 'Start selected' }).click();
+    await expect(page.getByText('Started 1 download.')).toBeVisible();
+    await expect.poll(async () => (await jobs())[0]?.stage).toBe('complete');
+    const native = (await jobs())[0];
+    expect(native.route.service).toBe('real-debrid');
+    expect(nativeProvider.requested.filter((path) => path === '/rest/1.0/hosts/domains')).toHaveLength(0);
+    expect(nativeProvider.requested.filter((path) => path === '/rest/1.0/unrestrict/link')).toHaveLength(1);
+
+    nativeProvider.refuseUnrestrict = 403;
+    await collectOne('https://real-debrid.com/d/SYNTHETICDENIED123');
+    await expect(page.getByText('Started 1 download.')).toBeVisible();
+    await expect.poll(async () => (await jobs()).find((/** @type {{ id: string }} */ job) => job.id !== native.id)?.stage).toBe('failed');
+    const denied = (await jobs()).find((/** @type {{ id: string }} */ job) => job.id !== native.id);
+    expect(denied.failure.code).toBe('invalid_credentials');
+    await page.goto(`${local.origin}/jobs/${denied.id}`);
+    await expect(page.locator('.inspector')).toContainText('Forbidden');
+    await expect(page.locator('.inspector')).toContainText('Settings > Accounts & services');
+    await expect(page.locator('.inspector')).not.toContainText('synthetic-private-provider-detail');
+    await expect(page.locator('.statusbar .status')).toHaveText('Live');
+    expect((await (await page.request.get(`${local.origin}/v1/auth/session`)).json()).authenticated).toBe(true);
+    expect(nativeProvider.requested.filter((path) => path === '/rest/1.0/unrestrict/link')).toHaveLength(2);
+  } finally {
+    await context.close();
+    await local.remove();
+    await nativeProvider.stop();
+  }
+});
+
 test('links download through a chosen Real-Debrid account, and a lost answer is asked again only once confirmed', async ({
   browser,
 }) => {
@@ -1457,25 +1539,27 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
   const asked = () => realDebrid.requested.filter((path) => path === '/rest/1.0/unrestrict/link').length;
   const original = 'https://hoster.example/file/through-account';
   const lost = 'https://hoster.example/file/answer-lost';
-  await collect(page, `${original}\n${lost}`, 'Collected 2 links for review.');
+  const mixedDirect = fixture.put('mixed-direct.bin', MIB);
+  await collect(page, `${original}\n${lost}\n${mixedDirect}`, 'Collected 3 links for review.');
   expect(asked()).toBe(0);
   const linkRow = (/** @type {string} */ name) =>
     page.locator('tr[data-link]', { has: page.locator('td.name', { hasText: new RegExp(`^${name}$`) }) });
 
-  // Starting offers Direct, chosen by default, and the account.
+  // Explicit override remains in the existing menu. Cancelling it keeps
+  // the link; ordinary Start routes automatically without a prompt.
   await linkRow('through-account').locator('input[type="checkbox"]').check();
-  await page.getByRole('button', { name: 'Start selected' }).click();
+  await linkRow('through-account').getByRole('button', { name: 'Actions for through-account' }).click();
+  await page.getByRole('menuitem', { name: 'Download via…' }).click();
   const choose = page.getByRole('dialog', { name: 'Start 1 link' });
   await expect(choose.getByRole('radio', { name: /^Direct/ })).toBeChecked();
   await expect(choose.getByRole('radio')).toHaveCount(2);
   expect(asked()).toBe(0);
-  // Cancelled: nothing starts and the link stays.
   await choose.getByRole('button', { name: 'Cancel' }).click();
   await expect(linkRow('through-account').locator('td.link-status')).toHaveText('Not checked');
+  await linkRow('mixed-direct.bin').locator('input[type="checkbox"]').check();
   await page.getByRole('button', { name: 'Start selected' }).click();
-  await choose.getByRole('radio', { name: 'Real-Debrid: Main' }).check();
-  await choose.getByRole('button', { name: 'Start' }).click();
-  await expect(page.getByText('Started 1 download.')).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('Started 2 downloads.')).toBeVisible();
   // Downloads routed through an account, as the API reports them.
   const routed = async () => {
     const response = await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`);
@@ -1486,6 +1570,14 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
   const [through] = await routed();
   expect(through.route.service).toBe('real-debrid');
   expect(asked()).toBe(1);
+  await expect.poll(async () => {
+    const jobs = (await (await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`)).json()).items;
+    return jobs.find((/** @type {{ artifact?: { path: string } }} */ job) => job.artifact?.path === 'mixed-direct.bin')?.stage;
+  }).toBe('complete');
+  const mixedJobs = (await (await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`)).json()).items;
+  const mixedJob = mixedJobs.find((/** @type {{ artifact?: { path: string } }} */ job) => job.artifact?.path === 'mixed-direct.bin');
+  expect(mixedJob).toBeDefined();
+  expect(mixedJob.route).toBeUndefined();
   // The provider's file name, saved in the folder the link was collected to.
   expect(through.artifact.path).toBe(realDebrid.filename);
   const settings = await (await page.request.get(`${daemon.origin}/v1/settings`)).json();
@@ -1502,8 +1594,7 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
   await page.goto(`${daemon.origin}/links`);
   await linkRow('answer-lost').locator('input[type="checkbox"]').check();
   await page.getByRole('button', { name: 'Start selected' }).click();
-  await choose.getByRole('radio', { name: 'Real-Debrid: Main' }).check();
-  await choose.getByRole('button', { name: 'Start' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByText('Started 1 download.')).toBeVisible();
   await expect.poll(async () => (await routed()).length).toBe(2);
   const lostJob = (await routed()).find((/** @type {{ id: string }} */ j) => j.id !== through.id);
@@ -1525,6 +1616,25 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
     .toBe('complete');
   expect(asked()).toBe(3);
   expect(realDebrid.downloadAuth).toEqual([undefined, undefined]);
+
+  // An explicit Direct override on a supported host bypasses the account
+  // through the real HTTP transport. The synthetic hostname cannot resolve,
+  // but the job still keeps Direct and never asks the provider.
+  await page.goto(`${daemon.origin}/links`);
+  await collect(page, 'https://hoster.example/file/direct-override', 'Collected 1 link for review.');
+  const beforeDirect = (await (await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`)).json()).items.map((/** @type {{ id: string }} */ job) => job.id);
+  await linkRow('direct-override').getByRole('button', { name: 'Actions for direct-override' }).click();
+  await page.getByRole('menuitem', { name: 'Download via…' }).click();
+  await choose.getByRole('radio', { name: /^Direct/ }).check();
+  await choose.getByRole('button', { name: 'Start' }).click();
+  await expect(page.getByText('Started 1 download.')).toBeVisible();
+  const allJobs = (await (await page.request.get(`${daemon.origin}/v1/jobs?page_size=500`)).json()).items;
+  const explicitDirect = allJobs.find((/** @type {{ id: string }} */ job) => !beforeDirect.includes(job.id));
+  expect(explicitDirect).toBeDefined();
+  expect(explicitDirect.route).toBeUndefined();
+  expect(asked()).toBe(3);
+  await page.goto(`${daemon.origin}/jobs/${explicitDirect.id}`);
+  await expect(page.locator('[data-fact="download-via"]')).toHaveText('Direct');
 
   // No generated link or credential reached the page, its storage, or the
   // daemon's output.
@@ -1651,7 +1761,7 @@ test('Settings stays at the right end of the toolbar in every view and state', a
     await expect(job.locator('td[data-state]')).toHaveText('Downloading');
     await expectSame();
     await job.locator('td.name a').click();
-    await expect(page.getByRole('button', { name: 'Pause job-1' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: `Pause ${NAME}` })).toBeEnabled();
     await expectSame();
     await expectSearchInFirstRow(page);
 

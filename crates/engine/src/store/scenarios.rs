@@ -771,6 +771,112 @@ fn only_a_previous_starts_file_is_adopted() {
 }
 
 #[test]
+fn source_names_are_safe_and_provider_metadata_survives_restart_without_a_response() {
+    let mut f = Fixture::new();
+    for (url, expected) in [
+        (
+            "https://files.example/My%20File.zip?token=private-query#private-fragment",
+            Some("My File.zip"),
+        ),
+        (
+            "https://files.example/d/OPAQUEPRIVATEID?filename=private.zip",
+            None,
+        ),
+        ("https://files.example/", None),
+        ("https://files.example/%2Fsecret.zip", None),
+        ("https://files.example/%5Csecret.zip", None),
+        ("https://files.example/%0Asecret.zip", None),
+        ("https://files.example/CON.zip", None),
+    ] {
+        f.submit(&[url]);
+        let id = f.store.stage_pending(1, NOW).unwrap()[0];
+        assert_eq!(f.summary(id).name.as_deref(), expected, "{url}");
+    }
+    let job = f.job();
+    assert_eq!(f.summary(job).name.as_deref(), Some("a.bin"));
+    f.advance(job, JobStage::Resolving).unwrap();
+    let generation = f.summary(job).generation;
+    f.store
+        .record_suggested_name(job, generation, "Provider Name.zip", NOW)
+        .unwrap();
+    assert!(
+        matches!(f.events().last(), Some(EventKind::JobChanged { job: summary })
+        if summary.name.as_deref() == Some("Provider Name.zip"))
+    );
+    let events = f.events().len();
+    for name in [
+        "Provider Name.zip",
+        "../private.zip",
+        "bad\\name.zip",
+        "bad\nname.zip",
+    ] {
+        f.store
+            .record_suggested_name(job, generation, name, NOW)
+            .unwrap();
+    }
+    assert_eq!(f.events().len(), events);
+    let mut f = f.reopen();
+    assert_eq!(f.summary(job).name.as_deref(), Some("Provider Name.zip"));
+    // A headerless response retains the accepted provider name.
+    f.advance(job, JobStage::Transferring).unwrap();
+    f.register(job, BootEpoch::INITIAL);
+    f.store
+        .record_response(job, generation, &Representation::default(), None, NOW)
+        .unwrap();
+    assert_eq!(f.summary(job).name.as_deref(), Some("Provider Name.zip"));
+}
+
+#[test]
+fn late_metadata_cannot_change_a_paused_cancelled_or_new_generation_job() {
+    let mut f = Fixture::new();
+    let job = f.job();
+    f.advance(job, JobStage::Resolving).unwrap();
+    let generation = f.summary(job).generation;
+    let revision = f.summary(job).revision;
+    f.run(
+        IdempotencyKey::generate(),
+        Command::Pause {
+            job,
+            expected_revision: revision,
+        },
+    )
+    .unwrap();
+    f.store
+        .record_suggested_name(job, generation, "late.zip", NOW)
+        .unwrap();
+    assert_eq!(f.summary(job).name.as_deref(), Some("a.bin"));
+    let revision = f.summary(job).revision;
+    f.run(
+        IdempotencyKey::generate(),
+        Command::Cancel {
+            job,
+            expected_revision: revision,
+        },
+    )
+    .unwrap();
+    f.store
+        .record_suggested_name(job, generation, "late.zip", NOW)
+        .unwrap();
+    assert_eq!(f.summary(job).name.as_deref(), Some("a.bin"));
+    f.advance(job, JobStage::Cancelled).unwrap();
+    let revision = f.summary(job).revision;
+    f.run(
+        IdempotencyKey::generate(),
+        Command::Retry {
+            job,
+            expected_revision: revision,
+            repeat_provider_operation: false,
+        },
+    )
+    .unwrap();
+    f.advance(job, JobStage::Resolving).unwrap();
+    f.store
+        .record_suggested_name(job, generation, "stale.zip", NOW)
+        .unwrap();
+    assert_eq!(f.summary(job).name.as_deref(), Some("a.bin"));
+}
+
+#[test]
 fn a_response_is_recorded_once_and_survives_restart() {
     let mut f = Fixture::new();
     let (job, generation) = transferring(&mut f, BootEpoch::INITIAL);
@@ -784,9 +890,11 @@ fn a_response_is_recorded_once_and_survives_restart() {
         .record_response(job, generation, &seen, Some("game.rar"), NOW)
         .unwrap();
     assert_eq!(f.summary(job).bytes_total, Some(10));
+    assert_eq!(f.summary(job).name.as_deref(), Some("game.rar"));
     assert!(matches!(
         f.events().last(),
         Some(EventKind::JobChanged { job: summary }) if summary.bytes_total == Some(10)
+            && summary.name.as_deref() == Some("game.rar")
     ));
     // Later responses are compared with it, never recorded over it.
     let changed = Representation {
@@ -802,6 +910,7 @@ fn a_response_is_recorded_once_and_survives_restart() {
     f.checkpoint(job, generation, &[(0, 4)]).unwrap();
 
     let mut f = f.reopen();
+    assert_eq!(f.summary(job).name.as_deref(), Some("game.rar"));
     let partial = f.store.latest_staging(job).unwrap().unwrap();
     assert_eq!(partial.representation, Some(seen));
     assert_eq!(partial.suggested_name.as_deref(), Some("game.rar"));

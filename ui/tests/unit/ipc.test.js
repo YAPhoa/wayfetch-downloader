@@ -210,3 +210,14 @@ test('account commands carry no credentials, only the protocol JSON', async () =
   ]);
   assert.deepEqual(core.calledWith('refresh_account'), [{ account: 'acct-1' }]);
 });
+
+test('collected starts preserve automatic default and explicit route overrides over IPC', async () => {
+  const core = new FakeCore({ links_command: () => ({ type: 'links_applied', applied: [], refused: [] }) });
+  const client = new DesktopIpcClient(core);
+  const request = { idempotencyKey: 'k', target: 't', action: /** @type {const} */ ('start'), links: [{ link: /** @type {any} */ ('src-1'), revision: 1 }] };
+  await client.linksCommand(request);
+  await client.linksCommand({ ...request, routing: 'direct' });
+  await client.linksCommand({ ...request, account: /** @type {any} */ ('acct-1') });
+  const base = { idempotency_key: 'k', target: 't', action: 'start', links: request.links };
+  assert.deepEqual(core.calledWith('links_command'), [{ request: base }, { request: { ...base, routing: 'direct' } }, { request: { ...base, account: 'acct-1' } }]);
+});
