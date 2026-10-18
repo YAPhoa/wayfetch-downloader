@@ -12,7 +12,8 @@
 // - Each command carries the revisions shown, so a link changed elsewhere
 //   since is refused rather than started as it was. Links leave the page
 //   only once the engine has confirmed the command; refused ones stay,
-//   with the reason.
+//   with the reason. Once every link sent is started, the workspace
+//   switches to Downloads; if any is refused, the page stays to say why.
 // - The page re-reads the list when shown, after events that can change
 //   it, and now and then while shown, since removals and moves made in
 //   another window have no event of their own.
@@ -71,6 +72,7 @@ import { loadServices } from './services.js';
  *   navigate: (path: string) => void,
  *   onSignedOut: () => void,
  *   onTotal: (total: number) => void,
+ *   onStarted: (text: string) => void,
  *   toolbar: (tools: Node, search: Node) => Node,
  *   menu: Menu,
  * }} LinksContext
@@ -416,6 +418,13 @@ export class LinksPage {
       this.busy = false;
     }
     const outcome = result?.type === 'links_applied' ? this.applied(action, result, destination, media) : null;
+    // All started: what to see next is the downloads, not what is left here.
+    if (outcome?.downloads && outcome.ok) {
+      this.say('');
+      this.context.onStarted(outcome.text);
+      void this.refresh();
+      return;
+    }
     await this.refresh();
     // Said once the list shows it.
     if (outcome) this.say(outcome.text, outcome);

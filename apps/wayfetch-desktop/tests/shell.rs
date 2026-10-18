@@ -389,8 +389,8 @@ impl Shell {
             .to_owned()
     }
 
-    /// Collects `count` links and starts them from the Links page, then
-    /// goes back to Downloads.
+    /// Collects `count` links and starts them from the Links page, which
+    /// switches to Downloads.
     async fn add_many(&self, urls: &str, count: usize) {
         let (links, downloads) = match count {
             1 => ("1 link".to_owned(), "1 download".to_owned()),
@@ -406,11 +406,9 @@ impl Shell {
         self.click(".links-page [data-key=\"links-start\"]:not([disabled])")
             .await;
         self.wait_for(&format!(
-            "document.querySelector('.links-page .notice > span')?.textContent.startsWith('Started {downloads}.')"
+            "location.pathname === '/' && document.querySelector('.downloads-view .notice')?.textContent.startsWith('Started {downloads}.')"
         ))
         .await;
-        self.click("[data-key=\"open-downloads\"]").await;
-        self.wait_for("location.pathname === '/'").await;
     }
 
     /// Adds a link: collected, then started.
@@ -1765,13 +1763,13 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
     // Only the chosen link starts; the other waits, unfetched.
     tick(&shell, "start.bin").await;
     shell
-        .wait_for("document.querySelector('.selection-summary strong')?.textContent === '1 link selected'")
+        .wait_for("document.querySelector('.links-page .selection-summary strong')?.textContent === '1 link selected'")
         .await;
     shell
         .click(".links-page [data-key=\"links-start\"]:not([disabled])")
         .await;
     shell
-        .wait_for("document.querySelector('.links-page .notice > span')?.textContent.startsWith('Started 1 download.')")
+        .wait_for("location.pathname === '/' && document.querySelector('.downloads-view .notice')?.textContent.startsWith('Started 1 download.')")
         .await;
     // Ordinary Start uses the engine's automatic default without a route
     // prompt. With no accounts, this fixture is fetched directly below.
@@ -1783,10 +1781,13 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
     );
     // The accepted source moves out of Links; no redundant started banner.
     shell
+        .click(".workspace > :not([hidden]) [data-key=\"view-links\"]")
+        .await;
+    shell
         .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 1")
         .await;
     assert_eq!(collected(&shell).await, json!(["keep.bin"]));
-    assert_eq!(shell.js("return document.querySelector('.selection-summary').textContent.includes('already in Downloads')").await, false);
+    assert_eq!(shell.js("return document.querySelector('.links-page .selection-summary').textContent.includes('already in Downloads')").await, false);
     eventually(|| async {
         std::fs::read(dirs.root.join("start.bin"))
             .ok()
@@ -1897,8 +1898,7 @@ async fn refreshing_tables_keeps_pointer_interactions_intact() {
         .wait_for("!document.querySelector('[data-key=\"links-start\"]').disabled")
         .await;
     shell.click("[data-key=\"links-start\"]").await;
-    shell.wait_for("document.querySelector('.links-page .notice > span')?.textContent === 'Started 1 download.'").await;
-    shell.click("[data-key=\"open-downloads\"]").await;
+    shell.wait_for("location.pathname === '/' && document.querySelector('.downloads-view .notice')?.textContent === 'Started 1 download.'").await;
     shell.wait_for_state("job-1", "Done").await;
     shell
         .js("window.connectedDuringRefresh = null;
@@ -2078,7 +2078,7 @@ async fn a_link_automatically_downloads_through_a_matching_account_in_the_window
         .click(".links-page [data-key=\"links-start\"]:not([disabled])")
         .await;
     shell
-        .wait_for("document.querySelector('.links-page .notice > span')?.textContent.startsWith('Started 1 download.')")
+        .wait_for("location.pathname === '/' && document.querySelector('.downloads-view .notice')?.textContent.startsWith('Started 1 download.')")
         .await;
     assert_eq!(
         shell

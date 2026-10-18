@@ -89,9 +89,9 @@ async function add(page, text, count = 1) {
   // The links just collected are selected.
   await expect(page.locator('.selection-summary strong')).toHaveText(`${links} selected`);
   await page.getByRole('button', { name: 'Start selected' }).click();
-  await expect(page.getByText(`Started ${count === 1 ? '1 download' : `${count} downloads`}.`)).toBeVisible();
-  await page.getByRole('button', { name: 'View downloads' }).click();
+  // Starting switches to Downloads, which says what started.
   await expect(page).toHaveURL(`${daemon.origin}/`);
+  await expect(page.getByText(`Started ${count === 1 ? '1 download' : `${count} downloads`}.`)).toBeVisible();
 }
 
 /**
@@ -989,6 +989,8 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(start).toBeEnabled();
   await start.click();
   await expect(page.getByText('Started 1 download.')).toBeVisible();
+  await expect(page).toHaveURL(`${daemon.origin}/`);
+  await views.getByRole('link', { name: 'Links (1)' }).click();
   await expect(linkRow('review-a.bin')).toHaveCount(0);
   await expect(linkRow('review-b.bin').locator('td.link-status')).toHaveText('Not checked');
   await expect(views.getByRole('link', { name: 'Links (1)' })).toBeVisible();
@@ -1780,7 +1782,6 @@ test('Settings stays at the right end of the toolbar in every view and state', a
 
     // Downloads with a job in progress, then with it selected.
     await page.getByRole('button', { name: 'Start selected' }).click();
-    await page.getByRole('button', { name: 'View downloads' }).click();
     const job = page.locator('tr[data-job="job-1"]');
     await expect(job.locator('td[data-state]')).toHaveText('Downloading');
     await expectSame();
@@ -1820,15 +1821,18 @@ test('removing a download requires an explicit file choice and deletes only its 
     await page.getByLabel('Repeat password').fill(PASSWORD);
     await page.getByRole('button', { name: 'Create owner' }).click();
     await expect(page.getByText('No downloads yet.')).toBeVisible();
+    // A name filter left on Downloads cannot hide what is started next.
+    await page.locator('#filter-names').fill('nothing matches this');
     await page.getByRole('button', { name: 'Add links' }).click();
     await page.getByLabel('Links, one per line').fill(fixture.put('delete-choice.bin', MIB));
     await page.getByRole('button', { name: 'Collect links' }).click();
     await expect(page.locator('.selection-summary strong')).toHaveText('1 link selected');
     await page.getByRole('button', { name: 'Start selected' }).click();
     await expect(page.getByText('Started 1 download.')).toBeVisible();
-    await expect(page.locator('.links-page tr[data-link]')).toHaveCount(0);
+    await expect(page.locator('#filter-names')).toHaveValue('');
+    await expect(row(page, 'job-1')).toBeVisible();
+    await page.goto(`${own.origin}/links`);
     await expect(page.locator('.selection-summary')).not.toContainText('already in Downloads');
-    await page.reload();
     await expect(page.locator('.links-page tr[data-link]')).toHaveCount(0);
     await page.getByRole('link', { name: 'Downloads', exact: true }).click();
     await expectState(page, 'job-1', 'Done');
