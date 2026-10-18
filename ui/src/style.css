@@ -839,13 +839,18 @@ dd .link-text { overflow-wrap: anywhere; }
 .jobs .check { width: 1%; padding-right: 0; }
 .jobs .check input { display: block; }
 
-/* A sortable column's header is a button that looks like the header. */
+/* A sortable column's header is a button that looks like the header and
+   fills the whole cell, so anywhere in it sorts. */
+th.sortable { padding: 0; }
+
 th button.sort {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 4px;
+  width: 100%;
   min-height: 0;
-  padding: 0;
+  padding: var(--row-pad);
+  border-radius: 0;
   border: 0;
   background: transparent;
   color: inherit;
@@ -853,7 +858,8 @@ th button.sort {
   cursor: pointer;
 }
 
-th button.sort:hover:not(:disabled) { background: transparent; color: var(--ink); }
+th button.sort:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
+th button.sort:focus-visible { outline-offset: -2px; }
 th[aria-sort] button.sort { color: var(--ink); }
 
 .links td.added { color: var(--muted); }

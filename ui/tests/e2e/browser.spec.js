@@ -917,6 +917,11 @@ test('collected links wait on the Links page until chosen ones are started', asy
   const names = page.locator('.links-page tr[data-link] td.name');
   const nameHeader = page.locator('.links-page th', { has: page.getByRole('button', { name: 'Name', exact: true }) });
   await expect(page.locator('.links-page th[aria-sort]')).toHaveText('Added at');
+  // The whole header cell is the button.
+  const [cell, button] = await Promise.all([nameHeader.boundingBox(), nameHeader.getByRole('button').boundingBox()]);
+  // (The cell's height also holds its 1px bottom border.)
+  expect(Math.abs(Number(button?.width) - Number(cell?.width))).toBeLessThanOrEqual(1);
+  expect(Math.abs(Number(button?.height) - Number(cell?.height))).toBeLessThanOrEqual(1);
   await nameHeader.getByRole('button').click();
   await expect(nameHeader).toHaveAttribute('aria-sort', 'ascending');
   await expect(names).toHaveText(['example.com/missing-scheme.bin', 'review-a.bin', 'review-b.bin']);

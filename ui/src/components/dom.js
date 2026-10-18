@@ -119,7 +119,7 @@ export function sortHeader({ column, label, sort, onSort, className }) {
     'th',
     {
       scope: 'col',
-      class: className ?? null,
+      class: className ? `sortable ${className}` : 'sortable',
       'aria-sort': active ? (sort.descending ? 'descending' : 'ascending') : null,
     },
     h(
