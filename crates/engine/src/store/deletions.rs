@@ -228,6 +228,8 @@ impl Store {
                 })
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
+        let mut staging = staging;
+        staging.extend(super::media::aux_files(&tx, id)?);
         tx.commit().map_err(StoreError::from)?;
         Ok(DeleteStart::Started(DeleteIntent { published, staging }))
     }

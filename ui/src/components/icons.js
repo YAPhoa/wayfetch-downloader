@@ -12,6 +12,7 @@ export const ICONS = {
   folder: 'M1.5 3h4l1.5 1.5h5.5v7h-11z',
   display: 'M2 3h10M2 7h10M2 11h10',
   accounts: 'M7 1.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5M2.5 12.5c.4-2.6 2.2-4 4.5-4s4.1 1.4 4.5 4',
+  plugins: 'M5.5 1.5v3h-3v3h3v5h3v-5h3v-3h-3v-3z',
   more: 'M3 7h.01M7 7h.01M11 7h.01',
   brand: 'M7 1.5v7.5M4 6l3 3 3-3M2.5 12h9',
   add: 'M7 2v10M2 7h10',

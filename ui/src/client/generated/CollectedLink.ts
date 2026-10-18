@@ -4,6 +4,7 @@ import type { DiagnosticText } from "./DiagnosticText.js";
 import type { HostName } from "./HostName.js";
 import type { JobId } from "./JobId.js";
 import type { LinkCheck } from "./LinkCheck.js";
+import type { LinkMedia } from "./LinkMedia.js";
 import type { Revision } from "./Revision.js";
 import type { RootId } from "./RootId.js";
 import type { SourceLinkId } from "./SourceLinkId.js";
@@ -66,4 +67,10 @@ job?: JobId,
 /**
  * Why it is invalid, or why it was last refused when started.
  */
-problem?: DiagnosticText, };
+problem?: DiagnosticText, 
+/**
+ * For a link a media service recognized, such as a YouTube video:
+ * its title, once checked, and what it will be downloaded as. Added
+ * in protocol 4.0.
+ */
+media?: LinkMedia, };

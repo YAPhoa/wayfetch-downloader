@@ -20,6 +20,10 @@ use std::time::Duration;
 
 use clap::Args;
 use serde::de::{DeserializeOwned, IgnoredAny};
+use wayfetch_adapters::ffmpeg::Ffmpeg;
+use wayfetch_adapters::plugin::find_on_path;
+use wayfetch_adapters::youtube::YouTube;
+use wayfetch_adapters::ytdlp::YtDlp;
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::state_dir::StateDir;
 use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner};
@@ -162,6 +166,15 @@ pub struct EngineSettings {
     http: HttpConfig,
     root: PathBuf,
     provider_endpoints: Vec<(String, String)>,
+    plugins: PluginPaths,
+}
+
+/// Where the helper programs are, as configured or found on `PATH`.
+#[derive(Debug, Clone, Default)]
+struct PluginPaths {
+    yt_dlp: Option<PathBuf>,
+    yt_dlp_js_runtimes: Option<String>,
+    ffmpeg: Option<PathBuf>,
 }
 
 impl EngineSettings {
@@ -225,11 +238,22 @@ impl EngineArgs {
         for path in file_cas.chain(self.ca_cert.iter().cloned()) {
             http.extra_roots.extend(read_ca(&path)?);
         }
+        let plugins = file.map(|f| &f.plugins);
+        let plugins = PluginPaths {
+            yt_dlp: plugins
+                .and_then(|p| p.yt_dlp.clone())
+                .or_else(|| find_on_path("yt-dlp")),
+            yt_dlp_js_runtimes: plugins.and_then(|p| p.yt_dlp_js_runtimes.clone()),
+            ffmpeg: plugins
+                .and_then(|p| p.ffmpeg.clone())
+                .or_else(|| find_on_path("ffmpeg")),
+        };
         Ok(EngineSettings {
             config,
             http,
             root,
             provider_endpoints: self.provider_endpoints.clone(),
+            plugins,
         })
     }
 }
@@ -316,12 +340,22 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
         http,
         root,
         provider_endpoints,
+        plugins,
     } = settings;
     let transport =
         Arc::new(HttpTransport::new(http).map_err(|e| format!("cannot configure HTTP: {e}"))?);
     let providers = wayfetch_adapters::providers(transport.clone(), &provider_endpoints)?;
-    let mut builder =
-        EngineBuilder::new(config, tokio::runtime::Handle::current()).transport(transport);
+    // yt-dlp keeps the player code it read in the state directory, so
+    // checks after the first are faster.
+    let cache = config.state_dir.join("cache").join("yt-dlp");
+    let (ytdlp, ffmpeg) = tokio::join!(
+        YtDlp::detect(plugins.yt_dlp, Some(cache), plugins.yt_dlp_js_runtimes),
+        Ffmpeg::detect(plugins.ffmpeg),
+    );
+    let mut builder = EngineBuilder::new(config, tokio::runtime::Handle::current())
+        .transport(transport)
+        .media_service(Arc::new(YouTube::new(Arc::new(ytdlp))))
+        .converter(Arc::new(ffmpeg));
     for provider in providers {
         builder = builder.account_provider(provider);
     }

@@ -33,6 +33,9 @@ pub struct OpenRequest {
     pub connect_timeout: Duration,
     /// Largest chunk the body may yield at once.
     pub read_buffer: usize,
+    /// A `User-Agent` to send instead of the transport's own, for a link
+    /// made for one, such as a media stream's.
+    pub user_agent: Option<String>,
 }
 
 /// A response whose headers arrived.

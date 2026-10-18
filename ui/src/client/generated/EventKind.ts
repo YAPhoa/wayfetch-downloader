@@ -31,4 +31,4 @@ job: JobId, } | { "type": "settings_changed",
 /**
  * The settings revision after the change.
  */
-revision: Revision, };
+revision: Revision, } | { "type": "links_changed" };

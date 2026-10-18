@@ -14,6 +14,7 @@ use bytes::Bytes;
 use tokio::runtime::Handle;
 use wayfetch_engine::accounts::provider::AccountProvider;
 use wayfetch_engine::fs::Root;
+use wayfetch_engine::media::{Converter, MediaService};
 use wayfetch_engine::transfer::transport::Transport;
 use wayfetch_engine::{
     EngineBuilder, EngineConfig, EngineOwner, Limits, Policy, ShutdownRequest, Timeouts,
@@ -56,6 +57,10 @@ pub struct Env<S> {
     pub credential_key: Option<PathBuf>,
     /// Account integrations engines start with.
     pub providers: Vec<Arc<dyn AccountProvider>>,
+    /// Media services engines start with.
+    pub media: Vec<Arc<dyn MediaService>>,
+    /// The converter engines start with, if any.
+    pub converter: Option<Arc<dyn Converter>>,
 }
 
 impl<S> Env<S> {
@@ -91,6 +96,8 @@ impl<S> Env<S> {
             policy: Policy::DEFAULT,
             credential_key: None,
             providers: Vec::new(),
+            media: Vec::new(),
+            converter: None,
         }
     }
 
@@ -118,6 +125,12 @@ impl<S> Env<S> {
             EngineBuilder::new(config, Handle::current()).transport(self.transport.clone());
         for provider in &self.providers {
             builder = builder.account_provider(provider.clone());
+        }
+        for service in &self.media {
+            builder = builder.media_service(service.clone());
+        }
+        if let Some(converter) = &self.converter {
+            builder = builder.converter(converter.clone());
         }
         builder.start().await.unwrap()
     }
