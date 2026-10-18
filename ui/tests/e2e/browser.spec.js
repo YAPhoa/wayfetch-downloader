@@ -87,7 +87,7 @@ async function add(page, text, count = 1) {
   const links = count === 1 ? '1 link' : `${count} links`;
   await collect(page, text, `Collected ${links} for review.`);
   // The links just collected are selected.
-  await expect(page.locator('.selection-summary strong')).toHaveText(`${links} selected`);
+  await expect(page.locator('.links-page .selection-summary strong')).toHaveText(`${links} selected`);
   await page.getByRole('button', { name: 'Start selected' }).click();
   // Starting switches to Downloads, which says what started.
   await expect(page).toHaveURL(`${daemon.origin}/`);
@@ -656,7 +656,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: /^Links/ }).click();
   await expect(orphan.locator('td.folder')).toHaveText(`${films} (removed; choose another)`);
   await orphan.getByRole('checkbox').check();
-  await expect(page.locator('.selection-summary')).toContainText(
+  await expect(page.locator('.links-page .selection-summary')).toContainText(
     '1 link saving to a removed folder will not start; choose another with Save to.',
   );
   await page.getByRole('button', { name: 'Remove', exact: true }).click();
@@ -738,6 +738,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(menu.getByRole('menuitem', { name: /^Rename/ })).toHaveAttribute('aria-disabled', 'true');
   await expect(menu.getByRole('menuitem', { name: /^Rename/ })).toContainText('Once it has finished');
   await expect(menu.getByRole('menuitem', { name: /^Remove…/ })).not.toHaveAttribute('aria-disabled');
+  await expect(menu.getByRole('menuitem', { name: /^Remove…/ })).toHaveText('Remove…');
   // A press outside closes it.
   await page.locator('.filters').click({ position: { x: 5, y: 5 } });
   await expect(menu).toBeHidden();
@@ -870,7 +871,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(page.locator('tr.started')).toHaveCount(0);
   await expect(page.getByText('No links collected.')).toBeVisible();
   // With nothing to select, no empty summary line sits above the table.
-  await expect(page.locator('.selection-summary')).toBeHidden();
+  await expect(page.locator('.links-page .selection-summary')).toBeHidden();
 
   // Add links is a page of its own. Leaving it collects nothing, and
   // keeps what was typed.
@@ -905,7 +906,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(page.locator('.links-page')).not.toContainText('secret');
   expect(fixture.requested.filter((name) => name === 'review-a.bin' || name === 'review-b.bin')).toEqual([]);
   // The new links are selected, with focus on the first.
-  await expect(page.locator('.selection-summary strong')).toHaveText('3 links selected');
+  await expect(page.locator('.links-page .selection-summary strong')).toHaveText('3 links selected');
   await expect(page.locator('tr[data-link] input[type="checkbox"]').first()).toBeFocused();
 
   // They outlive a reload; the engine holds them.
@@ -938,14 +939,14 @@ test('collected links wait on the Links page until chosen ones are started', asy
   // Filtering never acts on what it hides.
   const start = page.getByRole('button', { name: 'Start selected' });
   await linkRow('review-a.bin').getByRole('checkbox').check();
-  await expect(page.locator('.selection-summary')).toContainText('1 link selected');
-  await expect(page.locator('.selection-summary .path')).toHaveText(/** @type {string} */ (daemon.archive));
+  await expect(page.locator('.links-page .selection-summary')).toContainText('1 link selected');
+  await expect(page.locator('.links-page .selection-summary .path')).toHaveText(/** @type {string} */ (daemon.archive));
   await page.getByLabel('Filter links').fill('review-b');
   await expect(linkRow('review-a.bin')).toHaveCount(0);
   await expect(page.getByText('1 selected link hidden by the filter is left out.')).toBeVisible();
   await expect(start).toBeDisabled();
   await page.getByRole('checkbox', { name: 'Select all links shown' }).check();
-  await expect(page.locator('.selection-summary strong')).toHaveText('1 link selected');
+  await expect(page.locator('.links-page .selection-summary strong')).toHaveText('1 link selected');
   await page.getByRole('checkbox', { name: 'Select all links shown' }).uncheck();
   await page.getByLabel('Filter links').fill('');
 
@@ -1207,11 +1208,11 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   await expect(retry).toBeEnabled();
   await expect(retry).toHaveAttribute('title', /^Continues from the [89]\.\d MiB saved when it can$/);
 
-  // The row menu offers it too, and says what it does.
+  // The row menu offers it too, with no note beside it.
   await row(page, job).click({ button: 'right' });
   let menu = await openMenu(page);
   await expect(menu.getByRole('menuitem', { name: /^Retry/ })).not.toHaveAttribute('aria-disabled');
-  await expect(menu.getByRole('menuitem', { name: /^Retry/ })).toContainText(/Continues from the [89]\.\d MiB saved/);
+  await expect(menu.getByRole('menuitem', { name: /^Retry/ })).toHaveText('Retry');
   await page.keyboard.press('Escape');
 
   // A retry sent for a revision the job has left is refused and explained
@@ -1245,7 +1246,7 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   await row(page, job).click({ button: 'right' });
   menu = await openMenu(page);
   await expect(menu.getByRole('menuitem', { name: /^Retry/ })).toHaveAttribute('aria-disabled', 'true');
-  await expect(menu.getByRole('menuitem', { name: /^Retry/ })).toContainText('Waiting for the server to answer');
+  await expect(menu.getByRole('menuitem', { name: /^Retry/ })).toHaveText('Retry');
   await page.keyboard.press('Escape');
   answer();
   await expect(page.getByText(`Retrying ${NAME}. It continues from the`, { exact: false })).toBeVisible();
@@ -1777,7 +1778,7 @@ test('Settings stays at the right end of the toolbar in every view and state', a
     await expect(page.getByRole('link', { name: 'Links (1)' })).toBeVisible();
     await expectSame();
     await expectSearchInFirstRow(page);
-    await expect(page.locator('.selection-summary strong')).toHaveText('1 link selected');
+    await expect(page.locator('.links-page .selection-summary strong')).toHaveText('1 link selected');
     await expectSame();
 
     // Downloads with a job in progress, then with it selected.
@@ -1826,13 +1827,13 @@ test('removing a download requires an explicit file choice and deletes only its 
     await page.getByRole('button', { name: 'Add links' }).click();
     await page.getByLabel('Links, one per line').fill(fixture.put('delete-choice.bin', MIB));
     await page.getByRole('button', { name: 'Collect links' }).click();
-    await expect(page.locator('.selection-summary strong')).toHaveText('1 link selected');
+    await expect(page.locator('.links-page .selection-summary strong')).toHaveText('1 link selected');
     await page.getByRole('button', { name: 'Start selected' }).click();
     await expect(page.getByText('Started 1 download.')).toBeVisible();
     await expect(page.locator('#filter-names')).toHaveValue('');
     await expect(row(page, 'job-1')).toBeVisible();
     await page.goto(`${own.origin}/links`);
-    await expect(page.locator('.selection-summary')).not.toContainText('already in Downloads');
+    await expect(page.locator('.links-page .selection-summary')).not.toContainText('already in Downloads');
     await expect(page.locator('.links-page tr[data-link]')).toHaveCount(0);
     await page.getByRole('link', { name: 'Downloads', exact: true }).click();
     await expectState(page, 'job-1', 'Done');
@@ -1857,6 +1858,98 @@ test('removing a download requires an explicit file choice and deletes only its 
     expect(await readFile(join(/** @type {string} */ (own.root), 'unrelated.bin'), 'utf8')).toBe('keep me');
     await page.reload();
     await expect(page.getByText('No downloads yet.')).toBeVisible();
+  } finally {
+    await context.close();
+    await own.remove();
+  }
+});
+
+test('ticked downloads are paused, resumed, cancelled, and removed together', async ({ browser }) => {
+  const own = await new Daemon(await freePort()).init();
+  await own.start();
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    await page.goto(own.origin);
+    await page.getByLabel('Setup secret').fill((await own.setupSecret()).trim());
+    await page.getByLabel('Owner name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
+    await page.getByLabel('Repeat password').fill(PASSWORD);
+    await page.getByRole('button', { name: 'Create owner' }).click();
+    await expect(page.getByText('No downloads yet.')).toBeVisible();
+    await page.getByRole('button', { name: 'Add links' }).click();
+    await page
+      .getByLabel('Links, one per line')
+      .fill([fixture.put('bulk-a.bin', 10 * MIB, 9 * MIB), fixture.put('bulk-b.bin', 10 * MIB, 9 * MIB), fixture.put('bulk-c.bin', MIB)].join('\n'));
+    await page.getByRole('button', { name: 'Collect links' }).click();
+    await expect(page.locator('.links-page .selection-summary strong')).toHaveText('3 links selected');
+    await page.getByRole('button', { name: 'Start selected' }).click();
+    await expect(page).toHaveURL(`${own.origin}/`);
+    await expect(page.getByText('Started 3 downloads.')).toBeVisible();
+    const byName = (/** @type {string} */ name) => page.locator('tr[data-job]', { hasText: name });
+    const [a, b, c] = ['bulk-a.bin', 'bulk-b.bin', 'bulk-c.bin'].map(byName);
+    await expect(c.locator('td[data-state]')).toHaveText('Done');
+    const summary = page.locator('.downloads-view .selection-summary');
+
+    // Ticking two: the toolbar acts on both, not on a download in the details.
+    await a.getByRole('checkbox').check();
+    await b.getByRole('checkbox').check();
+    await expect(summary.locator('strong')).toHaveText('2 downloads selected');
+    await expect(a).toHaveClass(/ticked/);
+    await page.getByRole('button', { name: 'Pause 2 downloads' }).click();
+    await expect(page.getByText('Paused 2 downloads.')).toBeVisible();
+    await expect(a.locator('td[data-state]')).toHaveText('Paused');
+    await expect(b.locator('td[data-state]')).toHaveText('Paused');
+
+    // Select all; a command skips those it does not apply to and says so.
+    await page.getByRole('checkbox', { name: 'Select all downloads shown' }).check();
+    await expect(summary.locator('strong')).toHaveText('3 downloads selected');
+    await page.getByRole('button', { name: 'Resume 2 downloads' }).click();
+    await expect(page.getByText('Resumed 2 downloads. 1 selected download was left as it was: Resume does not apply.')).toBeVisible();
+
+    // A ticked row's menu acts on every ticked download.
+    await a.click({ button: 'right' });
+    let menu = await openMenu(page);
+    await expect(menu.getByRole('menuitem', { name: 'Rename…' })).toHaveCount(0);
+    await menu.getByRole('menuitem', { name: 'Cancel 2 downloads' }).click();
+    await expect(page.getByText('Cancelled 2 downloads.')).toBeVisible();
+    await expect(a.locator('td[data-state]')).toHaveText('Cancelled');
+    await expect(b.locator('td[data-state]')).toHaveText('Cancelled');
+
+    // Ticks hidden by the name filter leave the toolbar nothing to act on;
+    // it never falls back to the download in the details.
+    await page.getByRole('button', { name: 'Clear selection' }).click();
+    await b.locator('td.name a').click();
+    await expect(page.getByRole('button', { name: 'Retry bulk-b.bin' })).toBeEnabled();
+    await a.getByRole('checkbox').check();
+    await page.locator('#filter-names').fill('bulk-c');
+    await expect(summary).toContainText('1 selected download hidden by the filter is left out.');
+    for (const action of ['Pause', 'Resume', 'Cancel', 'Retry']) {
+      await expect(page.locator(`.downloads-view [data-action="${action.toLowerCase()}"]`)).toBeDisabled();
+    }
+    await page.locator('#filter-names').fill('');
+    await page.getByRole('button', { name: 'Close details' }).click();
+
+    // An unticked row's menu acts on that row alone.
+    await page.getByRole('button', { name: 'Clear selection' }).click();
+    await expect(summary).toBeEmpty();
+    await c.click({ button: 'right' });
+    menu = await openMenu(page);
+    await expect(menu.getByRole('menuitem', { name: 'Rename…' })).toBeVisible();
+    await page.keyboard.press('Escape');
+
+    await page.getByRole('checkbox', { name: 'Select all downloads shown' }).check();
+    await b.getByRole('button', { name: 'Actions for bulk-b.bin' }).click();
+    menu = await openMenu(page);
+    await menu.getByRole('menuitem', { name: /^Remove 3 downloads…/ }).click();
+    const dialog = page.getByRole('dialog', { name: 'Remove 3 downloads' });
+    await expect(dialog.getByRole('radio', { name: 'Remove from list only (keep files)' })).toBeChecked();
+    await dialog.getByRole('button', { name: 'Remove', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByText('Removed 3 downloads from the list. Remaining files stay in their folders.')).toBeVisible();
+    await expect(page.locator('tr[data-job]')).toHaveCount(0);
+    await expect(summary).toBeEmpty();
+    expect((await own.published('bulk-c.bin')).equals(content(0, MIB))).toBe(true);
   } finally {
     await context.close();
     await own.remove();
