@@ -437,6 +437,18 @@ impl AccountProvider for RealDebrid {
         }
     }
 
+    fn requires_account(&self, link: &Url) -> bool {
+        let id = link.path().strip_prefix("/d/");
+        matches!(link.scheme(), "http" | "https")
+            && link
+                .host_str()
+                .is_some_and(|host| host.strip_suffix('.').unwrap_or(host) == "real-debrid.com")
+            && link.port().is_none()
+            && link.username().is_empty()
+            && link.password().is_none()
+            && id.is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+    }
+
     fn begin(&self) -> BoxFuture<'_, Result<DeviceAuthorization, ProviderError>> {
         Box::pin(self.begin())
     }

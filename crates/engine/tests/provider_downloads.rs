@@ -47,6 +47,8 @@ use wayfetch_protocol::{
 const SERVICE: &str = "synthetic-debrid";
 /// A hoster link, as collected.
 const ORIGINAL: &str = "https://hoster.example/file/abc123";
+/// A fixture provider's own account-only link, never a live provider URL.
+const NATIVE: &str = "https://provider.example/d/SYNTHETIC123";
 /// What a generated link carries that grants access.
 const SIGNATURE: &str = "synthetic-signature";
 /// What the provider's credentials are named after.
@@ -86,6 +88,7 @@ struct Provider {
     lookups: AtomicUsize,
     checks: AtomicUsize,
     hosts: AtomicUsize,
+    domains: Mutex<Vec<String>>,
     host_error: Mutex<Option<ProviderError>>,
     hosts_wait: AtomicBool,
     hosts_panic: AtomicBool,
@@ -118,6 +121,7 @@ impl Provider {
             lookups: AtomicUsize::new(0),
             checks: AtomicUsize::new(0),
             hosts: AtomicUsize::new(0),
+            domains: Mutex::new(vec!["hoster.example".into()]),
             host_error: Mutex::new(None),
             hosts_wait: AtomicBool::new(false),
             hosts_panic: AtomicBool::new(false),
@@ -200,6 +204,10 @@ impl AccountProvider for Provider {
         }
     }
 
+    fn requires_account(&self, url: &Url) -> bool {
+        self.service.as_str() == SERVICE && url.as_str() == NATIVE
+    }
+
     fn supported_hosts(&self) -> BoxFuture<'_, Result<SupportedHosts, ProviderError>> {
         Box::pin(async {
             self.hosts.fetch_add(1, Ordering::SeqCst);
@@ -213,7 +221,7 @@ impl AccountProvider for Provider {
             if let Some(error) = self.host_error.lock().unwrap().clone() {
                 return Err(error);
             }
-            SupportedHosts::new(vec!["hoster.example".into()])
+            SupportedHosts::new(self.domains.lock().unwrap().clone())
         })
     }
 
@@ -548,7 +556,7 @@ async fn authorize(
         .is_none()
         .then(|| AccountAlias::new("Main").unwrap());
     let command = Command::AuthorizeAccount {
-        service: ProviderId::new(SERVICE).unwrap(),
+        service: provider.service.clone(),
         account,
         alias,
     };
@@ -2083,4 +2091,281 @@ async fn automatic_discovery_shutdown_reaps_a_waiting_provider() {
             .code,
         ErrorCode::ShuttingDown
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_native_links_without_usable_accounts_stay_collected_without_network() {
+    for fault in [
+        "missing",
+        "disabled",
+        "invalid",
+        "expired",
+        "missing_credential",
+        "locked",
+    ] {
+        let env = env();
+        let provider = &env.server.provider;
+        env.server.host.serve(body(KIB));
+        let mut owner = env.start().await;
+        if fault != "missing" {
+            let account = add_account(&owner, provider).await;
+            match fault {
+                "disabled" => {
+                    owner
+                        .handle()
+                        .execute(
+                            envelope(
+                                &owner,
+                                Command::SetAccountEnabled {
+                                    account,
+                                    expected_revision: account_revision(&owner, account).await,
+                                    enabled: false,
+                                },
+                            ),
+                            ALL,
+                        )
+                        .await
+                        .unwrap();
+                }
+                "invalid" => {
+                    database(&env)
+                        .execute("UPDATE accounts SET status = 'invalid_credentials'", [])
+                        .unwrap();
+                }
+                "expired" => {
+                    database(&env)
+                        .execute("UPDATE accounts SET expires_at = 1", [])
+                        .unwrap();
+                }
+                "missing_credential" => {
+                    database(&env)
+                        .execute("DELETE FROM account_credentials", [])
+                        .unwrap();
+                }
+                "locked" => {
+                    shutdown(owner).await;
+                    std::fs::remove_file(env.credential_key.as_ref().unwrap()).unwrap();
+                    owner = env.start().await;
+                }
+                _ => unreachable!(),
+            }
+        }
+        let links = collect(&owner, &[NATIVE]).await;
+        let request = envelope(&owner, automatic_command(&links));
+        let first = owner.handle().execute(request.clone(), ALL).await.unwrap();
+        let (done, refused) = applied(first.clone());
+        assert!(done.is_empty(), "{fault}");
+        assert_eq!(refused.len(), 1, "{fault}");
+        assert_eq!(refused[0].code, ErrorCode::NotApplicable);
+        assert!(
+            refused[0].message.as_str().contains("Sign in"),
+            "{fault}: {refused:?}"
+        );
+        assert!(
+            refused[0]
+                .message
+                .as_str()
+                .contains("Settings > Accounts & services")
+        );
+        assert_eq!(
+            owner.handle().execute(request, ALL).await.unwrap(),
+            first,
+            "replay"
+        );
+        assert_eq!(listed(&owner).await.len(), 1);
+        assert!(support::jobs(&owner).await.is_empty());
+        assert_eq!(
+            provider.hosts.load(Ordering::SeqCst),
+            0,
+            "pure native recognition"
+        );
+        assert_eq!(provider.unrestricts(), 0);
+        assert!(env.server.host.requests().is_empty());
+        shutdown(owner).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_native_refusal_does_not_hold_up_unmatched_direct_links() {
+    let env = env();
+    env.server.host.serve(body(KIB));
+    let owner = env.start().await;
+    let links = collect(&owner, &[NATIVE, "https://other.example/ordinary.bin"]).await;
+    let (done, refused) = applied(
+        owner
+            .handle()
+            .execute(envelope(&owner, automatic_command(&links)), ALL)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(refused.len(), 1);
+    assert_eq!(done.len(), 1);
+    assert!(
+        support::complete(&owner, done[0].job.unwrap())
+            .await
+            .route
+            .is_none()
+    );
+    assert_eq!(
+        listed(&owner).await[0].host.as_ref().unwrap().as_str(),
+        "provider.example"
+    );
+    assert_eq!(env.server.provider.hosts.load(Ordering::SeqCst), 0);
+    assert_eq!(env.server.provider.unrestricts(), 0);
+    assert!(
+        env.server
+            .host
+            .requests()
+            .iter()
+            .all(|(url, _)| url != NATIVE)
+    );
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_native_links_use_the_owning_account_even_with_unknown_host_metadata() {
+    let env = env();
+    let provider = &env.server.provider;
+    env.server.host.serve(body(KIB));
+    let owner = env.start().await;
+    let account = add_account(&owner, provider).await;
+    *provider.host_error.lock().unwrap() =
+        Some(ProviderError::Unavailable("fixture outage".into()));
+    let links = collect(&owner, &[ORIGINAL]).await;
+    let (done, refused) = applied(
+        owner
+            .handle()
+            .execute(envelope(&owner, automatic_command(&links)), ALL)
+            .await
+            .unwrap(),
+    );
+    assert!(done.is_empty());
+    assert_eq!(refused.len(), 1);
+    assert_eq!(provider.hosts.load(Ordering::SeqCst), 1);
+    let links = collect(&owner, &[NATIVE]).await;
+    let native = links
+        .into_iter()
+        .filter(|l| {
+            l.host
+                .as_ref()
+                .is_some_and(|h| h.as_str() == "provider.example")
+        })
+        .collect::<Vec<_>>();
+    let (done, refused) = applied(
+        owner
+            .handle()
+            .execute(envelope(&owner, automatic_command(&native)), ALL)
+            .await
+            .unwrap(),
+    );
+    assert!(refused.is_empty(), "{refused:?}");
+    let job = support::complete(&owner, done[0].job.unwrap()).await;
+    assert_eq!(job.route.unwrap().account, account);
+    assert_eq!(
+        provider.hosts.load(Ordering::SeqCst),
+        1,
+        "no native catalogue lookup"
+    );
+    assert_eq!(provider.unrestricts(), 1);
+    assert!(
+        env.server
+            .host
+            .requests()
+            .iter()
+            .all(|(url, _)| url != NATIVE)
+    );
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_native_links_cannot_be_claimed_by_another_provider_account() {
+    let mut env = env();
+    let mut other = Provider::new();
+    Arc::get_mut(&mut other).unwrap().service = ProviderId::new("other-debrid").unwrap();
+    *other.domains.lock().unwrap() = vec!["provider.example".into()];
+    env.providers.push(other.clone());
+    let owner = env.start().await;
+    add_account(&owner, &other).await;
+    let links = collect(&owner, &[NATIVE]).await;
+    let (done, refused) = applied(
+        owner
+            .handle()
+            .execute(envelope(&owner, automatic_command(&links)), ALL)
+            .await
+            .unwrap(),
+    );
+    assert!(done.is_empty());
+    assert_eq!(refused.len(), 1);
+    assert!(refused[0].message.as_str().contains(SERVICE));
+    assert!(support::jobs(&owner).await.is_empty());
+    assert_eq!(other.hosts.load(Ordering::SeqCst), 0);
+    assert_eq!(other.unrestricts(), 0);
+    assert_eq!(env.server.provider.hosts.load(Ordering::SeqCst), 0);
+    assert!(env.server.host.requests().is_empty());
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_links_keep_explicit_direct_and_immediate_submit_behavior() {
+    use wayfetch_protocol::command::{InputUrl, SubmitItems};
+    let env = env();
+    env.server.host.serve(body(KIB));
+    let owner = env.start().await;
+    let links = collect(&owner, &[NATIVE]).await;
+    let direct = start(&owner, &links, None).await.unwrap()[0];
+    assert!(support::complete(&owner, direct).await.route.is_none());
+    let result = owner
+        .handle()
+        .execute(
+            envelope(
+                &owner,
+                Command::Submit {
+                    items: SubmitItems::try_from(vec![InputUrl::parse(NATIVE).unwrap()]).unwrap(),
+                    package: None,
+                },
+            ),
+            &[Permission::Submit],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, CommandResult::Submitted { .. }));
+    let submitted = support::jobs(&owner)
+        .await
+        .into_iter()
+        .find(|j| j.id != direct)
+        .unwrap();
+    assert!(
+        support::complete(&owner, submitted.id)
+            .await
+            .route
+            .is_none()
+    );
+    assert_eq!(env.server.provider.hosts.load(Ordering::SeqCst), 0);
+    assert_eq!(env.server.provider.unrestricts(), 0);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_starts_preserve_the_ordinary_host_catalogue_cache() {
+    let env = env();
+    let provider = &env.server.provider;
+    env.server.host.serve(body(KIB));
+    let owner = env.start().await;
+    let account = add_account(&owner, provider).await;
+    for (url, lookups) in [(NATIVE, 0), (ORIGINAL, 1), (NATIVE, 1), (ORIGINAL, 1)] {
+        let links = collect(&owner, &[url]).await;
+        let (done, refused) = applied(
+            owner
+                .handle()
+                .execute(envelope(&owner, automatic_command(&links)), ALL)
+                .await
+                .unwrap(),
+        );
+        assert!(refused.is_empty(), "{refused:?}");
+        let job = support::complete(&owner, done[0].job.unwrap()).await;
+        assert_eq!(job.route.unwrap().account, account);
+        assert_eq!(provider.hosts.load(Ordering::SeqCst), lookups);
+    }
+    assert_eq!(provider.unrestricts(), 4);
+    shutdown(owner).await;
 }

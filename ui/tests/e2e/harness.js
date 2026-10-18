@@ -180,6 +180,8 @@ export class RealDebridFixture {
     this.filename = 'Through the Provider.bin';
     /** Unrestrict requests whose answer is lost: the connection drops before it. */
     this.lose = 0;
+    /** Optional status returned by unrestrict, without a provider error code. @type {number | null} */
+    this.refuseUnrestrict = null;
     /** Authorization headers that reached generated links. @type {(string | undefined)[]} */
     this.downloadAuth = [];
     this.server = createServer((request, response) => void this.serve(request, response));
@@ -268,6 +270,10 @@ export class RealDebridFixture {
             return;
           }
           answer(200, this.generated.map((_, i) => download(i + 1)).reverse());
+          return;
+        }
+        if (this.refuseUnrestrict !== null) {
+          answer(this.refuseUnrestrict, { error: 'synthetic-private-provider-detail' });
           return;
         }
         if (this.lose > 0) {

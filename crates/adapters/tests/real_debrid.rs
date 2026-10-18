@@ -449,3 +449,45 @@ async fn unsupported_domain_answers_and_outages_remain_unknown() {
         assert_eq!(server.log().len(), 1, "never silently retry");
     }
 }
+
+#[tokio::test]
+async fn native_file_links_require_this_account_without_contacting_the_api() {
+    let server = Server::start().await;
+    let rd = provider(&server);
+    for link in [
+        "https://real-debrid.com/d/SYNTHETIC123",
+        "https://REAL-DEBRID.COM/d/Synthetic123",
+        "https://real-debrid.com./d/SYNTHETIC123",
+        "http://real-debrid.com/d/SYNTHETIC123",
+        "https://real-debrid.com/d/SYNTHETIC123?download=1",
+    ] {
+        assert!(
+            rd.requires_account(&url::Url::parse(link).unwrap()),
+            "{link}"
+        );
+    }
+    for link in [
+        "https://real-debrid.com.evil.test/d/SYNTHETIC123",
+        "https://notreal-debrid.com/d/SYNTHETIC123",
+        "https://www.real-debrid.com/d/SYNTHETIC123",
+        "https://real-debrid.download/d/SYNTHETIC123",
+        "https://cdn.real-debrid.com/d/SYNTHETIC123",
+        "https://real-debrid.com@evil.test/d/SYNTHETIC123",
+        "https://spoof@real-debrid.com/d/SYNTHETIC123",
+        "https://real-debrid.com/?next=/d/SYNTHETIC123",
+        "https://evil.test/?next=https://real-debrid.com/d/SYNTHETIC123",
+        "https://real-debrid.com/downloads/SYNTHETIC123",
+        "https://real-debrid.com/d/",
+        "https://real-debrid.com/d/SYNTHETIC123/extra",
+        "https://real-debrid.com/d/SYNTHETIC-123",
+        "https://real-debrid.com/d/%53YNTHETIC123",
+        "https://real-debrid.com:8443/d/SYNTHETIC123",
+        "ftp://real-debrid.com/d/SYNTHETIC123",
+    ] {
+        assert!(
+            !rd.requires_account(&url::Url::parse(link).unwrap()),
+            "{link}"
+        );
+    }
+    assert!(server.log().is_empty(), "recognition is pure");
+}

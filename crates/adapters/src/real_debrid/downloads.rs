@@ -525,6 +525,17 @@ fn refusal(status: u16, code: Option<i64>) -> Unrestricted {
             UnsupportedCapability,
             "Real-Debrid has disabled link generation for now.",
         ),
+        // Known provider codes above keep their more specific meaning.
+        // Otherwise HTTP authorization refusals are actionable account
+        // errors, even when the response is bare or unfamiliar.
+        _ if status == 401 => (
+            InvalidCredentials,
+            "Authorization failed at Real-Debrid (HTTP 401). Sign this account in again in Settings > Accounts & services.",
+        ),
+        _ if status == 403 => (
+            InvalidCredentials,
+            "Forbidden by Real-Debrid (HTTP 403): access denied for this account. Check the account in Settings > Accounts & services.",
+        ),
         _ if status == 429 => {
             return Unrestricted::Refused {
                 code: QuotaExhausted,

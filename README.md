@@ -252,14 +252,25 @@ starting without `"account"` selects automatically: the engine matches each
 original URL's hostname against the provider's supported domains, chooses
 the lowest-ID usable enabled account supporting it, and uses Direct for a
 known nonmatch. Matching uses exact domains and subdomains at a dot boundary.
-Disabled accounts opt out. Matching hosts with unusable accounts (invalid or
+Disabled accounts opt out of ordinary host routing. Provider-owned file links
+are different: Real-Debrid's `real-debrid.com/d/<alphanumeric-id>` links require
+its own usable account, including when host metadata is unavailable. Without
+one, the link stays collected with a sign-in/enable instruction in Settings >
+Accounts & services; no download or provider request starts. Recognition is
+local and does not classify `real-debrid.download` CDN links as account-only.
+An explicit Direct override and `/v1/inputs` retain their Direct behavior.
+Matching hosts with unusable accounts (invalid or
 expired status, unreadable credentials, or a locked vault) stay collected
 with a reason; unknown host support also stays collected. Supported domains
 are fetched without generating a link and cached for five minutes; failures
 are retained for 15 seconds. Automatic starts need `submit` and
 `provider_downloads`; a token missing the latter must explicitly choose
 `"routing": "direct"`. An explicit account cannot be combined with `routing`.
-`/v1/inputs` continues to submit Direct jobs. If Real-Debrid's
+Unknown HTTP 401 authorization failures after the one token-refresh retry, and
+403 Forbidden/access-denied responses, explain the account action in Settings >
+Accounts & services. Known quota, premium, and locked-account errors retain
+their specific meaning. These provider refusals do not sign the person out of
+Wayfetch. If Real-Debrid's
 answer was lost, the job fails as `operation_ambiguous` once Wayfetch has
 checked Real-Debrid's downloads list and found no matching link; retrying it
 needs `"repeat_provider_operation": true`, since Real-Debrid may then do the

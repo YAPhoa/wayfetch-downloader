@@ -238,6 +238,9 @@ export function describe(job, clock = shortTime) {
  * @param {FailureSummary} failure
  */
 export function explain(failure) {
+  // The engine's redacted context distinguishes rejected authorization from
+  // other account refusals and supplies the provider-specific next step.
+  if (failure.code === 'invalid_credentials' && failure.message?.trim()) return failure.message;
   return FAILURES[failure.code].explain;
 }
 

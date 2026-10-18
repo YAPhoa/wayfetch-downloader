@@ -48,6 +48,30 @@ impl Coordinator {
             }
             Ok(false) => {}
         }
+        let links = match &envelope.command {
+            Command::StartLinks { links, .. } => {
+                links.as_slice().iter().map(|l| l.link).collect::<Vec<_>>()
+            }
+            _ => unreachable!(),
+        };
+        let urls = match self.with_store(move |store| store.start_urls(&links)).await {
+            Ok(urls) => urls,
+            Err(error) => {
+                let _ = reply.send(Err(error.into()));
+                return;
+            }
+        };
+        let native: BTreeMap<_, _> = urls
+            .iter()
+            .filter_map(|(link, url)| {
+                self.accounts
+                    .providers()
+                    .iter()
+                    .find(|provider| provider.requires_account(url))
+                    .map(|provider| (*link, provider.service().clone()))
+            })
+            .collect();
+        let needs_hosts = urls.iter().any(|(link, _)| !native.contains_key(link));
         let accounts = match self.with_store(Store::accounts).await {
             Ok(accounts) => accounts,
             Err(error) => {
@@ -76,7 +100,7 @@ impl Coordinator {
         });
         let missing: Vec<_> = services
             .iter()
-            .filter(|s| !self.routing.cache.contains_key(*s))
+            .filter(|s| needs_hosts && !self.routing.cache.contains_key(*s))
             .filter_map(|s| self.accounts.provider(s))
             .collect();
         if !missing.is_empty() {
@@ -140,19 +164,6 @@ impl Coordinator {
             }
             return;
         }
-        let links = match &envelope.command {
-            Command::StartLinks { links, .. } => {
-                links.as_slice().iter().map(|l| l.link).collect::<Vec<_>>()
-            }
-            _ => unreachable!(),
-        };
-        let urls = match self.with_store(move |store| store.start_urls(&links)).await {
-            Ok(urls) => urls,
-            Err(error) => {
-                let _ = reply.send(Err(error.into()));
-                return;
-            }
-        };
         // Accounts are sorted by durable ID, independent of provider/catalogue order.
         let mut accounts = accounts;
         accounts.sort_by_key(|a| a.id);
@@ -182,6 +193,21 @@ impl Coordinator {
         }
         let mut routes = Routes::new();
         for (link, url) in urls {
+            if let Some(service) = native.get(&link) {
+                let route = accounts
+                    .iter()
+                    .find(|a| a.service == *service && usable.contains(&a.id))
+                    .map(|account| JobRoute {
+                        service: service.clone(),
+                        account: account.id,
+                    });
+                routes.insert(link, match route {
+                    Some(route) => Ok(Some(route)),
+                    None => Err(ProtocolError::new(ErrorCode::NotApplicable,
+                        &format!("Sign-in required for {service}. Sign in, check, or enable the account in Settings > Accounts & services, then start this provider link again."))),
+                });
+                continue;
+            }
             let mut matching = Vec::new();
             let mut unknown = false;
             for account in accounts

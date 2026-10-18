@@ -372,6 +372,14 @@ pub trait AccountProvider: Send + Sync + 'static {
     /// What the integration supports.
     fn support(&self) -> ServiceSupport;
 
+    /// Whether this provider recognizes an account-only native file link.
+    /// Pure recognition only: no network or credential access. Automatic
+    /// routing must use this provider's account, never a different provider
+    /// or an implicit Direct fallback, even without host metadata.
+    fn requires_account(&self, _link: &Url) -> bool {
+        false
+    }
+
     /// Read the provider's supported domains without generating a download
     /// or consuming account quota. Failure means unknown support.
     fn supported_hosts(&self) -> BoxFuture<'_, Result<SupportedHosts, ProviderError>> {

@@ -1426,6 +1426,76 @@ test('accounts are signed in on the service, checked, disabled, signed in again,
   await context.close();
 });
 
+test('native provider links require sign-in and provider Forbidden keeps the Wayfetch session', async ({ browser }) => {
+  const nativeProvider = await new RealDebridFixture().start();
+  const local = await new Daemon(await freePort(), { realDebrid: nativeProvider.base }).init();
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await local.start();
+    await page.goto(local.origin);
+    await page.getByLabel('Setup secret').fill((await local.setupSecret()).trim());
+    await page.getByLabel('Owner name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
+    await page.getByLabel('Repeat password').fill(PASSWORD);
+    await page.getByRole('button', { name: 'Create owner' }).click();
+    await expect(page.locator('.statusbar .status')).toHaveText('Live');
+    /** @param {string} link */
+    const collectOne = async (link) => {
+      await page.goto(`${local.origin}/links`);
+      await page.getByRole('button', { name: 'Add links' }).click();
+      await page.getByLabel('Links, one per line').fill(link);
+      await page.getByRole('button', { name: 'Collect links' }).click();
+      await expect(page.getByText('Collected 1 link for review.')).toBeVisible();
+      await page.locator('tr[data-link] input[type="checkbox"]').check();
+      await page.getByRole('button', { name: 'Start selected' }).click();
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    };
+    const jobs = async () => (await (await page.request.get(`${local.origin}/v1/jobs?page_size=500`)).json()).items;
+    await collectOne('https://real-debrid.com/d/SYNTHETICNATIVE123');
+    await expect(page.locator('.links-page .notice')).toContainText('Sign-in required');
+    await expect(page.locator('.links-page .notice')).toContainText('Settings > Accounts & services');
+    await expect(page.locator('tr[data-link]')).toHaveCount(1);
+    expect(await jobs()).toEqual([]);
+    expect(nativeProvider.requested).toEqual([]);
+
+    await page.goto(`${local.origin}/settings/accounts`);
+    await page.getByRole('button', { name: 'Add account…' }).click();
+    await page.getByRole('dialog', { name: 'Add account' }).getByRole('button', { name: 'Sign in to Real-Debrid' }).click();
+    const signIn = page.getByRole('dialog', { name: 'Sign in to Real-Debrid' });
+    await signIn.getByRole('button', { name: 'Continue' }).click();
+    await expect(signIn).toHaveCount(0);
+    await expect(page.locator('[data-key="accounts-message"]')).toHaveText('Account added and signed in.');
+    await page.goto(`${local.origin}/links`);
+    await page.locator('tr[data-link] input[type="checkbox"]').check();
+    await page.getByRole('button', { name: 'Start selected' }).click();
+    await expect(page.getByText('Started 1 download.')).toBeVisible();
+    await expect.poll(async () => (await jobs())[0]?.stage).toBe('complete');
+    const native = (await jobs())[0];
+    expect(native.route.service).toBe('real-debrid');
+    expect(nativeProvider.requested.filter((path) => path === '/rest/1.0/hosts/domains')).toHaveLength(0);
+    expect(nativeProvider.requested.filter((path) => path === '/rest/1.0/unrestrict/link')).toHaveLength(1);
+
+    nativeProvider.refuseUnrestrict = 403;
+    await collectOne('https://real-debrid.com/d/SYNTHETICDENIED123');
+    await expect(page.getByText('Started 1 download.')).toBeVisible();
+    await expect.poll(async () => (await jobs()).find((/** @type {{ id: string }} */ job) => job.id !== native.id)?.stage).toBe('failed');
+    const denied = (await jobs()).find((/** @type {{ id: string }} */ job) => job.id !== native.id);
+    expect(denied.failure.code).toBe('invalid_credentials');
+    await page.goto(`${local.origin}/jobs/${denied.id}`);
+    await expect(page.locator('.inspector')).toContainText('Forbidden');
+    await expect(page.locator('.inspector')).toContainText('Settings > Accounts & services');
+    await expect(page.locator('.inspector')).not.toContainText('synthetic-private-provider-detail');
+    await expect(page.locator('.statusbar .status')).toHaveText('Live');
+    expect((await (await page.request.get(`${local.origin}/v1/auth/session`)).json()).authenticated).toBe(true);
+    expect(nativeProvider.requested.filter((path) => path === '/rest/1.0/unrestrict/link')).toHaveLength(2);
+  } finally {
+    await context.close();
+    await local.remove();
+    await nativeProvider.stop();
+  }
+});
+
 test('links download through a chosen Real-Debrid account, and a lost answer is asked again only once confirmed', async ({
   browser,
 }) => {

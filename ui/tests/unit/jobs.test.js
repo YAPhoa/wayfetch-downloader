@@ -126,6 +126,21 @@ test('states read as plain words with what went wrong', () => {
   assert.match(explain(expired), /Add the link again/);
 });
 
+test('account refusals retain the engine’s redacted authorization details and next step', () => {
+  for (const message of [
+    'Authorization failed at Real-Debrid (HTTP 401). Sign this account in again in Settings > Accounts & services.',
+    'Forbidden by Real-Debrid (HTTP 403): access denied for this account. Check the account in Settings > Accounts & services.',
+  ]) {
+    assert.equal(explain({ code: 'invalid_credentials', message }), message);
+  }
+  for (const message of [undefined, null, '', '   ']) {
+    assert.equal(
+      explain({ code: 'invalid_credentials', message }),
+      'The provider rejected the account. Check its credentials.',
+    );
+  }
+});
+
 test('each state filter counts the stages it shows', () => {
   /** @type {Parameters<typeof groupCount>[1]} */
   const counts = { queued: 4, transferring: 2, verifying: 1, waiting: 3, blocked: 1, complete: 9 };
