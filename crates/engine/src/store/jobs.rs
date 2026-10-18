@@ -9,17 +9,18 @@ use strum::VariantArray;
 use wayfetch_domain::failure::{Failure, FailureCode};
 use wayfetch_domain::id::{JobId, PackageId, RootId};
 use wayfetch_domain::job::{DesiredState, JobStage, JobState, Outcome};
-use wayfetch_domain::name::{DiagnosticText, HostName};
+use wayfetch_domain::name::{DiagnosticText, HostName, ProviderId};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Generation;
 use wayfetch_protocol::event::{EventCursor, EventKind};
+use wayfetch_protocol::media::{JobMedia, MediaChoice};
 use wayfetch_protocol::query::{
     ArtifactSummary, FailureSummary, JobCounts, JobFilter, JobRoute, JobSummary, Page, Query,
     QueryResult,
 };
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
-use super::{Store, StoreError, files, key, links, operations, outbox, sql};
+use super::{Store, StoreError, files, key, links, media, operations, outbox, sql};
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
 /// the job's newest partial; the next three describe its published file,
@@ -31,7 +32,8 @@ const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.gener
      COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
                ORDER BY p.generation DESC LIMIT 1), 0), \
      a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id, j.removed_at IS NOT NULL, \
-     j.restart_reason, j.route_service, j.route_account, j.suggested_name";
+     j.restart_reason, j.route_service, j.route_account, j.suggested_name, \
+     j.media_service, j.media_choice";
 
 /// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
 /// has exactly one source link.
@@ -56,6 +58,20 @@ pub struct Admission {
     /// The provider account it downloads through; `None` for a direct
     /// download.
     pub route: Option<JobRoute>,
+    /// The media service it is made by, and what it is made as.
+    pub media: Option<JobMedia>,
+}
+
+/// What a new download of a media link is made by and as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NewMedia {
+    /// The media service.
+    pub(super) service: ProviderId,
+    /// What it is made as.
+    pub(super) choice: MediaChoice,
+    /// The title the link's check found, for the name shown until the
+    /// file is named.
+    pub(super) title: Option<String>,
 }
 
 /// Stages that are parked with a failure explaining why.
@@ -84,6 +100,7 @@ pub(super) struct StoredJob {
     /// The provider account it downloads through.
     route: Option<JobRoute>,
     name: Option<String>,
+    media: Option<JobMedia>,
 }
 
 impl StoredJob {
@@ -105,6 +122,7 @@ impl StoredJob {
             destination: self.destination,
             restart_reason: self.restart_reason.clone(),
             route: self.route.clone().map(Box::new),
+            media: self.media.clone().map(Box::new),
         }
     }
 }
@@ -129,6 +147,7 @@ struct RawJob {
     restart_reason: Option<String>,
     route: (Option<String>, Option<i64>),
     name: Option<String>,
+    media: (Option<String>, Option<String>),
 }
 
 impl RawJob {
@@ -155,6 +174,7 @@ impl RawJob {
             restart_reason: row.get(17)?,
             route: (row.get(18)?, row.get(19)?),
             name: row.get(20)?,
+            media: (row.get(21)?, row.get(22)?),
         })
     }
 
@@ -209,8 +229,25 @@ impl RawJob {
             restart_reason: self.restart_reason.as_deref().map(DiagnosticText::new),
             route: operations::decode_route(self.route.0, self.route.1)?,
             name,
+            media: decode_media(self.media.0, self.media.1.as_deref())?,
         })
     }
+}
+
+/// A job's stored media service and choice.
+fn decode_media(
+    service: Option<String>,
+    choice: Option<&str>,
+) -> Result<Option<JobMedia>, StoreError> {
+    service
+        .map(|service| {
+            Ok(JobMedia {
+                service: ProviderId::new(service)
+                    .map_err(|_| StoreError::Corrupt("media service"))?,
+                choice: media::decode_choice(choice)?,
+            })
+        })
+        .transpose()
 }
 
 /// Only filename-like source segments are useful public hints. Opaque path
@@ -303,7 +340,13 @@ pub(super) fn save(
     if matches!(job.state.stage(), JobStage::Complete | JobStage::Cancelled) {
         operations::retire_links(tx, job.id)?;
     }
-    outbox::append(tx, &EventKind::JobChanged { job: job.summary() }, now)?;
+    outbox::append(
+        tx,
+        &EventKind::JobChanged {
+            job: Box::new(job.summary()),
+        },
+        now,
+    )?;
     Ok(())
 }
 
@@ -331,14 +374,19 @@ pub(super) fn create(
     package: i64,
     root: Option<i64>,
     route: Option<&JobRoute>,
+    media: Option<&NewMedia>,
     now: UtcTimestamp,
 ) -> Result<JobId, StoreError> {
     let state = JobState::new();
     let desired: &'static str = state.desired().into();
+    let name = media
+        .and_then(|m| crate::media::title_file_name(m.title.as_deref()?, None))
+        .map(|name| name.as_str().to_owned());
     tx.execute(
         "INSERT INTO jobs (source_link_id, package_id, desired_state, stage, generation, \
-         revision, root_id, route_service, route_account, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+         revision, root_id, route_service, route_account, created_at, updated_at, \
+         media_service, media_choice, suggested_name) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, ?12, ?13)",
         params![
             source,
             package,
@@ -350,6 +398,9 @@ pub(super) fn create(
             route.map(|r| r.service.as_str()),
             route.map(|r| sql(r.account)).transpose()?,
             now.unix_millis(),
+            media.map(|m| m.service.as_str()),
+            media.map(|m| media::encode_choice(&m.choice)),
+            name,
         ],
     )?;
     let id: JobId = key(tx.last_insert_rowid())?;
@@ -358,7 +409,13 @@ pub(super) fn create(
         [source],
     )?;
     let job = load(tx, id)?;
-    outbox::append(tx, &EventKind::JobAdded { job: job.summary() }, now)?;
+    outbox::append(
+        tx,
+        &EventKind::JobAdded {
+            job: Box::new(job.summary()),
+        },
+        now,
+    )?;
     Ok(id)
 }
 
@@ -370,7 +427,13 @@ pub(super) fn announce(
     now: UtcTimestamp,
 ) -> Result<(), StoreError> {
     let job = load(tx, id)?;
-    outbox::append(tx, &EventKind::JobChanged { job: job.summary() }, now)?;
+    outbox::append(
+        tx,
+        &EventKind::JobChanged {
+            job: Box::new(job.summary()),
+        },
+        now,
+    )?;
     Ok(())
 }
 
@@ -428,7 +491,7 @@ impl Store {
             .collect::<Result<_, _>>()?;
         let staged = pending
             .into_iter()
-            .map(|(source, package, root)| create(&tx, source, package, root, None, now))
+            .map(|(source, package, root)| create(&tx, source, package, root, None, None, now))
             .collect::<Result<Vec<_>, _>>()?;
         tx.commit()?;
         Ok(staged)
@@ -531,11 +594,12 @@ impl Store {
             Option<i64>,
             Option<String>,
             Option<i64>,
+            (Option<String>, Option<String>),
         );
         let rows: Vec<Row> = tx
             .prepare(
                 "SELECT j.id, j.stage, j.generation, j.desired_state, s.input_url, j.root_id, \
-                 j.route_service, j.route_account \
+                 j.route_service, j.route_account, j.media_service, j.media_choice \
                  FROM jobs j JOIN source_links s ON s.id = j.source_link_id \
                  WHERE j.stage IN ('queued', 'recovering') AND (?2 OR j.root_id IS NOT NULL) \
                  ORDER BY j.stage = 'recovering' DESC, j.id LIMIT ?1",
@@ -550,11 +614,12 @@ impl Store {
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    (row.get(8)?, row.get(9)?),
                 ))
             })?
             .collect::<Result<_, _>>()?;
         let mut ready = Vec::with_capacity(limit);
-        for (id, stage, generation, desired, url, root, service, account) in rows {
+        for (id, stage, generation, desired, url, root, service, account, media) in rows {
             let id: JobId = key(id)?;
             if running.contains(&id) || ready.len() == limit {
                 continue;
@@ -568,6 +633,7 @@ impl Store {
                 url,
                 root: root.map(key).transpose()?,
                 route: operations::decode_route(service, account)?,
+                media: decode_media(media.0, media.1.as_deref())?,
             });
         }
         Ok(ready)
@@ -634,6 +700,7 @@ impl Store {
         query: &Query,
         instance: InstanceId,
     ) -> Result<QueryResult, ProtocolError> {
+        let converter = self.media_converter;
         let tx = self.read().map_err(ProtocolError::from)?;
         let as_of = EventCursor {
             instance,
@@ -714,7 +781,7 @@ impl Store {
                 QueryResult::JobCounts(JobCounts { stages, as_of })
             }
             Query::ListLinks { after, page_size } => {
-                QueryResult::Links(links::list(&tx, *after, *page_size, as_of)?)
+                QueryResult::Links(links::list(&tx, *after, *page_size, as_of, converter)?)
             }
             Query::LinkSource { link } => QueryResult::LinkSource {
                 link: *link,

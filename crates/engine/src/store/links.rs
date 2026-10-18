@@ -15,17 +15,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::{OptionalExtension, Transaction, params, params_from_iter};
 use url::Url;
 use wayfetch_domain::id::{BatchId, JobId, RootId, SourceLinkId};
-use wayfetch_domain::name::{DiagnosticText, HostName};
+use wayfetch_domain::name::{DiagnosticText, HostName, ProviderId};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
 use wayfetch_protocol::command::{
     AppliedLink, CollectItems, InputUrl, LinkRef, LinkRefs, MAX_COLLECTED_LINKS, RefusedLink,
 };
 use wayfetch_protocol::event::{EventCursor, EventKind};
+use wayfetch_protocol::media::MediaChoice;
 use wayfetch_protocol::query::{CollectedLink, JobRoute, LinkCheck, LinkPage, PageSize};
 use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 
-use super::{Store, StoreError, jobs, key, outbox, sql};
+use super::{Store, StoreError, jobs, key, media, outbox, sql};
 
 /// The most characters of an invalid entry a list shows.
 const SHOWN_TEXT_CHARS: usize = 200;
@@ -95,6 +96,7 @@ pub(super) fn collect(
     tx: &Transaction<'_>,
     items: &CollectItems,
     destination: Option<RootId>,
+    media: &BTreeMap<usize, ProviderId>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let listed: i64 = tx
@@ -138,12 +140,18 @@ pub(super) fn collect(
     let mut insert = tx
         .prepare(
             "INSERT INTO source_links (batch_id, ordinal, input_url, held, listed, root_id, \
-             invalid, problem) VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6)",
+             invalid, problem, media_service, media_state) \
+             VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6, ?7, CASE WHEN ?7 IS NULL THEN NULL \
+             ELSE 'pending' END)",
         )
         .map_err(StoreError::from)?;
     let mut invalid = 0u32;
-    for (ordinal, entry) in entries.iter().enumerate() {
-        let ordinal = i64::try_from(ordinal).map_err(|_| StoreError::Corrupt("ordinal"))?;
+    for (position, entry) in entries.iter().enumerate() {
+        let ordinal = i64::try_from(position).map_err(|_| StoreError::Corrupt("ordinal"))?;
+        let service = match entry {
+            Entry::Valid(_) => media.get(&position).map(ProviderId::as_str),
+            Entry::Invalid { .. } => None,
+        };
         let (text, problem) = match entry {
             Entry::Valid(url) => (url.as_url().as_str(), None),
             Entry::Invalid { text, problem } => {
@@ -159,6 +167,7 @@ pub(super) fn collect(
                 root,
                 problem.is_some(),
                 problem.as_ref().map(DiagnosticText::as_str),
+                service,
             ])
             .map_err(StoreError::from)?;
     }
@@ -187,6 +196,7 @@ struct Held {
     root: Option<RootId>,
     problem: Option<String>,
     job: Option<JobId>,
+    media: media::LinkColumns,
 }
 
 fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreError> {
@@ -194,9 +204,12 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
     let Ok(id) = sql(link) else { return Ok(None) };
     let raw = tx
         .query_row(
-            "SELECT s.batch_id, b.package_id, s.listed, s.invalid, s.revision, s.root_id, \
-             s.problem, j.id FROM source_links s JOIN input_batches b ON b.id = s.batch_id \
-             LEFT JOIN jobs j ON j.source_link_id = s.id WHERE s.id = ?1",
+            &format!(
+                "SELECT s.batch_id, b.package_id, s.listed, s.invalid, s.revision, s.root_id, \
+                 s.problem, j.id, {MEDIA_COLUMNS} FROM source_links s \
+                 JOIN input_batches b ON b.id = s.batch_id \
+                 LEFT JOIN jobs j ON j.source_link_id = s.id WHERE s.id = ?1"
+            ),
             [id],
             |r| {
                 Ok((
@@ -208,12 +221,13 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
                     r.get::<_, Option<i64>>(5)?,
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<i64>>(7)?,
+                    media::LinkColumns::read(r, 8)?,
                 ))
             },
         )
         .optional()?;
     raw.map(
-        |(batch, package, listed, invalid, revision, root, problem, job)| {
+        |(batch, package, listed, invalid, revision, root, problem, job, media)| {
             Ok(Held {
                 batch,
                 package,
@@ -223,11 +237,17 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
                 root: root.map(key).transpose()?,
                 problem,
                 job: job.map(key).transpose()?,
+                media,
             })
         },
     )
     .transpose()
 }
+
+/// A collected link's media columns, in [`media::LinkColumns::read`]'s
+/// order.
+const MEDIA_COLUMNS: &str =
+    "s.media_service, s.media_state, s.media_info, s.media_problem, s.media_choice";
 
 /// The outcome of one link: applied, or refused with a code and message.
 type Outcome = Result<AppliedLink, (ErrorCode, String)>;
@@ -380,12 +400,24 @@ pub(super) fn start(
                         "The automatically chosen account is no longer usable; check Accounts and start again.".into())));
             }
         }
+        // A media link starts as a media download only when it was routed
+        // automatically and no account took it.
+        let media = match (&row.media.service, automatic, route) {
+            (Some(service), true, None) => Some(jobs::NewMedia {
+                service: ProviderId::new(service.clone())
+                    .map_err(|_| StoreError::Corrupt("media service"))?,
+                choice: media::decode_choice(row.media.choice.as_deref())?,
+                title: media::decode_info(row.media.info.as_deref())?.map(|i| i.title),
+            }),
+            _ => None,
+        };
         let job = jobs::create(
             tx,
             sql(link.link)?,
             row.package,
             row.root.map(sql).transpose()?,
             route,
+            media.as_ref(),
             now,
         )?;
         tx.execute(
@@ -495,12 +527,72 @@ pub(super) fn relocate(
     })
 }
 
+/// Chooses what media links not started yet are downloaded as. A link
+/// that is not a media link, was not checked yet, or does not offer the
+/// choice now is refused.
+pub(super) fn choose_media(
+    tx: &Transaction<'_>,
+    links: &LinkRefs,
+    choice: MediaChoice,
+    converter: bool,
+) -> Result<CommandResult, ProtocolError> {
+    apply_each(tx, links, |link, row| {
+        let Some(row) = row else {
+            return Ok(Err((ErrorCode::NotFound, REMOVED.to_owned())));
+        };
+        if let Some(refused) = refusal(link, &row, false) {
+            return Ok(Err(refused));
+        }
+        if row.media.service.is_none() {
+            return Ok(Err((
+                ErrorCode::NotApplicable,
+                "This is not a video link, so it has no formats to choose from.".to_owned(),
+            )));
+        }
+        let Some(info) = media::decode_info(row.media.info.as_deref())? else {
+            return Ok(Err((
+                ErrorCode::NotApplicable,
+                "This video's formats are not known yet. Wait for its check to finish.".to_owned(),
+            )));
+        };
+        if !info.can_make(choice, converter) {
+            let why = if info.can_make(choice, true) {
+                media::NEEDS_CONVERTER
+            } else {
+                "This video does not offer that format."
+            };
+            return Ok(Err((ErrorCode::NotApplicable, why.to_owned())));
+        }
+        let mut revision = row.revision;
+        if media::decode_choice(row.media.choice.as_deref())? != choice {
+            revision = revision
+                .next()
+                .map_err(|_| StoreError::Corrupt("link revision"))?;
+            tx.execute(
+                "UPDATE source_links SET media_choice = ?1, revision = ?2 WHERE id = ?3",
+                params![
+                    media::encode_choice(&choice),
+                    sql(revision)?,
+                    sql(link.link)?
+                ],
+            )
+            .map_err(StoreError::from)?;
+        }
+        Ok(Ok(AppliedLink {
+            link: link.link,
+            job: None,
+            revision: Some(revision),
+        }))
+    })
+}
+
 /// A page of listed links after `after`, oldest first.
 pub(super) fn list(
     tx: &Transaction<'_>,
     after: Option<SourceLinkId>,
     page_size: PageSize,
     as_of: EventCursor,
+    converter: bool,
 ) -> Result<LinkPage, StoreError> {
     let after = match after {
         // Past the stored range: nothing follows.
@@ -509,14 +601,14 @@ pub(super) fn list(
     };
     let size = usize::from(page_size.get());
     let mut items = tx
-        .prepare(
+        .prepare(&format!(
             "SELECT s.id, s.batch_id, b.created_at, s.revision, s.invalid, s.input_url, \
-             s.root_id, s.problem, r.path, j.id FROM source_links s \
+             s.root_id, s.problem, r.path, j.id, {MEDIA_COLUMNS} FROM source_links s \
              JOIN input_batches b ON b.id = s.batch_id \
              LEFT JOIN roots r ON r.id = s.root_id \
              LEFT JOIN jobs j ON j.source_link_id = s.id \
-             WHERE s.listed = 1 AND s.id > ?1 ORDER BY s.id LIMIT ?2",
-        )?
+             WHERE s.listed = 1 AND s.id > ?1 ORDER BY s.id LIMIT ?2"
+        ))?
         .query_map(
             params_from_iter([after, i64::from(page_size.get()) + 1]),
             |r| {
@@ -531,11 +623,13 @@ pub(super) fn list(
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
                     r.get::<_, Option<i64>>(9)?,
+                    media::LinkColumns::read(r, 10)?,
                 ))
             },
         )?
         .map(|row| {
-            let (id, batch, created, revision, invalid, text, root, problem, path, job) = row?;
+            let (id, batch, created, revision, invalid, text, root, problem, path, job, media) =
+                row?;
             let url = (!invalid).then(|| Url::parse(&text).ok()).flatten();
             if !invalid && url.is_none() {
                 return Err(StoreError::Corrupt("collected link"));
@@ -560,6 +654,7 @@ pub(super) fn list(
                 destination_path: path,
                 job: job.map(key).transpose()?,
                 problem: problem.as_deref().map(DiagnosticText::new),
+                media: media.summary(converter)?.map(Box::new),
             })
         })
         .collect::<Result<Vec<_>, StoreError>>()?;

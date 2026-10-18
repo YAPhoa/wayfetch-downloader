@@ -15,13 +15,21 @@
 //! * [`common`]: endpoints, bounded requests, and answer checks.
 //! * [`real_debrid`]: Real-Debrid account sign-in, status, and downloads
 //!   through an account.
+//! * [`youtube`]: recognizing YouTube video links, and reading them as
+//!   media through [`ytdlp`].
+//! * [`plugin`]: the helper programs media integrations run; [`ytdlp`]
+//!   reads videos, [`ffmpeg`] joins and converts their streams.
 
 use std::sync::Arc;
 
 use wayfetch_engine::accounts::provider::{AccountProvider, ApiClient};
 
 pub mod common;
+pub mod ffmpeg;
+pub mod plugin;
 pub mod real_debrid;
+pub mod youtube;
+pub mod ytdlp;
 
 pub use common::Endpoint;
 

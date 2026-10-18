@@ -536,10 +536,12 @@ impl Destinations {
         available: Vec<Result<(), String>>,
         max_active_downloads: BoundedSetting,
         download_speed_limit: SpeedLimitSetting,
+        plugins: Vec<wayfetch_protocol::media::PluginSummary>,
     ) -> Settings {
         Settings {
             max_active_downloads,
             download_speed_limit,
+            plugins,
             revision: self.revision,
             default_root: self.default_root(),
             roots: self

@@ -39,6 +39,9 @@ pub struct CommandContext {
     pub route: Option<JobRoute>,
     /// Per-link automatic decisions; failures keep that link collected.
     pub routes: std::collections::BTreeMap<SourceLinkId, Result<Option<JobRoute>, ProtocolError>>,
+    /// For links being collected: the media service that recognized each,
+    /// by its position in the batch.
+    pub media: std::collections::BTreeMap<usize, wayfetch_domain::name::ProviderId>,
 }
 
 impl Store {
@@ -54,6 +57,7 @@ impl Store {
         context: &CommandContext,
         now: UtcTimestamp,
     ) -> Result<CommandResult, ProtocolError> {
+        let converter = self.media_converter;
         let tx = self.write()?;
         if let Some(result) = replayed(&tx, envelope, instance)? {
             return Ok(result);
@@ -64,7 +68,7 @@ impl Store {
             Command::CollectLinks {
                 items,
                 destination: chosen,
-            } => links::collect(&tx, items, chosen.or(destination), now)?,
+            } => links::collect(&tx, items, chosen.or(destination), &context.media, now)?,
             Command::StartLinks {
                 links,
                 account,
@@ -84,6 +88,9 @@ impl Store {
             }
             Command::RemoveLinks { links } => links::remove(&tx, links)?,
             Command::MoveLinks { links, destination } => links::relocate(&tx, links, *destination)?,
+            Command::ChooseLinkMedia { links, choice } => {
+                links::choose_media(&tx, links, *choice, converter)?
+            }
             Command::Pause {
                 job,
                 expected_revision,

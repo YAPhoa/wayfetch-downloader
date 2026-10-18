@@ -55,12 +55,12 @@ pub enum EventKind {
     /// A job was created.
     JobAdded {
         /// Its state at creation.
-        job: JobSummary,
+        job: Box<JobSummary>,
     },
     /// A job's durable state changed. Replaces the client's copy.
     JobChanged {
         /// Its new state.
-        job: JobSummary,
+        job: Box<JobSummary>,
     },
     /// A job was removed from lists and counts. The client drops its copy.
     /// Added in protocol 1.0.
@@ -74,6 +74,10 @@ pub enum EventKind {
         /// The settings revision after the change.
         revision: Revision,
     },
+    /// What is known about collected links changed without a command,
+    /// such as a media link's title arriving: a client reads the Links list
+    /// again. Added in protocol 4.0.
+    LinksChanged,
 }
 
 /// A durable event with its position.

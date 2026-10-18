@@ -19,6 +19,7 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
 
 /**
  * @typedef {import('../client/generated/StartRouting.js').StartRouting} StartRouting
+ * @typedef {import('../client/generated/MediaChoice.js').MediaChoice} MediaChoice
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
  * @typedef {import('../client/contract.js').EventCursor} EventCursor
  * @typedef {import('../client/contract.js').StreamSink} StreamSink
@@ -153,14 +154,15 @@ export class DesktopIpcClient {
   }
 
   /**
-   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId, account?: AccountId, routing?: StartRouting }} request
+   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId, account?: AccountId, routing?: StartRouting, media?: MediaChoice }} request
    */
-  linksCommand({ idempotencyKey, target, action, links, destination, account, routing }) {
+  linksCommand({ idempotencyKey, target, action, links, destination, account, routing, media }) {
     /** @type {LinksCommandRequest} */
     const request = { idempotency_key: idempotencyKey, target, action, links };
     if (destination !== undefined) request.destination = destination;
     if (account !== undefined) request.account = account;
     if (routing !== undefined) request.routing = routing;
+    if (media !== undefined) request.media = media;
     return this.call('links_command', { request });
   }
 

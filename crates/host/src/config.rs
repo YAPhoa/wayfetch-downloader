@@ -58,9 +58,26 @@ pub struct ConfigFile<S> {
     /// Policy for download preferences.
     #[serde(default)]
     pub downloads: Downloads,
+    /// Helper programs video links use.
+    #[serde(default)]
+    pub plugins: Plugins,
     /// The host's own section.
     #[serde(default = "Option::default")]
     pub server: Option<S>,
+}
+
+/// `[plugins]`: the helper programs video links use. Each is found on
+/// `PATH` unless given here.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Plugins {
+    /// yt-dlp, which reads video sites' titles, formats, and stream links.
+    pub yt_dlp: Option<PathBuf>,
+    /// What yt-dlp's `--js-runtimes` option is given, such as
+    /// `quickjs:/usr/local/bin/qjs`; yt-dlp's own default if not set.
+    pub yt_dlp_js_runtimes: Option<String>,
+    /// ffmpeg, which joins video with its sound and makes MP3.
+    pub ffmpeg: Option<PathBuf>,
 }
 
 /// `[storage]`.
@@ -281,6 +298,16 @@ pub fn load<S: DeserializeOwned>(path: &Path) -> Result<Loaded<S>, String> {
     storage.download_root.iter_mut().for_each(resolve);
     storage.roots.iter_mut().for_each(resolve);
     file.network.ca_certs.iter_mut().for_each(resolve);
+    let plugins = &mut file.plugins;
+    plugins.yt_dlp.iter_mut().for_each(resolve);
+    plugins.ffmpeg.iter_mut().for_each(resolve);
+    if plugins
+        .yt_dlp_js_runtimes
+        .as_ref()
+        .is_some_and(|r| r.is_empty() || r.len() > 4096 || r.starts_with('-'))
+    {
+        return Err(fail(&"plugins.yt_dlp_js_runtimes is not a runtime list"));
+    }
     Ok(Loaded { file, dir })
 }
 
@@ -401,6 +428,10 @@ roots = ["media", "../shared"]
 [network]
 allow_networks = ["192.168.1.0/24"]
 ca_certs = ["ca.pem"]
+
+[plugins]
+yt_dlp = "bin/yt-dlp"
+ffmpeg = "/usr/bin/ffmpeg"
 "#,
         );
         let loaded = load::<NoServer>(&path).unwrap();
@@ -415,6 +446,11 @@ ca_certs = ["ca.pem"]
             ["192.168.1.0/24".parse::<IpNet>().unwrap()]
         );
         assert_eq!(loaded.path(Path::new("tokens")), dir.join("tokens"));
+        let plugins = &loaded.file.plugins;
+        assert_eq!(plugins.yt_dlp, Some(dir.join("bin/yt-dlp")));
+        assert_eq!(plugins.ffmpeg, Some("/usr/bin/ffmpeg".into()));
+        let runtimes = "schema_version = 1\n[plugins]\nyt_dlp_js_runtimes = \"--exec=x\"\n";
+        assert!(parse(runtimes).unwrap_err().contains("yt_dlp_js_runtimes"));
     }
 
     #[test]

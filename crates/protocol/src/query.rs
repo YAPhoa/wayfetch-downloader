@@ -22,6 +22,7 @@ use crate::account::{Accounts, Authorization, AuthorizationId};
 use crate::command::Permission;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::event::EventCursor;
+use crate::media::{JobMedia, LinkMedia, PluginSummary};
 
 /// Items per page: 1 to [`PageSize::MAX`], default [`PageSize::DEFAULT`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +258,11 @@ pub struct JobSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub route: Option<Box<JobRoute>>,
+    /// For a download of a media link: its service and what it is made
+    /// as. Added in protocol 4.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub media: Option<Box<JobMedia>>,
 }
 
 /// How a job is downloaded, when it is not directly from its host. Added
@@ -370,6 +376,10 @@ pub struct Settings {
     /// The combined rate of every download's body, engine-wide. Added in
     /// protocol 2.3.
     pub download_speed_limit: SpeedLimitSetting,
+    /// The helper programs media services run, and whether each can be
+    /// used. Added in protocol 4.0.
+    #[serde(default)]
+    pub plugins: Vec<PluginSummary>,
 }
 
 /// An engine preference with a whole-number value, as the operator's
@@ -525,6 +535,12 @@ pub struct CollectedLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub problem: Option<DiagnosticText>,
+    /// For a link a media service recognized, such as a YouTube video:
+    /// its title, once checked, and what it will be downloaded as. Added
+    /// in protocol 4.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub media: Option<Box<LinkMedia>>,
 }
 
 /// One page of collected links. Added in protocol 1.1.
@@ -755,6 +771,15 @@ mod tests {
                 locked: false,
                 conflict: true,
             },
+            plugins: vec![PluginSummary {
+                id: "yt-dlp".into(),
+                name: "yt-dlp".into(),
+                role: crate::media::PluginRole::MediaResolver,
+                services: vec![ProviderId::new("youtube").unwrap()],
+                state: crate::media::PluginState::Ready,
+                version: Some("2026.08.19".into()),
+                problem: None,
+            }],
         });
         assert_eq!(
             serde_json::to_value(&settings).unwrap(),
@@ -773,6 +798,10 @@ mod tests {
                     "min": 1024, "max": 4_194_304, "unlimited": false,
                     "locked": false, "conflict": true,
                 },
+                "plugins": [{
+                    "id": "yt-dlp", "name": "yt-dlp", "role": "media_resolver",
+                    "services": ["youtube"], "state": "ready", "version": "2026.08.19",
+                }],
             })
         );
         // A 1.0 engine's roots carry no `added`: none can be removed.
