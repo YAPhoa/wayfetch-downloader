@@ -207,6 +207,12 @@ pub struct JobSummary {
     pub id: JobId,
     /// Its package.
     pub package: PackageId,
+    /// A safe file-name hint from the source path or accepted provider/response
+    /// metadata. Absent for opaque links without a meaningful file name.
+    /// The published artifact's path takes precedence. Boxed to keep event
+    /// summaries small. Added in protocol 3.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<Box<str>>,
     /// Observed stage.
     pub stage: JobStage,
     /// Requested state.
@@ -681,12 +687,15 @@ mod tests {
         let job: JobSummary = from_value(old.clone()).unwrap();
         assert_eq!(job.original_host, None);
         assert_eq!(job.destination, None);
+        assert_eq!(job.name, None);
         let mut new = old;
         new["original_host"] = json!("files.example");
         new["destination"] = json!("root-2");
+        new["name"] = json!("My File.zip");
         let job: JobSummary = from_value(new).unwrap();
         assert_eq!(job.original_host.unwrap().as_str(), "files.example");
         assert_eq!(job.destination, RootId::from_u64(2));
+        assert_eq!(job.name.as_deref(), Some("My File.zip"));
     }
 
     #[test]

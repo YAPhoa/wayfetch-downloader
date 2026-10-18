@@ -126,4 +126,4 @@ jobs:
       - name: Unit tests
         run: cargo test --locked -p wayfetch-desktop
       - name: The real window against a local fixture
-        run: xvfb-run -a cargo test --locked -p wayfetch-desktop --test shell -- --ignored
+        run: xvfb-run -a cargo test --locked -p wayfetch-desktop --features scripted-picker --test shell -- --ignored --test-threads=1

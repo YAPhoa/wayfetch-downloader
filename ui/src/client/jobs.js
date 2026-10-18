@@ -238,6 +238,9 @@ export function describe(job, clock = shortTime) {
  * @param {FailureSummary} failure
  */
 export function explain(failure) {
+  // The engine's redacted context distinguishes rejected authorization from
+  // other account refusals and supplies the provider-specific next step.
+  if (failure.code === 'invalid_credentials' && failure.message?.trim()) return failure.message;
   return FAILURES[failure.code].explain;
 }
 
@@ -305,11 +308,11 @@ export function fileName(job) {
 }
 
 /**
- * What to call a job: its file name once published, else its ID.
+ * What to call a job: its published file, the engine's filename hint, or its ID.
  * @param {JobSummary} job
  */
 export function jobName(job) {
-  return fileName(job) ?? job.id;
+  return fileName(job) ?? job.name ?? job.id;
 }
 
 /**

@@ -37,7 +37,7 @@ export function content(start, end) {
 }
 
 /**
- * @typedef {{ size: number, stallAt: number | null, etag: string, waiters: (() => void)[] }} FixtureFile
+ * @typedef {{ size: number, stallAt: number | null, etag: string, filename: string | null, waiters: (() => void)[] }} FixtureFile
  */
 
 /**
@@ -69,9 +69,10 @@ export class Fixture {
    * @param {string} name
    * @param {number} size
    * @param {number | null} [stallAt]
+   * @param {string | null} [filename]
    */
-  put(name, size, stallAt = null) {
-    this.files.set(name, { size, stallAt, etag: '"v1"', waiters: [] });
+  put(name, size, stallAt = null, filename = null) {
+    this.files.set(name, { size, stallAt, filename, etag: '"v1"', waiters: [] });
     return `${this.base}/files/${encodeURIComponent(name)}`;
   }
 
@@ -109,7 +110,12 @@ export class Fixture {
     let start = 0;
     const range = /^bytes=(\d+)-$/.exec(request.headers.range ?? '');
     const ifRange = request.headers['if-range'];
-    const headers = { ETag: file.etag, 'Accept-Ranges': 'bytes', 'Content-Type': 'application/octet-stream' };
+    const headers = {
+      ETag: file.etag,
+      'Accept-Ranges': 'bytes',
+      'Content-Type': 'application/octet-stream',
+      ...(file.filename === null ? {} : { 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}` }),
+    };
     if (range && (ifRange === undefined || ifRange === file.etag)) {
       start = Number(range[1]);
       response.writeHead(206, {
@@ -180,6 +186,8 @@ export class RealDebridFixture {
     this.filename = 'Through the Provider.bin';
     /** Unrestrict requests whose answer is lost: the connection drops before it. */
     this.lose = 0;
+    /** Optional status returned by unrestrict, without a provider error code. @type {number | null} */
+    this.refuseUnrestrict = null;
     /** Authorization headers that reached generated links. @type {(string | undefined)[]} */
     this.downloadAuth = [];
     this.server = createServer((request, response) => void this.serve(request, response));
@@ -209,6 +217,9 @@ export class RealDebridFixture {
       response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(data));
     };
     switch (url.pathname) {
+      case '/rest/1.0/hosts/domains':
+        answer(200, ['hoster.example']);
+        return;
       case '/oauth/v2/device/code':
         this.polls = 0;
         answer(200, {
@@ -265,6 +276,10 @@ export class RealDebridFixture {
             return;
           }
           answer(200, this.generated.map((_, i) => download(i + 1)).reverse());
+          return;
+        }
+        if (this.refuseUnrestrict !== null) {
+          answer(this.refuseUnrestrict, { error: 'synthetic-private-provider-detail' });
           return;
         }
         if (this.lose > 0) {

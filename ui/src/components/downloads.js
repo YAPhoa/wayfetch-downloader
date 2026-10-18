@@ -723,7 +723,7 @@ export class Downloads {
       const action = /** @type {StateAction} */ (button.dataset.action);
       button.disabled = !allowed.has(action);
       const label = ACTION_LABELS[action];
-      button.setAttribute('aria-label', job ? `${label} ${job.id}` : label);
+      button.setAttribute('aria-label', job ? `${label} ${jobName(job)}` : label);
       if (action === 'retry') button.title = job && allowed.has('retry') ? retryPlan(job) : '';
     }
   }
@@ -1529,7 +1529,7 @@ export class Downloads {
   general(job) {
     const shown = progress(job, this.feed.sample(job.id));
     const state = describe(job);
-    const name = fileName(job);
+    const name = fileName(job) ?? job.name;
     const where = this.location(job);
     return h(
       'div',

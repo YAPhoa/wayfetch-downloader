@@ -14,7 +14,7 @@ use wayfetch_domain::version::Revision;
 use crate::account::{AccountAlias, AccountRef};
 use crate::command::{
     CollectItems, Command, CommandEnvelope, IdempotencyKey, InputUrl, LinkRef, LinkRefs,
-    PreferenceChange, SpeedLimitChange, SubmitItems,
+    PreferenceChange, SpeedLimitChange, StartRouting, SubmitItems,
 };
 use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
@@ -311,10 +311,16 @@ pub struct LinksCommandRequest {
     #[cfg_attr(feature = "ts", ts(optional))]
     pub destination: Option<RootId>,
     /// For [`LinksAction::Start`] only: the provider account to download
-    /// through, directly if absent. Added in protocol 2.2.
+    /// through; automatic selection if absent unless routing requests
+    /// Direct. Account override added in protocol 2.2.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub account: Option<AccountId>,
+    /// Explicit route intent for a start. Absent uses
+    /// automatic selection; cannot be combined with an account. Added in 3.0.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub routing: Option<StartRouting>,
 }
 
 impl LinksCommandRequest {
@@ -322,6 +328,12 @@ impl LinksCommandRequest {
     /// refused with any other action.
     pub fn into_envelope(self) -> Result<CommandEnvelope, ProtocolError> {
         let links = LinkRefs::try_from(self.links)?;
+        if self.routing.is_some() && (self.action != LinksAction::Start || self.account.is_some()) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "routing is only for a start without an account",
+            ));
+        }
         if self.account.is_some() && self.action != LinksAction::Start {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidRequest,
@@ -345,6 +357,7 @@ impl LinksCommandRequest {
             (LinksAction::Start, None) => Command::StartLinks {
                 links,
                 account: self.account,
+                routing: self.routing,
             },
             (LinksAction::Remove, None) => Command::RemoveLinks { links },
         };
@@ -640,11 +653,54 @@ mod tests {
     }
 
     #[test]
+    fn start_routing_is_explicit_and_conflicting_routes_are_rejected() {
+        let request = |routing: Option<&str>, account: Option<&str>, action: &str| {
+            let mut value = json!({"idempotency_key": IdempotencyKey::generate(), "target": InstanceId::generate(), "action": action, "links": [{"link": "src-1", "revision": 1}]});
+            if let Some(routing) = routing {
+                value["routing"] = json!(routing);
+            }
+            if let Some(account) = account {
+                value["account"] = json!(account);
+            }
+            serde_json::from_value::<LinksCommandRequest>(value)
+                .unwrap()
+                .into_envelope()
+        };
+        for routing in ["direct", "automatic"] {
+            assert!(request(Some(routing), None, "start").is_ok());
+            assert_eq!(
+                request(Some(routing), Some("acct-1"), "start")
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidRequest
+            );
+            assert_eq!(
+                request(Some(routing), None, "remove").unwrap_err().code,
+                ErrorCode::InvalidRequest
+            );
+        }
+        let omitted = request(None, None, "start").unwrap();
+        assert_eq!(
+            omitted.command.required_permissions(),
+            [
+                crate::Permission::Submit,
+                crate::Permission::ProviderDownloads
+            ]
+        );
+        let explicit = request(Some("direct"), None, "start").unwrap();
+        assert_eq!(
+            explicit.command.required_permissions(),
+            [crate::Permission::Submit]
+        );
+    }
+
+    #[test]
     fn link_commands_name_each_link_once_at_a_revision() {
         let one = json!([{"link": "src-3", "revision": 2}]);
         let Command::StartLinks {
             links: refs,
             account: None,
+            routing: None,
         } = links("start", one.clone(), None).unwrap()
         else {
             panic!()

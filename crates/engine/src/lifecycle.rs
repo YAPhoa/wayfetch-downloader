@@ -67,6 +67,7 @@ use wayfetch_protocol::{
 
 mod accounts;
 mod resolve;
+mod routing;
 
 pub(crate) use resolve::{Resolution, ResolveRequest, ResolvedLink};
 
@@ -248,6 +249,7 @@ impl EngineBuilder {
             published: head,
             pruned_at: Instant::now(),
             accounts: accounts::AccountService::new(self.providers, vault, credential_key),
+            routing: routing::RoutingService::default(),
         };
         owner.supervisor.spawn(coordinator.run());
         // Unless a task already failed.
@@ -502,6 +504,15 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<CommandResult, ProtocolError> {
         for required in envelope.command.required_permissions() {
+            if required == Permission::ProviderDownloads
+                && !granted.contains(&required)
+                && matches!(envelope.command, Command::StartLinks { account: None, .. })
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::PermissionDenied,
+                    "Automatic routing requires provider_downloads permission. Choose Download via Direct, or use a token with provider_downloads permission.",
+                ));
+            }
             authorize(required, granted)?;
         }
         let (reply, response) = oneshot::channel();
@@ -884,6 +895,8 @@ enum Internal {
         generation: wayfetch_domain::version::Generation,
         result: crate::accounts::provider::Checked,
     },
+    /// Supported domains fetched outside the coordinator.
+    HostsReady(routing::Capabilities),
     /// A download asks for its provider link.
     Resolve(ResolveRequest),
     /// A provider call for a download's link ended.
@@ -992,6 +1005,8 @@ struct Coordinator {
     pruned_at: Instant,
     /// Accounts: the vault, sign-ins, and checks.
     accounts: accounts::AccountService,
+    /// Bounded cached capability discovery for automatic starts.
+    routing: routing::RoutingService,
 }
 
 impl Coordinator {
@@ -1088,120 +1103,31 @@ impl Coordinator {
                 }
             }
             Request::Execute(envelope, reply) => {
-                let target = match envelope.command {
-                    Command::Pause { job, .. } | Command::Cancel { job, .. } => Some(job),
-                    Command::Submit { .. }
-                    | Command::Resume { .. }
-                    | Command::Retry { .. }
-                    | Command::UpdateSettings { .. }
-                    | Command::Rename { .. }
-                    | Command::DeleteFiles { .. }
-                    | Command::Remove { .. }
-                    | Command::RemoveRoot { .. }
-                    | Command::CollectLinks { .. }
-                    | Command::StartLinks { .. }
-                    | Command::RemoveLinks { .. }
-                    | Command::MoveLinks { .. }
-                    | Command::AuthorizeAccount { .. }
-                    | Command::SetAccountEnabled { .. }
-                    | Command::RemoveAccount { .. } => None,
-                };
-                let account_command = matches!(
+                if matches!(
                     envelope.command,
-                    Command::SetAccountEnabled { .. } | Command::RemoveAccount { .. }
-                )
-                .then(|| envelope.command.clone());
-                let (unusable, route) = match self.prepare(&envelope).await {
-                    Ok(prepared) => prepared,
-                    Err(e) => {
-                        let _ = reply.send(Err(e));
-                        return;
+                    Command::StartLinks {
+                        account: Some(_),
+                        routing: Some(_),
+                        ..
                     }
-                };
-                let context = CommandContext {
-                    destination: self.destinations.default_root(),
-                    unusable,
-                    route,
-                };
-                let settings = matches!(
+                ) {
+                    let _ = reply.send(Err(ProtocolError::new(
+                        ErrorCode::InvalidRequest,
+                        "routing cannot be combined with an account",
+                    )));
+                } else if matches!(
                     envelope.command,
-                    Command::UpdateSettings { .. } | Command::RemoveRoot { .. }
-                );
-                let removed = match envelope.command {
-                    Command::RemoveRoot { root, .. } => Some(root),
-                    _ => None,
-                };
-                let retried = match envelope.command {
-                    Command::Retry { job, .. } => Some(job),
-                    _ => None,
-                };
-                let (result, interrupt, current) = self
-                    .with_store(move |store| {
-                        let result = store.execute(&envelope, instance, &context, now());
-                        if let Ok(CommandResult::Submitted { .. }) = result {
-                            // The batch is durable whatever happens here;
-                            // links left unstaged are staged at the next start.
-                            let _ = stage_all(store);
-                        }
-                        // Interrupt only a job that should now stop: a
-                        // replayed pause from before a resume changes nothing.
-                        let interrupt = target.filter(|&job| {
-                            result.is_ok()
-                                && store
-                                    .job_state(job)
-                                    .is_ok_and(|s| s.desired() != DesiredState::Running)
-                        });
-                        let current = (settings && result.is_ok())
-                            .then(|| store.settings().ok())
-                            .flatten();
-                        // A replayed removal may predate adding the folder
-                        // again, so the store says whether it is gone.
-                        let gone = removed.filter(|&root| {
-                            result.is_ok()
-                                && store.root_rows().is_ok_and(|rows| {
-                                    !rows.iter().any(|r| r.id == root && r.registered)
-                                })
-                        });
-                        (result, interrupt, (current, gone))
-                    })
-                    .await;
-                let (current, gone) = current;
-                if let Some(saved) = current {
-                    self.destinations
-                        .set_settings(saved.revision, saved.default_root);
-                    // A lower limit takes effect as downloads end; a higher
-                    // one admits at once, in `changed` below.
-                    self.max_active = saved.max_active_downloads;
-                    // Running transfers follow at their next grant, before
-                    // the change is reported.
-                    self.speed_limit = saved.download_speed_limit;
-                    self.bandwidth.set(self.download_speed_limit().value);
-                }
-                if let Some(root) = gone {
-                    self.destinations.remove(root);
-                }
-                // A retried job is queued, so one held for restart recovery
-                // after a storage fault may run again.
-                if let (Some(job), Ok(_)) = (retried, &result) {
-                    self.held.remove(&job);
-                }
-                if let Some(job) = interrupt {
-                    if let Some(token) = self.running.get(&job) {
-                        token.cancel();
-                    } else if self.held.remove(&job) {
-                        // Nothing runs to stop, so the pause or cancel is
-                        // settled here.
-                        let settled = self.with_store(move |store| settle(store, job, true)).await;
-                        if settled.unwrap_or(true) {
-                            self.held.insert(job);
-                        }
+                    Command::StartLinks {
+                        account: None,
+                        routing: None | Some(wayfetch_protocol::command::StartRouting::Automatic),
+                        ..
                     }
+                ) {
+                    self.start_routing(envelope, reply).await;
+                } else {
+                    self.execute_command(envelope, reply, Default::default())
+                        .await;
                 }
-                if let (Some(command), true) = (&account_command, result.is_ok()) {
-                    self.account_changed(command).await;
-                }
-                let _ = reply.send(result);
-                self.changed().await;
             }
             Request::Query(Query::Settings {}, reply) => self.settings(reply).await,
             Request::Query(Query::Accounts {}, reply) => self.list_accounts(reply).await,
@@ -1240,8 +1166,133 @@ impl Coordinator {
         }
     }
 
+    async fn execute_command(
+        &mut self,
+        envelope: Box<CommandEnvelope>,
+        reply: oneshot::Sender<Result<CommandResult, ProtocolError>>,
+        routes: routing::Routes,
+    ) {
+        let instance = self.identity.instance;
+        let target = match envelope.command {
+            Command::Pause { job, .. } | Command::Cancel { job, .. } => Some(job),
+            Command::Submit { .. }
+            | Command::Resume { .. }
+            | Command::Retry { .. }
+            | Command::UpdateSettings { .. }
+            | Command::Rename { .. }
+            | Command::DeleteFiles { .. }
+            | Command::Remove { .. }
+            | Command::RemoveRoot { .. }
+            | Command::CollectLinks { .. }
+            | Command::StartLinks { .. }
+            | Command::RemoveLinks { .. }
+            | Command::MoveLinks { .. }
+            | Command::AuthorizeAccount { .. }
+            | Command::SetAccountEnabled { .. }
+            | Command::RemoveAccount { .. } => None,
+        };
+        let account_command = matches!(
+            envelope.command,
+            Command::SetAccountEnabled { .. } | Command::RemoveAccount { .. }
+        )
+        .then(|| envelope.command.clone());
+        let (unusable, route) = match self.prepare(&envelope).await {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+        };
+        let context = CommandContext {
+            destination: self.destinations.default_root(),
+            unusable,
+            route,
+            routes,
+        };
+        let settings = matches!(
+            envelope.command,
+            Command::UpdateSettings { .. } | Command::RemoveRoot { .. }
+        );
+        let removed = match envelope.command {
+            Command::RemoveRoot { root, .. } => Some(root),
+            _ => None,
+        };
+        let retried = match envelope.command {
+            Command::Retry { job, .. } => Some(job),
+            _ => None,
+        };
+        let (result, interrupt, current) = self
+            .with_store(move |store| {
+                let result = store.execute(&envelope, instance, &context, now());
+                if let Ok(CommandResult::Submitted { .. }) = result {
+                    // The batch is durable whatever happens here;
+                    // links left unstaged are staged at the next start.
+                    let _ = stage_all(store);
+                }
+                // Interrupt only a job that should now stop: a
+                // replayed pause from before a resume changes nothing.
+                let interrupt = target.filter(|&job| {
+                    result.is_ok()
+                        && store
+                            .job_state(job)
+                            .is_ok_and(|s| s.desired() != DesiredState::Running)
+                });
+                let current = (settings && result.is_ok())
+                    .then(|| store.settings().ok())
+                    .flatten();
+                // A replayed removal may predate adding the folder
+                // again, so the store says whether it is gone.
+                let gone = removed.filter(|&root| {
+                    result.is_ok()
+                        && store
+                            .root_rows()
+                            .is_ok_and(|rows| !rows.iter().any(|r| r.id == root && r.registered))
+                });
+                (result, interrupt, (current, gone))
+            })
+            .await;
+        let (current, gone) = current;
+        if let Some(saved) = current {
+            self.destinations
+                .set_settings(saved.revision, saved.default_root);
+            // A lower limit takes effect as downloads end; a higher
+            // one admits at once, in `changed` below.
+            self.max_active = saved.max_active_downloads;
+            // Running transfers follow at their next grant, before
+            // the change is reported.
+            self.speed_limit = saved.download_speed_limit;
+            self.bandwidth.set(self.download_speed_limit().value);
+        }
+        if let Some(root) = gone {
+            self.destinations.remove(root);
+        }
+        // A retried job is queued, so one held for restart recovery
+        // after a storage fault may run again.
+        if let (Some(job), Ok(_)) = (retried, &result) {
+            self.held.remove(&job);
+        }
+        if let Some(job) = interrupt {
+            if let Some(token) = self.running.get(&job) {
+                token.cancel();
+            } else if self.held.remove(&job) {
+                // Nothing runs to stop, so the pause or cancel is
+                // settled here.
+                let settled = self.with_store(move |store| settle(store, job, true)).await;
+                if settled.unwrap_or(true) {
+                    self.held.insert(job);
+                }
+            }
+        }
+        if let (Some(command), true) = (&account_command, result.is_ok()) {
+            self.account_changed(command).await;
+        }
+        let _ = reply.send(result);
+        self.changed().await;
+    }
+
     async fn handle_internal(&mut self, internal: Internal) {
         match internal {
+            Internal::HostsReady(capabilities) => self.hosts_ready(capabilities).await,
             Internal::Store(work) => self.with_store(work).await,
             Internal::Finished(job, interrupted) => {
                 self.running.remove(&job);

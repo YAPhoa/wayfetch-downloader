@@ -5,6 +5,7 @@ import type { InstanceId } from "./InstanceId.js";
 import type { LinkRef } from "./LinkRef.js";
 import type { LinksAction } from "./LinksAction.js";
 import type { RootId } from "./RootId.js";
+import type { StartRouting } from "./StartRouting.js";
 
 /**
  * Starts, removes, or moves collected links at the revisions the client
@@ -33,6 +34,12 @@ links: Array<LinkRef>,
 destination?: RootId, 
 /**
  * For [`LinksAction::Start`] only: the provider account to download
- * through, directly if absent. Added in protocol 2.2.
+ * through; automatic selection if absent unless routing requests
+ * Direct. Account override added in protocol 2.2.
  */
-account?: AccountId, };
+account?: AccountId, 
+/**
+ * Explicit route intent for a start. Absent uses
+ * automatic selection; cannot be combined with an account. Added in 3.0.
+ */
+routing?: StartRouting, };
