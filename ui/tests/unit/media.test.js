@@ -45,7 +45,7 @@ const READY = {
 
 test('choices have names and keys that tell them apart', () => {
   assert.equal(choiceLabel({ kind: 'video' }), 'Best video');
-  assert.equal(choiceLabel({ kind: 'video', max_height: 1080 }), '1080p video');
+  assert.equal(choiceLabel({ kind: 'video', max_height: 1080 }), '1080p');
   assert.equal(choiceLabel({ kind: 'audio', format: 'mp3' }), 'MP3 audio');
   assert.equal(choiceLabel({ kind: 'audio', format: 'm4a' }), 'M4A audio');
   const keys = READY.options.map((o) => choiceKey(o.choice));

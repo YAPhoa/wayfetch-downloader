@@ -30,7 +30,7 @@ export function mediaServiceName(id) {
  */
 export function choiceLabel(choice) {
   if (choice.kind === 'audio') return `${choice.format.toUpperCase()} audio`;
-  return choice.max_height === undefined ? 'Best video' : `${choice.max_height}p video`;
+  return choice.max_height === undefined ? 'Best video' : `${choice.max_height}p`;
 }
 
 /**

@@ -107,21 +107,21 @@ test('a YouTube link shows its title and formats, and downloads the one chosen',
     const mp3 = formats.getByRole('menuitemradio', { name: /MP3 audio/ });
     await expect(mp3).toHaveAttribute('aria-disabled', 'true');
     await expect(mp3).toHaveText('MP3 audioNeeds a plugin');
-    await formats.getByRole('menuitemradio', { name: '360p video' }).click();
+    await formats.getByRole('menuitemradio', { name: '360p' }).click();
     await expect(formats).toBeHidden();
-    await expect(page.getByText('1 video will download as 360p video.')).toBeVisible();
+    await expect(page.getByText('1 video will download as 360p.')).toBeVisible();
     await expect(picker).toBeFocused();
     await page.reload();
-    await expect(picker).toHaveText('360p video');
+    await expect(picker).toHaveText('360p');
     // From the keyboard: the arrow keys open the list and Escape closes it
     // with the choice unchanged.
     await picker.focus();
     await page.keyboard.press('ArrowDown');
-    await expect(formats.getByRole('menuitemradio', { name: '360p video' })).toBeFocused();
+    await expect(formats.getByRole('menuitemradio', { name: '360p' })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(formats).toBeHidden();
     await expect(picker).toBeFocused();
-    await expect(picker).toHaveText('360p video');
+    await expect(picker).toHaveText('360p');
 
     await row.getByRole('checkbox').check();
     await page.getByRole('button', { name: 'Start selected' }).click();
