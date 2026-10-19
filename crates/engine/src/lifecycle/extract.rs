@@ -51,6 +51,20 @@ impl Extractions {
         self.extractor.as_ref().map(|e| e.plugin())
     }
 
+    /// Why archives cannot be unpacked now, if they cannot: no extractor,
+    /// or one turned off or not working.
+    pub(super) fn unavailable(&self) -> Option<ProtocolError> {
+        let why = match &self.extractor {
+            None => "archives cannot be unpacked here".to_owned(),
+            Some(e) if !e.ready() => format!(
+                "archives cannot be unpacked while {} is turned off or not working",
+                e.plugin().name
+            ),
+            Some(_) => return None,
+        };
+        Some(ProtocolError::new(ErrorCode::NotApplicable, &why))
+    }
+
     /// Keeps `password` for `job`'s next attempt.
     pub(super) fn give_password(&mut self, job: JobId, password: Secret) {
         self.passwords.retain(|_, (_, at)| at.elapsed() < PASSWORD_TTL);
@@ -69,9 +83,10 @@ impl Extractions {
 
 impl Coordinator {
     /// After a download ended: queues the archive it completed, if the
-    /// user has extraction on, and checks archives waiting for volumes.
+    /// user has extraction on and archives can be unpacked, and checks
+    /// archives waiting for volumes.
     pub(super) async fn plan_extractions(&mut self, job: JobId) {
-        let automatic = self.extractions.automatic;
+        let automatic = self.extractions.automatic && self.extractions.unavailable().is_none();
         let _ = self
             .with_store(move |store| store.plan_extractions(job, automatic, now()))
             .await;
@@ -157,11 +172,8 @@ impl Coordinator {
     /// Keeps `password` for `job`'s next attempt, from a request to unpack
     /// it.
     pub(super) fn give_password(&mut self, job: JobId, password: String) -> Result<(), ProtocolError> {
-        if self.extractions.extractor.is_none() {
-            return Err(ProtocolError::new(
-                ErrorCode::NotApplicable,
-                "archives cannot be unpacked here",
-            ));
+        if let Some(why) = self.extractions.unavailable() {
+            return Err(why);
         }
         self.extractions
             .give_password(job, Secret::from_text(&password));

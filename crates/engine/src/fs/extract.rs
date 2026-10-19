@@ -224,6 +224,11 @@ impl Root {
             };
             placed?;
             sys::sync_dir(&target).map_err(FsError::io("sync archive folder"))?;
+            if single.is_some() {
+                // The private folder is empty now. Left behind, it only
+                // takes a name in the root's private directory.
+                let _ = extract.remove_dir(name);
+            }
             return Ok(path);
         }
         Err(FsError::TargetExists(RelativePath::new(wanted)?))

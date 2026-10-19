@@ -1360,6 +1360,12 @@ impl Coordinator {
             | Command::Extract { .. }
             | Command::CancelExtraction { .. } => None,
         };
+        if let Command::Extract { .. } = envelope.command
+            && let Some(why) = self.extractions.unavailable()
+        {
+            let _ = reply.send(Err(why));
+            return;
+        }
         let account_command = matches!(
             envelope.command,
             Command::SetAccountEnabled { .. } | Command::RemoveAccount { .. }
