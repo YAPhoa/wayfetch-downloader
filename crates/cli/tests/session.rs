@@ -196,7 +196,7 @@ impl Session {
             let Some(job) = event_job(v).filter(|job| job["id"] == id) else {
                 return false;
             };
-            let parked = matches!(job["stage"].as_str(), Some("failed" | "blocked"));
+            let parked = job["stage"] == "failed";
             assert!(job["stage"] == stage || !parked, "{job}");
             job["stage"] == stage
         })
@@ -569,7 +569,7 @@ async fn a_session_never_initializes_its_download_root() {
     let warning = session.until(|v| v["type"] == "root_unavailable").await;
     assert!(warning["reason"].is_string());
     let id = session.submit(&server.url("/i.bin")).await;
-    let blocked = session.stage(&id, "blocked").await;
+    let blocked = session.stage(&id, "failed").await;
     assert_eq!(blocked["failure"]["code"], "destination_unavailable");
     session.send("quit").await;
     assert_clean_stop(&session.finish().await, "quit");

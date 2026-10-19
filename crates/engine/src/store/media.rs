@@ -178,53 +178,20 @@ impl Store {
         self.media_converter = ready;
     }
 
-    /// At most `limit` listed media links waiting to be checked, oldest
-    /// first, except `busy`.
-    pub(crate) fn pending_media(
-        &mut self,
-        limit: usize,
-        busy: &[SourceLinkId],
-    ) -> Result<Vec<(SourceLinkId, ProviderId, Url)>, StoreError> {
-        let tx = self.read()?;
-        let fetch = i64::try_from(limit.saturating_add(busy.len())).unwrap_or(i64::MAX);
-        let rows = tx
-            .prepare(
-                "SELECT id, media_service, input_url FROM source_links \
-                 WHERE media_state = 'pending' AND listed = 1 ORDER BY id LIMIT ?1",
-            )?
-            .query_map([fetch], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut pending = Vec::new();
-        for (id, service, url) in rows {
-            let id: SourceLinkId = key(id)?;
-            if busy.contains(&id) || pending.len() == limit {
-                continue;
-            }
-            pending.push((
-                id,
-                ProviderId::new(service).map_err(|_| StoreError::Corrupt("media service"))?,
-                Url::parse(&url).map_err(|_| StoreError::Corrupt("source URL"))?,
-            ));
-        }
-        Ok(pending)
-    }
-
-    /// Records what checking `link` found, if it still waits for it, with a
-    /// `links_changed` event. A choice the link no longer offers goes back
-    /// to the default.
+    /// Records what check `task` of `link` found, if it is still the
+    /// link's check, with a `links_changed` event. A choice the link no
+    /// longer offers goes back to the default.
     pub(crate) fn record_media(
         &mut self,
+        task: i64,
         link: SourceLinkId,
         found: Result<MediaInfo, String>,
         now: UtcTimestamp,
     ) -> Result<(), StoreError> {
         let tx = self.write()?;
+        if !super::crawl::finish(&tx, task)? {
+            return Ok(());
+        }
         let (state, info, problem) = match found {
             Ok(info) => {
                 let info = serde_json::to_string(&info.normalized())
@@ -263,9 +230,9 @@ impl Store {
 
     /// Checks every listed media link whose check failed again, as after
     /// a plugin was installed. Returns how many.
-    pub(crate) fn retry_failed_media(&mut self) -> Result<usize, StoreError> {
+    pub(crate) fn retry_failed_media(&mut self, now: UtcTimestamp) -> Result<usize, StoreError> {
         let tx = self.write()?;
-        let n = retry_failed(&tx)?;
+        let n = retry_failed(&tx, now)?;
         tx.commit()?;
         Ok(n)
     }
@@ -454,11 +421,18 @@ pub(super) fn aux_files(
         .collect()
 }
 
-/// Puts listed media links whose check failed back to be checked.
-pub(super) fn retry_failed(tx: &Transaction<'_>) -> Result<usize, StoreError> {
-    Ok(tx.execute(
-        "UPDATE source_links SET media_state = 'pending', media_problem = NULL \
-         WHERE media_state = 'failed' AND listed = 1",
-        [],
-    )?)
+/// Checks listed media links whose check failed again.
+pub(super) fn retry_failed(tx: &Transaction<'_>, now: UtcTimestamp) -> Result<usize, StoreError> {
+    let failed: Vec<(i64, String, String)> = tx
+        .prepare(
+            "SELECT id, input_url, media_service FROM source_links \
+             WHERE media_state = 'failed' AND listed = 1",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    for (id, url, service) in &failed {
+        let url = Url::parse(url).map_err(|_| StoreError::Corrupt("source URL"))?;
+        super::crawl::enqueue(tx, *id, &url, Some(service), now)?;
+    }
+    Ok(failed.len())
 }

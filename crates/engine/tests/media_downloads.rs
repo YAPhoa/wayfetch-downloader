@@ -26,7 +26,7 @@ use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
 use wayfetch_engine::{EngineOwner, ShutdownRequest};
-use wayfetch_protocol::command::{CollectItems, LinkRef, LinkRefs};
+use wayfetch_protocol::command::{CollectMode, CollectText, LinkRef, LinkRefs};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::JobId;
 use wayfetch_protocol::domain::job::JobStage;
@@ -364,7 +364,9 @@ async fn listed(owner: &EngineOwner) -> Vec<CollectedLink> {
 /// Collects the page and waits for its check.
 async fn collect(owner: &EngineOwner) -> CollectedLink {
     let command = Command::CollectLinks {
-        items: CollectItems::try_from(vec![PAGE.to_owned()]).unwrap(),
+        text: CollectText::try_from(PAGE.to_owned()).unwrap(),
+        base_url: None,
+        mode: CollectMode::Analyze,
         destination: None,
     };
     owner

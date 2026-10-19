@@ -10,8 +10,8 @@
  * @typedef {import('./generated/FailureCode.js').FailureCode} FailureCode
  * @typedef {import('./generated/FailureSummary.js').FailureSummary} FailureSummary
  *
- * How a state reads at a glance: running, waiting on something, quietly
- * stopped, gone wrong, or finished.
+ * How a state reads at a glance: running, quietly waiting or stopped,
+ * gone wrong, or finished.
  * @typedef {'run' | 'warn' | 'calm' | 'bad' | 'ok'} Tone
  */
 
@@ -86,10 +86,7 @@ const STATES = Object.freeze({
   verifying: ['Checking file', 'run'],
   publishing: ['Saving', 'run'],
   recovering: ['Recovering', 'run'],
-  waiting: ['Waiting', 'warn'],
-  needs_input: ['Needs your answer', 'warn'],
   paused: ['Paused', 'calm'],
-  blocked: ['Blocked', 'warn'],
   complete: ['Done', 'ok'],
   failed: ['Failed', 'bad'],
   cancelled: ['Cancelled', 'calm'],
@@ -151,11 +148,11 @@ const FAILURES = Object.freeze({
   },
   destination_unavailable: {
     short: 'folder unavailable',
-    explain: 'The download folder is full, missing or unavailable. Fix the folder to continue.',
+    explain: 'The download folder is full, missing or unavailable. Fix the folder, then retry.',
   },
   permission_denied: {
     short: 'access denied',
-    explain: 'Wayfetch may not write to the download folder. Check its permissions.',
+    explain: 'Wayfetch may not write to the download folder. Fix its permissions, then retry.',
   },
   integrity_mismatch: {
     short: 'file check failed',
@@ -195,7 +192,6 @@ export const GROUPS = Object.freeze([
     tone: 'run',
     stages: stages('resolving', 'transferring', 'verifying', 'publishing', 'recovering'),
   },
-  { key: 'waiting', label: 'Waiting', tone: 'warn', stages: stages('waiting', 'needs_input', 'blocked') },
   { key: 'paused', label: 'Paused', tone: 'calm', stages: stages('paused') },
   { key: 'queued', label: 'Queued', tone: 'calm', stages: stages('queued') },
   { key: 'failed', label: 'Failed', tone: 'bad', stages: stages('failed') },
@@ -214,20 +210,15 @@ export function groupCount(group, counts) {
 }
 
 /**
- * A job's state in plain words, such as "Waiting until 17:42" or
- * "Failed: link expired", and its tone.
+ * A job's state in plain words, such as "Failed: link expired", and its
+ * tone.
  * @param {JobSummary} job
- * @param {(time: Date) => string} [clock] formats a retry time
  * @returns {{ label: string, tone: Tone }}
  */
-export function describe(job, clock = shortTime) {
+export function describe(job) {
   const [name, tone] = STATES[job.display];
   const failure = job.failure;
-  if (job.display === 'waiting' && failure?.retry_at !== undefined && failure.retry_at !== null) {
-    return { label: `Waiting until ${clock(new Date(failure.retry_at))}`, tone };
-  }
-  const explained = job.display === 'failed' || job.display === 'blocked' || job.display === 'waiting';
-  if (failure && explained) {
+  if (failure && job.display === 'failed') {
     return { label: `${name}: ${FAILURES[failure.code].short}`, tone };
   }
   return { label: name, tone };
@@ -242,11 +233,6 @@ export function explain(failure) {
   // other account refusals and supplies the provider-specific next step.
   if (failure.code === 'invalid_credentials' && failure.message?.trim()) return failure.message;
   return FAILURES[failure.code].explain;
-}
-
-/** @param {Date} time */
-function shortTime(time) {
-  return time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 const UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];

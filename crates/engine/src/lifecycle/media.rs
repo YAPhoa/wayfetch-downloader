@@ -1,39 +1,25 @@
-//! Media services on the coordinator: recognizing media links as they are
-//! collected, checking them in the background, and the plugins they need
-//! (protocol 4.0).
-//!
-//! At most [`MAX_CHECKS`] checks run at once, each outside the coordinator
-//! under [`CHECK_DEADLINE`]; the links waiting are rows in the store, not
-//! a queue in memory, so a restart picks them up again. A service whose
-//! plugin is missing fails its links' checks at once, saying so; checks
-//! that failed are tried again at the next start, when a plugin may have
-//! been installed.
+//! Media services on the coordinator: recognizing media links, and the
+//! plugins they need (protocol 4.0). Their links are checked with every
+//! other link's, in the crawl module; a service whose plugin is missing
+//! fails its links' checks at once, saying so, and checks that failed are
+//! tried again at the next start, when a plugin may have been installed.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
 use url::Url;
-use wayfetch_domain::id::SourceLinkId;
 use wayfetch_domain::name::ProviderId;
-use wayfetch_protocol::command::InputUrl;
 use wayfetch_protocol::media::PluginChanged;
 use wayfetch_protocol::media::PluginSummary;
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, IdempotencyKey, ProtocolError,
 };
 
-use super::{Coordinator, Internal, now};
+use super::{Coordinator, now};
 use crate::media::{
-    Converter, MediaInfo, MediaService, PluginControl, PluginError, PluginOutcome, PluginWork,
-    unusable,
+    Converter, MediaService, PluginControl, PluginError, PluginOutcome, PluginWork,
 };
-
-/// Most media links checked at once.
-const MAX_CHECKS: usize = 2;
-
-/// Longest one check may take.
-const CHECK_DEADLINE: Duration = Duration::from_secs(90);
 
 /// Longest one plugin change may take: an update downloads a release of
 /// up to about 40 MB and runs it once.
@@ -52,8 +38,6 @@ pub(super) struct MediaServices {
     pub(super) changing: BTreeSet<wayfetch_domain::name::PluginId>,
     /// The keys of the plugin changes running, with their commands.
     pub(super) keys: HashMap<IdempotencyKey, Command>,
-    /// Links being checked.
-    checking: BTreeSet<SourceLinkId>,
 }
 
 impl MediaServices {
@@ -68,7 +52,6 @@ impl MediaServices {
             control,
             changing: BTreeSet::new(),
             keys: HashMap::new(),
-            checking: BTreeSet::new(),
         }
     }
 
@@ -131,86 +114,9 @@ impl MediaServices {
         }
         plugins
     }
-
-    /// For a collect: the service recognizing each valid entry, by its
-    /// position.
-    pub(super) fn collected(&self, envelope: &CommandEnvelope) -> BTreeMap<usize, ProviderId> {
-        let Command::CollectLinks { items, .. } = &envelope.command else {
-            return BTreeMap::new();
-        };
-        items
-            .as_slice()
-            .iter()
-            .enumerate()
-            .filter_map(|(i, raw)| {
-                let url = InputUrl::parse(raw.trim()).ok()?;
-                Some((i, self.recognize(url.as_url())?.service().clone()))
-            })
-            .collect()
-    }
 }
 
 impl Coordinator {
-    /// Starts checks of waiting media links, up to the limit.
-    pub(super) async fn check_media(&mut self) {
-        let free = MAX_CHECKS.saturating_sub(self.media.checking.len());
-        if free == 0 || self.media.services.is_empty() {
-            return;
-        }
-        let busy: Vec<_> = self.media.checking.iter().copied().collect();
-        let Ok(pending) = self
-            .with_store(move |store| store.pending_media(free, &busy))
-            .await
-        else {
-            return;
-        };
-        for (link, service, url) in pending {
-            let Some(service) = self.media.service(&service).cloned() else {
-                let problem = "Wayfetch has no integration for this video site any more.";
-                let _ = self
-                    .with_store(move |s| s.record_media(link, Err(problem.into()), now()))
-                    .await;
-                continue;
-            };
-            if !service.ready() {
-                let problem = unusable(&service.plugins())
-                    .unwrap_or_else(|| "A plugin this link needs cannot be used.".into());
-                let _ = self
-                    .with_store(move |s| s.record_media(link, Err(problem), now()))
-                    .await;
-                continue;
-            }
-            self.media.checking.insert(link);
-            let (sender, cancel) = (self.client.0.clone(), self.supervisor.cancel.clone());
-            self.supervisor.spawn(async move {
-                let checked = tokio::select! {
-                    () = cancel.cancelled() => return,
-                    checked = tokio::time::timeout(CHECK_DEADLINE, service.probe(&url)) => checked,
-                };
-                let found = match checked {
-                    Ok(Ok(info)) => Ok(info),
-                    Ok(Err(e)) => Err(e.message),
-                    Err(_) => {
-                        Err("Checking the video took too long. Start it to try again.".into())
-                    }
-                };
-                let _ = sender.send(Internal::MediaChecked(link, found)).await;
-            });
-        }
-    }
-
-    /// Records a finished check; `changed` starts the next.
-    pub(super) async fn media_checked(
-        &mut self,
-        link: SourceLinkId,
-        found: Result<MediaInfo, String>,
-    ) {
-        self.media.checking.remove(&link);
-        let _ = self
-            .with_store(move |s| s.record_media(link, found, now()))
-            .await;
-    }
-
     /// Runs [`Command::ChangePlugin`]: replays a recorded result, or has
     /// the host make the change in a task of its own, one change of a
     /// plugin at a time.

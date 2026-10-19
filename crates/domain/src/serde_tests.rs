@@ -60,8 +60,8 @@ fn enum_wire_names_match_display() {
         assert_eq!(from_str::<FailureCode>(&format!("\"{v}\"")).unwrap(), v);
     }
     assert_eq!(
-        to_value(JobStage::NeedsInput).unwrap(),
-        json!("needs_input")
+        to_value(JobStage::Transferring).unwrap(),
+        json!("transferring")
     );
     assert_eq!(to_value(DisplayState::Pausing).unwrap(), json!("pausing"));
     assert_eq!(

@@ -16,7 +16,9 @@
 //!   request a URL already requested, is followed only for a request that
 //!   may be repeated.
 //! * Names resolve through the policy, so the connector only ever sees
-//!   permitted addresses.
+//!   permitted addresses. A request for a link found on a web page
+//!   ([`Reach::Public`]) uses a client of its own that reaches public
+//!   addresses only, whatever local networks the operator allows.
 //!
 //! The broker never sends a request twice unless the transfer's lease
 //! authorizes the repetition, and hands out an open response's body once.
@@ -41,7 +43,9 @@ use wayfetch_engine::transfer::lease::{
     LeaseSource, Replay, ReplayPolicy, Representation, RequestPurpose, RequestRef, ResponseRef,
     Transfer,
 };
-use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
+use wayfetch_engine::transfer::transport::{
+    OpenRequest, Reach, Response, Transport, TransportError,
+};
 use wayfetch_engine::transfer::writer::BoxFuture;
 
 use crate::body::Body;
@@ -203,28 +207,48 @@ impl Drop for Slot<'_> {
 }
 
 /// One request as sent, hop by hop.
-struct Outgoing<'a> {
-    method: Method,
-    url: Url,
-    headers: HeaderMap,
-    body: Option<Bytes>,
-    range: Option<(u64, Option<u64>)>,
-    validators: Option<&'a Representation>,
-    connect_timeout: Duration,
+pub(crate) struct Outgoing<'a> {
+    pub(crate) method: Method,
+    pub(crate) url: Url,
+    pub(crate) headers: HeaderMap,
+    pub(crate) body: Option<Bytes>,
+    pub(crate) range: Option<(u64, Option<u64>)>,
+    pub(crate) validators: Option<&'a Representation>,
+    pub(crate) connect_timeout: Duration,
+    /// Which addresses it may reach, redirects included.
+    pub(crate) reach: Reach,
     /// Whether sending it again would repeat no action: decides whether a
     /// failure after it may have reached the server is a plain timeout or
     /// an ambiguous outcome.
-    replay_safe: bool,
+    pub(crate) replay_safe: bool,
+}
+
+/// An egress policy, and the client whose resolver applies it.
+struct Egress {
+    policy: Arc<EgressPolicy>,
+    /// The client for the last connect timeout asked for; the engine uses
+    /// one, so the pool is normally kept.
+    client: Mutex<Option<(Duration, reqwest::Client)>>,
+}
+
+impl Egress {
+    fn new(policy: EgressPolicy) -> Self {
+        Self {
+            policy: Arc::new(policy),
+            client: Mutex::new(None),
+        }
+    }
 }
 
 /// An HTTP(S) transport for the engine and a request broker for leases.
 pub struct HttpTransport {
     config: HttpConfig,
-    pub(crate) policy: Arc<EgressPolicy>,
+    /// The operator's policy, for links the person adds.
+    allowed: Egress,
+    /// Public addresses only, for links found on pages; `None` when the
+    /// operator's policy allows no more than that anyway.
+    public: Option<Egress>,
     tls: rustls::ClientConfig,
-    /// The client for the last connect timeout asked for; the engine uses
-    /// one, so the pool is normally kept.
-    client: Mutex<Option<(Duration, reqwest::Client)>>,
     broker: Mutex<Broker>,
 }
 
@@ -255,19 +279,43 @@ impl HttpTransport {
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth();
         tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let public = EgressPolicy::default();
         let transport = Self {
-            policy: Arc::new(config.egress.clone()),
+            allowed: Egress::new(config.egress.clone()),
+            public: (config.egress != public).then(|| Egress::new(public)),
             config,
             tls,
-            client: Mutex::new(None),
             broker: Mutex::default(),
         };
-        let client = transport.build_client(DEFAULT_CONNECT_TIMEOUT)?;
-        *transport.client.lock().expect("unpoisoned") = Some((DEFAULT_CONNECT_TIMEOUT, client));
+        // Building the clients checks the configuration.
+        for egress in [Some(&transport.allowed), transport.public.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let client = transport.build_client(&egress.policy, DEFAULT_CONNECT_TIMEOUT)?;
+            *egress.client.lock().expect("unpoisoned") = Some((DEFAULT_CONNECT_TIMEOUT, client));
+        }
         Ok(transport)
     }
 
-    fn build_client(&self, connect_timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
+    /// The policy and client for requests with `reach`.
+    fn egress(&self, reach: Reach) -> &Egress {
+        match reach {
+            Reach::Allowed => &self.allowed,
+            Reach::Public => self.public.as_ref().unwrap_or(&self.allowed),
+        }
+    }
+
+    /// The policy requests with `reach` are checked against.
+    pub(crate) fn policy(&self, reach: Reach) -> &EgressPolicy {
+        &self.egress(reach).policy
+    }
+
+    fn build_client(
+        &self,
+        policy: &Arc<EgressPolicy>,
+        connect_timeout: Duration,
+    ) -> Result<reqwest::Client, reqwest::Error> {
         reqwest::Client::builder()
             .tls_backend_preconfigured(self.tls.clone())
             .http1_only()
@@ -275,7 +323,7 @@ impl HttpTransport {
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .referer(false)
-            .dns_resolver(PolicyResolver(self.policy.clone()))
+            .dns_resolver(PolicyResolver(policy.clone()))
             .connect_timeout(connect_timeout)
             .pool_max_idle_per_host(self.config.idle_per_host)
             .pool_idle_timeout(self.config.idle_timeout)
@@ -285,20 +333,24 @@ impl HttpTransport {
 
     pub(crate) fn client(
         &self,
+        reach: Reach,
         connect_timeout: Duration,
     ) -> Result<reqwest::Client, TransportError> {
-        let mut slot = self.client.lock().expect("unpoisoned");
+        let egress = self.egress(reach);
+        let mut slot = egress.client.lock().expect("unpoisoned");
         if let Some((timeout, client)) = &*slot
             && *timeout == connect_timeout
         {
             return Ok(client.clone());
         }
-        let client = self.build_client(connect_timeout).map_err(|e| {
-            error(
-                FailureCode::UnsupportedCapability,
-                format!("HTTP client: {}", e.without_url()),
-            )
-        })?;
+        let client = self
+            .build_client(&egress.policy, connect_timeout)
+            .map_err(|e| {
+                error(
+                    FailureCode::UnsupportedCapability,
+                    format!("HTTP client: {}", e.without_url()),
+                )
+            })?;
         *slot = Some((connect_timeout, client.clone()));
         Ok(client)
     }
@@ -470,6 +522,8 @@ impl HttpTransport {
                 range,
                 validators,
                 connect_timeout,
+                // A provider's link is the provider's answer, not a page's.
+                reach: Reach::Allowed,
                 replay_safe,
             },
             read_buffer,
@@ -503,17 +557,18 @@ impl HttpTransport {
 
     /// Sends `out` and follows redirects within the hop budget, checking
     /// every target. Returns the final response and its URL.
-    async fn send(
+    pub(crate) async fn send(
         &self,
         mut out: Outgoing<'_>,
     ) -> Result<(reqwest::Response, Url), TransportError> {
-        let client = self.client(out.connect_timeout)?;
+        let client = self.client(out.reach, out.connect_timeout)?;
+        let policy = self.policy(out.reach);
         let mut headers = caller_headers(std::mem::take(&mut out.headers));
         let mut hops = 0;
         // URLs sent so far, without fragments, which are never sent.
         let mut sent: Vec<Url> = Vec::new();
         loop {
-            self.policy.check(&out.url).map_err(refused)?;
+            policy.check(&out.url).map_err(refused)?;
             let mut request = client
                 .request(out.method.clone(), out.url.clone())
                 .headers(headers.clone())
@@ -619,6 +674,7 @@ impl Transport for HttpTransport {
                 range: request.range,
                 validators: request.validators.as_ref(),
                 connect_timeout: request.connect_timeout,
+                reach: request.reach,
                 replay_safe: true,
             },
             request.read_buffer,
