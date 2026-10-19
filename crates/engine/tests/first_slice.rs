@@ -869,6 +869,75 @@ async fn downloads_share_one_speed_limit_that_changes_while_they_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn subscribers_see_live_progress_only_while_bytes_transfer() {
+    let env = throttled_env();
+    let data = body(160 * KIB);
+    env.server.put("/live.bin", Resource::new(data.clone()));
+    let owner = env.start().await;
+    set_speed_limit(&owner, rate(32 * KIB)).await;
+    let handle = owner.handle();
+    let hello = handle.hello().await.unwrap();
+    let mut stream = handle
+        .subscribe(
+            Subscribe {
+                after: Some(hello.head),
+            },
+            ALL,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(stream.next().await, Some(StreamItem::Hello(_))));
+    let [id] = submit(&owner, &["/live.bin"]).await[..] else {
+        panic!()
+    };
+    let mut samples = Vec::new();
+    let generation = loop {
+        match stream.next().await.expect("stream ended early") {
+            StreamItem::Progress(sample) => samples.push(sample),
+            StreamItem::Event(event) => {
+                if let EventKind::JobChanged { job } = event.kind
+                    && job.id == id
+                    && job.stage == JobStage::Complete
+                {
+                    break job.generation;
+                }
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    // About five seconds at 32 KiB/s, one sample a second.
+    assert!(samples.len() >= 3, "{samples:?}");
+    let mut received = 0;
+    for sample in &samples {
+        assert_eq!(
+            (sample.job, sample.boot_epoch, sample.generation),
+            (id, hello.boot_epoch, generation)
+        );
+        assert_eq!(sample.bytes_total, Some(data.len() as u64));
+        assert!(sample.bytes_received >= received, "{samples:?}");
+        received = sample.bytes_received;
+    }
+    // Once past the first burst, speed follows the limit.
+    let steady = &samples[samples.len() - 1];
+    let limit = 32 * KIB as u64;
+    assert!(
+        (limit / 2..=2 * limit).contains(&steady.bytes_per_second),
+        "{samples:?}"
+    );
+    // Samples run ahead of the 16 KiB checkpoints durable progress moves by.
+    assert!(
+        samples
+            .iter()
+            .any(|s| s.bytes_received % (16 * KIB as u64) != 0)
+    );
+
+    // Nothing more is sent once the transfer ended.
+    let quiet = tokio::time::timeout(Duration::from_secs(3), stream.next()).await;
+    assert!(quiet.is_err(), "{quiet:?}");
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn throttling_is_not_inactivity_and_a_throttled_transfer_pauses_and_resumes() {
     let mut env = throttled_env();
     // Far shorter than the throttled transfers take.
@@ -1100,8 +1169,10 @@ async fn subscribers_replay_within_bounds_and_resync_beyond_them() {
     };
     let mut last = head.position;
     loop {
-        let Some(StreamItem::Event(event)) = live.next().await else {
-            panic!("stream ended early")
+        let event = match live.next().await {
+            Some(StreamItem::Event(event)) => event,
+            Some(StreamItem::Progress(_)) => continue,
+            other => panic!("stream ended early: {other:?}"),
         };
         assert_eq!(event.cursor.position, last + 1, "in order, no gaps");
         last = event.cursor.position;

@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::throttle::Bandwidth;
 use crate::fs::{StagingFile, SyncedRanges};
+use crate::progress::Meter;
 
 /// A boxed, sendable future.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -92,6 +93,7 @@ pub struct IntervalWriter {
     certified: u64,
     hold: Option<Arc<dyn Any + Send + Sync>>,
     bandwidth: Option<Arc<Bandwidth>>,
+    meter: Option<Arc<Meter>>,
 }
 
 impl std::fmt::Debug for IntervalWriter {
@@ -116,6 +118,7 @@ impl IntervalWriter {
             certified: start,
             hold: None,
             bandwidth: None,
+            meter: None,
         }
     }
 
@@ -123,6 +126,12 @@ impl IntervalWriter {
     /// download of the engine shares.
     pub fn throttled(mut self, bandwidth: Arc<Bandwidth>) -> Self {
         self.bandwidth = Some(bandwidth);
+        self
+    }
+
+    /// Records each position it reaches in `meter`, for live progress.
+    pub(crate) fn metered(mut self, meter: Arc<Meter>) -> Self {
+        self.meter = Some(meter);
         self
     }
 
@@ -156,6 +165,9 @@ impl IntervalWriter {
         self.blocking(move || file.write_all_at(&chunk, offset))
             .await?;
         self.position = next;
+        if let Some(meter) = &self.meter {
+            meter.reached(next);
+        }
         Ok(())
     }
 

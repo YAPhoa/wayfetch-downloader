@@ -27,6 +27,7 @@ pub mod fs;
 pub mod lifecycle;
 pub mod media;
 mod preferences;
+mod progress;
 mod published;
 pub mod state_dir;
 mod store;
