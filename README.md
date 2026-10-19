@@ -231,8 +231,8 @@ at most, through the same egress policy as downloads: `HEAD` (or a one-byte
 file is `offline`. In `analyze` mode, the default, a typed link that is a
 web page is read once (at most 2 MiB) and the files and videos on it are
 collected beside it with `found_on`; links to other pages are counted and
-never followed. Links found on a page that was not itself served from a
-local address reach public addresses only, checks and downloads alike,
+never followed. Links in pasted HTML, and links found on a page that was
+not itself served from a local address, reach public addresses only, checks and downloads alike,
 whatever networks `network.allow_networks` opens. `check` checks links again and
 `analyze` also reads a link that is a page. A page starts only through a
 provider account; directly, it is refused. A staging command reports each link it applied and

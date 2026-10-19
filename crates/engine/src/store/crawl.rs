@@ -741,4 +741,21 @@ mod tests {
             assert_eq!(admitted[0].reach, reach);
         }
     }
+
+    #[test]
+    fn links_in_pasted_html_reach_public_addresses_only() {
+        for (html, reach) in [(true, Reach::Public), (false, Reach::Allowed)] {
+            let mut f = Fixture::new();
+            f.collect(&["http://192.168.1.10/f.zip"], CollectMode::Analyze, html);
+            let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
+            assert_eq!(task.reach, reach, "pasted as HTML: {html}");
+            let (links, _) = f.links();
+            f.links_command(&[&links[0]], |links| Command::StartLinks {
+                links,
+                account: None,
+                routing: Some(StartRouting::Direct),
+            });
+            assert_eq!(f.store.admissible(1, &[], true).unwrap()[0].reach, reach);
+        }
+    }
 }
