@@ -133,9 +133,9 @@ pub(super) fn collect(
     let mut insert = tx
         .prepare(
             "INSERT INTO source_links (batch_id, ordinal, input_url, held, listed, root_id, \
-             invalid, problem, media_service, media_state, may_analyze) \
+             invalid, problem, media_service, media_state, may_analyze, public_only) \
              VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6, ?7, CASE WHEN ?7 IS NULL THEN NULL \
-             ELSE 'pending' END, ?8)",
+             ELSE 'pending' END, ?8, ?9)",
         )
         .map_err(StoreError::from)?;
     let mut invalid = 0u32;
@@ -162,6 +162,10 @@ pub(super) fn collect(
                 problem.as_ref().map(DiagnosticText::as_str),
                 service,
                 analyze && !plan.html && problem.is_none() && service.is_none(),
+                // Pasted HTML is a page's content, from wherever it was
+                // copied: its links never get the local networks the
+                // operator allows, whatever page address came with it.
+                plan.html,
             ])
             .map_err(StoreError::from)?;
         if let Entry::Valid(url) = &link.entry {
