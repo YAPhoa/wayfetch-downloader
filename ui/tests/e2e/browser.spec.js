@@ -839,6 +839,30 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(page.getByRole('button', { name: 'Done (52)' })).toBeVisible();
   expect((await daemon.published('renamed.bin', daemon.archive)).equals(content(0, MIB))).toBe(true);
 
+  // The footer counts from where the page really starts: removing a
+  // download on page 1 elsewhere moves this page's range.
+  const pager = page.locator('.downloads-view .pager');
+  await expect(pager.locator('.range')).toHaveText('51\u201353 of 53');
+  const other = await context.newPage();
+  await other.goto(`${daemon.origin}/`);
+  const firstRow = other.locator('tr[data-job]').first();
+  await firstRow.getByRole('button', { name: /^Actions for / }).click();
+  await (await openMenu(other)).getByRole('menuitem', { name: /^Remove…/ }).click();
+  await other.getByRole('dialog', { name: 'Remove download' }).getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(other.getByRole('button', { name: 'All (52)' })).toBeVisible();
+  await other.close();
+  await expect(pager.locator('.range')).toHaveText('50\u201352 of 52');
+  await expect(pager.locator('.page')).toHaveText('Page 2 of 2');
+
+  // Emptying the page goes back to the one before it.
+  await page.getByRole('checkbox', { name: 'Select all downloads shown' }).check();
+  await page.locator('tr[data-job]').first().getByRole('button', { name: /^Actions for / }).click();
+  await (await openMenu(page)).getByRole('menuitem', { name: /^Remove 3 downloads…/ }).click();
+  await page.getByRole('dialog', { name: 'Remove 3 downloads' }).getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(pager.locator('.page')).toHaveText('Page 1 of 1');
+  await expect(pager.locator('.range')).toHaveText('1\u201349 of 49');
+  await expect(page.locator('tr[data-job]')).toHaveCount(49);
+
   // The chosen default outlives a reload.
   await page.reload();
   await expect(page.locator('.statusbar .status')).toHaveText('Live');

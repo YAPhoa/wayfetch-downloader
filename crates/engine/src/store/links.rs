@@ -664,15 +664,17 @@ pub(super) fn list(
     } else {
         None
     };
-    let total: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM source_links WHERE listed = 1",
-        [],
-        |r| r.get(0),
+    let (total, before): (i64, i64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(id <= ?1), 0) FROM source_links WHERE listed = 1",
+        [after],
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    let count = |n: i64| u64::try_from(n).map_err(|_| StoreError::Corrupt("link count"));
     Ok(LinkPage {
         items,
         next_after,
-        total: u64::try_from(total).map_err(|_| StoreError::Corrupt("link count"))?,
+        total: count(total)?,
+        before: Some(count(before)?),
         as_of,
     })
 }

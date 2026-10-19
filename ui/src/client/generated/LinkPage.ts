@@ -20,6 +20,11 @@ next_after?: SourceLinkId,
  */
 total: number, 
 /**
+ * How many collected links come before this page. Added in protocol
+ * 4.3; an older engine omits it.
+ */
+before?: number, 
+/**
  * The page reflects every durable event up to and including this
  * cursor.
  */
