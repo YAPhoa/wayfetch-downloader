@@ -755,6 +755,8 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   const signed = `${fixture.put('menu.bin', MIB)}?token=secret`;
   await add(page, signed);
   await page.getByRole('button', { name: 'Next page' }).click();
+  await expect(page.locator('.downloads-view .pager .page')).toHaveText(/^Page 2 of 2$/);
+  await expect(page.getByRole('button', { name: 'Next page' })).toBeDisabled();
   const menuRow = page.locator('tr[data-job]', { has: page.locator('td.name', { hasText: /^menu\.bin$/ }) });
   await expect(menuRow).toHaveCount(1);
   const job = await menuRow.getAttribute('data-job');
@@ -1890,8 +1892,16 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(c.locator('td[data-state]')).toHaveText('Done');
     const summary = page.locator('.downloads-view .selection-summary');
 
-    // The selection line keeps its room, so ticking moves no row.
-    await expect(summary).toHaveText('3 downloads shown');
+    // The table's footer says which rows are shown; one page pages nowhere.
+    const pager = page.locator('.downloads-view .pager');
+    await expect(pager.locator('.range')).toHaveText('1–3 of 3');
+    await expect(pager.locator('.page')).toHaveText('Page 1 of 1');
+    await expect(pager.getByRole('button', { name: 'Previous page' })).toBeDisabled();
+    await expect(pager.getByRole('button', { name: 'Next page' })).toBeDisabled();
+
+    // The selection line keeps its room while empty, so ticking moves no row.
+    await expect(summary).toBeEmpty();
+    await expect(summary).toBeVisible();
     const before = await a.boundingBox();
     await a.getByRole('checkbox').check();
     await expect(summary.locator('strong')).toHaveText('1 download selected');
@@ -1937,7 +1947,7 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
 
     // An unticked row's menu acts on that row alone.
     await page.getByRole('button', { name: 'Clear selection' }).click();
-    await expect(summary).toHaveText('3 downloads shown');
+    await expect(summary).toBeEmpty();
     await c.click({ button: 'right' });
     menu = await openMenu(page);
     await expect(menu.getByRole('menuitem', { name: 'Rename…' })).toBeVisible();
