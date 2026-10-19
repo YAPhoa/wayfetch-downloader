@@ -523,7 +523,19 @@ progress.tone-calm { color: var(--control); }
 .list-status { margin: 0; padding: 16px; color: var(--muted); }
 
 .pager:empty { display: none; }
-.pager { display: flex; gap: 8px; padding: 6px 16px; border-top: 1px solid var(--line); }
+/* The table's footer: the rows shown on the left, paging on the right. */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-top: 1px solid var(--header-line);
+  background: var(--chrome);
+  color: var(--muted);
+}
+
+.pager .spacer { flex: 1; }
+.pager .page { padding: 0 4px; }
 
 /* The inspector for the selected job. */
 
@@ -852,6 +864,8 @@ dd .link-text { overflow-wrap: anywhere; }
 .selection-summary button.link { padding-top: 0; padding-bottom: 0; }
 .selection-summary .path { color: var(--ink); font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 .selection-summary:empty { display: none; }
+/* Downloads keeps the line's room while rows are shown, even when empty. */
+.selection-summary.reserved:empty { display: flex; }
 
 .notice button.link { margin-left: 8px; }
 

@@ -35,11 +35,12 @@ import {
   refusals,
 } from '../client/links.js';
 import { choiceKey, choiceLabel } from '../client/media.js';
+import { pagePlace } from '../client/pages.js';
 import { accountName, canChooseRoute, routeAccounts } from '../client/routes.js';
 import { Selection } from '../client/selection.js';
 import { saveSort, savedSort, sortedBy, toggleSort } from '../client/sort.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, refocus, show, sortHeader } from './dom.js';
+import { copyText, focusedKey, h, pagerBar, refocus, show, sortHeader } from './dom.js';
 import { icon } from './icons.js';
 import { pickerButton, rowMenuHandlers } from './menu.js';
 import { loadServices } from './services.js';
@@ -748,12 +749,16 @@ export class LinksPage {
       empty = 'Loading…';
     }
     show(this.listStatus, empty);
+    const more = this.nextAfter !== null;
     show(
       this.pager,
-      this.earlier.length > 0 &&
-        h('button', { type: 'button', 'data-key': 'links-page-back', onclick: () => this.page('back') }, 'Previous page'),
-      this.nextAfter !== null &&
-        h('button', { type: 'button', 'data-key': 'links-page-next', onclick: () => this.page('next') }, 'Next page'),
+      this.links.length > 0 &&
+        pagerBar({
+          place: pagePlace({ earlier: this.earlier.length, size: LINKS_PAGE_SIZE, rows: this.links.length, more, total: this.total }),
+          more,
+          key: 'links-page',
+          onPage: (direction) => this.page(direction),
+        }),
     );
     refocus(this.element, focused);
   }

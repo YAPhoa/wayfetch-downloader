@@ -34,11 +34,12 @@ import {
   retryPlan,
 } from '../client/jobs.js';
 import { count, refusals } from '../client/links.js';
+import { pagePlace } from '../client/pages.js';
 import { routeLabel } from '../client/routes.js';
 import { Selection } from '../client/selection.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, refocus, show } from './dom.js';
+import { copyText, focusedKey, h, pagerBar, refocus, show } from './dom.js';
 import { icon } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu, rowMenuHandlers } from './menu.js';
@@ -266,7 +267,7 @@ export class Downloads {
       'aria-label': 'Select all downloads shown',
       onchange: () => this.tick(this.shownJobs, this.selectAll.checked),
     });
-    this.selectionLine = h('p', { class: 'selection-summary', role: 'status' });
+    this.selectionLine = h('p', { class: 'selection-summary reserved', role: 'status' });
     this.actionButtons = STATE_ACTIONS.map((action) =>
       h(
         'button',
@@ -1448,17 +1449,17 @@ export class Downloads {
   /**
    * How many downloads are ticked, with a way to untick them, and how
    * many of them the name filter hides, which commands leave out. While
-   * downloads are shown the line keeps its room, saying how many are
-   * shown when none is ticked, so ticking one moves no row.
+   * downloads are shown the line keeps its room, empty when none is
+   * ticked, so ticking one moves no row.
    * @param {readonly JobSummary[]} shown
    */
   renderSelection(shown) {
     const ticked = this.selection.chosen(shown).length;
     const hidden = this.selection.size - ticked;
+    this.selectionLine.hidden = shown.length === 0 && this.selection.size === 0;
     show(
       this.selectionLine,
       ticked > 0 && h('strong', null, `${count(ticked, 'download')} selected`),
-      ticked === 0 && hidden === 0 && shown.length > 0 && h('span', null, `${count(shown.length, 'download')} shown`),
       hidden > 0 &&
         h('span', { class: 'warn-text' }, `${count(hidden, 'selected download')} hidden by the filter ${hidden === 1 ? 'is' : 'are'} left out.`),
       this.selection.size > 0 &&
@@ -1529,20 +1530,24 @@ export class Downloads {
       else empty = 'No downloads yet. Use Add links to collect some, then start them on the Links page.';
     }
     show(this.listStatus, empty);
+    const counts = feed.counts?.stages;
+    const group = GROUPS.find((g) => g.key === this.group);
+    const more = feed.nextAfter !== null;
     show(
       this.pager,
-      this.earlier.length > 0 &&
-        h(
-          'button',
-          { type: 'button', 'data-key': 'page-back', onclick: () => this.page('back') },
-          'Previous page',
-        ),
-      feed.nextAfter !== null &&
-        h(
-          'button',
-          { type: 'button', 'data-key': 'page-next', onclick: () => this.page('next') },
-          'Next page',
-        ),
+      feed.jobs.length > 0 &&
+        pagerBar({
+          place: pagePlace({
+            earlier: this.earlier.length,
+            size: PAGE_SIZE,
+            rows: feed.jobs.length,
+            more,
+            total: counts && group ? groupCount(group, counts) : null,
+          }),
+          more,
+          key: 'page',
+          onPage: (direction) => this.page(direction),
+        }),
     );
 
     const rates = feed.jobs.flatMap((job) => feed.sample(job.id)?.bytes_per_second ?? []);
