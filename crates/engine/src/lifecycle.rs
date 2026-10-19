@@ -79,7 +79,7 @@ use crate::config::{ConfigError, EngineConfig, Preference};
 use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::fs::Root;
-use crate::media::{Converter, MediaService, PluginControl};
+use crate::media::{Converter, MediaService, PluginControl, PluginWork};
 use crate::state_dir::{Identity, StateDir, StateDirError};
 use crate::store::{Admission, CommandContext, Store, StoreError, StoreInfo, Unusable};
 use crate::subscription::Subscription;
@@ -406,6 +406,16 @@ impl EngineOwner {
     /// The instance identity and this start's boot epoch.
     pub fn identity(&self) -> Identity {
         self.identity
+    }
+
+    /// What a host's plugin work runs with outside a change, such as
+    /// sweeping old copies at startup: it holds the state directory until
+    /// its file work ends and stops when the engine does.
+    pub fn plugin_work(&self) -> PluginWork {
+        PluginWork::new(
+            self.supervisor.guard(),
+            self.supervisor.cancel.child_token(),
+        )
     }
 
     /// The database settings in effect, for startup reporting.
@@ -1116,6 +1126,17 @@ impl Coordinator {
     // A dropped receiver means the caller gave up; there is nothing to do.
     async fn handle(&mut self, request: Request) {
         let instance = self.identity.instance;
+        // A key a running plugin change holds starts nothing else.
+        let request = match request {
+            Request::Execute(envelope, reply) => match self.media.held(&envelope) {
+                Some(held) => {
+                    let _ = reply.send(Err(held));
+                    return;
+                }
+                None => Request::Execute(envelope, reply),
+            },
+            request => request,
+        };
         match request {
             Request::Hello(reply) => {
                 let head = self.with_store(Store::event_head).await;

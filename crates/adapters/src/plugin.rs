@@ -267,8 +267,8 @@ impl Plugin {
     }
 
     /// The copy found without Wayfetch installing one.
-    pub fn found(&self) -> &Program {
-        &self.found
+    pub fn found(&self) -> Arc<Program> {
+        self.found.clone()
     }
 
     /// The copy Wayfetch installed, if one is in use.

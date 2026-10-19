@@ -13,11 +13,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
+use bytes::Bytes;
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
 use pgp::packet::SignatureType;
 use pgp::types::KeyDetails;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
 use url::Url;
 use wayfetch_engine::media::PluginError;
 use wayfetch_engine::transfer::range::Framing;
@@ -209,7 +209,7 @@ pub async fn fetch(
     transport: &dyn Transport,
     url: &Url,
     max: u64,
-    out: &mut (impl AsyncWrite + Unpin + Send),
+    out: &mut impl Save,
 ) -> Result<[u8; 32], PluginError> {
     let unreachable = |why: String| {
         PluginError::Unreachable(format!("{} could not be fetched: {why}", file_name(url)))
@@ -244,14 +244,32 @@ pub async fn fetch(
             return Err(unreachable(format!("it is larger than {max} bytes")));
         }
         hasher.update(&chunk);
-        out.write_all(&chunk)
-            .await
-            .map_err(|e| PluginError::Storage(format!("cannot save {}: {e}", file_name(url))))?;
+        out.save(chunk).await?;
     }
-    out.flush()
-        .await
-        .map_err(|e| PluginError::Storage(format!("cannot save {}: {e}", file_name(url))))?;
     Ok(hasher.finalize().into())
+}
+
+/// Where [`fetch`] puts what it reads.
+pub trait Save: Send {
+    /// Keeps `chunk`, the next bytes read.
+    fn save(&mut self, chunk: Bytes) -> impl Future<Output = Result<(), PluginError>> + Send;
+}
+
+impl Save for Vec<u8> {
+    async fn save(&mut self, chunk: Bytes) -> Result<(), PluginError> {
+        self.extend_from_slice(&chunk);
+        Ok(())
+    }
+}
+
+/// Chunks for a writer on another thread, which stops taking them if
+/// writing fails.
+impl Save for tokio::sync::mpsc::Sender<Bytes> {
+    async fn save(&mut self, chunk: Bytes) -> Result<(), PluginError> {
+        self.send(chunk)
+            .await
+            .map_err(|_| PluginError::Storage("the download could not be saved".into()))
+    }
 }
 
 /// The last path segment of `url`, for messages.

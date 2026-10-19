@@ -9,7 +9,7 @@
 //! that failed are tried again at the next start, when a plugin may have
 //! been installed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,11 +19,14 @@ use wayfetch_domain::name::ProviderId;
 use wayfetch_protocol::command::InputUrl;
 use wayfetch_protocol::media::PluginChanged;
 use wayfetch_protocol::media::PluginSummary;
-use wayfetch_protocol::{Command, CommandEnvelope, CommandResult, ErrorCode, ProtocolError};
+use wayfetch_protocol::{
+    Command, CommandEnvelope, CommandResult, ErrorCode, IdempotencyKey, ProtocolError,
+};
 
 use super::{Coordinator, Internal, now};
 use crate::media::{
-    Converter, MediaInfo, MediaService, PluginControl, PluginError, PluginOutcome, unusable,
+    Converter, MediaInfo, MediaService, PluginControl, PluginError, PluginOutcome, PluginWork,
+    unusable,
 };
 
 /// Most media links checked at once.
@@ -47,6 +50,8 @@ pub(super) struct MediaServices {
     pub(super) control: Option<Arc<dyn PluginControl>>,
     /// Plugins being changed.
     pub(super) changing: BTreeSet<wayfetch_domain::name::PluginId>,
+    /// The keys of the plugin changes running, with their commands.
+    pub(super) keys: HashMap<IdempotencyKey, Command>,
     /// Links being checked.
     checking: BTreeSet<SourceLinkId>,
 }
@@ -62,8 +67,26 @@ impl MediaServices {
             converter,
             control,
             changing: BTreeSet::new(),
+            keys: HashMap::new(),
             checking: BTreeSet::new(),
         }
+    }
+
+    /// Why `envelope` cannot run while a plugin change holds its key:
+    /// a retry waits for the change, and another command conflicts.
+    pub(super) fn held(&self, envelope: &CommandEnvelope) -> Option<ProtocolError> {
+        let running = self.keys.get(&envelope.idempotency_key)?;
+        Some(if *running == envelope.command {
+            ProtocolError::new(
+                ErrorCode::Busy,
+                "the plugin is still being changed; try again shortly",
+            )
+        } else {
+            ProtocolError::new(
+                ErrorCode::IdempotencyConflict,
+                "idempotency key was used for a different command",
+            )
+        })
     }
 
     /// The service that recognizes `link`, if any.
@@ -225,14 +248,24 @@ impl Coordinator {
             )))));
             return;
         }
-        let (sender, cancel) = (self.client.0.clone(), self.supervisor.cancel.clone());
+        // Held until the change is recorded, so the key cannot start
+        // anything else meanwhile.
+        self.media
+            .keys
+            .insert(envelope.idempotency_key, envelope.command.clone());
+        let sender = self.client.0.clone();
+        let stop = self.supervisor.cancel.child_token();
+        let work = PluginWork::new(self.supervisor.guard(), stop.clone());
+        // The change is never abandoned mid-step: running out of time or
+        // shutting down asks it to stop, and it ends at its next step.
         self.supervisor.spawn(async move {
+            let change = control.change(&plugin, change, work);
+            tokio::pin!(change);
             let result = tokio::select! {
-                () = cancel.cancelled() => return,
-                result = tokio::time::timeout(CHANGE_DEADLINE, control.change(&plugin, change)) => {
-                    result.unwrap_or_else(|_| {
-                        Err(PluginError::Unreachable("the change took too long".into()))
-                    })
+                result = &mut change => result,
+                () = tokio::time::sleep(CHANGE_DEADLINE) => {
+                    stop.cancel();
+                    change.await
                 }
             };
             let _ = sender
@@ -257,6 +290,7 @@ impl Coordinator {
             return;
         };
         self.media.changing.remove(plugin);
+        self.media.keys.remove(&envelope.idempotency_key);
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(e) => {

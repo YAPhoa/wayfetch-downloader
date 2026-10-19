@@ -19,8 +19,12 @@
 //! not its expiring URL, so a download continues after its links expire
 //! as long as the service still serves the same formats.
 
+use std::any::Any;
+use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::name::PluginId;
@@ -382,6 +386,10 @@ pub fn unusable(plugins: &[PluginSummary]) -> Option<String> {
 /// where each plugin is, how to update it, and what it installed. A change
 /// takes effect for work started after it; work already running keeps the
 /// copy it started with.
+///
+/// Its file work runs through [`PluginWork::blocking`], so the engine
+/// keeps the state directory until that work ends, and it stops between
+/// steps once [`PluginWork::stopping`].
 pub trait PluginControl: Send + Sync + 'static {
     /// Makes `change` to `plugin`, answering whether anything changed and
     /// the version in use afterwards.
@@ -389,7 +397,69 @@ pub trait PluginControl: Send + Sync + 'static {
         &'a self,
         plugin: &'a PluginId,
         change: PluginChange,
+        work: PluginWork,
     ) -> BoxFuture<'a, Result<PluginOutcome, PluginError>>;
+}
+
+/// What a plugin change runs with: the engine's hold on its state
+/// directory, and whether the change should stop.
+#[derive(Clone)]
+pub struct PluginWork {
+    guard: Arc<dyn Any + Send + Sync>,
+    stop: CancellationToken,
+}
+
+impl std::fmt::Debug for PluginWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginWork")
+            .field("stopping", &self.stopping())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PluginWork {
+    pub(crate) fn new(guard: Arc<dyn Any + Send + Sync>, stop: CancellationToken) -> Self {
+        Self { guard, stop }
+    }
+
+    /// Work that holds no state directory and never stops, for a host
+    /// without an engine and for tests.
+    pub fn unowned() -> Self {
+        Self::new(Arc::new(()), CancellationToken::new())
+    }
+
+    /// Whether the change should stop at its next step: the engine is
+    /// shutting down, or the change ran out of time.
+    pub fn stopping(&self) -> bool {
+        self.stop.is_cancelled()
+    }
+
+    /// Resolves once the change should stop.
+    pub async fn stopped(&self) {
+        self.stop.cancelled().await;
+    }
+
+    /// Runs file work on a blocking thread, holding the state directory
+    /// until it ends, even if whoever awaits it gives up.
+    pub fn blocking<T, F>(
+        &self,
+        work: F,
+    ) -> impl Future<Output = Result<T, PluginError>> + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let guard = self.guard.clone();
+        let running = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            work()
+        });
+        async {
+            running.await.map_err(|e| {
+                PluginError::Storage(format!("the plugin files could not be changed: {e}"))
+            })
+        }
+    }
 }
 
 /// What a plugin change did.

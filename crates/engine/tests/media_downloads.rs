@@ -17,15 +17,15 @@ use std::time::Duration;
 use bytes::Bytes;
 use support::{ALL, KIB, body, complete, envelope, job, shutdown, wait_for};
 use url::Url;
-use wayfetch_engine::EngineOwner;
 use wayfetch_engine::media::{
     Container, Conversion, Converter, MediaError, MediaInfo, MediaPlan, MediaService, MediaStream,
-    Part, PluginControl, PluginError, PluginOutcome, Recipe,
+    Part, PluginControl, PluginError, PluginOutcome, PluginWork, Recipe,
 };
 use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
+use wayfetch_engine::{EngineOwner, ShutdownRequest};
 use wayfetch_protocol::command::{CollectItems, LinkRef, LinkRefs};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::JobId;
@@ -767,10 +767,24 @@ async fn a_failed_conversion_removes_its_output_and_keeps_the_streams() {
 }
 
 /// Turns the synthetic resolver on and off; its updates never reach the
-/// release.
+/// release. With `slow`, an update first writes a file that finishes only
+/// once `slow` is cleared.
 struct Control {
     service: Arc<Service>,
     changes: AtomicUsize,
+    slow: Arc<AtomicBool>,
+    written: Arc<AtomicBool>,
+}
+
+impl Control {
+    fn new(service: Arc<Service>) -> Self {
+        Self {
+            service,
+            changes: AtomicUsize::new(0),
+            slow: Arc::new(AtomicBool::new(false)),
+            written: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 impl PluginControl for Control {
@@ -778,6 +792,7 @@ impl PluginControl for Control {
         &'a self,
         plugin: &'a PluginId,
         change: PluginChange,
+        work: PluginWork,
     ) -> BoxFuture<'a, Result<PluginOutcome, PluginError>> {
         Box::pin(async move {
             self.changes.fetch_add(1, Ordering::SeqCst);
@@ -788,6 +803,16 @@ impl PluginControl for Control {
                 PluginChange::Enable => true,
                 PluginChange::Disable => false,
                 PluginChange::Update => {
+                    if self.slow.load(Ordering::SeqCst) {
+                        let (slow, written) = (self.slow.clone(), self.written.clone());
+                        work.blocking(move || {
+                            while slow.load(Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            written.store(true, Ordering::SeqCst);
+                        })
+                        .await?;
+                    }
                     return Err(PluginError::Unreachable(
                         "the release could not be fetched".into(),
                     ));
@@ -822,10 +847,7 @@ async fn settings_plugins(owner: &EngineOwner) -> (u64, Vec<PluginSummary>) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plugin_turned_off_stops_its_links_until_it_is_turned_on_again() {
     let mut f = fixture(true, audio_only());
-    let control = Arc::new(Control {
-        service: f.service.clone(),
-        changes: AtomicUsize::new(0),
-    });
+    let control = Arc::new(Control::new(f.service.clone()));
     f.env.plugin_control = Some(control.clone());
     let owner = f.env.start().await;
     let (before, _) = settings_plugins(&owner).await;
@@ -915,5 +937,82 @@ async fn plugins_cannot_be_changed_without_a_host_that_can() {
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::NotApplicable);
+    shutdown(owner).await;
+}
+
+/// Starts a slow update of the synthetic resolver, answering once its
+/// file write has begun.
+async fn slow_update(
+    f: &mut Fixture,
+) -> (
+    EngineOwner,
+    Arc<Control>,
+    wayfetch_protocol::CommandEnvelope,
+    tokio::task::JoinHandle<Result<CommandResult, wayfetch_protocol::ProtocolError>>,
+) {
+    let control = Arc::new(Control::new(f.service.clone()));
+    control.slow.store(true, Ordering::SeqCst);
+    f.env.plugin_control = Some(control.clone());
+    let owner = f.env.start().await;
+    let update = envelope(
+        &owner,
+        change_plugin("synthetic-resolver", PluginChange::Update),
+    );
+    let (handle, sent) = (owner.handle(), update.clone());
+    let running = tokio::spawn(async move { handle.execute(sent, ALL).await });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while control.changes.load(Ordering::SeqCst) == 0 {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    (owner, control, update, running)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_keeps_the_state_directory_until_a_plugin_write_ends() {
+    let mut f = fixture(true, audio_only());
+    let (owner, control, _, _running) = slow_update(&mut f).await;
+    let slow = control.slow.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        slow.store(false, Ordering::SeqCst);
+    });
+    let report = owner
+        .shutdown(ShutdownRequest {
+            timeout: Some(Duration::from_secs(10)),
+        })
+        .await;
+    assert!(report.clean && report.state_dir_released, "{report:?}");
+    assert!(
+        control.written.load(Ordering::SeqCst),
+        "the lock was released before the write ended"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_held_by_a_running_plugin_change_starts_nothing_else() {
+    let mut f = fixture(true, audio_only());
+    let (owner, control, update, running) = slow_update(&mut f).await;
+    let reuse = |command| {
+        let mut envelope = update.clone();
+        envelope.command = command;
+        let handle = owner.handle();
+        async move { handle.execute(envelope, ALL).await.unwrap_err().code }
+    };
+    assert_eq!(
+        reuse(change_plugin("other", PluginChange::Enable)).await,
+        ErrorCode::IdempotencyConflict
+    );
+    assert_eq!(
+        reuse(change_plugin("synthetic-resolver", PluginChange::Disable)).await,
+        ErrorCode::IdempotencyConflict
+    );
+    // A retry waits for the change to end.
+    assert_eq!(reuse(update.command.clone()).await, ErrorCode::Busy);
+    assert_eq!(control.changes.load(Ordering::SeqCst), 1);
+    control.slow.store(false, Ordering::SeqCst);
+    assert_eq!(running.await.unwrap().unwrap_err().code, ErrorCode::Busy);
+    assert!(f.service.enabled.load(Ordering::SeqCst), "nothing else ran");
+    assert_eq!(control.changes.load(Ordering::SeqCst), 1);
     shutdown(owner).await;
 }

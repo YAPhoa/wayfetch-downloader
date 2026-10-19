@@ -389,8 +389,9 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
         builder = builder.account_provider(provider);
     }
     let owner = builder.start().await.map_err(|e| e.to_string())?;
-    // The engine holds the state directory now, and no plugin has run.
-    control.sweep().await?;
+    // The engine holds the state directory now, until the sweep's file
+    // work ends.
+    control.sweep(&owner.plugin_work()).await?;
     Ok(Started { owner, root })
 }
 

@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 wayfetch-engine.workspace = true
+bytes.workspace = true
 hex = "0.4.3"
 # Verifies plugin releases' signatures; no compression or extra algorithms.
 pgp = { version = "0.21", default-features = false }
@@ -17,12 +18,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 url.workspace = true
 zeroize = "1.9.1"
 
 [dev-dependencies]
-bytes.workspace = true
 httparse.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use wayfetch_engine::domain::name::PluginId;
-use wayfetch_engine::media::{PluginControl, PluginError, PluginOutcome};
+use wayfetch_engine::media::{PluginControl, PluginError, PluginOutcome, PluginWork};
 use wayfetch_engine::protocol::media::PluginChange;
 use wayfetch_engine::state_dir::replace_file;
 use wayfetch_engine::transfer::transport::Transport;
@@ -174,45 +174,50 @@ impl Plugins {
         self.entries.iter().find(|e| e.plugin.describe().id == id)
     }
 
-    /// Deletes the files the record lists for discarding. Call while the
-    /// engine holds the state directory and before any plugin runs.
-    pub async fn sweep(&self) -> Result<(), String> {
+    /// Deletes the files the record lists for discarding, with the
+    /// engine's [`PluginWork`] so it holds the state directory meanwhile.
+    pub async fn sweep(&self, work: &PluginWork) -> Result<(), String> {
         let mut record = self.record.lock().await;
         if record.discard.is_empty() {
             return Ok(());
         }
         let in_use: BTreeSet<_> = record.installed.values().map(|i| i.file.clone()).collect();
         let (dir, discard) = (self.dir.clone(), record.discard.clone());
-        let kept = tokio::task::spawn_blocking(move || {
-            discard
-                .into_iter()
-                .filter(|file| {
-                    in_use.contains(file)
-                        || relative(file).is_some_and(|f| remove(&dir.join(f)).is_err())
-                })
-                .collect::<BTreeSet<_>>()
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+        let kept = work
+            .blocking(move || {
+                discard
+                    .into_iter()
+                    .filter(|file| {
+                        in_use.contains(file)
+                            || relative(file).is_some_and(|f| remove(&dir.join(f)).is_err())
+                    })
+                    .collect::<BTreeSet<_>>()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
         record.discard = kept;
-        self.save(&record).await.map_err(|e| e.to_string())
+        self.save(&record, work).await.map_err(|e| e.to_string())
     }
 
     /// Writes `record`.
-    async fn save(&self, record: &Record) -> Result<(), PluginError> {
+    async fn save(&self, record: &Record, work: &PluginWork) -> Result<(), PluginError> {
         let bytes =
             serde_json::to_vec_pretty(record).map_err(|e| PluginError::Storage(e.to_string()))?;
         let dir = self.dir.clone();
-        tokio::task::spawn_blocking(move || {
+        work.blocking(move || {
             std::fs::create_dir_all(&dir)?;
             replace_file(&dir.join(RECORD), &bytes)
         })
-        .await
-        .map_err(|e| PluginError::Storage(e.to_string()))?
+        .await?
         .map_err(|e| PluginError::Storage(format!("cannot save the plugin settings: {e}")))
     }
 
-    async fn set_enabled(&self, plugin: &Plugin, enabled: bool) -> Result<bool, PluginError> {
+    async fn set_enabled(
+        &self,
+        plugin: &Plugin,
+        enabled: bool,
+        work: &PluginWork,
+    ) -> Result<bool, PluginError> {
         let id = plugin.describe().id;
         let mut record = self.record.lock().await;
         let mut next = record.clone();
@@ -222,14 +227,14 @@ impl Plugins {
             next.disabled.insert(id.to_owned())
         };
         if changed {
-            self.save(&next).await?;
+            self.save(&next, work).await?;
             *record = next;
             plugin.set_enabled(enabled);
         }
         Ok(changed)
     }
 
-    async fn remove(&self, plugin: &Plugin) -> Result<(), PluginError> {
+    async fn remove(&self, plugin: &Plugin, work: &PluginWork) -> Result<(), PluginError> {
         let describe = plugin.describe();
         let mut record = self.record.lock().await;
         let mut next = record.clone();
@@ -240,22 +245,34 @@ impl Plugins {
             )));
         };
         next.discard.insert(installed.file);
-        self.save(&next).await?;
+        self.save(&next, work).await?;
         *record = next;
         plugin.set_installed(None);
         Ok(())
     }
 
     /// Installs the newest release of `plugin` if it is newer than the
-    /// copy in use; whether it was.
-    async fn update(&self, plugin: &Plugin, release: &Release) -> Result<bool, PluginError> {
+    /// copy in use, or if the copy Wayfetch installed no longer runs;
+    /// whether it did.
+    async fn update(
+        &self,
+        plugin: &Plugin,
+        release: &Release,
+        work: &PluginWork,
+    ) -> Result<bool, PluginError> {
         let describe = plugin.describe();
         let Some(transport) = self.transport.as_deref() else {
             return Err(PluginError::NotApplicable(
                 "this Wayfetch cannot download plugins".into(),
             ));
         };
-        let current = plugin.program();
+        // A copy Wayfetch installed that no longer runs is replaced, even
+        // by the same release; the copy that works decides what is newer.
+        let installed = plugin.installed();
+        let repair = installed.as_ref().is_some_and(|p| !p.ready());
+        let current = installed
+            .filter(|p| p.ready())
+            .unwrap_or_else(|| plugin.found());
         let current_version = current.ready().then(|| current.version()).flatten();
         let asset = (release.asset)(current.path()).ok_or_else(|| {
             PluginError::NotApplicable(format!(
@@ -263,13 +280,16 @@ impl Plugins {
                 describe.name
             ))
         })?;
-        let (manifest, entries) = release.manifest(transport).await?;
+        let (manifest, entries) = tokio::select! {
+            fetched = release.manifest(transport) => fetched?,
+            () = work.stopped() => return Err(stopping()),
+        };
         let manifest = hex::encode(manifest);
         let expected = *entries.get(asset.name).ok_or_else(|| {
             PluginError::Rejected(format!("the release does not list {}", asset.name))
         })?;
         let sha256 = hex::encode(expected);
-        {
+        if !repair {
             let record = self.record.lock().await;
             let same_file = record
                 .installed
@@ -288,27 +308,30 @@ impl Plugins {
         let (file_path, part_path) = (self.dir.join(&file), self.dir.join(&part));
         // Named before any byte is written, so a crash leaves nothing
         // the record does not name.
-        self.edit(|r| {
-            r.discard.insert(file.clone());
-            r.discard.insert(part.clone());
-        })
+        self.edit(
+            |r| {
+                r.discard.insert(file.clone());
+                r.discard.insert(part.clone());
+            },
+            work,
+        )
         .await?;
         let installed = self
             .install(
-                transport, release, asset, &current, expected, &part_path, &file_path,
+                transport, release, asset, &current, expected, &part_path, &file_path, work,
             )
             .await;
         // The part is never needed again.
-        let _ = remove(&part_path);
+        let _ = work.blocking(move || remove(&part_path)).await;
         let program = match installed {
             Ok(()) => Program::detect(describe, Some(file_path.clone()), plugin.check()).await,
             Err(e) => {
-                self.forget(&file_path, &[&file, &part]).await;
+                self.forget(&file_path, &[&file, &part], work).await;
                 return Err(e);
             }
         };
         let Some(version) = program.ready().then(|| program.version()).flatten() else {
-            self.forget(&file_path, &[&file, &part]).await;
+            self.forget(&file_path, &[&file, &part], work).await;
             let why = program.problem().unwrap_or("it reported no version");
             return Err(PluginError::Rejected(format!(
                 "the new {} did not run, so the copy in use stays: {why}",
@@ -320,29 +343,49 @@ impl Plugins {
             manifest,
             version: version.clone(),
         };
-        if current_version.is_some_and(|v| !release::newer(&version, v)) {
-            self.forget(&file_path, &[&file, &part]).await;
-            self.edit(|r| {
-                r.checked.insert(describe.id.into(), checked);
-            })
+        // Repairing accepts the version that works now, never an older one.
+        let stale = current_version.is_some_and(|v| {
+            if repair {
+                release::newer(v, &version)
+            } else {
+                !release::newer(&version, v)
+            }
+        });
+        if stale {
+            self.forget(&file_path, &[&file, &part], work).await;
+            self.edit(
+                |r| {
+                    r.checked.insert(describe.id.into(), checked);
+                },
+                work,
+            )
             .await?;
+            if repair {
+                return Err(PluginError::Rejected(format!(
+                    "the newest {} is older than the copy found; remove the update to use that copy",
+                    describe.name
+                )));
+            }
             return Ok(false);
         }
-        self.edit(|r| {
-            if let Some(old) = r.installed.insert(
-                describe.id.into(),
-                Installed {
-                    file: file.clone(),
-                    version,
-                    sha256,
-                },
-            ) {
-                r.discard.insert(old.file);
-            }
-            r.discard.remove(&file);
-            r.discard.remove(&part);
-            r.checked.insert(describe.id.into(), checked);
-        })
+        self.edit(
+            |r| {
+                if let Some(old) = r.installed.insert(
+                    describe.id.into(),
+                    Installed {
+                        file: file.clone(),
+                        version,
+                        sha256,
+                    },
+                ) {
+                    r.discard.insert(old.file);
+                }
+                r.discard.remove(&file);
+                r.discard.remove(&part);
+                r.checked.insert(describe.id.into(), checked);
+            },
+            work,
+        )
         .await?;
         plugin.set_installed(Some(program));
         Ok(true)
@@ -360,21 +403,33 @@ impl Plugins {
         expected: [u8; 32],
         part: &Path,
         file: &Path,
+        work: &PluginWork,
     ) -> Result<(), PluginError> {
         let storage =
             |e: std::io::Error| PluginError::Storage(format!("cannot save the download: {e}"));
-        if let Some(dir) = part.parent() {
-            tokio::fs::create_dir_all(dir).await.map_err(storage)?;
-        }
-        let mut out = tokio::fs::File::create(part).await.map_err(storage)?;
-        let digest = release::fetch(
-            transport,
-            &release.url(asset.name)?,
-            release.max_bytes,
-            &mut out,
-        )
-        .await?;
-        drop(out);
+        let url = release.url(asset.name)?;
+        // The file is written on a blocking thread that holds the state
+        // directory until it has ended, whatever happens to the download.
+        let (mut chunks, mut written) = tokio::sync::mpsc::channel::<bytes::Bytes>(8);
+        let path = part.to_owned();
+        let writer = work.blocking(move || -> std::io::Result<()> {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let mut out = std::fs::File::create(&path)?;
+            while let Some(chunk) = written.blocking_recv() {
+                std::io::Write::write_all(&mut out, &chunk)?;
+            }
+            out.sync_all()
+        });
+        let fetched = tokio::select! {
+            fetched = release::fetch(transport, &url, release.max_bytes, &mut chunks) => fetched,
+            () = work.stopped() => Err(stopping()),
+        };
+        drop(chunks);
+        // A failed write says why; the download only saw the writer stop.
+        writer.await?.map_err(storage)?;
+        let digest = fetched?;
         if digest != expected {
             return Err(PluginError::Rejected(format!(
                 "the downloaded {} does not match its signed checksum",
@@ -386,7 +441,7 @@ impl Plugins {
             .zipapp
             .then(|| current.path().map(Path::to_owned))
             .flatten();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        work.blocking(move || -> std::io::Result<()> {
             match interpreter {
                 Some(current) => {
                     let current = std::fs::read(current)?;
@@ -404,17 +459,20 @@ impl Plugins {
             }
             std::fs::File::open(&file)?.sync_all()
         })
-        .await
-        .map_err(|e| PluginError::Storage(e.to_string()))?
+        .await?
         .map_err(storage)
     }
 
     /// Changes the record and saves it.
-    async fn edit(&self, change: impl FnOnce(&mut Record)) -> Result<(), PluginError> {
+    async fn edit(
+        &self,
+        change: impl FnOnce(&mut Record),
+        work: &PluginWork,
+    ) -> Result<(), PluginError> {
         let mut record = self.record.lock().await;
         let mut next = record.clone();
         change(&mut next);
-        self.save(&next).await?;
+        self.save(&next, work).await?;
         *record = next;
         Ok(())
     }
@@ -422,14 +480,18 @@ impl Plugins {
     /// Deletes a new copy that will not be used, and drops `names` from
     /// the record once it is gone; if it cannot be deleted, the next
     /// start tries again.
-    async fn forget(&self, file: &Path, names: &[&String]) {
-        if remove(file).is_ok() {
+    async fn forget(&self, file: &Path, names: &[&String], work: &PluginWork) {
+        let file = file.to_owned();
+        if let Ok(Ok(())) = work.blocking(move || remove(&file)).await {
             let _ = self
-                .edit(|r| {
-                    for name in names {
-                        r.discard.remove(*name);
-                    }
-                })
+                .edit(
+                    |r| {
+                        for name in names {
+                            r.discard.remove(*name);
+                        }
+                    },
+                    work,
+                )
                 .await;
         }
     }
@@ -440,16 +502,18 @@ impl PluginControl for Plugins {
         &'a self,
         plugin: &'a PluginId,
         change: PluginChange,
+        work: PluginWork,
     ) -> BoxFuture<'a, Result<PluginOutcome, PluginError>> {
         Box::pin(async move {
+            let work = &work;
             let entry = self
                 .entry(plugin.as_str())
                 .ok_or_else(|| PluginError::Unknown(plugin.clone()))?;
             let describe = entry.plugin.describe();
             let changed = match change {
-                PluginChange::Enable => self.set_enabled(&entry.plugin, true).await?,
-                PluginChange::Disable => self.set_enabled(&entry.plugin, false).await?,
-                PluginChange::Remove => self.remove(&entry.plugin).await.map(|()| true)?,
+                PluginChange::Enable => self.set_enabled(&entry.plugin, true, work).await?,
+                PluginChange::Disable => self.set_enabled(&entry.plugin, false, work).await?,
+                PluginChange::Remove => self.remove(&entry.plugin, work).await.map(|()| true)?,
                 PluginChange::Update => {
                     let release = entry.release.ok_or_else(|| {
                         PluginError::NotApplicable(format!(
@@ -457,7 +521,7 @@ impl PluginControl for Plugins {
                             describe.name
                         ))
                     })?;
-                    self.update(&entry.plugin, release).await?
+                    self.update(&entry.plugin, release, work).await?
                 }
             };
             Ok(PluginOutcome {
@@ -466,6 +530,11 @@ impl PluginControl for Plugins {
             })
         })
     }
+}
+
+/// Why a change stopped before it finished.
+fn stopping() -> PluginError {
+    PluginError::Unreachable("Wayfetch stopped the change; try again".into())
 }
 
 /// `file` as a path inside the plugins directory, if it is one.
@@ -628,7 +697,10 @@ mod tests {
         let plugins = open(dir.path(), Some(found.clone()), &releases).await;
         let tool = plugins.get("tool").unwrap();
 
-        let updated = plugins.change(&id(), PluginChange::Update).await.unwrap();
+        let updated = plugins
+            .change(&id(), PluginChange::Update, PluginWork::unowned())
+            .await
+            .unwrap();
         assert_eq!(
             updated,
             PluginOutcome {
@@ -642,7 +714,10 @@ mod tests {
         assert_eq!(files(dir.path()), ["a65f5b61819a2df6-tool"]);
 
         // The same release again downloads nothing.
-        let again = plugins.change(&id(), PluginChange::Update).await.unwrap();
+        let again = plugins
+            .change(&id(), PluginChange::Update, PluginWork::unowned())
+            .await
+            .unwrap();
         assert!(!again.changed);
         assert_eq!(releases.downloads(), 1);
 
@@ -654,13 +729,18 @@ mod tests {
 
         // Removing goes back to the copy found; the file goes at the next
         // start, as a run may still use it.
-        let removed = plugins.change(&id(), PluginChange::Remove).await.unwrap();
+        let removed = plugins
+            .change(&id(), PluginChange::Remove, PluginWork::unowned())
+            .await
+            .unwrap();
         assert_eq!(removed.version.as_deref(), Some("2026.01.01"));
         assert!(!tool.summary(Vec::new()).installed);
         assert_eq!(files(dir.path()).len(), 1);
-        plugins.sweep().await.unwrap();
+        plugins.sweep(&PluginWork::unowned()).await.unwrap();
         assert!(files(dir.path()).is_empty());
-        let refused = plugins.change(&id(), PluginChange::Remove).await;
+        let refused = plugins
+            .change(&id(), PluginChange::Remove, PluginWork::unowned())
+            .await;
         assert!(matches!(refused, Err(PluginError::NotApplicable(_))));
     }
 
@@ -672,7 +752,9 @@ mod tests {
         let found = script(dir.path(), "found", "echo 2026.01.01");
         let plugins = open(dir.path(), Some(found), &releases).await;
         let tool = plugins.get("tool").unwrap();
-        let refused = plugins.change(&id(), PluginChange::Update).await;
+        let refused = plugins
+            .change(&id(), PluginChange::Update, PluginWork::unowned())
+            .await;
         assert!(matches!(refused, Err(PluginError::Rejected(m)) if m.contains("signed checksum")));
         assert_eq!(tool.program().version(), Some("2026.01.01"));
         assert!(files(dir.path()).is_empty());
@@ -691,11 +773,17 @@ mod tests {
         let releases = Arc::new(Releases::default());
         let found = script(dir.path(), "found", "echo 2100.01.01");
         let plugins = open(dir.path(), Some(found), &releases).await;
-        let unchanged = plugins.change(&id(), PluginChange::Update).await.unwrap();
+        let unchanged = plugins
+            .change(&id(), PluginChange::Update, PluginWork::unowned())
+            .await
+            .unwrap();
         assert_eq!(unchanged.version.as_deref(), Some("2100.01.01"));
         assert!(!unchanged.changed);
         assert!(files(dir.path()).is_empty());
-        plugins.change(&id(), PluginChange::Update).await.unwrap();
+        plugins
+            .change(&id(), PluginChange::Update, PluginWork::unowned())
+            .await
+            .unwrap();
         assert_eq!(releases.downloads(), 1);
     }
 
@@ -706,15 +794,21 @@ mod tests {
         let plugins = open(dir.path(), None, &releases).await;
         let tool = plugins.get("tool").unwrap();
         assert!(!tool.usable());
-        let installed = plugins.change(&id(), PluginChange::Update).await.unwrap();
+        let installed = plugins
+            .change(&id(), PluginChange::Update, PluginWork::unowned())
+            .await
+            .unwrap();
         assert!(installed.changed && tool.usable());
         assert_eq!(tool.summary(Vec::new()).fallback_version, None);
 
-        let off = plugins.change(&id(), PluginChange::Disable).await.unwrap();
+        let off = plugins
+            .change(&id(), PluginChange::Disable, PluginWork::unowned())
+            .await
+            .unwrap();
         assert!(off.changed && !tool.usable());
         assert!(
             !plugins
-                .change(&id(), PluginChange::Disable)
+                .change(&id(), PluginChange::Disable, PluginWork::unowned())
                 .await
                 .unwrap()
                 .changed
@@ -723,8 +817,48 @@ mod tests {
         let plugins = open(dir.path(), None, &releases).await;
         assert!(!plugins.get("tool").unwrap().enabled());
         let other = plugins
-            .change(&PluginId::new("other").unwrap(), PluginChange::Enable)
+            .change(
+                &PluginId::new("other").unwrap(),
+                PluginChange::Enable,
+                PluginWork::unowned(),
+            )
             .await;
         assert!(matches!(other, Err(PluginError::Unknown(_))));
+    }
+
+    #[tokio::test]
+    async fn an_update_replaces_an_installed_copy_that_went_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let releases = Arc::new(Releases::default());
+        let plugins = open(dir.path(), None, &releases).await;
+        let work = PluginWork::unowned;
+        assert!(
+            plugins
+                .change(&id(), PluginChange::Update, work())
+                .await
+                .unwrap()
+                .changed
+        );
+        drop(plugins);
+        let installed = dir.path().join("plugins/tool").join(&files(dir.path())[0]);
+        std::fs::remove_file(installed).unwrap();
+
+        let plugins = open(dir.path(), None, &releases).await;
+        let tool = plugins.get("tool").unwrap();
+        assert!(!tool.usable());
+        // The record names the same release, but the copy is gone.
+        let repaired = plugins
+            .change(&id(), PluginChange::Update, work())
+            .await
+            .unwrap();
+        assert!(repaired.changed && tool.usable(), "{repaired:?}");
+        assert_eq!(releases.downloads(), 2);
+        assert_eq!(files(dir.path()), ["a65f5b61819a2df6-tool"]);
+        plugins.sweep(&work()).await.unwrap();
+        assert_eq!(
+            files(dir.path()),
+            ["a65f5b61819a2df6-tool"],
+            "the copy in use stays"
+        );
     }
 }
