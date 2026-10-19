@@ -32,6 +32,9 @@ pub struct CommandContext {
     /// operator's download root, which was not identified yet, and is saved
     /// there once it is.
     pub destination: Option<RootId>,
+    /// The operator's download root, once identified: jobs submitted
+    /// without a destination belong to it.
+    pub download_root: Option<RootId>,
     /// Destinations of links being started that cannot be used, and why.
     pub unusable: Unusable,
     /// The provider account links being started download through, as the
@@ -136,7 +139,14 @@ impl Store {
             Command::RemoveRoot {
                 expected_revision,
                 root,
-            } => roots::remove_root(&tx, *expected_revision, *root, now)?,
+            } => roots::remove_root(
+                &tx,
+                *expected_revision,
+                *root,
+                destination,
+                context.download_root,
+                now,
+            )?,
             Command::SetAccountEnabled {
                 account,
                 expected_revision,

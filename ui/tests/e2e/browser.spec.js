@@ -486,8 +486,10 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(displayLink).not.toHaveAttribute('aria-current');
   // The permitted server folders.
   await expect(pane.getByRole('heading', { name: 'Download folders' })).toBeVisible();
-  const archive = pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) });
-  await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.root}`) })).toBeChecked();
+  /** @param {string} path */
+  const folderRow = (path) => pane.locator('.folder-row', { has: page.getByText(path, { exact: true }) });
+  await expect(folderRow(/** @type {string} */ (daemon.root)).locator('.tag')).toHaveText('Default');
+  await expect(folderRow(/** @type {string} */ (daemon.root)).getByRole('button')).toHaveCount(0);
   await expect(pane.getByText('Server paths', { exact: true })).toBeVisible();
   // Nothing asks for a command line.
   await expect(page.locator('.settings-page code')).toHaveCount(0);
@@ -545,12 +547,13 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   // The browser's Back goes to the previous section.
   await page.goBack();
   await expect(displayLink).toHaveAttribute('aria-current', 'page');
-  // A new default is saved with feedback.
+  // Any other folder can be made the default at once, with feedback.
   await folderLink.click();
-  await archive.check();
-  await pane.getByRole('button', { name: 'Save' }).click();
-  await expect(pane.getByText(`Saved. New downloads go to ${daemon.archive}.`)).toBeVisible();
-  await expect(pane.getByRole('button', { name: 'Save' })).toBeFocused();
+  await pane.getByRole('button', { name: `Make ${daemon.archive} the default` }).click();
+  await expect(pane.getByText(`New downloads now go to ${daemon.archive}.`)).toBeVisible();
+  await expect(folderRow(/** @type {string} */ (daemon.archive)).locator('.tag')).toHaveText('Default');
+  await expect(folderRow(/** @type {string} */ (daemon.root)).getByRole('button')).toHaveText(['Make default', 'Remove']);
+  await expect(pane.getByRole('button', { name: `Make ${daemon.root} the default` })).toBeFocused();
   // A server folder is added by browsing to it: the dialog starts at the
   // selected folder, goes up, to a typed path, and into a folder.
   const shares = join(/** @type {string} */ (daemon.dir), 'shares');
@@ -614,27 +617,21 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(addThis).toBeEnabled();
   await folders.getByRole('button', { name: 'Add this folder' }).click();
   await expect(folders).toBeHidden();
-  await expect(pane.getByText('Folder added. Save to use it for new downloads.')).toBeVisible();
-  await expect(pane.getByRole('radio', { name: new RegExp(`^${join(shares, 'films')}`) })).toBeChecked();
+  await expect(pane.getByText('Folder added. Use Make default to save new downloads there.')).toBeVisible();
+  await expect(folderRow(join(shares, 'films')).getByRole('button')).toHaveText(['Make default', 'Remove']);
   await expect(pane.getByRole('button', { name: 'Add folder…' })).toBeFocused();
   // Closing without adding changes nothing.
   await pane.getByRole('button', { name: 'Add folder…' }).click();
   await page.keyboard.press('Escape');
   await expect(pane.getByText('No folder was chosen; nothing changed.')).toBeVisible();
-  // Only a folder the user added can be removed; its files stay.
+  // Any folder but the default can be removed; its files stay.
   const films = join(shares, 'films');
   // Links collected to be saved there do not keep it; they show it as
-  // removed until given another folder. The folder checked is not saved,
-  // which the section is marked for, and leaving asks first.
-  await expect(folderLink.locator('.unsaved')).toBeVisible();
+  // removed until given another folder. Folder changes are made at once,
+  // so leaving does not ask.
+  await expect(folderLink.locator('.unsaved')).toBeHidden();
   await page.locator('[data-key="settings-back"]').click();
-  const discard = page.getByRole('dialog', { name: 'Discard unsaved changes?' });
-  await expect(discard).toContainText('Download folders has changes that are not saved.');
-  await discard.getByRole('button', { name: 'Keep editing' }).click();
-  await expect(discard).toHaveCount(0);
-  await expect(page).toHaveURL(`${daemon.origin}/settings/folder`);
-  await page.keyboard.press('Escape');
-  await discard.getByRole('button', { name: 'Discard changes' }).click();
+  await expect(page).toHaveURL(`${daemon.origin}/`);
   await page.getByRole('button', { name: 'Add links' }).click();
   await page.getByLabel('Save to').selectOption({ label: films });
   await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(fixture.put('orphan.bin', MIB));
@@ -645,12 +642,12 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await settingsButton.click();
   await folderLink.click();
   await writeFile(join(films, 'kept.bin'), 'kept');
-  await expect(pane.getByRole('button', { name: /^Remove / })).toHaveCount(1);
+  await expect(pane.getByRole('button', { name: /^Remove / })).toHaveCount(2);
   await pane.getByRole('button', { name: `Remove ${films}` }).click();
   await expect(pane.getByText(`Removed ${films}. Its files stay there;`, { exact: false })).toBeVisible();
-  await expect(pane.getByRole('radio', { name: new RegExp(`^${films}`) })).toHaveCount(0);
-  await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) })).toBeChecked();
-  await expect(pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) })).toBeFocused();
+  await expect(folderRow(films)).toHaveCount(0);
+  await expect(folderRow(/** @type {string} */ (daemon.archive)).locator('.tag')).toHaveText('Default');
+  await expect(pane.getByRole('button', { name: `Make ${daemon.root} the default` })).toBeFocused();
   expect(await readFile(join(films, 'kept.bin'), 'utf8')).toBe('kept');
   await page.locator('[data-key="settings-back"]').click();
   await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: /^Links/ }).click();
@@ -665,7 +662,6 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await page.getByRole('navigation', { name: 'Views' }).getByRole('link', { name: 'Downloads' }).click();
   await settingsButton.click();
   await folderLink.click();
-  await pane.getByRole('radio', { name: new RegExp(`^${daemon.archive}`) }).check();
   // The download kept running meanwhile, and finishes while Settings is shown.
   expect(await daemon.published(running).then(() => 'published', () => 'not yet')).toBe('not yet');
   fixture.release(running);

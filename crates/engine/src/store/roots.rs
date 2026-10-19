@@ -25,6 +25,9 @@ pub(crate) struct RootRow {
     /// Added by the host on the user's request, so permitted whether or
     /// not the operator configures it.
     pub(crate) registered: bool,
+    /// Removed by the user, so not permitted even while the operator
+    /// configures it, until the user adds it again.
+    pub(crate) removed: bool,
 }
 
 /// A path's stored form. Roots must have UTF-8 paths, so a client can be
@@ -34,15 +37,18 @@ pub(crate) fn path_text(path: &Path) -> Result<&str, StoreError> {
         .ok_or(StoreError::Root("path is not valid UTF-8"))
 }
 
-fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, bool)> {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, bool, bool)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
 }
 
-fn decode((id, path, registered): (i64, String, bool)) -> Result<RootRow, StoreError> {
+fn decode(
+    (id, path, registered, removed): (i64, String, bool, bool),
+) -> Result<RootRow, StoreError> {
     Ok(RootRow {
         id: key(id)?,
         path: path.into(),
         registered,
+        removed,
     })
 }
 
@@ -51,7 +57,7 @@ impl Store {
     pub(crate) fn root_rows(&mut self) -> Result<Vec<RootRow>, StoreError> {
         let tx = self.read()?;
         let rows = tx
-            .prepare("SELECT id, path, registered FROM roots ORDER BY id")?
+            .prepare("SELECT id, path, registered, removed FROM roots ORDER BY id")?
             .query_map([], read_row)?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter().map(decode).collect()
@@ -62,7 +68,7 @@ impl Store {
         let path = path_text(path)?;
         let tx = self.read()?;
         tx.query_row(
-            "SELECT id, path, registered FROM roots WHERE path = ?1",
+            "SELECT id, path, registered, removed FROM roots WHERE path = ?1",
             [path],
             read_row,
         )
@@ -119,10 +125,14 @@ impl Store {
         Ok(id)
     }
 
-    /// Marks root `id` as registered on the user's request.
+    /// Marks root `id` as registered on the user's request, which also
+    /// restores a root they removed.
     pub(crate) fn register_root(&mut self, id: RootId) -> Result<(), StoreError> {
         let tx = self.write()?;
-        tx.execute("UPDATE roots SET registered = 1 WHERE id = ?1", [sql(id)?])?;
+        tx.execute(
+            "UPDATE roots SET registered = 1, removed = 0 WHERE id = ?1",
+            [sql(id)?],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -337,45 +347,48 @@ pub(super) fn update_settings(
     })
 }
 
-/// Stops offering root `id`, which the user added, at the settings
-/// revision the client saw: it stays recorded, so adding its folder again
-/// restores the same root. The coordinator has checked that the operator
-/// does not configure it. The current default, and a root that unfinished
-/// jobs save to, are refused.
+/// Stops offering root `id` at the settings revision the client saw,
+/// whether the user added it or the operator configures it: it stays
+/// recorded, marked removed, so it stays out while configured and adding
+/// its folder again restores the same root. The coordinator has checked
+/// that it is permitted. The default, saved or in effect (`default`), and
+/// a root that unfinished jobs save to, are refused; jobs submitted
+/// without a destination save to the operator's `download_root`.
 pub(super) fn remove_root(
     tx: &Transaction<'_>,
     expected: Revision,
     id: RootId,
+    default: Option<RootId>,
+    download_root: Option<RootId>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let saved = settings(tx)?;
     check_revision(&saved, expected)?;
     let root = sql(id)?;
-    let registered: Option<bool> = tx
-        .query_row(
-            "SELECT registered FROM roots WHERE id = ?1",
-            [root],
-            |row| row.get(0),
-        )
+    let removed: Option<bool> = tx
+        .query_row("SELECT removed FROM roots WHERE id = ?1", [root], |row| {
+            row.get(0)
+        })
         .optional()
         .map_err(StoreError::from)?;
-    if registered != Some(true) {
+    if removed != Some(false) {
         return Err(ProtocolError::new(
             ErrorCode::NotFound,
             "destination not found",
         ));
     }
-    if saved.default_root == Some(id) {
+    if saved.default_root == Some(id) || default == Some(id) {
         return Err(ProtocolError::new(
             ErrorCode::NotApplicable,
-            "new downloads are saved to this folder; choose another default first",
+            "new downloads are saved to this folder; make another folder the default first",
         ));
     }
     let unfinished: i64 = tx
         .query_row(
-            "SELECT COUNT(*) FROM jobs WHERE root_id = ?1 \
+            "SELECT COUNT(*) FROM jobs \
+             WHERE (root_id = ?1 OR (?2 AND root_id IS NULL)) \
              AND stage NOT IN ('complete', 'failed', 'cancelled')",
-            [root],
+            params![root, download_root == Some(id)],
             |row| row.get(0),
         )
         .map_err(StoreError::from)?;
@@ -393,8 +406,11 @@ pub(super) fn remove_root(
         ));
     }
     let next = next_revision(tx, &saved, now)?;
-    tx.execute("UPDATE roots SET registered = 0 WHERE id = ?1", [root])
-        .map_err(StoreError::from)?;
+    tx.execute(
+        "UPDATE roots SET registered = 0, removed = 1 WHERE id = ?1",
+        [root],
+    )
+    .map_err(StoreError::from)?;
     tx.execute(
         "UPDATE settings SET revision = ?1, updated_at = ?2 WHERE id = 1",
         params![sql(next)?, now.unix_millis()],
