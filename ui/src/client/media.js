@@ -42,15 +42,6 @@ export function choiceKey(choice) {
 }
 
 /**
- * The option of `options` that `key` names.
- * @param {readonly MediaOption[]} options
- * @param {string} key
- */
-export function optionFor(options, key) {
-  return options.find((o) => choiceKey(o.choice) === key) ?? null;
-}
-
-/**
  * A length in seconds as `m:ss` or `h:mm:ss`.
  * @param {number} seconds
  */

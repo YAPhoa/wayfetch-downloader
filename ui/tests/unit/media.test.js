@@ -7,7 +7,6 @@ import {
   choiceLabel,
   durationText,
   mediaServiceName,
-  optionFor,
   pluginStatus,
   pluginUse,
 } from '../../src/client/media.js';
@@ -51,8 +50,6 @@ test('choices have names and keys that tell them apart', () => {
   assert.equal(choiceLabel({ kind: 'audio', format: 'm4a' }), 'M4A audio');
   const keys = READY.options.map((o) => choiceKey(o.choice));
   assert.deepEqual(keys, ['video-best', 'video-720', 'audio-mp3']);
-  assert.deepEqual(optionFor(READY.options, 'video-720')?.choice, { kind: 'video', max_height: 720 });
-  assert.equal(optionFor(READY.options, 'video-1'), null);
 });
 
 test('lengths read as minutes or hours', () => {

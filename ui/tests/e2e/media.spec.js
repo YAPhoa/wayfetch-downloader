@@ -98,15 +98,30 @@ test('a YouTube link shows its title and formats, and downloads the one chosen',
 
     // Without ffmpeg, MP3 and the 1080p picture need a plugin; Best video
     // is the format with sound included.
-    const select = row.locator('select[data-key^="link-format-"]');
-    await expect(select).toHaveAccessibleName('Format of Wayfetch test video');
-    await expect(select.locator('option:checked')).toHaveText('Best video');
-    await expect(select.locator('option', { hasText: 'MP3 audio' })).toBeDisabled();
-    await expect(select.locator('option', { hasText: 'MP3 audio' })).toHaveText('MP3 audio (needs a plugin)');
-    await select.selectOption({ label: '360p video' });
+    const picker = row.locator('button[data-key^="link-format-"]');
+    await expect(picker).toHaveAccessibleName('Format of Wayfetch test video: Best video');
+    await picker.click();
+    const formats = page.getByRole('menu', { name: 'Format' });
+    await expect(formats.getByRole('menuitemradio', { checked: true })).toHaveText('Best video');
+    await expect(formats.getByRole('menuitemradio', { checked: true })).toBeFocused();
+    const mp3 = formats.getByRole('menuitemradio', { name: /MP3 audio/ });
+    await expect(mp3).toHaveAttribute('aria-disabled', 'true');
+    await expect(mp3).toHaveText('MP3 audioNeeds a plugin');
+    await formats.getByRole('menuitemradio', { name: '360p video' }).click();
+    await expect(formats).toBeHidden();
     await expect(page.getByText('1 video will download as 360p video.')).toBeVisible();
+    await expect(picker).toBeFocused();
     await page.reload();
-    await expect(row.locator('select option:checked')).toHaveText('360p video');
+    await expect(picker).toHaveText('360p video');
+    // From the keyboard: the arrow keys open the list and Escape closes it
+    // with the choice unchanged.
+    await picker.focus();
+    await page.keyboard.press('ArrowDown');
+    await expect(formats.getByRole('menuitemradio', { name: '360p video' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(formats).toBeHidden();
+    await expect(picker).toBeFocused();
+    await expect(picker).toHaveText('360p video');
 
     await row.getByRole('checkbox').check();
     await page.getByRole('button', { name: 'Start selected' }).click();

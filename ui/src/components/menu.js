@@ -6,8 +6,15 @@
 //
 // Disabled items stay in the menu, and focusable, so a keyboard or screen
 // reader user learns they exist; a hint can say why they do not apply.
+//
+// A menu whose items say whether they are `checked` is a choice of one,
+// such as a format: its items are radio items, the checked one is marked
+// and takes focus when it opens. `pickerButton` opens one; it stands in
+// for a native select, whose list the system draws in its own theme
+// rather than the app's.
 
 import { h, show } from './dom.js';
+import { icon } from './icons.js';
 
 /**
  * @typedef {{
@@ -17,6 +24,7 @@ import { h, show } from './dom.js';
  *   disabled?: boolean,
  *   hint?: string,
  *   danger?: boolean,
+ *   checked?: boolean,
  * }} MenuItem
  * @typedef {MenuItem | 'separator'} MenuEntry
  * @typedef {{ left: number, top: number, right: number, bottom: number }} Anchor
@@ -102,6 +110,43 @@ export function rowMenuHandlers(more, open) {
   };
 }
 
+/**
+ * A button that opens `menu` as `owner`'s choice of one, showing what is
+ * chosen: a press toggles the menu, and the up and down arrows open it.
+ * @param {{
+ *   menu: Menu,
+ *   owner: string,
+ *   label: string,
+ *   name: string,
+ *   disabled?: boolean,
+ *   title?: string | null,
+ *   open: (anchor: Anchor) => void,
+ * }} options `name` is its accessible name, and `label` the choice
+ */
+export function pickerButton({ menu, owner, label, name, disabled = false, title = null, open }) {
+  return h(
+    'button',
+    {
+      type: 'button',
+      class: 'picker',
+      'data-key': owner,
+      'aria-haspopup': 'menu',
+      'aria-expanded': String(menu.owner === owner),
+      'aria-label': `${name}: ${label}`,
+      title,
+      disabled,
+      onclick: (/** @type {MouseEvent} */ event) => menu.toggle(owner, /** @type {HTMLElement} */ (event.currentTarget), open),
+      onkeydown: (/** @type {KeyboardEvent} */ event) => {
+        if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+        event.preventDefault();
+        if (menu.owner !== owner) open(/** @type {HTMLElement} */ (event.currentTarget).getBoundingClientRect());
+      },
+    },
+    h('span', { class: 'picker-label' }, label),
+    icon('chevron'),
+  );
+}
+
 export class Menu {
   /**
    * @param {string} label the menu's accessible name
@@ -109,6 +154,7 @@ export class Menu {
    */
   constructor(label, onchange) {
     this.onchange = onchange;
+    this.label = label;
     this.element = h('div', {
       class: 'menu',
       role: 'menu',
@@ -150,12 +196,15 @@ export class Menu {
    * Opens the menu at `anchor` with focus on its first item.
    * @param {MenuEntry[]} entries
    * @param {Anchor} anchor
-   * @param {{ owner: string, restore: () => void }} options `restore` puts
+   * @param {{ owner: string, restore: () => void, label?: string }} options
+   *   `label` names this menu when it differs from the usual; `restore` puts
    *   focus back when the menu closes from the keyboard or runs an item
    */
-  show(entries, anchor, { owner, restore }) {
+  show(entries, anchor, { owner, restore, label = this.label }) {
     this.close(false);
     this.dismissed = null;
+    this.element.setAttribute('aria-label', label);
+    const choice = entries.some((entry) => entry !== 'separator' && entry.checked !== undefined);
     show(
       this.element,
       entries.map((entry) =>
@@ -165,11 +214,12 @@ export class Menu {
               'button',
               {
                 type: 'button',
-                role: 'menuitem',
+                role: choice ? 'menuitemradio' : 'menuitem',
                 tabindex: -1,
                 class: entry.danger ? 'menu-item danger' : 'menu-item',
                 'data-key': `menu-item-${entry.key}`,
                 'aria-disabled': entry.disabled ? 'true' : null,
+                'aria-checked': choice ? String(Boolean(entry.checked)) : null,
                 onpointermove: (/** @type {PointerEvent} */ event) => {
                   // Keep the visual highlight and keyboard target together.
                   // Touch scrolling must not move focus or scroll an item.
@@ -183,6 +233,7 @@ export class Menu {
                   entry.run();
                 },
               },
+              choice && h('span', { class: 'menu-check', 'aria-hidden': 'true' }, entry.checked && icon('check')),
               h('span', { class: 'menu-label' }, entry.label),
               entry.hint && h('span', { class: 'menu-hint' }, entry.hint),
             ),
@@ -198,7 +249,8 @@ export class Menu {
     });
     this.element.style.left = `${at.left}px`;
     this.element.style.top = `${at.top}px`;
-    this.items()[0]?.focus();
+    const items = this.items();
+    (items.find((item) => item.getAttribute('aria-checked') === 'true') ?? items[0])?.focus();
     document.addEventListener('pointerdown', this.onPointerDown, true);
     document.addEventListener('scroll', this.onScroll, true);
     window.addEventListener('resize', this.onDismiss);
@@ -216,6 +268,22 @@ export class Menu {
     const dismissed = this.dismissed;
     this.dismissed = null;
     return dismissed !== null && dismissed.owner === owner && opener.contains(dismissed.target);
+  }
+
+  /**
+   * What a press on `owner`'s opener does: closes its menu when open, or
+   * when that press just closed it, and otherwise calls `open`.
+   * @param {string} owner
+   * @param {HTMLElement} opener
+   * @param {(anchor: Anchor) => void} open
+   */
+  toggle(owner, opener, open) {
+    if (this.justDismissed(owner, opener)) return;
+    if (this.owner === owner) {
+      this.close(true);
+      return;
+    }
+    open(opener.getBoundingClientRect());
   }
 
   /**
@@ -242,7 +310,7 @@ export class Menu {
 
   /** @returns {HTMLElement[]} */
   items() {
-    return [...this.element.querySelectorAll('[role="menuitem"]')].map(
+    return [...this.element.querySelectorAll('[role="menuitem"], [role="menuitemradio"]')].map(
       (item) => /** @type {HTMLElement} */ (item),
     );
   }

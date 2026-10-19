@@ -164,6 +164,12 @@ button.primary {
 
 button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
 
+/* Opens a choice of one, in place of a native select. */
+button.picker { justify-content: space-between; min-width: 0; max-width: 100%; }
+button.picker .picker-label { overflow: hidden; text-overflow: ellipsis; }
+button.picker .icon { color: var(--muted); }
+button.picker[aria-expanded='true'] { border-color: var(--accent); }
+
 button.link {
   min-height: 0;
   padding: 2px 4px;
@@ -685,6 +691,11 @@ dd { margin: 0; overflow-wrap: anywhere; }
 }
 
 .menu-item:focus { background: var(--selected); outline: none; }
+/* A choice of one: a column for the mark beside each name. */
+.menu-item[role='menuitemradio'] { justify-content: flex-start; gap: 8px; }
+.menu-item[role='menuitemradio'] .menu-label { flex: 1; }
+.menu-check { display: inline-flex; width: 14px; flex: none; color: var(--accent); }
+.menu-check .icon { stroke-width: 2; }
 .menu-item[aria-disabled='true'] { color: var(--muted); cursor: default; }
 .menu-item.danger:not([aria-disabled='true']) { color: var(--bad); }
 .menu-hint { color: var(--muted); font-size: 12px; }
@@ -879,7 +890,7 @@ th[aria-sort] button.sort { color: var(--ink); }
 
 .links td.folder { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 .links td.format { white-space: nowrap; }
-.links td.format select { max-width: 160px; }
+.links td.format .picker { width: 132px; min-height: 26px; padding: 0 8px 0 10px; }
 .links td.format .unknown { color: var(--muted); }
 .links td.folder .path { font-family: ui-monospace, monospace; color: var(--muted); }
 
