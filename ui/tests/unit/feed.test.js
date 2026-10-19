@@ -264,7 +264,6 @@ async function started(client, pageSize = 2, readDelay = 0, onEvent = undefined)
     onChange: () => {},
     onEvent,
     retryDelays: [0],
-    refreshInterval: 1e9,
     readDelay,
   });
   feeds.push(feed);
@@ -427,6 +426,37 @@ test('only current progress samples are shown', async () => {
   // A new generation makes the sample stale.
   client.change('job_changed', job(1, { stage: 'queued', generation: 3 }));
   assert.equal(feed.sample('job-1'), undefined);
+});
+
+test('a job that stops transferring drops its sample and takes no more', async () => {
+  const client = new FakeClient();
+  client.change('job_added', job(1, { stage: 'transferring' }));
+  const feed = await started(client);
+  const sink = client.live[0].sink;
+  const sample = { job: /** @type {const} */ ('job-1'), boot_epoch: 1, generation: 1, bytes_received: 5, bytes_per_second: 9 };
+  sink.item({ type: 'progress', ...sample });
+  assert.equal(feed.sample('job-1')?.bytes_per_second, 9);
+  // Paused under the same generation: no speed is shown any more.
+  client.change('job_changed', job(1, { stage: 'paused' }));
+  assert.equal(feed.sample('job-1'), undefined);
+  // A sample sent before the pause arrived late is ignored.
+  sink.item({ type: 'progress', ...sample });
+  assert.equal(feed.sample('job-1'), undefined);
+});
+
+test('held jobs are never re-read on a timer', async () => {
+  const client = new FakeClient();
+  client.change('job_added', job(1, { stage: 'transferring' }));
+  let reads = 0;
+  const list = client.listJobs.bind(client);
+  client.listJobs = async (request) => {
+    reads += 1;
+    return list(request);
+  };
+  await started(client);
+  const before = reads;
+  await new Promise((resolve) => setTimeout(resolve, 3500));
+  assert.equal(reads, before);
 });
 
 test('a read overtaken by events keeps the newer copy', async () => {
