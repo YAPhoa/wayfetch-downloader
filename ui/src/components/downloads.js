@@ -206,6 +206,8 @@ export class Downloads {
     /** `after` of each earlier page, for going back. */
     /** @type {(JobId | null)[]} */
     this.earlier = [];
+    /** Set while going back from a page that emptied. */
+    this.goingBack = false;
     /** Rendered rows by job, reused while nothing they show changed. */
     /**
      * @type {Map<JobId, {
@@ -1533,12 +1535,18 @@ export class Downloads {
     const counts = feed.counts?.stages;
     const group = GROUPS.find((g) => g.key === this.group);
     const more = feed.nextAfter !== null;
+    // A page emptied by removals or filter changes: show the one before it.
+    if (feed.status === 'live' && feed.jobs.length === 0 && this.earlier.length > 0 && !this.goingBack) {
+      this.goingBack = true;
+      void this.page('back').finally(() => (this.goingBack = false));
+    }
     show(
       this.pager,
-      feed.jobs.length > 0 &&
+      (feed.jobs.length > 0 || this.earlier.length > 0) &&
         pagerBar({
           place: pagePlace({
             earlier: this.earlier.length,
+            before: feed.before,
             size: PAGE_SIZE,
             rows: feed.jobs.length,
             more,
@@ -1554,7 +1562,10 @@ export class Downloads {
     show(this.speed, rates.length > 0 && `Down ${formatBytes(rates.reduce((a, b) => a + b, 0))}/s`);
   }
 
-  /** @param {'next' | 'back'} direction */
+  /**
+   * @param {'next' | 'back'} direction
+   * @returns {Promise<void>}
+   */
   page(direction) {
     const { feed } = this;
     let after;
@@ -1565,7 +1576,7 @@ export class Downloads {
       after = this.earlier.pop() ?? null;
     }
     this.notice = '';
-    feed.showPage(after).catch((error) => this.report(error));
+    return feed.showPage(after).catch((error) => this.report(error));
   }
 
   /**

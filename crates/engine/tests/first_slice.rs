@@ -315,6 +315,7 @@ async fn a_direct_download_is_published_and_listed_after_restart() {
 
     let owner = env.start().await;
     let listed = jobs(&owner).await;
+    let done_id = done.id;
     assert_eq!(listed, vec![done]);
     let completed = Query::ListJobs {
         filter: JobFilter {
@@ -328,6 +329,24 @@ async fn a_direct_download_is_published_and_listed_after_restart() {
         panic!()
     };
     assert_eq!(page.items[0].artifact, Some(artifact));
+    assert_eq!(page.before, Some(0));
+    // A later page counts the matching jobs before it, and only those.
+    let page_after = |stages| Query::ListJobs {
+        filter: JobFilter {
+            stages,
+            package: None,
+        },
+        after: Some(done_id),
+        page_size: PageSize::DEFAULT,
+    };
+    for (stages, before) in [(vec![JobStage::Complete], 1), (vec![JobStage::Failed], 0)] {
+        let QueryResult::Jobs(page) = owner.handle().query(page_after(stages), ALL).await.unwrap()
+        else {
+            panic!()
+        };
+        assert!(page.items.is_empty());
+        assert_eq!(page.before, Some(before));
+    }
     assert_eq!(env.published("My Game.rar"), data);
     // Nothing was requested again.
     assert_eq!(env.server.requests.lock().unwrap().len(), 1);
@@ -3050,6 +3069,8 @@ async fn the_collected_list_is_bounded() {
         };
         assert!(page.items.len() <= 500);
         assert_eq!(page.total, MAX_COLLECTED_LINKS as u64);
+        // Each page knows how many links come before it.
+        assert_eq!(page.before, Some(seen as u64));
         seen += page.items.len();
         match page.next_after {
             Some(next) => after = Some(next),

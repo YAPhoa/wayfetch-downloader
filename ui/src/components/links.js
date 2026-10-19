@@ -138,6 +138,12 @@ export class LinksPage {
     this.links = [];
     /** Links in the whole list, once read. @type {number | null} */
     this.total = null;
+    /**
+     * How many links come before the shown page; `null` from an engine
+     * before protocol 4.3.
+     * @type {number | null}
+     */
+    this.before = null;
     /** Where the shown page starts, and where the next one would. */
     /** @type {LinkId | null} */
     this.pageAfter = null;
@@ -304,6 +310,7 @@ export class LinksPage {
     }
     this.links = page.items;
     this.total = Number(page.total);
+    this.before = page.before ?? null;
     this.nextAfter = page.next_after ?? null;
     this.selected.keepOnly(page.items.map((l) => l.id));
     this.context.onTotal(this.total);
@@ -752,9 +759,16 @@ export class LinksPage {
     const more = this.nextAfter !== null;
     show(
       this.pager,
-      this.links.length > 0 &&
+      (this.links.length > 0 || this.earlier.length > 0) &&
         pagerBar({
-          place: pagePlace({ earlier: this.earlier.length, size: LINKS_PAGE_SIZE, rows: this.links.length, more, total: this.total }),
+          place: pagePlace({
+            earlier: this.earlier.length,
+            before: this.before,
+            size: LINKS_PAGE_SIZE,
+            rows: this.links.length,
+            more,
+            total: this.total,
+          }),
           more,
           key: 'links-page',
           onPage: (direction) => this.page(direction),

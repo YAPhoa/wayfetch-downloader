@@ -15,6 +15,12 @@ items: Array<T>,
  */
 next_after?: JobId | null, 
 /**
+ * How many items that match the query come before this page, so a
+ * client can say where the page sits. Added in protocol 4.3; an
+ * older engine omits it.
+ */
+before?: number, 
+/**
  * The page reflects every durable event up to and including this
  * cursor. Subscribe after it to follow later changes.
  */

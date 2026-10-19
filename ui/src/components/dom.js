@@ -140,7 +140,7 @@ export function sortHeader({ column, label, sort, onSort, className }) {
 export function pagerBar({ place, more, key, onPage }) {
   const { first, last, total, page, pages } = place;
   return [
-    h('span', { class: 'range' }, total === null ? `${first}\u2013${last}` : `${first}\u2013${last} of ${total}`),
+    h('span', { class: 'range' }, first > last ? '' : total === null ? `${first}\u2013${last}` : `${first}\u2013${last} of ${total}`),
     h('span', { class: 'spacer' }),
     h(
       'button',
