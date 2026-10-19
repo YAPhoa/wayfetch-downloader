@@ -113,6 +113,8 @@ export function pluginsSection(context) {
     try {
       const settings = await client.settings();
       revision = settings.revision;
+      // A check that finds nothing new leaves an open menu open.
+      if (!said && shown.length > 0 && JSON.stringify(settings.plugins) === JSON.stringify(shown)) return;
       render(settings.plugins, said);
     } catch (error) {
       if (error instanceof WayfetchError && error.code === 'unauthenticated') {
