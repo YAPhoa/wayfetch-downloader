@@ -126,12 +126,29 @@ impl MediaInfo {
         }
     }
 
-    /// The choices to offer: the best video, each height, then audio.
+    /// `choice` as a link shows it: the best video as the height it makes
+    /// now, so it matches one of the `options`. What is kept is still the
+    /// best video, so a converter added later makes a taller one.
+    pub fn shown(&self, choice: MediaChoice, converter: bool) -> MediaChoice {
+        match choice {
+            MediaChoice::Video { max_height: None } => MediaChoice::Video {
+                max_height: self.height_for(None, converter),
+            },
+            other => other,
+        }
+    }
+
+    /// The choices to offer: each height, then audio. The best video is
+    /// not offered apart from them: heights only get better, so it is the
+    /// tallest available one, and `shown` names it so.
     pub fn options(&self, converter: bool) -> Vec<MediaOption> {
-        let mut choices = vec![MediaChoice::default()];
-        choices.extend(self.heights.iter().map(|&h| MediaChoice::Video {
-            max_height: Some(h),
-        }));
+        let mut choices: Vec<_> = self
+            .heights
+            .iter()
+            .map(|&h| MediaChoice::Video {
+                max_height: Some(h),
+            })
+            .collect();
         if self.audio {
             choices.push(MediaChoice::Audio {
                 format: AudioFormat::Mp3,
@@ -566,11 +583,24 @@ mod tests {
                 .map(|o| o.choice)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(available(true).len(), 6);
+        assert_eq!(available(true).len(), 5);
+        // The best video shows as the tallest height it can make.
+        let best = |converter| info.shown(MediaChoice::default(), converter);
+        assert_eq!(
+            best(true),
+            MediaChoice::Video {
+                max_height: Some(1080)
+            }
+        );
+        assert_eq!(
+            best(false),
+            MediaChoice::Video {
+                max_height: Some(360)
+            }
+        );
         assert_eq!(
             available(false),
             [
-                MediaChoice::default(),
                 MediaChoice::Video {
                     max_height: Some(360)
                 },

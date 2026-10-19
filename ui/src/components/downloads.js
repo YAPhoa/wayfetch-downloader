@@ -1586,15 +1586,8 @@ export class Downloads {
         'data-key': `menu-${job.id}`,
         'aria-label': `Actions for ${name}`,
         'aria-haspopup': 'menu',
-        onclick: (/** @type {MouseEvent} */ event) => {
-          const button = /** @type {HTMLElement} */ (event.currentTarget);
-          if (this.menu.justDismissed(job.id, button)) return;
-          if (this.menu.owner === job.id) {
-            this.menu.close(true);
-            return;
-          }
-          this.openMenu(current(), button.getBoundingClientRect());
-        },
+        onclick: (/** @type {MouseEvent} */ event) =>
+          this.menu.toggle(job.id, /** @type {HTMLElement} */ (event.currentTarget), (anchor) => this.openMenu(current(), anchor)),
       },
       icon('more'),
     );

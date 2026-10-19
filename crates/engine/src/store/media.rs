@@ -91,6 +91,8 @@ impl LinkColumns {
             .as_ref()
             .map(|i| i.options(converter))
             .unwrap_or_default();
+        let choice = decode_choice(self.choice.as_deref())?;
+        let choice = info.as_ref().map_or(choice, |i| i.shown(choice, converter));
         Ok(Some(LinkMedia {
             service,
             state,
@@ -99,7 +101,7 @@ impl LinkColumns {
                 .map(|i| i.title.clone())
                 .filter(|t| !t.is_empty()),
             duration_seconds: info.as_ref().and_then(|i| i.duration_seconds),
-            choice: decode_choice(self.choice.as_deref())?,
+            choice,
             needs: options
                 .iter()
                 .any(|o| !o.available)
