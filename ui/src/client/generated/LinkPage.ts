@@ -20,6 +20,11 @@ next_after?: SourceLinkId,
  */
 total: number, 
 /**
+ * How many collected links come before this page. Added in protocol
+ * 4.3; an older engine omits it.
+ */
+before?: number, 
+/**
  * How many of them are waiting for, or in, a check. Added in
  * protocol 5.0.
  */

@@ -146,6 +146,12 @@ export class JobFeed {
     this.pageIds = [];
     /** @type {JobId | null} */
     this.nextAfter = null;
+    /**
+     * How many listed jobs come before this page, as the engine last said;
+     * `null` from an engine before protocol 4.3.
+     * @type {number | null}
+     */
+    this.before = null;
     /** The inspected job, if any. */
     /** @type {JobId | null} */
     this.watched = null;
@@ -431,6 +437,7 @@ export class JobFeed {
       );
       this.pageIds = page.items.map((job) => job.id);
       this.nextAfter = page.next_after ?? null;
+      this.before = page.before ?? null;
       this.prune();
       this.changed();
       return page.as_of.position;
@@ -535,14 +542,20 @@ export class JobFeed {
           const listed = this.page.has(kind.job.id);
           this.hold(kind.job, item.cursor.position);
           // A job that entered or left the filter shifts the page's rows.
-          if (kind.type === 'job_changed' && this.stages !== null && listed !== this.admits(kind.job)) {
+          // So may one off this page entering or leaving it before the page.
+          if (
+            kind.type === 'job_changed' &&
+            this.stages !== null &&
+            (listed !== this.admits(kind.job) || (!listed && this.pageAfter !== null))
+          ) {
             this.repage.request();
           }
           this.recount.request();
         }
         if (kind.type === 'job_removed') {
-          // A later job moves up into the page.
-          if (this.removed(kind.job)) this.repage.request();
+          // A later job moves up into the page; an earlier one moves the
+          // page's place in the list.
+          if (this.removed(kind.job) || this.pageAfter !== null) this.repage.request();
           this.recount.request();
         }
         this.changed();

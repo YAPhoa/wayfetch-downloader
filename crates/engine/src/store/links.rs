@@ -851,11 +851,11 @@ pub(super) fn list(
     } else {
         None
     };
-    let (total, checking): (i64, i64) = tx.query_row(
-        "SELECT COUNT(*), COUNT(t.id) FROM source_links s \
+    let (total, checking, before): (i64, i64, i64) = tx.query_row(
+        "SELECT COUNT(*), COUNT(t.id), COALESCE(SUM(s.id <= ?1), 0) FROM source_links s \
          LEFT JOIN crawl_tasks t ON t.source_link_id = s.id WHERE s.listed = 1",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        [after],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let count = |n: i64| u64::try_from(n).map_err(|_| StoreError::Corrupt("link count"));
     Ok(LinkPage {
@@ -863,6 +863,7 @@ pub(super) fn list(
         next_after,
         total: count(total)?,
         checking: count(checking)?,
+        before: Some(count(before)?),
         as_of,
     })
 }
