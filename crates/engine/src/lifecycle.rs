@@ -1297,6 +1297,7 @@ impl Coordinator {
         };
         let context = CommandContext {
             destination: self.destinations.default_root(),
+            download_root: self.destinations.download_root(),
             unusable,
             route,
             routes,
@@ -1339,7 +1340,7 @@ impl Coordinator {
                     result.is_ok()
                         && store
                             .root_rows()
-                            .is_ok_and(|rows| !rows.iter().any(|r| r.id == root && r.registered))
+                            .is_ok_and(|rows| rows.iter().any(|r| r.id == root && r.removed))
                 });
                 (result, interrupt, (current, gone))
             })
@@ -1479,7 +1480,7 @@ impl Coordinator {
     /// without a chosen destination needs every configured root
     /// identified that can be, so the default is current. A settings
     /// change, and a destination chosen for links, must name a permitted
-    /// root that is available now, and only a root the user added can be
+    /// root that is available now, and only a permitted root can be
     /// removed. A start of links learns which of their destinations cannot
     /// be used, which it returns, and the account it downloads through,
     /// which must be enabled, of a service that downloads, with credential
@@ -1604,8 +1605,8 @@ impl Coordinator {
                 }
                 return Ok(unusable);
             }
-            // Only a folder the user added can be removed; the store checks
-            // the rest.
+            // Any permitted folder but the default can be removed; the
+            // store checks the rest.
             Command::RemoveRoot { root, .. } => {
                 let root = *root;
                 if self.replays(envelope).await? {
@@ -1616,12 +1617,6 @@ impl Coordinator {
                     return Err(ProtocolError::new(
                         ErrorCode::NotFound,
                         "destination not found",
-                    ));
-                }
-                if !self.destinations.added(root) {
-                    return Err(ProtocolError::new(
-                        ErrorCode::NotApplicable,
-                        "the server's configuration names this folder, so it cannot be removed here",
                     ));
                 }
             }
