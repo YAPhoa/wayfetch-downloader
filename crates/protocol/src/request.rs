@@ -218,7 +218,7 @@ impl UpdateSettingsRequest {
     }
 }
 
-/// Stops offering a folder the user added as a destination.
+/// Stops offering a folder as a destination.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]

@@ -787,10 +787,6 @@ legend { padding: 0 0 4px; color: var(--muted); }
 .choice-text .path { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 .choice-text .problem { flex-basis: 100%; }
 
-/* A folder the user added has a Remove button at the end of its row. */
-.choice-row { display: flex; align-items: flex-start; gap: 8px; }
-.choice-row .choice { flex: 1; min-width: 0; }
-.remove-root { flex: none; min-height: 24px; padding: 0 8px; }
 
 .empty-state {
   padding: 12px;
@@ -1009,28 +1005,32 @@ th[aria-sort] button.sort { color: var(--ink); }
 .group-rows, .group-empty, .group-foot, .settings-group .table-scroll { clear: both; }
 .group-empty { margin: 0; padding: 16px; color: var(--muted); }
 
-.settings-group .choice-row {
+/* A download folder: its path, then Make default and Remove unless it is
+   the default. */
+.folder-row {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
   min-height: 48px;
   padding: 4px 12px 4px 16px;
   border-bottom: 1px solid var(--line);
 }
 
-.settings-group .choice-row:last-child { border-bottom: 0; }
-.settings-group .choice-row:hover { background: var(--hover); }
-.settings-group .choice-row:has(input:checked) { background: var(--selected); }
-.settings-group .choice { align-items: center; gap: 12px; padding: 10px 0; }
-.settings-group .choice input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
-.settings-group .choice:has(input:disabled) { cursor: default; }
+.folder-row:last-child { border-bottom: 0; }
+.folder-row:hover { background: var(--hover); }
+.folder-row.default { background: var(--selected); }
+.folder-row .choice-text { flex: 1 1 240px; padding: 10px 0; }
+.folder-actions { display: flex; flex: none; gap: 4px; margin-left: auto; }
+.folder-actions button { min-height: 30px; padding: 0 10px; }
 /* Icon, path and tag in columns, so a long path wraps beside its icon. */
 .settings-group .choice-text { display: grid; grid-template-columns: auto minmax(0, max-content) 1fr; gap: 4px 10px; }
 .settings-group .choice-text .tag { justify-self: start; }
 .settings-group .choice-text .icon { color: var(--muted); }
 .settings-group .choice-text .path { color: var(--ink); }
 .settings-group .choice-text .problem { grid-column: 2 / -1; font-size: 13px; }
-.settings-group .choice-row:has(input:checked) .choice-text .icon { color: var(--accent); }
-.settings-group .remove-root { min-height: 30px; color: var(--bad); border-color: transparent; background: transparent; }
+.folder-row.default .choice-text .icon { color: var(--accent); }
+.settings-group .remove-root { color: var(--bad); border-color: transparent; background: transparent; }
 .settings-group .remove-root:hover:not(:disabled),
 .settings-group .remove-root:focus-visible { border-color: var(--control); background: var(--surface); }
 

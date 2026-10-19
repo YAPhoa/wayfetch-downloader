@@ -414,9 +414,11 @@ pub enum Command {
         /// The revision the client last saw.
         expected_revision: Revision,
     },
-    /// Stop offering a folder the user added as a destination. Its files
-    /// stay; a folder the operator configured, the current default, or one
-    /// that unfinished jobs save to is refused. Added in protocol 1.1.
+    /// Stop offering a folder as a destination. Its files stay; the
+    /// current default, or a folder that unfinished jobs save to, is
+    /// refused. Added in protocol 1.1 for folders the user added; since
+    /// protocol 4.2 a folder the operator configured can be removed too,
+    /// and stays removed until the user adds it again.
     RemoveRoot {
         /// The settings revision the client last saw.
         expected_revision: Revision,

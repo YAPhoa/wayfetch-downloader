@@ -1743,7 +1743,7 @@ fn remove_root(owner: &EngineOwner, revision: Revision, root: RootId) -> Command
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn only_an_idle_folder_the_user_added_can_be_removed() {
+async fn only_an_idle_folder_that_is_not_the_default_can_be_removed() {
     let env = env();
     let mut resource = Resource::new(body(16 * KIB));
     resource.stall_at = Some(8 * KIB);
@@ -1757,7 +1757,8 @@ async fn only_an_idle_folder_the_user_added_can_be_removed() {
     assert!(listed.roots.iter().any(|r| r.id == ROOT && !r.added));
     let code = |result: Result<CommandResult, ProtocolError>| result.unwrap_err().code;
 
-    // The operator's folder, a stale revision, and the default are refused.
+    // The default, here the operator's folder, a stale revision, and the
+    // default chosen are refused.
     let revision = listed.revision;
     let refused = handle
         .execute(remove_root(&owner, revision, ROOT), ALL)
@@ -1875,6 +1876,70 @@ async fn only_an_idle_folder_the_user_added_can_be_removed() {
             .iter()
             .any(|r| r.id == added.id)
     );
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_configured_folder_stays_removed_until_added_again() {
+    let mut env = env();
+    let media = folder(&env, "media");
+    env.roots.push(media.clone());
+    let media_id = env.init_root(&media);
+    env.server.put("/a.bin", Resource::new(body(5 * KIB)));
+    let owner = env.start().await;
+    let handle = owner.handle();
+    let listed = settings(&owner).await;
+    assert_eq!(listed.default_root, Some(ROOT));
+    assert!(listed.roots.iter().all(|r| !r.added));
+
+    // The operator's download root is the default until another is made
+    // the default; then it can be removed.
+    let refused = handle
+        .execute(remove_root(&owner, listed.revision, ROOT), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::NotApplicable);
+    handle
+        .execute(choose(&owner, listed.revision, media_id), ALL)
+        .await
+        .unwrap();
+    let revision = settings(&owner).await.revision;
+    handle
+        .execute(remove_root(&owner, revision, ROOT), ALL)
+        .await
+        .unwrap();
+    let after = settings(&owner).await;
+    assert_eq!(after.default_root, Some(media_id));
+    assert!(!after.roots.iter().any(|r| r.id == ROOT));
+    // The configured folder it was is still a root, so it cannot be
+    // removed as the default now.
+    let refused = handle
+        .execute(remove_root(&owner, after.revision, media_id), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::NotApplicable);
+    let [a] = submit(&owner, &["/a.bin"]).await[..] else {
+        panic!()
+    };
+    assert_eq!(complete(&owner, a).await.destination, Some(media_id));
+    shutdown(owner).await;
+
+    // Still configured, yet it stays removed across restarts.
+    let owner = env.start().await;
+    let after = settings(&owner).await;
+    assert_eq!(after.default_root, Some(media_id));
+    assert!(!after.roots.iter().any(|r| r.id == ROOT));
+    // Adding the folder again restores the same root.
+    let again = owner
+        .handle()
+        .register_root(env.root.clone(), ALL)
+        .await
+        .unwrap();
+    assert_eq!(again.id, ROOT);
+    assert!(settings(&owner).await.roots.iter().any(|r| r.id == ROOT));
+    shutdown(owner).await;
+    let owner = env.start().await;
+    assert!(settings(&owner).await.roots.iter().any(|r| r.id == ROOT));
     shutdown(owner).await;
 }
 
@@ -2302,6 +2367,20 @@ async fn a_job_submitted_before_the_download_root_is_mounted_is_saved_there() {
         .await
         .unwrap();
     Root::initialize(&env.root, ROOT, owner.identity().instance).unwrap();
+    // The download root cannot be removed while the job waits for it.
+    let refused = owner
+        .handle()
+        .execute(
+            remove_root(&owner, settings(&owner).await.revision, ROOT),
+            ALL,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::NotApplicable, "{refused:?}");
+    assert!(
+        refused.message.as_str().contains("unfinished"),
+        "{refused:?}"
+    );
     let paused = owner
         .handle()
         .execute(
