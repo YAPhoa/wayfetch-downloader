@@ -934,8 +934,11 @@ test('collected links wait on the Links page until chosen ones are started', asy
 
   // Filtering never acts on what it hides.
   const start = page.getByRole('button', { name: 'Start selected' });
+  // Ticking moves no row: the selection line keeps its room.
+  const before = await linkRow('review-a.bin').boundingBox();
   await linkRow('review-a.bin').getByRole('checkbox').check();
   await expect(page.locator('.links-page .selection-summary')).toContainText('1 link selected');
+  expect((await linkRow('review-a.bin').boundingBox())?.y).toBe(before?.y);
   await expect(page.locator('.links-page .selection-summary .path')).toHaveText(/** @type {string} */ (daemon.archive));
   await page.getByLabel('Filter links').fill('review-b');
   await expect(linkRow('review-a.bin')).toHaveCount(0);
@@ -1887,8 +1890,14 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(c.locator('td[data-state]')).toHaveText('Done');
     const summary = page.locator('.downloads-view .selection-summary');
 
-    // Ticking two: the toolbar acts on both, not on a download in the details.
+    // The selection line keeps its room, so ticking moves no row.
+    await expect(summary).toHaveText('3 downloads shown');
+    const before = await a.boundingBox();
     await a.getByRole('checkbox').check();
+    await expect(summary.locator('strong')).toHaveText('1 download selected');
+    expect((await a.boundingBox())?.y).toBe(before?.y);
+
+    // Ticking two: the toolbar acts on both, not on a download in the details.
     await b.getByRole('checkbox').check();
     await expect(summary.locator('strong')).toHaveText('2 downloads selected');
     await expect(a).toHaveClass(/ticked/);
@@ -1928,7 +1937,7 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
 
     // An unticked row's menu acts on that row alone.
     await page.getByRole('button', { name: 'Clear selection' }).click();
-    await expect(summary).toBeEmpty();
+    await expect(summary).toHaveText('3 downloads shown');
     await c.click({ button: 'right' });
     menu = await openMenu(page);
     await expect(menu.getByRole('menuitem', { name: 'Rename…' })).toBeVisible();
