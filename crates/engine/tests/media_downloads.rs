@@ -664,12 +664,16 @@ async fn without_a_converter_only_single_streams_are_offered_and_kept_as_they_ar
         .collect();
     assert_eq!(
         available,
-        [
-            MediaChoice::default(),
-            MediaChoice::Video {
-                max_height: Some(360)
-            }
-        ]
+        [MediaChoice::Video {
+            max_height: Some(360)
+        }]
+    );
+    // The best video, kept until chosen otherwise, shows as that height.
+    assert_eq!(
+        media.choice,
+        MediaChoice::Video {
+            max_height: Some(360)
+        }
     );
     assert!(media.needs.is_some(), "{media:?}");
     // A choice that needs the converter is refused.

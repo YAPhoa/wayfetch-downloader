@@ -2176,3 +2176,90 @@ async fn switching_queue_tabs_keeps_toolbar_geometry() {
     shell.close().await;
     assert!(moved.is_empty(), "toolbar moved: {moved:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an X display and WebKitWebDriver"]
+async fn the_default_window_fits_downloads_and_links() {
+    let server = Server::http().await;
+    let mut dirs = Dirs::new().await;
+    // A stand-in yt-dlp describes one video, so the Links page has a
+    // Format list; ffmpeg is missing.
+    let video = json!({
+        "id": "abcdefghijk",
+        "title": "A YouTube video whose title is longer than the Name column",
+        "duration": 61,
+        "live_status": "not_live",
+        "_type": "video",
+        "formats": [{
+            "format_id": "18", "url": server.url("/yt-18.mp4"), "protocol": "http", "ext": "mp4",
+            "vcodec": "avc1", "acodec": "mp4a", "height": 360, "filesize": MIB, "tbr": 360,
+        }],
+    });
+    let plugins = dirs.tmp.path().join("plugins");
+    std::fs::create_dir(&plugins).unwrap();
+    std::fs::write(plugins.join("video.json"), video.to_string()).unwrap();
+    let yt_dlp = plugins.join("yt-dlp");
+    std::fs::write(
+        &yt_dlp,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *--version*) echo 2099.01.01;; *) cat '{}';; esac\n",
+            plugins.join("video.json").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&yt_dlp, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let config = dirs.tmp.path().join("wayfetch.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version = 1\n[plugins]\nyt_dlp = {:?}\nffmpeg = {:?}\n",
+            yt_dlp.display().to_string(),
+            plugins.join("no-ffmpeg").display().to_string()
+        ),
+    )
+    .unwrap();
+    dirs.args = vec!["--config".into(), config.display().to_string()];
+    // Names past the Name column's widest, so it takes all the room it may.
+    let names: Vec<String> = (0..4)
+        .map(|i| {
+            format!("/ubuntu-24.04.{i}-desktop-amd64-with-a-file-name-longer-than-the-column.iso")
+        })
+        .collect();
+    for name in &names {
+        server.put(name, Resource::new(body(MIB)));
+    }
+    let shell = Shell::launch(&dirs).await;
+    assert_eq!(
+        shell.js("return [innerWidth, innerHeight]").await,
+        json!([1400, 820])
+    );
+    let fits = "const root = document.documentElement;
+                return root.scrollWidth <= root.clientWidth && root.scrollHeight <= root.clientHeight
+                  && [...document.querySelectorAll('.table-scroll')]
+                       .filter((el) => el.offsetParent !== null)
+                       .every((el) => el.scrollWidth <= el.clientWidth);";
+
+    // Downloads, with the inspector open on one of them.
+    let urls: Vec<String> = names.iter().map(|name| server.url(name)).collect();
+    shell.add_many(&urls.join("\n"), names.len()).await;
+    shell.select("job-1").await;
+    shell.wait_for_state("job-1", "Done").await;
+    assert_eq!(shell.js(fits).await, json!(true), "Downloads scrolls");
+
+    // Links, with a video's Format list beside long file names.
+    let links = std::iter::once("https://www.youtube.com/watch?v=abcdefghijk".to_owned())
+        .chain(urls.iter().map(|url| format!("{url}?again")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    shell
+        .collect(
+            &links,
+            &format!("Collected {} links for review.", names.len() + 1),
+        )
+        .await;
+    shell
+        .wait_for("document.querySelector('.links-page button.picker')?.checkVisibility()")
+        .await;
+    assert_eq!(shell.js(fits).await, json!(true), "Links scrolls");
+    shell.close().await;
+}

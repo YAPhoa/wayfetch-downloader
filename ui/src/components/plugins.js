@@ -251,15 +251,8 @@ export function pluginsSection(context) {
           'aria-label': `Actions for ${plugin.name}`,
           'aria-haspopup': 'menu',
           'aria-expanded': 'false',
-          onclick: (/** @type {MouseEvent} */ event) => {
-            const button = /** @type {HTMLElement} */ (event.currentTarget);
-            if (menu.justDismissed(id, button)) return;
-            if (menu.owner === id) {
-              menu.close(true);
-              return;
-            }
-            open(button.getBoundingClientRect());
-          },
+          onclick: (/** @type {MouseEvent} */ event) =>
+            menu.toggle(id, /** @type {HTMLElement} */ (event.currentTarget), open),
         },
         icon('more'),
       );

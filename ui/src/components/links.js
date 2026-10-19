@@ -18,7 +18,7 @@
 //   it, and now and then while shown, since removals and moves made in
 //   another window have no event of their own.
 // - A video link, such as YouTube's, shows its title once its service
-//   has read it, and a Format list: the best video, a picture height, or
+//   has read it, and a Format list: a picture height (the tallest available by default), or
 //   sound only as MP3 or M4A. Formats that need a missing plugin are
 //   listed but cannot be chosen.
 //
@@ -34,14 +34,14 @@ import {
   matches,
   refusals,
 } from '../client/links.js';
-import { choiceKey, choiceLabel, optionFor } from '../client/media.js';
+import { choiceKey, choiceLabel } from '../client/media.js';
 import { accountName, canChooseRoute, routeAccounts } from '../client/routes.js';
 import { Selection } from '../client/selection.js';
 import { saveSort, savedSort, sortedBy, toggleSort } from '../client/sort.js';
 import { openDialog } from './dialog.js';
 import { copyText, focusedKey, h, refocus, show, sortHeader } from './dom.js';
 import { icon } from './icons.js';
-import { rowMenuHandlers } from './menu.js';
+import { pickerButton, rowMenuHandlers } from './menu.js';
 import { loadServices } from './services.js';
 
 /**
@@ -719,6 +719,8 @@ export class LinksPage {
       const open = row.getAttribute('data-link') === owner;
       row.classList.toggle('menu-open', open);
       row.querySelector('button.more')?.setAttribute('aria-expanded', String(open));
+      const picker = row.querySelector('button.picker');
+      picker?.setAttribute('aria-expanded', String(picker.getAttribute('data-key') === owner));
     }
   }
 
@@ -911,15 +913,8 @@ export class LinksPage {
         'aria-label': `Actions for ${shownName}`,
         'aria-haspopup': 'menu',
         'aria-expanded': String(this.context.menu.owner === link.id),
-        onclick: (/** @type {MouseEvent} */ event) => {
-          const button = /** @type {HTMLElement} */ (event.currentTarget);
-          if (this.context.menu.justDismissed(link.id, button)) return;
-          if (this.context.menu.owner === link.id) {
-            this.context.menu.close(true);
-            return;
-          }
-          this.openMenu(link, button.getBoundingClientRect());
-        },
+        onclick: (/** @type {MouseEvent} */ event) =>
+          this.context.menu.toggle(link.id, /** @type {HTMLElement} */ (event.currentTarget), (anchor) => this.openMenu(link, anchor)),
       },
       icon('more'),
     );
@@ -1013,28 +1008,37 @@ export class LinksPage {
     if (media.options.length === 0) {
       return h('span', { class: 'choice-label unknown' }, media.state === 'checking' ? 'Checking…' : choiceLabel(media.choice));
     }
-    const select = h(
-      'select',
-      {
-        'data-key': `link-format-${link.id}`,
-        'aria-label': `Format of ${shownName}`,
-        title: media.needs ?? null,
-        disabled: this.busy,
-        onchange: () => {
-          const option = optionFor(media.options, select.value);
-          if (option) void this.act('choose_media', [link], undefined, undefined, undefined, option.choice);
-        },
-      },
-      media.options.map((option) => {
-        const key = choiceKey(option.choice);
-        return h(
-          'option',
-          { value: key, selected: key === current, disabled: !option.available },
-          option.available ? choiceLabel(option.choice) : `${choiceLabel(option.choice)} (needs a plugin)`,
-        );
-      }),
-    );
-    return select;
+    const owner = `link-format-${link.id}`;
+    return pickerButton({
+      menu: this.context.menu,
+      owner,
+      label: choiceLabel(media.choice),
+      name: `Format of ${shownName}`,
+      title: media.needs ?? null,
+      disabled: this.busy,
+      open: (anchor) =>
+        this.context.menu.show(
+          media.options.map((option) => {
+            const key = choiceKey(option.choice);
+            return {
+              key,
+              label: choiceLabel(option.choice),
+              checked: key === current,
+              disabled: !option.available,
+              hint: option.available ? undefined : 'Needs a plugin',
+              run: () => {
+                if (key !== current) void this.act('choose_media', [link], undefined, undefined, undefined, option.choice);
+              },
+            };
+          }),
+          anchor,
+          {
+            owner,
+            label: 'Format',
+            restore: () => /** @type {HTMLElement | null} */ (this.table.querySelector(`[data-key="${owner}"]`))?.focus(),
+          },
+        ),
+    });
   }
 
   /** @param {'next' | 'back'} direction */
