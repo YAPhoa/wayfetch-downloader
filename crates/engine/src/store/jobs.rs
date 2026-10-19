@@ -735,6 +735,13 @@ impl Store {
                     None => 0,
                 };
                 values.insert(0, after.into());
+                let before: i64 = tx
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM jobs j WHERE j.id <= ?{conditions}"),
+                        params_from_iter(values.iter()),
+                        |row| row.get(0),
+                    )
+                    .map_err(StoreError::from)?;
                 // One extra row tells whether another page follows.
                 values.push((i64::from(page_size.get()) + 1).into());
                 let mut items = tx
@@ -756,6 +763,9 @@ impl Store {
                 QueryResult::Jobs(Page {
                     items,
                     next_after,
+                    before: Some(
+                        u64::try_from(before).map_err(|_| StoreError::Corrupt("job count"))?,
+                    ),
                     as_of,
                 })
             }
