@@ -20,6 +20,11 @@ next_after?: SourceLinkId,
  */
 total: number, 
 /**
+ * How many of them are waiting for, or in, a check. Added in
+ * protocol 5.0.
+ */
+checking: number, 
+/**
  * The page reflects every durable event up to and including this
  * cursor.
  */

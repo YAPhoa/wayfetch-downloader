@@ -203,18 +203,18 @@ impl Drop for Slot<'_> {
 }
 
 /// One request as sent, hop by hop.
-struct Outgoing<'a> {
-    method: Method,
-    url: Url,
-    headers: HeaderMap,
-    body: Option<Bytes>,
-    range: Option<(u64, Option<u64>)>,
-    validators: Option<&'a Representation>,
-    connect_timeout: Duration,
+pub(crate) struct Outgoing<'a> {
+    pub(crate) method: Method,
+    pub(crate) url: Url,
+    pub(crate) headers: HeaderMap,
+    pub(crate) body: Option<Bytes>,
+    pub(crate) range: Option<(u64, Option<u64>)>,
+    pub(crate) validators: Option<&'a Representation>,
+    pub(crate) connect_timeout: Duration,
     /// Whether sending it again would repeat no action: decides whether a
     /// failure after it may have reached the server is a plain timeout or
     /// an ambiguous outcome.
-    replay_safe: bool,
+    pub(crate) replay_safe: bool,
 }
 
 /// An HTTP(S) transport for the engine and a request broker for leases.
@@ -503,7 +503,7 @@ impl HttpTransport {
 
     /// Sends `out` and follows redirects within the hop budget, checking
     /// every target. Returns the final response and its URL.
-    async fn send(
+    pub(crate) async fn send(
         &self,
         mut out: Outgoing<'_>,
     ) -> Result<(reqwest::Response, Url), TransportError> {

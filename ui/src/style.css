@@ -826,6 +826,9 @@ dd .link-text { overflow-wrap: anywhere; }
 
 .collect-destination label { display: inline; }
 .collect-destination select { flex: 1 1 240px; font-family: ui-monospace, monospace; }
+.collect-page { display: grid; gap: 4px; }
+.collect-page input { font-family: ui-monospace, monospace; }
+.collect-page .hint, .collect-form .choice .hint { margin: 0; flex-basis: 100%; }
 
 /* The Links page: collected links, with what is selected and
    where it will be saved above them. */
@@ -877,6 +880,14 @@ th[aria-sort] button.sort { color: var(--ink); }
 .links td.added { color: var(--muted); }
 
 .links td.name.unknown { color: var(--muted); font-weight: 400; }
+.links td.name .found-on {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
 .links tr.invalid td.name { font-family: ui-monospace, monospace; font-weight: 400; }
 .links tr.started td.name { color: var(--muted); font-weight: 400; }
 .links td.link-status a { color: inherit; }

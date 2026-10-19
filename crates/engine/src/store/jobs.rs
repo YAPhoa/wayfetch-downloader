@@ -408,6 +408,8 @@ pub(super) fn create(
         "UPDATE source_links SET staged = 1, held = 0, problem = NULL WHERE id = ?1",
         [source],
     )?;
+    // A started link's check would tell nothing the download will not.
+    super::crawl::drop_check(tx, source)?;
     let job = load(tx, id)?;
     outbox::append(
         tx,

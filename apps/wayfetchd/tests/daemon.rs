@@ -837,7 +837,8 @@ async fn links_are_collected_reviewed_and_started_over_http() {
     server.put("/a.bin", Resource::new(data.clone()));
     let signed = format!("{}?token=secret", server.url("/b.bin"));
 
-    let collect = client.command(json!({"items": [server.url("/a.bin"), "nonsense", signed]}));
+    let text = format!("{}\nftp://x.example/f\n{signed}", server.url("/a.bin"));
+    let collect = client.command(json!({"text": text}));
     let (status, collected) = client.post("/v1/staging/links", &collect).await;
     assert_eq!(status, StatusCode::OK, "{collected}");
     assert_eq!(
@@ -850,7 +851,21 @@ async fn links_are_collected_reviewed_and_started_over_http() {
         collected
     );
     assert!(client.jobs().await.is_empty());
-    assert!(server.log().is_empty());
+
+    // Collected links are checked, asking only for their headers, or for
+    // one byte where `HEAD` was not answered.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while client.get("/v1/staging/links").await.1["checking"] != 0 {
+        assert!(tokio::time::Instant::now() < deadline, "checks never ended");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        server
+            .log()
+            .iter()
+            .all(|r| r.method == "HEAD" || r.range() == Some((0, Some(1))))
+    );
+    let checks = server.log().len();
 
     let (status, page) = client.get("/v1/staging/links?page_size=2").await;
     assert_eq!(status, StatusCode::OK, "{page}");
@@ -860,12 +875,21 @@ async fn links_are_collected_reviewed_and_started_over_http() {
     let (_, rest) = client.get(&format!("/v1/staging/links?after={next}")).await;
     let (a, invalid, b) = (&page["items"][0], &page["items"][1], &rest["items"][0]);
     assert_eq!(
-        (a["check"].clone(), a["name_hint"].clone()),
-        (json!("not_checked"), json!("a.bin"))
+        (
+            a["check"].clone(),
+            a["name_hint"].clone(),
+            a["size"].clone()
+        ),
+        (json!("online"), json!("a.bin"), json!(1024))
+    );
+    // b.bin is not on the server.
+    assert_eq!(
+        (b["check"].clone(), b["reason"].clone()),
+        (json!("offline"), json!("not_found"))
     );
     assert_eq!(
         (invalid["check"].clone(), invalid["text"].clone()),
-        (json!("invalid"), json!("nonsense"))
+        (json!("invalid"), json!("ftp://x.example/f"))
     );
     // Only a client with the sources permission reads the whole link.
     assert!(!b.to_string().contains("secret"));
@@ -874,7 +898,7 @@ async fn links_are_collected_reviewed_and_started_over_http() {
     let reader = daemon.client(READER_TOKEN);
     assert_eq!(reader.get(&source).await.0, StatusCode::FORBIDDEN);
     assert_eq!(reader.get("/v1/staging/links").await.0, StatusCode::OK);
-    let refused = reader.command(json!({"items": ["https://x.example/"]}));
+    let refused = reader.command(json!({"text": "https://x.example/"}));
     let (status, _) = reader.post("/v1/staging/links", &refused).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
@@ -916,7 +940,7 @@ async fn links_are_collected_reviewed_and_started_over_http() {
     assert_eq!(left["total"], 0);
     assert!(left["items"].as_array().unwrap().is_empty());
     assert_eq!(client.jobs().await.len(), 1);
-    assert_eq!(server.log().len(), 1);
+    assert_eq!(server.log().len(), checks + 1);
 
     daemon.stop("TERM").await;
 }
@@ -2023,7 +2047,7 @@ async fn links_are_downloaded_through_a_real_debrid_account_over_http() {
 
     let original = "https://hoster.example/file/abc";
     let blocked = "https://hoster.example/file/blocked";
-    let collect = client.command(json!({"items": [original, blocked]}));
+    let collect = client.command(json!({"text": format!("{original}\n{blocked}")}));
     let (status, collected) = client.post("/v1/staging/links", &collect).await;
     assert_eq!(status, StatusCode::OK, "{collected}");
     let (_, listed) = client.get("/v1/staging/links").await;

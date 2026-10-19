@@ -218,40 +218,66 @@ impl From<SubmitItems> for Vec<InputUrl> {
     }
 }
 
-/// Text to collect: a bounded, non-empty list of entries, each at most
-/// [`MAX_URL_BYTES`]. Entries are kept as entered, not validated as URLs
-/// here: the engine records an entry that is not a valid link as invalid,
-/// with its problem, beside the valid ones. Added in protocol 1.1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Vec<String>", into = "Vec<String>")]
-pub struct CollectItems(Vec<String>);
+/// Most bytes of text one [`Command::CollectLinks`] may carry: half the
+/// HTTP API's default body limit, so the text fits even with every quote
+/// and line break escaped in JSON. Added in protocol 5.0.
+pub const MAX_COLLECT_TEXT_BYTES: usize = 512 * 1024;
 
-impl CollectItems {
-    /// The entries, in submission order.
-    pub fn as_slice(&self) -> &[String] {
+/// Text to collect links from: pasted text holding links, or a page's
+/// HTML. Non-empty and at most [`MAX_COLLECT_TEXT_BYTES`]. The engine
+/// finds the links in it; an entry that looks like a link but is not one
+/// Wayfetch can download is kept as invalid, with its problem. Replaced the
+/// list of entries in protocol 5.0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CollectText(String);
+
+impl CollectText {
+    /// The text.
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-impl TryFrom<Vec<String>> for CollectItems {
+impl TryFrom<String> for CollectText {
     type Error = ProtocolError;
 
-    fn try_from(items: Vec<String>) -> Result<Self, Self::Error> {
-        bounded(&items, "no links")?;
-        if let Some(i) = items.iter().position(|item| item.len() > MAX_URL_BYTES) {
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        if text.trim().is_empty() {
+            return Err(ProtocolError::new(ErrorCode::InvalidRequest, "no links"));
+        }
+        if text.len() > MAX_COLLECT_TEXT_BYTES {
             return Err(ProtocolError::new(
                 ErrorCode::LimitExceeded,
-                &format!("item {} rejected: URL too long", i + 1),
+                &format!(
+                    "the text is longer than {} KiB; collect it in parts",
+                    MAX_COLLECT_TEXT_BYTES / 1024
+                ),
             ));
         }
-        Ok(Self(items))
+        Ok(Self(text))
     }
 }
 
-impl From<CollectItems> for Vec<String> {
-    fn from(value: CollectItems) -> Self {
+impl From<CollectText> for String {
+    fn from(value: CollectText) -> Self {
         value.0
     }
+}
+
+/// How far the engine looks into collected links. Added in protocol 5.0.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum CollectMode {
+    /// Check every link; a link that turns out to be a web page is read
+    /// once, and the files and videos it links to are collected beside it.
+    /// Links on it to other pages are never followed.
+    #[default]
+    Analyze,
+    /// Check only links that look like files or that a video service
+    /// recognizes. Other links stay unchecked until analyzed.
+    SupportedOnly,
 }
 
 /// A collected link, at the revision the client last saw. Added in
@@ -423,12 +449,21 @@ pub enum Command {
         /// The folder.
         root: RootId,
     },
-    /// Collect links for review, as a new batch: nothing is downloaded or
-    /// fetched until they are started. An entry that is not a valid link is
-    /// kept as invalid, with its problem. Added in protocol 1.1.
+    /// Collect the links found in text for review, as a new batch, and
+    /// check them in the background as `mode` says: nothing is downloaded
+    /// until they are started. An entry that is not a valid link is kept as
+    /// invalid, with its problem; text with no links at all is refused.
+    /// Added in protocol 1.1; takes text since protocol 5.0.
     CollectLinks {
-        /// The entries.
-        items: CollectItems,
+        /// The text holding the links.
+        text: CollectText,
+        /// The page the text came from, which relative links in HTML are
+        /// read against.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<InputUrl>,
+        /// How far to look into the links.
+        #[serde(default)]
+        mode: CollectMode,
         /// Where the links will be saved: a permitted root that is
         /// available now. The default destination if absent.
         destination: Option<RootId>,
@@ -470,6 +505,20 @@ pub enum Command {
         links: LinkRefs,
         /// A permitted root that is available now.
         destination: RootId,
+    },
+    /// Check collected links again, from scratch: what was known about
+    /// them is forgotten until the new check ends. A link already started
+    /// is refused. Added in protocol 5.0.
+    CheckLinks {
+        /// The links.
+        links: LinkRefs,
+    },
+    /// Read collected links that are web pages, or not checked yet, and
+    /// collect the files and videos they link to beside them. Links on a
+    /// page to other pages are never followed. Added in protocol 5.0.
+    AnalyzeLinks {
+        /// The links.
+        links: LinkRefs,
     },
     /// Choose what collected media links are downloaded as. A link that is
     /// not a media link, does not offer the choice, or was started is
@@ -589,9 +638,12 @@ impl Command {
     /// [`Self::required_permissions`] for all of them.
     pub const fn required_permission(&self) -> Permission {
         match self {
-            Self::Submit { .. } | Self::CollectLinks { .. } | Self::StartLinks { .. } => {
-                Permission::Submit
-            }
+            // Checking and analyzing contact servers, like collecting.
+            Self::Submit { .. }
+            | Self::CollectLinks { .. }
+            | Self::StartLinks { .. }
+            | Self::CheckLinks { .. }
+            | Self::AnalyzeLinks { .. } => Permission::Submit,
             // The list is shared: changing or dropping entries someone
             // else collected is control, like changing their downloads.
             Self::RemoveLinks { .. }
@@ -691,6 +743,16 @@ pub enum CommandResult {
         collected: u32,
         /// Entries kept as invalid.
         invalid: u32,
+        /// Links found more than once in the text, collected once. Added
+        /// in protocol 5.0.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
+        repeated: u32,
+        /// Links in pasted HTML that lead to other web pages, which are not
+        /// collected. Added in protocol 5.0.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
+        skipped: u32,
     },
     /// A command on collected links was applied to some of them and
     /// refused for the rest, which stay as they were. Added in protocol
@@ -726,6 +788,10 @@ pub enum CommandResult {
     /// A plugin was changed, for [`Command::ChangePlugin`]. Added in
     /// protocol 4.1.
     PluginChanged(PluginChanged),
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// A collected link a command applied to. Added in protocol 1.1.
