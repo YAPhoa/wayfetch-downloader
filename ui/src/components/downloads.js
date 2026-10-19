@@ -1670,8 +1670,10 @@ export class Downloads {
   renderInspector() {
     const { feed } = this;
     const job = feed.watchedJob;
+    // With no download chosen there are no details, so the table keeps the room.
+    this.inspector.hidden = feed.watched === null;
     if (feed.watched === null) {
-      show(this.inspector, h('p', { class: 'empty' }, 'Select a download to see its details.'));
+      show(this.inspector);
       return;
     }
     if (!job) {
