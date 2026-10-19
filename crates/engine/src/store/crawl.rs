@@ -21,6 +21,18 @@ use wayfetch_protocol::query::CheckReason;
 
 use super::{Store, StoreError, key, outbox, sql};
 use crate::crawl::Checked;
+use crate::transfer::transport::Reach;
+
+/// What requests for a link may reach, from its `public_only` column: a
+/// page on the public internet cannot point checks or downloads at the
+/// local networks the operator allowed for links the person adds.
+pub(super) fn reach(public_only: bool) -> Reach {
+    if public_only {
+        Reach::Public
+    } else {
+        Reach::Allowed
+    }
+}
 
 /// A check the coordinator took.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +47,8 @@ pub(crate) struct Task {
     pub(crate) queue: String,
     /// Whether it may be read as a page.
     pub(crate) analyze: bool,
+    /// What its requests may reach.
+    pub(crate) reach: Reach,
     /// The video service that checks it, for a media link.
     pub(crate) media: Option<ProviderId>,
 }
@@ -133,11 +147,18 @@ impl Store {
             if tasks.len() == limit || busy.contains(&queue) {
                 continue;
             }
-            let (link, url, analyze, media): (i64, String, bool, Option<String>) = tx.query_row(
-                "SELECT s.id, s.input_url, s.may_analyze, s.media_service FROM crawl_tasks t \
-                 JOIN source_links s ON s.id = t.source_link_id WHERE t.id = ?1",
+            let (link, url, analyze, media, public_only): (
+                i64,
+                String,
+                bool,
+                Option<String>,
+                bool,
+            ) = tx.query_row(
+                "SELECT s.id, s.input_url, s.may_analyze, s.media_service, \
+                     s.public_only FROM crawl_tasks t \
+                     JOIN source_links s ON s.id = t.source_link_id WHERE t.id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
             tx.execute(
                 "UPDATE crawl_tasks SET state = 'running' WHERE id = ?1",
@@ -149,6 +170,7 @@ impl Store {
                 url: Url::parse(&url).map_err(|_| StoreError::Corrupt("source URL"))?,
                 queue,
                 analyze,
+                reach: reach(public_only),
                 media: media
                     .map(ProviderId::new)
                     .transpose()
@@ -214,8 +236,12 @@ impl Store {
             }
         };
         let (mut collected, mut left_out) = (None, 0u32);
-        if let Checked::Page { links: Some(_) } = checked {
-            let (n, out) = collect_children(&tx, id, &found.children, now)?;
+        if let Checked::Page {
+            links: Some(_),
+            local,
+        } = checked
+        {
+            let (n, out) = collect_children(&tx, id, &found.children, !local, now)?;
             collected = Some(n);
             left_out = out;
         }
@@ -253,10 +279,12 @@ impl Store {
 /// Collects `children` of page `parent` into its batch, each with a check,
 /// and returns how many are listed beside it and how many the full Links
 /// list left out. A link already in the batch counts as found, not again.
+/// With `public_only`, their requests reach public addresses only.
 fn collect_children(
     tx: &Transaction<'_>,
     parent: i64,
     children: &[Child],
+    public_only: bool,
     now: UtcTimestamp,
 ) -> Result<(u32, u32), StoreError> {
     let (batch, root): (i64, Option<i64>) = tx.query_row(
@@ -300,10 +328,18 @@ fn collect_children(
         let media = child.media.as_ref().map(ProviderId::as_str);
         tx.execute(
             "INSERT INTO source_links (batch_id, ordinal, input_url, held, listed, root_id, \
-             parent_id, media_service, media_state) \
-             VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6, CASE WHEN ?6 IS NULL THEN NULL \
+             parent_id, public_only, media_service, media_state) \
+             VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6, ?7, CASE WHEN ?7 IS NULL THEN NULL \
              ELSE 'pending' END)",
-            params![batch, ordinal, url.as_str(), root, parent, media],
+            params![
+                batch,
+                ordinal,
+                url.as_str(),
+                root,
+                parent,
+                public_only,
+                media
+            ],
         )?;
         enqueue(tx, tx.last_insert_rowid(), url, media, now)?;
         found += 1;
@@ -326,7 +362,7 @@ pub(super) fn shown_page(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use wayfetch_protocol::command::{CollectMode, CollectText, LinkRef, LinkRefs};
+    use wayfetch_protocol::command::{CollectMode, CollectText, LinkRef, LinkRefs, StartRouting};
     use wayfetch_protocol::query::{CollectedLink, LinkCheck, PageSize};
     use wayfetch_protocol::{
         Command, CommandEnvelope, CommandResult, IdempotencyKey, InstanceId, Query, QueryResult,
@@ -582,6 +618,7 @@ mod tests {
         };
         let page = Checked::Page {
             links: Some(Vec::new()),
+            local: false,
         };
         f.store
             .record_link_check(task.id, task.link, &page, &found, NOW)
@@ -609,7 +646,7 @@ mod tests {
         let start = Command::StartLinks {
             links: refs,
             account: None,
-            routing: None,
+            routing: Some(StartRouting::Direct),
         };
         let CommandResult::LinksApplied { refused, .. } =
             f.execute(start, &CommandContext::default())
@@ -667,5 +704,41 @@ mod tests {
         f.links_command(&[&links[0]], |links| Command::AnalyzeLinks { links });
         let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
         assert!(task.analyze);
+    }
+
+    #[test]
+    fn links_found_on_a_public_page_reach_public_addresses_only() {
+        for (local, reach) in [(false, Reach::Public), (true, Reach::Allowed)] {
+            let mut f = Fixture::new();
+            f.collect(&[PAGE], CollectMode::Analyze, false);
+            let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
+            // The person typed the page: it gets what the operator allows.
+            assert_eq!(task.reach, Reach::Allowed);
+            let found = Found {
+                children: vec![Child {
+                    url: InputUrl::parse("http://192.168.1.10/f.zip").unwrap(),
+                    media: None,
+                }],
+                skipped: 0,
+            };
+            let page = Checked::Page {
+                links: Some(Vec::new()),
+                local,
+            };
+            f.store
+                .record_link_check(task.id, task.link, &page, &found, NOW)
+                .unwrap();
+            let child = f.store.take_checks(1, &[], true).unwrap().remove(0);
+            assert_eq!(child.reach, reach, "page served locally: {local}");
+            // Its download reaches no more than its checks.
+            let (links, _) = f.links();
+            f.links_command(&[&links[1]], |links| Command::StartLinks {
+                links,
+                account: None,
+                routing: Some(StartRouting::Direct),
+            });
+            let admitted = f.store.admissible(1, &[], true).unwrap();
+            assert_eq!(admitted[0].reach, reach);
+        }
     }
 }

@@ -117,12 +117,13 @@ function pageDetail(link) {
 }
 
 /**
- * Whether `link` can be started: valid, not started already, and not a
- * page whose files were found, since those are started instead.
+ * Whether `link` can be started: valid and not started already. A web
+ * page starts only through a provider account, which the engine decides
+ * when starting, and refuses otherwise with the reason.
  * @param {CollectedLink} link
  */
 export function startable(link) {
-  return link.check !== 'invalid' && !link.job && !(link.check === 'page' && (link.found ?? 0) > 0);
+  return link.check !== 'invalid' && !link.job;
 }
 
 /**

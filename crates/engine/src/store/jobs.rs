@@ -21,6 +21,7 @@ use wayfetch_protocol::query::{
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
 use super::{Store, StoreError, files, key, links, media, operations, outbox, sql};
+use crate::transfer::transport::Reach;
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
 /// the job's newest partial; the next three describe its published file,
@@ -60,6 +61,8 @@ pub struct Admission {
     pub route: Option<JobRoute>,
     /// The media service it is made by, and what it is made as.
     pub media: Option<JobMedia>,
+    /// What its requests may reach.
+    pub reach: Reach,
 }
 
 /// What a new download of a media link is made by and as.
@@ -597,12 +600,13 @@ impl Store {
             Option<String>,
             Option<i64>,
             (Option<String>, Option<String>),
+            bool,
         );
         let rows: Vec<Row> = tx
             .prepare(
                 "SELECT j.id, j.stage, j.generation, j.desired_state, s.input_url, j.root_id, \
-                 j.route_service, j.route_account, j.media_service, j.media_choice \
-                 FROM jobs j JOIN source_links s ON s.id = j.source_link_id \
+                 j.route_service, j.route_account, j.media_service, j.media_choice, \
+                 s.public_only FROM jobs j JOIN source_links s ON s.id = j.source_link_id \
                  WHERE j.stage IN ('queued', 'recovering') AND (?2 OR j.root_id IS NOT NULL) \
                  ORDER BY j.stage = 'recovering' DESC, j.id LIMIT ?1",
             )?
@@ -617,11 +621,14 @@ impl Store {
                     row.get(6)?,
                     row.get(7)?,
                     (row.get(8)?, row.get(9)?),
+                    row.get(10)?,
                 ))
             })?
             .collect::<Result<_, _>>()?;
         let mut ready = Vec::with_capacity(limit);
-        for (id, stage, generation, desired, url, root, service, account, media) in rows {
+        for (id, stage, generation, desired, url, root, service, account, media, public_only) in
+            rows
+        {
             let id: JobId = key(id)?;
             if running.contains(&id) || ready.len() == limit {
                 continue;
@@ -636,6 +643,7 @@ impl Store {
                 root: root.map(key).transpose()?,
                 route: operations::decode_route(service, account)?,
                 media: decode_media(media.0, media.1.as_deref())?,
+                reach: super::crawl::reach(public_only),
             });
         }
         Ok(ready)

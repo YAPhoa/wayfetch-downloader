@@ -291,6 +291,7 @@ impl Download {
                 connect_timeout: self.timeouts.connect,
                 read_buffer: self.limits.read_buffer_bytes.get(),
                 user_agent: stream.user_agent.clone(),
+                reach: self.job.reach,
             };
             let response = self.send(&request).await?;
             let plan = range::plan(requested, response.framing, Some(stream.length))

@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use wayfetch_engine::media::PluginError;
 use wayfetch_engine::transfer::range::Framing;
-use wayfetch_engine::transfer::transport::{OpenRequest, Transport};
+use wayfetch_engine::transfer::transport::{OpenRequest, Reach, Transport};
 
 /// Longest wait for a connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -221,6 +221,7 @@ pub async fn fetch(
         connect_timeout: CONNECT_TIMEOUT,
         read_buffer: 64 * 1024,
         user_agent: None,
+        reach: Reach::Allowed,
     };
     let response = tokio::time::timeout(CONNECT_TIMEOUT * 2, transport.open(&request))
         .await

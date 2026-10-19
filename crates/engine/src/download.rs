@@ -727,6 +727,7 @@ impl Download {
             connect_timeout: self.timeouts.connect,
             read_buffer: self.limits.read_buffer_bytes.get(),
             user_agent: None,
+            reach: self.job.reach,
         };
         let response = self.send(&request).await?;
         // A provider's link must serve what the provider described.
@@ -1099,6 +1100,7 @@ mod tests {
     use wayfetch_protocol::{Command, CommandEnvelope, IdempotencyKey, Query, QueryResult};
 
     use super::*;
+    use crate::transfer::transport::Reach;
     use crate::transfer::writer::BoxFuture;
 
     const URL: &str = "https://files.example/a.bin";
@@ -1287,6 +1289,7 @@ mod tests {
                 root: Some(root_id),
                 route: None,
                 media: None,
+                reach: Reach::Allowed,
             },
             attempt: SoleAttempt::assume(job),
         };

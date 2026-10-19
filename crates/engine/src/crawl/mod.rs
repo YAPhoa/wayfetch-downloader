@@ -24,6 +24,7 @@ use bytes::Bytes;
 use url::Url;
 use wayfetch_protocol::query::CheckReason;
 
+use crate::transfer::transport::Reach;
 use crate::transfer::writer::BoxFuture;
 
 /// Largest page body read to find the links on it.
@@ -59,6 +60,8 @@ pub struct InspectRequest {
     pub max_page: usize,
     /// Deadline for the whole exchange.
     pub deadline: Duration,
+    /// Which addresses it may reach, redirects included.
+    pub reach: Reach,
 }
 
 /// What a server answered, reduced to what checking needs.
@@ -82,6 +85,9 @@ pub struct Inspection {
     pub attachment: bool,
     /// A page's body, for [`InspectMethod::Page`] when the answer is one.
     pub page: Option<Bytes>,
+    /// Whether it came from an address that is not public, which only the
+    /// operator's allowed networks reach.
+    pub local: bool,
 }
 
 /// Why a request got no answer to classify.
@@ -149,6 +155,11 @@ pub enum Checked {
     Page {
         /// The links on it, if read.
         links: Option<Vec<Url>>,
+        /// Whether it was served from an address that is not public. Only
+        /// such a page, one on a local server the operator allows, may
+        /// lead requests into local networks: links found on any other
+        /// page reach public addresses only.
+        local: bool,
     },
     /// Its server says it is gone.
     Offline(CheckReason, String),
@@ -163,7 +174,17 @@ fn classify(answer: &Inspection) -> Checked {
     match status {
         200..=299 | 416 => {
             if is_page(answer.content_type.as_deref(), answer.attachment) {
-                Checked::Page { links: None }
+                Checked::Page {
+                    links: None,
+                    local: answer.local,
+                }
+            } else if answer.length.is_some_and(|n| i64::try_from(n).is_err()) {
+                // Larger than any file the store can record, or a
+                // filesystem can hold: the answer cannot be trusted.
+                Checked::Unknown(
+                    CheckReason::Unreadable,
+                    "The server reported a size no file can have.".into(),
+                )
             } else {
                 Checked::File {
                     name: answer.filename.clone(),
@@ -187,15 +208,17 @@ fn head_usable(answer: &Inspection) -> bool {
     (200..300).contains(&answer.status)
 }
 
-/// Checks `url`. With `analyze`, a link that turns out to be a web page is
-/// read, and the links on it are returned; a link that does not look like a
-/// file is then asked for as a page straight away, saving a `HEAD`.
-pub async fn check(inspector: &dyn Inspector, url: &Url, analyze: bool) -> Checked {
+/// Checks `url`, reaching only what `reach` permits. With `analyze`, a
+/// link that turns out to be a web page is read, and the links on it are
+/// returned; a link that does not look like a file is then asked for as a
+/// page straight away, saving a `HEAD`.
+pub async fn check(inspector: &dyn Inspector, url: &Url, reach: Reach, analyze: bool) -> Checked {
     let ask = |method| InspectRequest {
         url: url.clone(),
         method,
         max_page: MAX_PAGE_BYTES,
         deadline: REQUEST_DEADLINE,
+        reach,
     };
     let failed = |e: InspectError| match e.reason {
         CheckReason::NotFound => Checked::Offline(e.reason, e.message),
@@ -244,7 +267,10 @@ pub async fn check(inspector: &dyn Inspector, url: &Url, analyze: bool) -> Check
     })
     .await
     .unwrap_or_default();
-    Checked::Page { links: Some(links) }
+    Checked::Page {
+        links: Some(links),
+        local: answer.local,
+    }
 }
 
 #[cfg(test)]
@@ -328,7 +354,13 @@ mod tests {
             attachment: true,
             ..Inspection::default()
         })]);
-        let checked = check(&script, &url("https://a.example/f.zip"), true).await;
+        let checked = check(
+            &script,
+            &url("https://a.example/f.zip"),
+            Reach::Allowed,
+            true,
+        )
+        .await;
         assert_eq!(
             checked,
             Checked::File {
@@ -348,7 +380,13 @@ mod tests {
             ..Inspection::default()
         };
         let script = Script::new(vec![Ok(answer(405, "text/plain")), Ok(empty)]);
-        let checked = check(&script, &url("https://a.example/empty.bin"), false).await;
+        let checked = check(
+            &script,
+            &url("https://a.example/empty.bin"),
+            Reach::Allowed,
+            false,
+        )
+        .await;
         assert_eq!(
             checked,
             Checked::File {
@@ -365,14 +403,32 @@ mod tests {
     #[tokio::test]
     async fn a_login_page_behind_a_file_name_is_a_page_not_a_file() {
         let script = Script::new(vec![Ok(answer(200, "text/html"))]);
-        let checked = check(&script, &url("https://a.example/f.zip"), false).await;
-        assert_eq!(checked, Checked::Page { links: None });
+        let checked = check(
+            &script,
+            &url("https://a.example/f.zip"),
+            Reach::Allowed,
+            false,
+        )
+        .await;
+        assert_eq!(
+            checked,
+            Checked::Page {
+                links: None,
+                local: false
+            }
+        );
         // An attachment named .html is a file.
         let script = Script::new(vec![Ok(Inspection {
             attachment: true,
             ..answer(200, "text/html")
         })]);
-        let checked = check(&script, &url("https://a.example/save"), false).await;
+        let checked = check(
+            &script,
+            &url("https://a.example/save"),
+            Reach::Allowed,
+            false,
+        )
+        .await;
         assert!(matches!(checked, Checked::File { .. }), "{checked:?}");
     }
 
@@ -386,14 +442,21 @@ mod tests {
             ..answer(200, "text/html")
         };
         let script = Script::new(vec![Ok(page)]);
-        let checked = check(&script, &url("https://a.example/release"), true).await;
+        let checked = check(
+            &script,
+            &url("https://a.example/release"),
+            Reach::Allowed,
+            true,
+        )
+        .await;
         assert_eq!(
             checked,
             Checked::Page {
                 links: Some(vec![
                     url("https://b.example/dir/f.zip"),
                     url("https://b.example/g.bin")
-                ])
+                ]),
+                local: false
             }
         );
         assert_eq!(script.asked(), [InspectMethod::Page]);
@@ -406,11 +469,18 @@ mod tests {
             ..answer(200, "text/html")
         };
         let script = Script::new(vec![Ok(answer(200, "text/html")), Ok(page)]);
-        let checked = check(&script, &url("https://a.example/a/f.rar"), true).await;
+        let checked = check(
+            &script,
+            &url("https://a.example/a/f.rar"),
+            Reach::Allowed,
+            true,
+        )
+        .await;
         assert_eq!(
             checked,
             Checked::Page {
-                links: Some(vec![url("https://a.example/a/f.zip")])
+                links: Some(vec![url("https://a.example/a/f.zip")]),
+                local: false
             }
         );
         assert_eq!(script.asked(), [InspectMethod::Head, InspectMethod::Page]);
@@ -431,7 +501,13 @@ mod tests {
                 Ok(answer(status, "text/html")),
                 Ok(answer(status, "text/html")),
             ]);
-            let checked = check(&script, &url("https://a.example/f.zip"), false).await;
+            let checked = check(
+                &script,
+                &url("https://a.example/f.zip"),
+                Reach::Allowed,
+                false,
+            )
+            .await;
             let message = format!("The server answered HTTP {status}.");
             let expected = if offline {
                 Checked::Offline(reason, message)
@@ -444,10 +520,38 @@ mod tests {
             reason: CheckReason::TimedOut,
             message: "no answer in time".into(),
         })]);
-        let checked = check(&script, &url("https://a.example/f.zip"), false).await;
+        let checked = check(
+            &script,
+            &url("https://a.example/f.zip"),
+            Reach::Allowed,
+            false,
+        )
+        .await;
         assert_eq!(
             checked,
             Checked::Unknown(CheckReason::TimedOut, "no answer in time".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_size_no_file_can_have_is_not_believed() {
+        let script = Script::new(vec![Ok(Inspection {
+            length: Some(1 << 63),
+            ..answer(200, "application/zip")
+        })]);
+        let checked = check(
+            &script,
+            &url("https://a.example/f.zip"),
+            Reach::Allowed,
+            false,
+        )
+        .await;
+        assert_eq!(
+            checked,
+            Checked::Unknown(
+                CheckReason::Unreadable,
+                "The server reported a size no file can have.".into()
+            )
         );
     }
 }
