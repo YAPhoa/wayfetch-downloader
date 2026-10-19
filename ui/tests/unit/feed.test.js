@@ -92,6 +92,11 @@ class FakeClient {
     throw new Error('not used');
   }
 
+  /** @returns {Promise<import('../../src/client/contract.js').CommandResult>} */
+  async changePlugin() {
+    throw new Error('not used');
+  }
+
   /** @returns {Promise<import('../../src/client/contract.js').Accounts>} */
   async accounts() {
     throw new Error('not used');

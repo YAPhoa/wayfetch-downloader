@@ -8,7 +8,7 @@
 
 use serde::Deserialize;
 use wayfetch_domain::id::{AccountId, JobId, PackageId, RootId};
-use wayfetch_domain::name::ProviderId;
+use wayfetch_domain::name::{PluginId, ProviderId};
 use wayfetch_domain::version::Revision;
 
 use crate::account::{AccountAlias, AccountRef};
@@ -18,7 +18,7 @@ use crate::command::{
 };
 use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
-use crate::media::MediaChoice;
+use crate::media::{MediaChoice, PluginChange};
 
 /// Submits a batch of URLs.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -242,6 +242,35 @@ impl RemoveRootRequest {
             command: Command::RemoveRoot {
                 expected_revision: self.expected_revision,
                 root: self.root,
+            },
+        }
+    }
+}
+
+/// Changes a plugin. Added in protocol 4.1.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ChangePluginRequest {
+    /// Identifies the command across retries.
+    pub idempotency_key: IdempotencyKey,
+    /// The instance the client believes it is talking to.
+    pub target: InstanceId,
+    /// The plugin.
+    pub plugin: PluginId,
+    /// The change.
+    pub change: PluginChange,
+}
+
+impl ChangePluginRequest {
+    /// The command envelope.
+    pub fn into_envelope(self) -> CommandEnvelope {
+        CommandEnvelope {
+            idempotency_key: self.idempotency_key,
+            target: self.target,
+            command: Command::ChangePlugin {
+                plugin: self.plugin,
+                change: self.change,
             },
         }
     }

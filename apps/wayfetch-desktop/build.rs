@@ -12,6 +12,7 @@ const COMMANDS: &[&str] = &[
     "links_command",
     "update_settings",
     "remove_root",
+    "change_plugin",
     "authorize_account",
     "cancel_authorization",
     "account_command",

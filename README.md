@@ -514,6 +514,25 @@ player code: [Deno](https://deno.com) on `PATH`, which runs that code with
 no file or network access, is what the container image bundles. yt-dlp
 keeps its cache, and Deno's, in the state directory's `cache/yt-dlp`.
 
+Each plugin's menu in Settings > Plugins turns it off or on: a plugin
+turned off is not run, so YouTube links say yt-dlp is turned off instead of
+being checked or started, and without ffmpeg only the formats that need no
+converting are offered. Check for update downloads yt-dlp's newest stable
+release from GitHub, where Install appears instead while none was found:
+the release's checksum list must carry a valid signature by the yt-dlp
+signing key Wayfetch pins (fingerprint `AC0C BBE6 848D 6A87 3464 AF4E 57CF
+6593 3B5A 7581`), the downloaded file must match its checksum, and the new
+copy must run and report a newer version; otherwise nothing changes. The
+zip build is installed when the copy in use is one, run by the same Python,
+else the standalone build for the system. Installed copies and the choices
+are kept in the state directory's `plugins`. Remove deletes the copy
+Wayfetch installed and goes back to the one found before; a copy included
+in the image or found on `PATH` is never deleted, only turned off. Work
+already running keeps the copy it started with, and a replaced copy is
+deleted at the next start. Set `updates = false` in `[plugins]` to keep
+Settings from installing releases. ffmpeg is not updated this way: FFmpeg
+publishes no signed builds.
+
 The UI adds direct links (one per line), lists jobs a page of 50 at a time in
 the order they were added, shows one job at `/jobs/job-N`, and pauses,
 resumes, or cancels them. It follows the event stream and reconnects on its
@@ -591,7 +610,8 @@ The image holds `wayfetchd` and its plugins on a distroless Debian base
 with Python 3.11 and the system CA bundle: no shell or package manager. The
 plugins are yt-dlp with its YouTube player scripts (`yt-dlp-ejs`), Deno, and
 a static ffmpeg, each pinned by version and hash in the `Dockerfile`; a
-newer plugin comes with a rebuilt image. It is built with the toolchain in
+newer ffmpeg or Deno comes with a rebuilt image, and a newer yt-dlp also
+from Settings > Plugins (into the state volume). It is built with the toolchain in
 `rust-toolchain.toml` and `--locked` dependencies. `deploy/compose.yaml` runs
 it as a configurable UID/GID with a read-only root filesystem, a 16 MiB
 `/tmp`, no capabilities, `no-new-privileges`, a process limit, an init

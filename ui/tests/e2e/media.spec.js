@@ -123,3 +123,58 @@ test('a YouTube link shows its title and formats, and downloads the one chosen',
     fixture.server.close();
   }
 });
+
+test('a plugin turned off stops its links until it is turned on again', async ({ page }) => {
+  const plugins = await mkdtemp(join(tmpdir(), 'wayfetch-plugins-'));
+  const daemon = await new Daemon(await freePort(), {
+    plugins: {
+      // Nothing is downloaded, so the format's address is never asked for.
+      ytDlp: await fakeYtDlp(plugins, [
+        { format_id: '18', url: 'http://127.0.0.1:9/yt-18.mp4', protocol: 'http', ext: 'mp4', vcodec: 'avc1', acodec: 'mp4a', height: 360, filesize: MIB, tbr: 360 },
+      ]),
+      ffmpeg: join(plugins, 'no-ffmpeg'),
+    },
+  }).init();
+  try {
+    await daemon.start();
+    await page.goto(daemon.origin);
+    await page.getByLabel('Setup secret').fill((await daemon.setupSecret()).trim());
+    await page.getByLabel('Owner name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
+    await page.getByLabel('Repeat password').fill(PASSWORD);
+    await page.getByRole('button', { name: 'Create owner' }).click();
+    await expect(page.locator('.statusbar .status')).toHaveText('Live');
+
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('link', { name: 'Plugins' }).click();
+    const ytDlp = page.locator('tr[data-plugin="yt-dlp"]');
+    await expect(ytDlp.locator('td.status')).toHaveText('Ready');
+    await ytDlp.getByRole('button', { name: 'Actions for yt-dlp' }).click();
+    // Nothing was installed by Wayfetch, so there is nothing to remove.
+    await expect(page.getByRole('menuitem', { name: 'Remove…' })).toHaveAttribute('aria-disabled', 'true');
+    await page.getByRole('menuitem', { name: 'Turn off' }).click();
+    await expect(page.locator('[data-key="plugins-message"]')).toContainText('yt-dlp is turned off.');
+    await expect(ytDlp.locator('td.status')).toHaveText('Turned off');
+    await page.goBack();
+    await page.goBack();
+
+    await page.getByRole('button', { name: 'Add links' }).click();
+    await page.getByLabel('Links, one per line').fill(VIDEO);
+    await page.getByRole('button', { name: 'Collect links' }).click();
+    const row = page.locator('tr[data-link]');
+    await expect(row.locator('td.link-status')).toContainText('turned off');
+
+    // Turned on again, the link is read without being collected again.
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('link', { name: 'Plugins' }).click();
+    await ytDlp.getByRole('button', { name: 'Actions for yt-dlp' }).click();
+    await page.getByRole('menuitem', { name: 'Turn on' }).click();
+    await expect(ytDlp.locator('td.status')).toHaveText('Ready');
+    await page.goBack();
+    await page.goBack();
+    await expect(row.locator('td.name')).toHaveText('Wayfetch test video');
+  } finally {
+    await daemon.remove();
+    await rm(plugins, { recursive: true, force: true });
+  }
+});

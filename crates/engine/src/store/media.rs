@@ -263,11 +263,7 @@ impl Store {
     /// a plugin was installed. Returns how many.
     pub(crate) fn retry_failed_media(&mut self) -> Result<usize, StoreError> {
         let tx = self.write()?;
-        let n = tx.execute(
-            "UPDATE source_links SET media_state = 'pending', media_problem = NULL \
-             WHERE media_state = 'failed' AND listed = 1",
-            [],
-        )?;
+        let n = retry_failed(&tx)?;
         tx.commit()?;
         Ok(n)
     }
@@ -454,4 +450,13 @@ pub(super) fn aux_files(
             })
         })
         .collect()
+}
+
+/// Puts listed media links whose check failed back to be checked.
+pub(super) fn retry_failed(tx: &Transaction<'_>) -> Result<usize, StoreError> {
+    Ok(tx.execute(
+        "UPDATE source_links SET media_state = 'pending', media_problem = NULL \
+         WHERE media_state = 'failed' AND listed = 1",
+        [],
+    )?)
 }
