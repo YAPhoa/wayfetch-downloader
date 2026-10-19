@@ -328,9 +328,10 @@ pub struct RootSummary {
     /// Why it is unavailable, if it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<DiagnosticText>,
-    /// Whether the user added it, rather than the operator's configuration,
-    /// so [`crate::Command::RemoveRoot`] may remove it. Added in protocol
-    /// 1.1.
+    /// Whether the user added it, rather than the operator's configuration.
+    /// Added in protocol 1.1, when only such a folder could be removed;
+    /// since 4.2 [`crate::Command::RemoveRoot`] removes any folder but the
+    /// default.
     #[serde(default)]
     pub added: bool,
 }

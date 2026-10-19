@@ -5,7 +5,7 @@ import type { Revision } from "./Revision.js";
 import type { RootId } from "./RootId.js";
 
 /**
- * Stops offering a folder the user added as a destination.
+ * Stops offering a folder as a destination.
  */
 export type RemoveRootRequest = { 
 /**
