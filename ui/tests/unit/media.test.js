@@ -86,8 +86,19 @@ test('a video link says whether it was read', () => {
 
 test('plugins say whether they work and what for', () => {
   /** @type {import('../../src/client/contract.js').PluginSummary} */
-  const ytdlp = { id: 'yt-dlp', name: 'yt-dlp', role: 'media_resolver', services: ['youtube'], state: 'ready', version: '2026.09.30' };
+  const ytdlp = {
+    id: 'yt-dlp',
+    name: 'yt-dlp',
+    role: 'media_resolver',
+    services: ['youtube'],
+    state: 'ready',
+    version: '2026.09.30',
+    enabled: true,
+    updatable: true,
+    installed: false,
+  };
   assert.deepEqual(pluginStatus(ytdlp), ['Ready', 'ok']);
+  assert.deepEqual(pluginStatus({ ...ytdlp, enabled: false, state: 'missing' }), ['Turned off', 'calm']);
   assert.deepEqual(pluginStatus({ ...ytdlp, state: 'missing' }), ['Not installed', 'warn']);
   assert.deepEqual(pluginStatus({ ...ytdlp, state: 'failed' }), ['Not working', 'bad']);
   assert.equal(pluginUse(ytdlp), 'Reads video titles and formats, for YouTube');

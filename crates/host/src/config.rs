@@ -78,6 +78,10 @@ pub struct Plugins {
     pub yt_dlp_js_runtimes: Option<String>,
     /// ffmpeg, which joins video with its sound and makes MP3.
     pub ffmpeg: Option<PathBuf>,
+    /// Whether Settings may install yt-dlp's newer official releases in
+    /// place of the copy found; true if not set. Turning plugins off and
+    /// removing installed copies stay possible either way.
+    pub updates: Option<bool>,
 }
 
 /// `[storage]`.
@@ -432,6 +436,7 @@ ca_certs = ["ca.pem"]
 [plugins]
 yt_dlp = "bin/yt-dlp"
 ffmpeg = "/usr/bin/ffmpeg"
+updates = false
 "#,
         );
         let loaded = load::<NoServer>(&path).unwrap();
@@ -449,6 +454,7 @@ ffmpeg = "/usr/bin/ffmpeg"
         let plugins = &loaded.file.plugins;
         assert_eq!(plugins.yt_dlp, Some(dir.join("bin/yt-dlp")));
         assert_eq!(plugins.ffmpeg, Some("/usr/bin/ffmpeg".into()));
+        assert_eq!(plugins.updates, Some(false));
         let runtimes = "schema_version = 1\n[plugins]\nyt_dlp_js_runtimes = \"--exec=x\"\n";
         assert!(parse(runtimes).unwrap_err().contains("yt_dlp_js_runtimes"));
     }

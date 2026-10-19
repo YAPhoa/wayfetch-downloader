@@ -4,6 +4,7 @@ import type { AppliedLink } from "./AppliedLink.js";
 import type { Authorization } from "./Authorization.js";
 import type { BatchId } from "./BatchId.js";
 import type { JobId } from "./JobId.js";
+import type { PluginChanged } from "./PluginChanged.js";
 import type { RefusedLink } from "./RefusedLink.js";
 import type { Revision } from "./Revision.js";
 
@@ -82,4 +83,4 @@ revision: Revision,
 /**
  * Whether the command changed anything.
  */
-changed: boolean, };
+changed: boolean, } | { "type": "plugin_changed" } & PluginChanged;

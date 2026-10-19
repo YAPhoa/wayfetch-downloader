@@ -122,7 +122,7 @@ impl MediaService for YouTube {
     }
 
     fn plugins(&self) -> Vec<PluginSummary> {
-        vec![self.ytdlp.program().summary(vec![self.id.clone()])]
+        vec![self.ytdlp.plugin().summary(vec![self.id.clone()])]
     }
 
     fn probe<'a>(&'a self, link: &'a Url) -> BoxFuture<'a, Result<MediaInfo, MediaError>> {

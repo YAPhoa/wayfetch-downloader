@@ -10,32 +10,33 @@
 mod support;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use support::{ALL, KIB, body, complete, envelope, job, shutdown, wait_for};
 use url::Url;
-use wayfetch_engine::EngineOwner;
 use wayfetch_engine::media::{
     Container, Conversion, Converter, MediaError, MediaInfo, MediaPlan, MediaService, MediaStream,
-    Part, Recipe,
+    Part, PluginControl, PluginError, PluginOutcome, PluginWork, Recipe,
 };
 use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
+use wayfetch_engine::{EngineOwner, ShutdownRequest};
 use wayfetch_protocol::command::{CollectItems, LinkRef, LinkRefs};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::JobId;
 use wayfetch_protocol::domain::job::JobStage;
-use wayfetch_protocol::domain::name::ProviderId;
+use wayfetch_protocol::domain::name::{PluginId, ProviderId};
 use wayfetch_protocol::media::{
-    AudioFormat, MediaChoice, MediaState, PluginRole, PluginState, PluginSummary,
+    AudioFormat, MediaChoice, MediaState, PluginChange, PluginChanged, PluginRole, PluginState,
+    PluginSummary,
 };
 use wayfetch_protocol::query::{CollectedLink, PageSize};
-use wayfetch_protocol::{Command, CommandResult, Query, QueryResult};
+use wayfetch_protocol::{Command, CommandResult, ErrorCode, Query, QueryResult};
 
 const SERVICE: &str = "synthetic-video";
 const PAGE: &str = "https://video.example/watch/abc";
@@ -186,6 +187,8 @@ struct Formats {
 
 struct Service {
     id: ProviderId,
+    /// Whether its plugin is turned on.
+    enabled: AtomicBool,
     info: MediaInfo,
     formats: Mutex<Formats>,
     resolves: AtomicUsize,
@@ -210,6 +213,10 @@ impl MediaService for Service {
             state: PluginState::Ready,
             version: Some("1".into()),
             problem: None,
+            enabled: self.enabled.load(Ordering::SeqCst),
+            updatable: true,
+            installed: false,
+            fallback_version: None,
         }]
     }
 
@@ -268,6 +275,10 @@ impl Converter for Joiner {
             state: PluginState::Ready,
             version: None,
             problem: None,
+            enabled: true,
+            updatable: false,
+            installed: false,
+            fallback_version: None,
         }
     }
 
@@ -314,6 +325,7 @@ fn fixture(converter: bool, formats: Formats) -> Fixture {
     let mut env = Env::new(host.clone(), Arc::new(HostTransport(host)));
     let service = Arc::new(Service {
         id: ProviderId::new(SERVICE).unwrap(),
+        enabled: AtomicBool::new(true),
         info: MediaInfo {
             title: TITLE.into(),
             duration_seconds: Some(42),
@@ -751,5 +763,256 @@ async fn a_failed_conversion_removes_its_output_and_keeps_the_streams() {
     );
     assert!(outputs(&f.env).is_empty());
     assert_eq!(f.env.staging_files(), 1);
+    shutdown(owner).await;
+}
+
+/// Turns the synthetic resolver on and off; its updates never reach the
+/// release. With `slow`, an update first writes a file that finishes only
+/// once `slow` is cleared.
+struct Control {
+    service: Arc<Service>,
+    changes: AtomicUsize,
+    slow: Arc<AtomicBool>,
+    written: Arc<AtomicBool>,
+}
+
+impl Control {
+    fn new(service: Arc<Service>) -> Self {
+        Self {
+            service,
+            changes: AtomicUsize::new(0),
+            slow: Arc::new(AtomicBool::new(false)),
+            written: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl PluginControl for Control {
+    fn change<'a>(
+        &'a self,
+        plugin: &'a PluginId,
+        change: PluginChange,
+        work: PluginWork,
+    ) -> BoxFuture<'a, Result<PluginOutcome, PluginError>> {
+        Box::pin(async move {
+            self.changes.fetch_add(1, Ordering::SeqCst);
+            if plugin.as_str() != "synthetic-resolver" {
+                return Err(PluginError::Unknown(plugin.clone()));
+            }
+            let enabled = match change {
+                PluginChange::Enable => true,
+                PluginChange::Disable => false,
+                PluginChange::Update => {
+                    if self.slow.load(Ordering::SeqCst) {
+                        let (slow, written) = (self.slow.clone(), self.written.clone());
+                        work.blocking(move || {
+                            while slow.load(Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            written.store(true, Ordering::SeqCst);
+                        })
+                        .await?;
+                    }
+                    return Err(PluginError::Unreachable(
+                        "the release could not be fetched".into(),
+                    ));
+                }
+                PluginChange::Remove => {
+                    return Err(PluginError::NotApplicable("nothing was installed".into()));
+                }
+            };
+            let was = self.service.enabled.swap(enabled, Ordering::SeqCst);
+            Ok(PluginOutcome {
+                changed: was != enabled,
+                version: Some("1".into()),
+            })
+        })
+    }
+}
+
+fn change_plugin(plugin: &str, change: PluginChange) -> Command {
+    Command::ChangePlugin {
+        plugin: PluginId::new(plugin).unwrap(),
+        change,
+    }
+}
+
+async fn settings_plugins(owner: &EngineOwner) -> (u64, Vec<PluginSummary>) {
+    match owner.handle().query(Query::Settings {}, ALL).await.unwrap() {
+        QueryResult::Settings(settings) => (settings.revision.get(), settings.plugins),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_turned_off_stops_its_links_until_it_is_turned_on_again() {
+    let mut f = fixture(true, audio_only());
+    let control = Arc::new(Control::new(f.service.clone()));
+    f.env.plugin_control = Some(control.clone());
+    let owner = f.env.start().await;
+    let (before, _) = settings_plugins(&owner).await;
+
+    let off = envelope(
+        &owner,
+        change_plugin("synthetic-resolver", PluginChange::Disable),
+    );
+    let result = owner.handle().execute(off.clone(), ALL).await.unwrap();
+    let expected = CommandResult::PluginChanged(PluginChanged {
+        plugin: PluginId::new("synthetic-resolver").unwrap(),
+        changed: true,
+        version: Some("1".into()),
+    });
+    assert_eq!(result, expected);
+    // A retry replays the recorded result without changing it again.
+    assert_eq!(owner.handle().execute(off, ALL).await.unwrap(), expected);
+    assert_eq!(control.changes.load(Ordering::SeqCst), 1);
+    let (after, plugins) = settings_plugins(&owner).await;
+    assert!(
+        after > before,
+        "the change is announced as a settings change"
+    );
+    let resolver = plugins
+        .iter()
+        .find(|p| p.id == "synthetic-resolver")
+        .unwrap();
+    assert!(!resolver.enabled);
+
+    // Its links are refused clearly, not downloaded some other way.
+    let link = collect(&owner).await;
+    let media = link.media.clone().unwrap();
+    assert_eq!(media.state, MediaState::Unavailable);
+    assert_eq!(
+        media.problem.as_ref().map(|p| p.as_str()),
+        Some(
+            "This needs the Synthetic resolver plugin, which is turned off. See Settings > Plugins."
+        )
+    );
+
+    // Turned on again, the link's failed check runs again.
+    let on = envelope(
+        &owner,
+        change_plugin("synthetic-resolver", PluginChange::Enable),
+    );
+    owner.handle().execute(on, ALL).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while listed(&owner).await[0].media.as_ref().unwrap().state != MediaState::Ready {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Failures say what happened, and change nothing.
+    let steady = settings_plugins(&owner).await.0;
+    let refused = |command| async {
+        owner
+            .handle()
+            .execute(envelope(&owner, command), ALL)
+            .await
+            .unwrap_err()
+            .code
+    };
+    assert_eq!(
+        refused(change_plugin("synthetic-resolver", PluginChange::Update)).await,
+        ErrorCode::Busy
+    );
+    assert_eq!(
+        refused(change_plugin("synthetic-resolver", PluginChange::Remove)).await,
+        ErrorCode::NotApplicable
+    );
+    assert_eq!(
+        refused(change_plugin("other", PluginChange::Enable)).await,
+        ErrorCode::NotFound
+    );
+    assert_eq!(settings_plugins(&owner).await.0, steady);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugins_cannot_be_changed_without_a_host_that_can() {
+    let f = fixture(true, audio_only());
+    let owner = f.env.start().await;
+    let command = change_plugin("synthetic-resolver", PluginChange::Disable);
+    let err = owner
+        .handle()
+        .execute(envelope(&owner, command), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotApplicable);
+    shutdown(owner).await;
+}
+
+/// Starts a slow update of the synthetic resolver, answering once its
+/// file write has begun.
+async fn slow_update(
+    f: &mut Fixture,
+) -> (
+    EngineOwner,
+    Arc<Control>,
+    wayfetch_protocol::CommandEnvelope,
+    tokio::task::JoinHandle<Result<CommandResult, wayfetch_protocol::ProtocolError>>,
+) {
+    let control = Arc::new(Control::new(f.service.clone()));
+    control.slow.store(true, Ordering::SeqCst);
+    f.env.plugin_control = Some(control.clone());
+    let owner = f.env.start().await;
+    let update = envelope(
+        &owner,
+        change_plugin("synthetic-resolver", PluginChange::Update),
+    );
+    let (handle, sent) = (owner.handle(), update.clone());
+    let running = tokio::spawn(async move { handle.execute(sent, ALL).await });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while control.changes.load(Ordering::SeqCst) == 0 {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    (owner, control, update, running)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_keeps_the_state_directory_until_a_plugin_write_ends() {
+    let mut f = fixture(true, audio_only());
+    let (owner, control, _, _running) = slow_update(&mut f).await;
+    let slow = control.slow.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        slow.store(false, Ordering::SeqCst);
+    });
+    let report = owner
+        .shutdown(ShutdownRequest {
+            timeout: Some(Duration::from_secs(10)),
+        })
+        .await;
+    assert!(report.clean && report.state_dir_released, "{report:?}");
+    assert!(
+        control.written.load(Ordering::SeqCst),
+        "the lock was released before the write ended"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_held_by_a_running_plugin_change_starts_nothing_else() {
+    let mut f = fixture(true, audio_only());
+    let (owner, control, update, running) = slow_update(&mut f).await;
+    let reuse = |command| {
+        let mut envelope = update.clone();
+        envelope.command = command;
+        let handle = owner.handle();
+        async move { handle.execute(envelope, ALL).await.unwrap_err().code }
+    };
+    assert_eq!(
+        reuse(change_plugin("other", PluginChange::Enable)).await,
+        ErrorCode::IdempotencyConflict
+    );
+    assert_eq!(
+        reuse(change_plugin("synthetic-resolver", PluginChange::Disable)).await,
+        ErrorCode::IdempotencyConflict
+    );
+    // A retry waits for the change to end.
+    assert_eq!(reuse(update.command.clone()).await, ErrorCode::Busy);
+    assert_eq!(control.changes.load(Ordering::SeqCst), 1);
+    control.slow.store(false, Ordering::SeqCst);
+    assert_eq!(running.await.unwrap().unwrap_err().code, ErrorCode::Busy);
+    assert!(f.service.enabled.load(Ordering::SeqCst), "nothing else ran");
+    assert_eq!(control.changes.load(Ordering::SeqCst), 1);
     shutdown(owner).await;
 }

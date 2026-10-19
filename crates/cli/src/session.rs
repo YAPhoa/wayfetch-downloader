@@ -248,7 +248,8 @@ impl Session<'_> {
                 | CommandResult::LinksApplied { .. }
                 | CommandResult::AuthorizationStarted(_)
                 | CommandResult::AccountAuthorized { .. }
-                | CommandResult::AccountUpdated { .. },
+                | CommandResult::AccountUpdated { .. }
+                | CommandResult::PluginChanged(_),
             ) => unexpected().into(),
             Err(e) => e.into(),
         })
@@ -295,7 +296,8 @@ impl Session<'_> {
                 | CommandResult::LinksApplied { .. }
                 | CommandResult::AuthorizationStarted(_)
                 | CommandResult::AccountAuthorized { .. }
-                | CommandResult::AccountUpdated { .. },
+                | CommandResult::AccountUpdated { .. }
+                | CommandResult::PluginChanged(_),
             ) => unexpected().into(),
             Err(e) => e.into(),
         })

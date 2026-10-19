@@ -240,6 +240,41 @@ fn next_revision(
     Ok(next)
 }
 
+impl Store {
+    /// Records a plugin change the host made, under the command's key. A
+    /// change that changed something moves the settings revision with a
+    /// `settings_changed` event, puts media links whose check failed back
+    /// to be checked (the plugin may work now), and announces
+    /// `links_changed`, since the choices links offer may have changed. A
+    /// retry of a recorded command only replays its result.
+    pub(crate) fn record_plugin_change(
+        &mut self,
+        envelope: &wayfetch_protocol::CommandEnvelope,
+        instance: wayfetch_protocol::InstanceId,
+        result: &CommandResult,
+        changed: bool,
+        now: UtcTimestamp,
+    ) -> Result<CommandResult, ProtocolError> {
+        let tx = self.write()?;
+        if let Some(result) = super::commands::replayed(&tx, envelope, instance)? {
+            return Ok(result);
+        }
+        if changed {
+            let next = next_revision(&tx, &settings(&tx)?, now)?;
+            tx.execute(
+                "UPDATE settings SET revision = ?1, updated_at = ?2 WHERE id = 1",
+                params![sql(next)?, now.unix_millis()],
+            )
+            .map_err(StoreError::from)?;
+            super::media::retry_failed(&tx)?;
+            outbox::append(&tx, &EventKind::LinksChanged, now)?;
+        }
+        super::commands::record(&tx, envelope, result, now)?;
+        tx.commit().map_err(StoreError::from)?;
+        Ok(result.clone())
+    }
+}
+
 /// Changes the settings at the revision the client saw, all or none: the
 /// default root if given, and each preference given. The coordinator has
 /// checked that the root is permitted and available and that each value

@@ -21,13 +21,13 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 use wayfetch_domain::id::{AccountId, BatchId, JobId, PackageId, RootId, SourceLinkId};
-use wayfetch_domain::name::{DiagnosticText, ProviderId};
+use wayfetch_domain::name::{DiagnosticText, PluginId, ProviderId};
 use wayfetch_domain::version::Revision;
 
 use crate::account::{AccountAlias, AccountRef, Authorization};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
-use crate::media::MediaChoice;
+use crate::media::{MediaChoice, PluginChange, PluginChanged};
 use crate::query::SpeedLimit;
 
 /// How a collected link's download route is chosen. Added in protocol 3.0.
@@ -516,6 +516,15 @@ pub enum Command {
         /// The account revision the client last saw.
         expected_revision: Revision,
     },
+    /// Turn a plugin on or off, update it, or remove the copy Wayfetch
+    /// installed. Running work keeps the copy it started with. Added in
+    /// protocol 4.1.
+    ChangePlugin {
+        /// The plugin.
+        plugin: PluginId,
+        /// The change.
+        change: PluginChange,
+    },
 }
 
 /// A change to one engine preference. Added in protocol 2.0.
@@ -596,7 +605,9 @@ impl Command {
             | Self::Rename { .. }
             | Self::DeleteFiles { .. }
             | Self::Remove { .. }
-            | Self::RemoveRoot { .. } => Permission::Control,
+            | Self::RemoveRoot { .. }
+            // Plugins only ever come from their official, signed releases.
+            | Self::ChangePlugin { .. } => Permission::Control,
             Self::AuthorizeAccount { .. }
             | Self::SetAccountEnabled { .. }
             | Self::RemoveAccount { .. } => Permission::Accounts,
@@ -712,6 +723,9 @@ pub enum CommandResult {
         /// Whether the command changed anything.
         changed: bool,
     },
+    /// A plugin was changed, for [`Command::ChangePlugin`]. Added in
+    /// protocol 4.1.
+    PluginChanged(PluginChanged),
 }
 
 /// A collected link a command applied to. Added in protocol 1.1.

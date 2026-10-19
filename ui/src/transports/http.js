@@ -29,6 +29,8 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
  * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
  * @typedef {import('../client/generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
+ * @typedef {import('../client/generated/ChangePluginRequest.js').ChangePluginRequest} ChangePluginRequest
+ * @typedef {import('../client/generated/PluginChange.js').PluginChange} PluginChange
  * @typedef {import('../client/generated/AddRootRequest.js').AddRootRequest} AddRootRequest
  * @typedef {import('../client/generated/CollectRequest.js').CollectRequest} CollectRequest
  * @typedef {import('../client/generated/LinksCommandRequest.js').LinksCommandRequest} LinksCommandRequest
@@ -220,6 +222,17 @@ export class HttpClient {
       root,
     };
     return this.request('POST', '/v1/roots/remove', { body });
+  }
+
+  /**
+   * Turns a plugin on or off, updates it, or removes the copy Wayfetch
+   * installed.
+   * @param {{ idempotencyKey: string, target: string, plugin: string, change: PluginChange }} request
+   */
+  changePlugin({ idempotencyKey, target, plugin, change }) {
+    /** @type {ChangePluginRequest} */
+    const body = { idempotency_key: idempotencyKey, target, plugin, change };
+    return this.request('POST', '/v1/plugins/change', { body });
   }
 
   /**

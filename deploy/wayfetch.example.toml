@@ -77,6 +77,9 @@ yt_dlp = "/usr/local/bin/yt-dlp"
 # yt-dlp's --js-runtimes option, for reading YouTube's player code.
 # yt_dlp_js_runtimes = "quickjs:/usr/local/bin/qjs"
 ffmpeg = "/usr/local/bin/ffmpeg"
+# Whether Settings > Plugins may install yt-dlp's newer signed releases
+# into the state directory; turning plugins off works either way.
+# updates = true
 
 # wayfetchd only; the other programs refuse this section.
 [server]
