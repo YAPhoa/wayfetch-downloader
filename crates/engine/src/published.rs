@@ -128,6 +128,19 @@ impl Files {
         id: RootId,
         work: impl FnOnce(&Root) -> Result<T, FsError> + Send + 'static,
     ) -> Result<T, Failure> {
+        self.on_root_if_present(id, false, work)
+            .await
+            .map(|ran| ran.expect("a root that must be present was opened"))
+    }
+
+    /// Like [`Files::on_root`], but if `absent_ok` and the folder is gone
+    /// (see [`FsError::is_absent_root`]), runs nothing and gives `None`.
+    async fn on_root_if_present<T: Send + 'static>(
+        &self,
+        id: RootId,
+        absent_ok: bool,
+        work: impl FnOnce(&Root) -> Result<T, FsError> + Send + 'static,
+    ) -> Result<Option<T>, Failure> {
         let root = self.roots.get(id).ok_or_else(|| {
             Failure::Untouched(ProtocolError::new(
                 ErrorCode::NotApplicable,
@@ -148,9 +161,12 @@ impl Files {
             .probes
             .blocking(move || {
                 let _slot = slot;
-                let opened = Root::open(&root.path, root.id, instance)
-                    .map_err(|e| Failure::Untouched(refusal(&e)))?;
-                work(&opened).map_err(|e| match e {
+                let opened = match Root::open(&root.path, root.id, instance) {
+                    Ok(opened) => opened,
+                    Err(e) if absent_ok && e.is_absent_root() => return Ok(None),
+                    Err(e) => return Err(Failure::Untouched(refusal(&e))),
+                };
+                work(&opened).map(Some).map_err(|e| match e {
                     // Refused before anything was changed.
                     FsError::TargetExists(_) => Failure::Untouched(refusal(&e)),
                     e => Failure::Touched(refusal(&e)),
@@ -287,12 +303,14 @@ impl Files {
             DeleteStart::Done(result) => return Ok(result),
             DeleteStart::Started(intent) => intent,
         };
+        // A folder that is gone took its files with it: there is nothing
+        // left to delete there.
         for (root_id, file) in intent.published {
-            self.on_root(root_id, move |root| root.delete_published(&file))
+            self.on_root_if_present(root_id, true, move |root| root.delete_published(&file))
                 .await?;
         }
         for record in intent.staging {
-            self.on_root(record.root, move |root| {
+            self.on_root_if_present(record.root, true, move |root| {
                 root.verify()?;
                 match root.remove_staging(&record)? {
                     crate::fs::Removal::Foreign => Err(FsError::StagingReplaced(record.name)),

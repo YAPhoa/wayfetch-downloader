@@ -136,9 +136,9 @@ fn open_root_dir(path: &Path) -> Result<Dir, FsError> {
     fail::fail_point!(
         "root-open-stall",
         path.file_name() == Some(std::ffi::OsStr::new("stalled")),
-        |_| Err(FsError::io("open root")(io::Error::other("failpoint")))
+        |_| Err(FsError::io(super::OPEN_ROOT)(io::Error::other("failpoint")))
     );
-    Dir::open_ambient_dir(path, ambient_authority()).map_err(FsError::io("open root"))
+    Dir::open_ambient_dir(path, ambient_authority()).map_err(FsError::io(super::OPEN_ROOT))
 }
 
 fn create_dir(parent: &Dir, name: &str) -> Result<(), FsError> {
