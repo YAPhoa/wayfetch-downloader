@@ -40,6 +40,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0017_root_removal.sql")),
     M::up(include_str!("migrations/0018_link_checks.sql")),
     M::up(include_str!("migrations/0019_failed_stages.sql")),
+    M::up(include_str!("migrations/0020_extractions.sql")),
 ];
 
 /// Newest schema version this engine knows.

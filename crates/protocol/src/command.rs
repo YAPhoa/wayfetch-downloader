@@ -413,6 +413,10 @@ pub enum Command {
         /// 2.3; older clients omit it, which leaves it unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         download_speed_limit: Option<SpeedLimitChange>,
+        /// Whether downloaded archives are unpacked as they finish. Added
+        /// in protocol 6.0.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extract_archives: Option<bool>,
     },
     /// Give a completed job's published file another name in the same
     /// folder. Never replaces an existing file. Added in protocol 1.0.
@@ -567,6 +571,24 @@ pub enum Command {
         /// The account revision the client last saw.
         expected_revision: Revision,
     },
+    /// Unpack a complete download of an archive, or of the first part of
+    /// a multi-part archive, into a new folder next to it, again if it was
+    /// unpacked before. A password the archive needs is given apart from
+    /// the command, which never carries a secret. Added in protocol 6.0.
+    Extract {
+        /// The job.
+        job: JobId,
+        /// The job revision the client last saw.
+        expected_revision: Revision,
+    },
+    /// Stop unpacking an archive, or waiting to. The archive is kept, and
+    /// nothing unpacked so far is. Added in protocol 6.0.
+    CancelExtraction {
+        /// The job.
+        job: JobId,
+        /// The job revision the client last saw.
+        expected_revision: Revision,
+    },
     /// Turn a plugin on or off, update it, or remove the copy Wayfetch
     /// installed. Running work keeps the copy it started with. Added in
     /// protocol 4.1.
@@ -660,6 +682,8 @@ impl Command {
             | Self::DeleteFiles { .. }
             | Self::Remove { .. }
             | Self::RemoveRoot { .. }
+            | Self::Extract { .. }
+            | Self::CancelExtraction { .. }
             // Plugins only ever come from their official, signed releases.
             | Self::ChangePlugin { .. } => Permission::Control,
             Self::AuthorizeAccount { .. }
@@ -975,6 +999,7 @@ mod tests {
             default_root: RootId::from_u64(4),
             max_active_downloads: None,
             download_speed_limit: None,
+            extract_archives: None,
         };
         assert_eq!(
             serde_json::to_string(&command).unwrap(),
@@ -985,6 +1010,7 @@ mod tests {
             default_root: None,
             max_active_downloads: Some(PreferenceChange::Set(6)),
             download_speed_limit: None,
+            extract_archives: None,
         };
         assert_eq!(
             serde_json::to_string(&change).unwrap(),

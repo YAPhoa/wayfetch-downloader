@@ -263,6 +263,56 @@ pub struct JobSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub media: Option<Box<JobMedia>>,
+    /// For a complete download of an archive, or of the first part of a
+    /// multi-part archive: whether and where it was unpacked. Boxed, as
+    /// most jobs have none. Added in protocol 6.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub extraction: Option<Box<ExtractionSummary>>,
+}
+
+/// Where unpacking a downloaded archive stands. Added in protocol 6.0.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr, strum::EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum ExtractionState {
+    /// Not unpacked, and not going to be unless asked.
+    Idle,
+    /// Waiting for other parts of the archive to finish downloading.
+    Waiting,
+    /// Waiting for its turn.
+    Queued,
+    /// Being unpacked.
+    Extracting,
+    /// The archive is protected: it needs its password.
+    NeedsPassword,
+    /// Unpacked; `output` names what was made.
+    Complete,
+    /// Unpacking failed; `problem` says why. The archive is kept.
+    Failed,
+    /// Unpacking was cancelled. The archive is kept.
+    Cancelled,
+}
+
+/// Unpacking a downloaded archive into a new folder next to it. The
+/// archive itself is never changed or removed. Added in protocol 6.0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ExtractionSummary {
+    /// Where it stands.
+    pub state: ExtractionState,
+    /// Once complete, what was made, in the archive's root: a new folder,
+    /// or the archive's only entry if it held just one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub output: Option<String>,
+    /// Why it failed, is waiting, or needs a password again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub problem: Option<DiagnosticText>,
 }
 
 /// How a job is downloaded, when it is not directly from its host. Added
@@ -387,6 +437,9 @@ pub struct Settings {
     /// used. Added in protocol 4.0.
     #[serde(default)]
     pub plugins: Vec<PluginSummary>,
+    /// Whether downloaded archives are unpacked as they finish. Added in
+    /// protocol 6.0.
+    pub extract_archives: bool,
 }
 
 /// An engine preference with a whole-number value, as the operator's
@@ -882,6 +935,7 @@ mod tests {
                 installed: true,
                 fallback_version: Some("2026.07.04".into()),
             }],
+            extract_archives: true,
         });
         assert_eq!(
             serde_json::to_value(&settings).unwrap(),
@@ -906,6 +960,7 @@ mod tests {
                     "enabled": true, "updatable": true, "installed": true,
                     "fallback_version": "2026.07.04",
                 }],
+                "extract_archives": true,
             })
         );
         // A 4.0 engine's plugins carry none of 4.1's fields: each is on,

@@ -22,7 +22,8 @@ use wayfetch_protocol::{
 use super::links::{self, Unusable};
 use super::operations::{self, OperationState};
 use super::{
-    Store, StoreError, accounts, deletions, files, jobs, key, outbox, renames, roots, sql,
+    Store, StoreError, accounts, deletions, extractions, files, jobs, key, outbox, renames, roots,
+    sql,
 };
 
 /// What the coordinator knows about destinations when a command runs.
@@ -124,14 +125,24 @@ impl Store {
                 default_root,
                 max_active_downloads,
                 download_speed_limit,
+                extract_archives,
             } => roots::update_settings(
                 &tx,
                 *expected_revision,
                 *default_root,
                 *max_active_downloads,
                 *download_speed_limit,
+                *extract_archives,
                 now,
             )?,
+            Command::Extract {
+                job,
+                expected_revision,
+            } => extractions::extract(&tx, *job, *expected_revision, now)?,
+            Command::CancelExtraction {
+                job,
+                expected_revision,
+            } => extractions::cancel(&tx, *job, *expected_revision, now)?,
             Command::Remove {
                 job,
                 expected_revision,

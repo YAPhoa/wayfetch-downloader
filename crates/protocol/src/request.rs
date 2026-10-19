@@ -82,6 +82,8 @@ pub enum Action {
     DeleteFiles,
     /// [`Command::Retry`]. Added in protocol 1.2.
     Retry,
+    /// [`Command::CancelExtraction`]. Added in protocol 6.0.
+    CancelExtraction,
 }
 
 /// Pauses, resumes, cancels, retries, renames, or removes a job at the
@@ -166,6 +168,10 @@ impl JobCommandRequest {
                 expected_revision,
                 repeat_provider_operation,
             },
+            (Action::CancelExtraction, None) => Command::CancelExtraction {
+                job,
+                expected_revision,
+            },
         };
         Ok(CommandEnvelope {
             idempotency_key: self.idempotency_key,
@@ -200,6 +206,11 @@ pub struct UpdateSettingsRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub download_speed_limit: Option<SpeedLimitChange>,
+    /// Whether downloaded archives are unpacked as they finish. Added in
+    /// protocol 6.0.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub extract_archives: Option<bool>,
 }
 
 impl UpdateSettingsRequest {
@@ -213,10 +224,72 @@ impl UpdateSettingsRequest {
                 default_root: self.default_root,
                 max_active_downloads: self.max_active_downloads,
                 download_speed_limit: self.download_speed_limit,
+                extract_archives: self.extract_archives,
             },
         }
     }
 }
+
+/// Unpacks a downloaded archive, with its password if it needs one. Added
+/// in protocol 6.0.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ExtractRequest {
+    /// Identifies the command across retries.
+    pub idempotency_key: IdempotencyKey,
+    /// The instance the client believes it is talking to.
+    pub target: InstanceId,
+    /// The job revision the client last saw.
+    pub expected_revision: Revision,
+    /// The archive's password. It is kept in memory for this archive's
+    /// next attempt only: never stored, logged, or part of the command.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ExtractRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractRequest")
+            .field("idempotency_key", &self.idempotency_key)
+            .field("target", &self.target)
+            .field("expected_revision", &self.expected_revision)
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+impl ExtractRequest {
+    /// The command envelope for `job`, and the password apart from it. An
+    /// empty password is refused.
+    pub fn into_parts(self, job: JobId) -> Result<(CommandEnvelope, Option<String>), ProtocolError> {
+        if self.password.as_deref().is_some_and(str::is_empty) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "the password is empty",
+            ));
+        }
+        if self.password.as_ref().is_some_and(|p| p.len() > MAX_PASSWORD_BYTES) {
+            return Err(ProtocolError::new(
+                ErrorCode::LimitExceeded,
+                "the password is too long",
+            ));
+        }
+        let envelope = CommandEnvelope {
+            idempotency_key: self.idempotency_key,
+            target: self.target,
+            command: Command::Extract {
+                job,
+                expected_revision: self.expected_revision,
+            },
+        };
+        Ok((envelope, self.password))
+    }
+}
+
+/// Longest archive password accepted, in bytes.
+pub const MAX_PASSWORD_BYTES: usize = 1024;
 
 /// Stops offering a folder as a destination.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -657,6 +730,7 @@ mod tests {
                 default_root: RootId::from_u64(4),
                 max_active_downloads: None,
                 download_speed_limit: None,
+                extract_archives: None,
             }
         );
         let preference: UpdateSettingsRequest = serde_json::from_value(json!({
@@ -673,6 +747,7 @@ mod tests {
                 default_root: None,
                 max_active_downloads: Some(PreferenceChange::Set(6)),
                 download_speed_limit: None,
+                extract_archives: None,
             }
         );
         let both: UpdateSettingsRequest = serde_json::from_value(json!({
@@ -981,6 +1056,43 @@ mod tests {
                 expected_revision: Revision::from_u64(2).unwrap(),
                 enabled: false,
             }
+        );
+    }
+
+    #[test]
+    fn an_extract_request_keeps_its_password_out_of_the_command() {
+        let request = |password: serde_json::Value| {
+            serde_json::from_value::<ExtractRequest>(json!({
+                "idempotency_key": IdempotencyKey::generate(),
+                "target": InstanceId::generate(),
+                "expected_revision": 4,
+                "password": password,
+            }))
+            .unwrap()
+        };
+        let job = JobId::from_u64(9).unwrap();
+        let with = request(json!("hunter2"));
+        assert!(!format!("{with:?}").contains("hunter2"));
+        let (envelope, password) = with.into_parts(job).unwrap();
+        assert_eq!(password.as_deref(), Some("hunter2"));
+        assert_eq!(
+            envelope.command,
+            Command::Extract {
+                job,
+                expected_revision: Revision::from_u64(4).unwrap()
+            }
+        );
+        assert!(!serde_json::to_string(&envelope).unwrap().contains("hunter2"));
+        let (_, none) = request(serde_json::Value::Null).into_parts(job).unwrap();
+        assert_eq!(none, None);
+        assert_eq!(
+            request(json!("")).into_parts(job).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        let long = "x".repeat(MAX_PASSWORD_BYTES + 1);
+        assert_eq!(
+            request(json!(long)).into_parts(job).unwrap_err().code,
+            ErrorCode::LimitExceeded
         );
     }
 }

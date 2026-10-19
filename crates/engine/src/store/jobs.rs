@@ -15,8 +15,8 @@ use wayfetch_domain::version::Generation;
 use wayfetch_protocol::event::{EventCursor, EventKind};
 use wayfetch_protocol::media::{JobMedia, MediaChoice};
 use wayfetch_protocol::query::{
-    ArtifactSummary, FailureSummary, JobCounts, JobFilter, JobRoute, JobSummary, Page, Query,
-    QueryResult,
+    ArtifactSummary, ExtractionState, ExtractionSummary, FailureSummary, JobCounts, JobFilter,
+    JobRoute, JobSummary, Page, Query, QueryResult,
 };
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
@@ -34,12 +34,13 @@ const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.gener
                ORDER BY p.generation DESC LIMIT 1), 0), \
      a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id, j.removed_at IS NOT NULL, \
      j.restart_reason, j.route_service, j.route_account, j.suggested_name, \
-     j.media_service, j.media_choice";
+     j.media_service, j.media_choice, x.state, x.output, x.problem";
 
 /// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
 /// has exactly one source link.
 const JOB_FROM: &str = "jobs j JOIN source_links s ON s.id = j.source_link_id \
-     LEFT JOIN publications a ON a.job_id = j.id AND a.state = 'published'";
+     LEFT JOIN publications a ON a.job_id = j.id AND a.state = 'published' \
+     LEFT JOIN extractions x ON x.job_id = j.id";
 
 /// A job the coordinator can start work on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,9 +102,30 @@ pub(super) struct StoredJob {
     route: Option<JobRoute>,
     name: Option<String>,
     media: Option<JobMedia>,
+    extraction: Option<ExtractionSummary>,
 }
 
 impl StoredJob {
+    /// The published file's name as an archive, if it is one.
+    pub(super) fn archive(&self) -> Option<crate::extract::ArchiveName> {
+        let path = &self.artifact.as_ref()?.path;
+        let name = path.rsplit('/').next()?;
+        crate::extract::ArchiveName::parse(name)
+    }
+
+    /// The root holding the published file, once complete.
+    pub(super) fn artifact_root(&self) -> Option<RootId> {
+        self.artifact.as_ref().map(|a| a.root)
+    }
+
+    /// The file name the job has or will have, if known.
+    pub(super) fn name(&self) -> Option<&str> {
+        match &self.artifact {
+            Some(artifact) => artifact.path.rsplit('/').next(),
+            None => self.name.as_deref(),
+        }
+    }
+
     pub(super) fn summary(&self) -> JobSummary {
         JobSummary {
             id: self.id,
@@ -123,6 +145,7 @@ impl StoredJob {
             restart_reason: self.restart_reason.clone(),
             route: self.route.clone().map(Box::new),
             media: self.media.clone().map(Box::new),
+            extraction: self.extraction.clone().map(Box::new),
         }
     }
 }
@@ -148,6 +171,7 @@ struct RawJob {
     route: (Option<String>, Option<i64>),
     name: Option<String>,
     media: (Option<String>, Option<String>),
+    extraction: (Option<String>, Option<String>, Option<String>),
 }
 
 impl RawJob {
@@ -175,6 +199,7 @@ impl RawJob {
             route: (row.get(18)?, row.get(19)?),
             name: row.get(20)?,
             media: (row.get(21)?, row.get(22)?),
+            extraction: (row.get(23)?, row.get(24)?, row.get(25)?),
         })
     }
 
@@ -196,7 +221,8 @@ impl RawJob {
             .and_then(crate::download::file_name)
             .or_else(|| source_name(&self.input_url))
             .map(|name| name.as_str().to_owned());
-        Ok(StoredJob {
+        let extraction = super::extractions::decode(self.extraction)?;
+        let mut job = StoredJob {
             id: key(self.id)?,
             state,
             package: key(self.package)?,
@@ -230,7 +256,18 @@ impl RawJob {
             route: operations::decode_route(self.route.0, self.route.1)?,
             name,
             media: decode_media(self.media.0, self.media.1.as_deref())?,
-        })
+            extraction: None,
+        };
+        // Every complete download of an archive's first volume can be
+        // unpacked, whether or not it was yet.
+        if job.state.stage() == JobStage::Complete && job.archive().is_some_and(|a| a.first) {
+            job.extraction = Some(extraction.unwrap_or(ExtractionSummary {
+                state: ExtractionState::Idle,
+                output: None,
+                problem: None,
+            }));
+        }
+        Ok(job)
     }
 }
 

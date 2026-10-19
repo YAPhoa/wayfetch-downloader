@@ -330,7 +330,7 @@ impl Root {
     /// Opens the directory `parent` below the root, or the root itself.
     /// With `create`, missing directories are created and their entries
     /// synchronized; without it, a missing directory is `None`.
-    fn parent_dir(&self, parent: Option<&str>, create: bool) -> Result<Option<Dir>, FsError> {
+    pub(super) fn parent_dir(&self, parent: Option<&str>, create: bool) -> Result<Option<Dir>, FsError> {
         let mut dir = self.dir.try_clone().map_err(FsError::io("open root"))?;
         for component in parent.into_iter().flat_map(|p| p.split('/')) {
             dir = match dir.open_dir(component) {

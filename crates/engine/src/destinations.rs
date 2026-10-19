@@ -539,8 +539,10 @@ impl Destinations {
         max_active_downloads: BoundedSetting,
         download_speed_limit: SpeedLimitSetting,
         plugins: Vec<wayfetch_protocol::media::PluginSummary>,
+        extract_archives: bool,
     ) -> Settings {
         Settings {
+            extract_archives,
             max_active_downloads,
             download_speed_limit,
             plugins,
