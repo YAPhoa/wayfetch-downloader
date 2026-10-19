@@ -108,6 +108,18 @@ export function refocus(root, key) {
 }
 
 /**
+ * Marks a table row as the base or alternate shade by its position among
+ * the rows shown, so the shading follows filtering, sorting and paging.
+ * @template {HTMLElement} R
+ * @param {R} row
+ * @param {number} index the row's position, from 0
+ */
+export function stripe(row, index) {
+  row.dataset.stripe = index % 2 === 1 ? 'alternate' : 'base';
+  return row;
+}
+
+/**
  * A column header that sorts its table: a button that sorts by `column`,
  * marked with the order while the table is sorted by it.
  * @template {string} C

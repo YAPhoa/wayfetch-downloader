@@ -42,7 +42,7 @@
   --hover: #f6f8fb;
   --filter-hover: #e3e7ee;
   --filter-selected: #ccd8ea;
-  --track: #e3e6ec;
+  --track: #dee4ed;
   --run: #1f4fa0;
   --ok: #1d6b3a;
   --warn: #8a4300;
@@ -51,6 +51,19 @@
   --note-warn: #fbebd9;
   --note-bad: #fbe4e1;
   --focus: #3b6fd1;
+  /* Download rows: alternate rows shaded; selected beats hovered. */
+  --row-alternate: #f8fafc;
+  --row-hover: #f5f7fa;
+  --row-selected: #e8eef8;
+  /* One colour per download state, for its mark and its progress;
+     Paused fills its bar in a second shade. */
+  --status-active: #2563eb;
+  --status-paused: #ca8a04;
+  --status-paused-fill: #eab308;
+  --status-queued: #0e7490;
+  --status-failed: #dc2626;
+  --status-cancelled: #6b7280;
+  --status-done: #15803d;
   --radius: 5px;
   --row-pad: 5px 12px;
   --font-size: 13px;
@@ -80,7 +93,7 @@
   --hover: #141a21;
   --filter-hover: #232c38;
   --filter-selected: #30415c;
-  --track: #262d37;
+  --track: #334155;
   --run: #7da6ee;
   --ok: #6fcf97;
   --warn: #f0a65a;
@@ -89,6 +102,16 @@
   --note-warn: #33261a;
   --note-bad: #3a1f1d;
   --focus: #7da6ee;
+  --row-alternate: #151b23;
+  --row-hover: #1c2430;
+  --row-selected: #223047;
+  --status-active: #60a5fa;
+  --status-paused: #eab308;
+  --status-paused-fill: #ca8a04;
+  --status-queued: #22d3ee;
+  --status-failed: #f87171;
+  --status-cancelled: #9ca3af;
+  --status-done: #4ade80;
 }
 
 * { box-sizing: border-box; }
@@ -216,12 +239,24 @@ code { font-family: ui-monospace, monospace; }
 .dot {
   display: inline-block;
   vertical-align: middle;
-  width: 7px;
-  height: 7px;
+  width: 10px;
+  height: 10px;
   flex: none;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--status-color, currentColor);
 }
+
+/* Download states: the mark and progress fill take the state's colour;
+   its label stays in the text colour. A state the UI does not know is
+   neutral. */
+[data-status] { --status-fill: var(--status-color); }
+[data-status='active'] { --status-color: var(--status-active); }
+[data-status='paused'] { --status-color: var(--status-paused); --status-fill: var(--status-paused-fill); }
+[data-status='queued'] { --status-color: var(--status-queued); }
+[data-status='failed'] { --status-color: var(--status-failed); }
+[data-status='cancelled'] { --status-color: var(--status-cancelled); }
+[data-status='done'] { --status-color: var(--status-done); }
+[data-status='unknown'] { --status-color: var(--control); }
 
 /* Sign-in and setup. */
 
@@ -419,11 +454,14 @@ code { font-family: ui-monospace, monospace; }
   text-align: left;
 }
 
-.filter .dot { color: var(--calm); }
+/* All has a list mark; a state's dot sits in the same 14px slot. */
+.filter .icon { color: var(--muted); }
+.filter .dot { margin: 0 2px; }
 .filter .filter-label { flex: 1; }
 .filter .count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
 .filter:hover:not(:disabled) { background: var(--filter-hover); }
 .filter[aria-pressed='true'] { background: var(--filter-selected); font-weight: 600; }
+.filter[aria-pressed='true'] .count { color: var(--ink); }
 .filter[aria-pressed='true']:hover:not(:disabled) { background: var(--filter-selected); }
 
 .list {
@@ -491,33 +529,30 @@ table.jobs {
 .jobs td.name a { color: inherit; text-decoration: none; }
 .jobs td.name a:hover { text-decoration: underline; }
 
-.jobs tbody tr { cursor: default; }
-.jobs tbody tr:hover { background: var(--hover); }
+.jobs tbody tr { cursor: default; background: var(--surface); }
+/* The shade follows the row's position among those shown (`stripe`). */
+.jobs tbody tr[data-stripe='alternate'] { background: var(--row-alternate); }
+.jobs tbody tr:hover { background: var(--row-hover); }
 .jobs tbody tr.selected,
-.jobs tbody tr.ticked { background: var(--selected); }
+.jobs tbody tr.ticked { background: var(--row-selected); }
 
-.jobs td.state .dot { margin: -2px 6px 0 0; }
+.state .dot { margin: -2px 8px 0 0; }
 
 .bar-cell { display: flex; align-items: center; gap: 8px; }
-.bar-cell progress { flex: 1; }
-.bar-cell .percent { width: 38px; text-align: right; }
+.bar-cell .bar { flex: 0 1 140px; }
+.bar-cell .percent { flex: none; width: 5ch; text-align: right; white-space: nowrap; }
 
-/* Progress bars: a thin track with the tone's fill; quiet tones fill
-   with the control colour so the bar stays visible. */
-progress {
-  appearance: none;
-  height: 6px;
-  border: 0;
-  border-radius: 3px;
+/* Progress bars: a neutral track filled in the state's colour, with
+   nothing filled when the progress is zero or unknown. */
+.bar {
+  display: block;
+  height: 8px;
+  border-radius: 4px;
   background: var(--track);
-  color: var(--control);
   overflow: hidden;
 }
 
-progress::-webkit-progress-bar { background: var(--track); }
-progress::-webkit-progress-value { background: currentColor; }
-progress::-moz-progress-bar { background: currentColor; }
-progress.tone-calm { color: var(--control); }
+.bar .fill { display: block; width: 0; height: 100%; background: var(--status-fill); }
 
 .list-status:empty { display: none; }
 .list-status { margin: 0; padding: 16px; color: var(--muted); }
@@ -595,7 +630,7 @@ progress.tone-calm { color: var(--control); }
 .big-progress .figure { display: flex; align-items: baseline; gap: 8px; }
 .big-progress .percent { font-size: 22px; font-weight: 600; }
 .big-progress .saved { color: var(--muted); }
-.big-progress progress { width: 100%; height: 10px; }
+.big-progress .bar { width: 100%; height: 10px; border-radius: 5px; }
 
 dl {
   display: grid;
@@ -677,8 +712,9 @@ dd { margin: 0; overflow-wrap: anywhere; }
   color: var(--ink);
 }
 
-.jobs tbody tr.menu-open, .accounts-table tbody tr.menu-open { background: var(--hover); }
-.jobs tbody tr.selected.menu-open { background: var(--selected); }
+.jobs tbody tr.menu-open { background: var(--row-hover); }
+.accounts-table tbody tr.menu-open { background: var(--hover); }
+.jobs tbody tr.selected.menu-open, .jobs tbody tr.ticked.menu-open { background: var(--row-selected); }
 
 /* Coarse pointers get a target large enough to touch. */
 @media (pointer: coarse) {
