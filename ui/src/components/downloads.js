@@ -1449,7 +1449,9 @@ export class Downloads {
 
   /**
    * How many downloads are ticked, with a way to untick them, and how
-   * many of them the name filter hides, which commands leave out.
+   * many of them the name filter hides, which commands leave out. While
+   * downloads are shown the line keeps its room, saying how many are
+   * shown when none is ticked, so ticking one moves no row.
    * @param {readonly JobSummary[]} shown
    */
   renderSelection(shown) {
@@ -1458,6 +1460,7 @@ export class Downloads {
     show(
       this.selectionLine,
       ticked > 0 && h('strong', null, `${count(ticked, 'download')} selected`),
+      ticked === 0 && hidden === 0 && shown.length > 0 && h('span', null, `${count(shown.length, 'download')} shown`),
       hidden > 0 &&
         h('span', { class: 'warn-text' }, `${count(hidden, 'selected download')} hidden by the filter ${hidden === 1 ? 'is' : 'are'} left out.`),
       this.selection.size > 0 &&
