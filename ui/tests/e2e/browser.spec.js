@@ -340,6 +340,8 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await expect(page.locator('dd[data-fact="job"]')).toHaveText('job-1');
   await page.getByRole('button', { name: 'Close details' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/`);
+  // With nothing chosen the details pane is gone, not a placeholder.
+  await expect(page.locator('.inspector')).toBeHidden();
 
   // The state filters list only matching jobs, with how many there are,
   // and keep keyboard focus while the list reloads.
