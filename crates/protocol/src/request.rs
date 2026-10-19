@@ -263,7 +263,10 @@ impl std::fmt::Debug for ExtractRequest {
 impl ExtractRequest {
     /// The command envelope for `job`, and the password apart from it. An
     /// empty password is refused.
-    pub fn into_parts(self, job: JobId) -> Result<(CommandEnvelope, Option<String>), ProtocolError> {
+    pub fn into_parts(
+        self,
+        job: JobId,
+    ) -> Result<(CommandEnvelope, Option<String>), ProtocolError> {
         if self.password.as_deref().is_some_and(str::is_empty) {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidRequest,
@@ -271,13 +274,21 @@ impl ExtractRequest {
             ));
         }
         // It is handed to the extractor as one line.
-        if self.password.as_deref().is_some_and(|p| p.contains(['\n', '\r', '\0'])) {
+        if self
+            .password
+            .as_deref()
+            .is_some_and(|p| p.contains(['\n', '\r', '\0']))
+        {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidRequest,
                 "the password holds a line break",
             ));
         }
-        if self.password.as_ref().is_some_and(|p| p.len() > MAX_PASSWORD_BYTES) {
+        if self
+            .password
+            .as_ref()
+            .is_some_and(|p| p.len() > MAX_PASSWORD_BYTES)
+        {
             return Err(ProtocolError::new(
                 ErrorCode::LimitExceeded,
                 "the password is too long",
@@ -1089,7 +1100,11 @@ mod tests {
                 expected_revision: Revision::from_u64(4).unwrap()
             }
         );
-        assert!(!serde_json::to_string(&envelope).unwrap().contains("hunter2"));
+        assert!(
+            !serde_json::to_string(&envelope)
+                .unwrap()
+                .contains("hunter2")
+        );
         let (_, none) = request(serde_json::Value::Null).into_parts(job).unwrap();
         assert_eq!(none, None);
         assert_eq!(

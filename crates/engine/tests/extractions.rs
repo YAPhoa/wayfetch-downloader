@@ -23,11 +23,14 @@ use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
 use wayfetch_protocol::domain::id::JobId;
+use wayfetch_protocol::domain::job::JobStage;
+use wayfetch_protocol::event::EventKind;
 use wayfetch_protocol::media::{PluginRole, PluginState, PluginSummary};
 use wayfetch_protocol::query::{ExtractionState, JobSummary, Settings};
 use wayfetch_protocol::request::ExtractRequest;
 use wayfetch_protocol::{
     Command, CommandResult, ErrorCode, IdempotencyKey, ProtocolError, Query, QueryResult,
+    StreamItem, Subscribe,
 };
 
 /// Files served at every path; a held path's body does not end until it
@@ -221,7 +224,9 @@ impl Extractor for Fake {
                     }
                     write("a.txt", b"hello");
                 }
-                "damaged.zip" => return Err(ExtractError::Damaged("The archive is damaged.".into())),
+                "damaged.zip" => {
+                    return Err(ExtractError::Damaged("The archive is damaged.".into()));
+                }
                 _ => {
                     write("a.txt", b"hello");
                     write("d/b.txt", b"world");
@@ -378,9 +383,26 @@ async fn turned_off_archives_stay_packed_until_asked() {
     .await
     .unwrap();
     assert!(!settings(&owner).await.extract_archives);
+    let handle = owner.handle();
+    let head = handle.hello().await.unwrap().head;
+    let mut events = handle
+        .subscribe(Subscribe { after: Some(head) }, ALL)
+        .await
+        .unwrap();
     let ids = submit(&owner, &["Later.zip"]).await;
     let done = support::complete(&owner, ids[0]).await;
     assert_eq!(state(&done), Some(ExtractionState::Idle));
+    // The event of its completion says so too, so a client can offer it.
+    loop {
+        let item = events.next().await.expect("stream ended early");
+        if let StreamItem::Event(event) = item
+            && let EventKind::JobChanged { job } = event.kind
+            && job.stage == JobStage::Complete
+        {
+            assert_eq!(state(&job), Some(ExtractionState::Idle));
+            break;
+        }
+    }
     assert!(fake.started.lock().unwrap().is_empty());
     // The setting survives a restart.
     shutdown(owner).await;
@@ -396,7 +418,10 @@ async fn turned_off_archives_stay_packed_until_asked() {
     fake.off.store(true, Ordering::SeqCst);
     let refused = extract(&owner, ids[0], None).await.unwrap_err();
     assert_eq!(refused.code, ErrorCode::NotApplicable);
-    assert!(refused.message.as_str().contains("Fake unpacker"), "{refused:?}");
+    assert!(
+        refused.message.as_str().contains("Fake unpacker"),
+        "{refused:?}"
+    );
     shutdown(owner).await;
 }
 
@@ -407,7 +432,10 @@ async fn a_multi_part_archive_waits_for_its_last_part() {
     let owner = env.start().await;
     let ids = submit(&owner, &["Set.part1.rar", "Set.part2.rar"]).await;
     let first = unpacking(&owner, ids[0], ExtractionState::Waiting).await;
-    assert_eq!(problem(&first), Some("Waiting for 1 more part to download."));
+    assert_eq!(
+        problem(&first),
+        Some("Waiting for 1 more part to download.")
+    );
     // Only the first part shows unpacking.
     assert_eq!(state(&job(&owner, ids[1]).await), None);
     assert!(fake.started.lock().unwrap().is_empty());
@@ -440,7 +468,10 @@ async fn a_protected_archive_asks_for_its_password() {
     extract(&owner, ids[0], Some(PASSWORD)).await.unwrap();
     let done = unpacking(&owner, ids[0], ExtractionState::Complete).await;
     assert_eq!(output(&done), Some("plans.txt"));
-    assert_eq!(std::fs::read(env.root.join("plans.txt")).unwrap(), b"secret");
+    assert_eq!(
+        std::fs::read(env.root.join("plans.txt")).unwrap(),
+        b"secret"
+    );
     // A password is used once: unpacking again asks for it again.
     extract(&owner, ids[0], None).await.unwrap();
     unpacking(&owner, ids[0], ExtractionState::NeedsPassword).await;
@@ -476,7 +507,13 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 async fn hostile_or_broken_archives_leave_nothing_beside_them() {
     let (env, fake) = env();
     let owner = env.start().await;
-    let names = ["evil.zip", "linked.zip", "liar.zip", "bomb.zip", "damaged.zip"];
+    let names = [
+        "evil.zip",
+        "linked.zip",
+        "liar.zip",
+        "bomb.zip",
+        "damaged.zip",
+    ];
     let ids = submit(&owner, &names).await;
     let mut problems = Vec::new();
     for id in &ids {
@@ -493,11 +530,11 @@ async fn hostile_or_broken_archives_leave_nothing_beside_them() {
             "The archive is damaged.",
         ]
     );
-    // The listing refused the first two before anything was unpacked.
-    assert_eq!(
-        *fake.started.lock().unwrap(),
-        ["liar.zip", "bomb.zip", "damaged.zip"]
-    );
+    // The listing refused the first two before anything was unpacked;
+    // downloads finish, and so are unpacked, in any order.
+    let mut started = fake.started.lock().unwrap().clone();
+    started.sort_unstable();
+    assert_eq!(started, ["bomb.zip", "damaged.zip", "liar.zip"]);
     // Only the archives remain, and no private folder.
     let mut kept: Vec<_> = names.iter().map(|n| n.to_string()).collect();
     kept.sort_unstable();

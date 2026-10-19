@@ -183,7 +183,8 @@ is never printed.
 | `GET /v1/jobs` | A page of jobs: `after`, `page_size`, `stage=a,b`, `package` |
 | `GET /v1/jobs/{id}` | One job |
 | `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
-| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"delete_files"\|"rename", "expected_revision"}`, plus `"name"` for a rename, and `"repeat_provider_operation": true` to retry a provider request whose answer was lost (needs `provider_downloads`) |
+| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"delete_files"\|"rename"\|"cancel_extraction", "expected_revision"}`, plus `"name"` for a rename, and `"repeat_provider_operation": true` to retry a provider request whose answer was lost (needs `provider_downloads`) |
+| `POST /v1/jobs/{id}/extract` | `{"idempotency_key", "target", "expected_revision", "password"?}`: unpacks a finished archive beside it (needs `control`). The password is kept in memory for that archive's next attempt only, never stored or logged |
 | `GET /v1/jobs/{id}/source` | The link the job was submitted with (needs `sources`) |
 | `POST /v1/staging/links` | Collect links for review without downloading them: `{"idempotency_key", "target", "text", "base_url"?, "mode"?: "analyze"\|"supported_only", "destination"?: "root-N"}`, where `text` is pasted text or a page's HTML (at most 512 KiB) and `base_url` the page it came from |
 | `GET /v1/staging/links` | A page of collected links: `after`, `page_size` |
@@ -519,7 +520,7 @@ YouTube now serves different streams. Without ffmpeg only Best video
 (the best format with sound included, usually 360p) and the limits it
 covers are offered.
 
-Settings > Plugins lists yt-dlp and ffmpeg with the version each reports
+Settings > Plugins lists yt-dlp, ffmpeg, and 7-Zip with the version each reports
 and whether it can be used. They are found on `PATH`, or where the
 `[plugins]` section of the configuration file says (`yt_dlp`, `ffmpeg`,
 and `yt_dlp_js_runtimes`, yt-dlp's `--js-runtimes` value), and are checked
@@ -544,8 +545,26 @@ Wayfetch installed and goes back to the one found before; a copy included
 in the image or found on `PATH` is never deleted, only turned off. Work
 already running keeps the copy it started with, and a replaced copy is
 deleted at the next start. Set `updates = false` in `[plugins]` to keep
-Settings from installing releases. ffmpeg is not updated this way: FFmpeg
-publishes no signed builds.
+Settings from installing releases. ffmpeg and 7-Zip are not updated this
+way: neither publishes signed builds.
+
+**Archives.** A finished download named like an archive (`.zip`, `.7z`,
+`.rar`, `.tar`, `.tar.gz` and the other compressed tars, and multi-part
+sets such as `.part1.rar`, `.r00`, `.z01`, or `.7z.001`) is unpacked by the
+7-Zip plugin (`7zz`, or the distributions' `7z`, 25.01 or newer; `seven_zip`
+in `[plugins]`) into a new folder beside it, named after the archive; an
+archive holding one file or folder gives just that. Nothing is ever
+replaced: a taken name becomes `Name (2)`. The archive is always kept. A
+multi-part set waits until no other part of it is still downloading in that
+folder. Settings > Downloads turns unpacking after download off or on, and a
+finished archive's row menu unpacks it, unpacks it again, or cancels
+unpacking. A protected archive shows Needs password, and Enter password…
+asks for it; the password goes to 7-Zip on its standard input and is never
+stored or logged. Archives whose listing names files outside their folder,
+links, or devices, and output larger than the listing says or that would
+nearly fill the drive, are refused, and only Wayfetch's private folder is
+removed. 7-Zip runs as a separate process that cancelling stops; it is not
+sandboxed beyond that.
 
 The UI adds direct links (one per line), lists jobs a page of 50 at a time in
 the order they were added, shows one job at `/jobs/job-N`, and pauses,
@@ -623,8 +642,8 @@ and the host opens only the file the engine published for it.
 The image holds `wayfetchd` and its plugins on a distroless Debian base
 with Python 3.11 and the system CA bundle: no shell or package manager. The
 plugins are yt-dlp with its YouTube player scripts (`yt-dlp-ejs`), Deno, and
-a static ffmpeg, each pinned by version and hash in the `Dockerfile`; a
-newer ffmpeg or Deno comes with a rebuilt image, and a newer yt-dlp also
+a static ffmpeg, and 7-Zip's static `7zzs`, each pinned by version and hash
+in the `Dockerfile`; a newer ffmpeg, Deno, or 7-Zip comes with a rebuilt image, and a newer yt-dlp also
 from Settings > Plugins (into the state volume). It is built with the toolchain in
 `rust-toolchain.toml` and `--locked` dependencies. `deploy/compose.yaml` runs
 it as a configurable UID/GID with a read-only root filesystem, a 16 MiB
@@ -860,5 +879,7 @@ MIT- and ISC-licensed JavaScript), [Deno](https://github.com/denoland/deno)
 (MIT), and the [static-ffmpeg](https://github.com/wader/static-ffmpeg)
 build of [FFmpeg](https://ffmpeg.org/legal.html) (GPL-3.0 or later, as built
 with libmp3lame, x264, and other GPL components; its source is linked from
-that project). Their license files are in the image's
+that project), and [7-Zip](https://7-zip.org/license.txt)'s official static
+build (GNU LGPL-2.1 or later, with BSD-licensed parts and the unRAR license
+restriction for its RAR code). Their license files are in the image's
 `/usr/local/share/licenses`; `ffmpeg -L` prints FFmpeg's.

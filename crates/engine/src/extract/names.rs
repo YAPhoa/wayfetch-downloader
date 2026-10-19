@@ -124,14 +124,27 @@ mod tests {
         ] {
             assert_eq!(parsed(name), Some((true, stem.into(), Layout::Direct)));
         }
-        for name in ["src.tar.gz", "src.tgz", "src.tar.xz", "src.tar.zst", "src.tbz2"] {
+        for name in [
+            "src.tar.gz",
+            "src.tgz",
+            "src.tar.xz",
+            "src.tar.zst",
+            "src.tbz2",
+        ] {
             assert_eq!(
                 parsed(name),
                 Some((true, "src".into(), Layout::CompressedTar)),
                 "{name}"
             );
         }
-        for name in ["movie.mkv", "notes.txt", ".zip", "a.part1.txt", "a.gz", "a.r0x"] {
+        for name in [
+            "movie.mkv",
+            "notes.txt",
+            ".zip",
+            "a.part1.txt",
+            "a.gz",
+            "a.r0x",
+        ] {
             assert_eq!(parsed(name), None, "{name}");
         }
     }

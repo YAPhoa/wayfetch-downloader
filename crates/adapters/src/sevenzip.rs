@@ -63,7 +63,7 @@ impl SevenZip {
     pub fn check() -> Check {
         Check {
             args: &[],
-            version: version,
+            version,
             env: Vec::new(),
         }
     }
@@ -89,7 +89,10 @@ impl SevenZip {
 /// `7-Zip 23.01 (x64) : ...` for the distributions' build.
 fn version(out: &str) -> Option<String> {
     let line = out.lines().find_map(|l| l.trim().strip_prefix("7-Zip "))?;
-    let line = line.strip_prefix("(z) ").or(line.strip_prefix("(a) ")).unwrap_or(line);
+    let line = line
+        .strip_prefix("(z) ")
+        .or(line.strip_prefix("(a) "))
+        .unwrap_or(line);
     let version = line.split_whitespace().next()?;
     numbers(version).map(|_| version.to_owned())
 }
@@ -273,7 +276,11 @@ impl Extractor for SevenZip {
             let output = self
                 .plugin
                 .program()
-                .run_with(list_arguments(&archive), input.as_ref().map(Secret::expose), limits)
+                .run_with(
+                    list_arguments(&archive),
+                    input.as_ref().map(Secret::expose),
+                    limits,
+                )
                 .await
                 .map_err(|e| failure(e, archive.password.is_some()))?;
             parse_listing(&String::from_utf8_lossy(&output.stdout))
@@ -374,11 +381,17 @@ mod tests {
             "x -o/r/.wayfetch/extract/4-g1 -y -bso0 -bsp0 -aou -snld0 -smemx4g -- /r/-x.zip"
         );
         assert!(pipe.is_empty());
-        assert_eq!(joined(&list_arguments(&with)), "l -slt -ba -y -bsp0 -- /r/-x.zip");
+        assert_eq!(
+            joined(&list_arguments(&with)),
+            "l -slt -ba -y -bsp0 -- /r/-x.zip"
+        );
         assert_eq!(password_line(&secret).expose(), b"hunter2\n");
         // Without one, 7-Zip is told there is none rather than asking.
         let without = archive(Layout::Direct, None);
-        assert_eq!(joined(&list_arguments(&without)), "l -slt -ba -y -bsp0 -p -- /r/-x.zip");
+        assert_eq!(
+            joined(&list_arguments(&without)),
+            "l -slt -ba -y -bsp0 -p -- /r/-x.zip"
+        );
     }
 
     #[test]
@@ -427,8 +440,14 @@ mod tests {
             stderr: stderr.into(),
         };
         let encrypted = "ERROR: a.7z : Cannot open encrypted archive. Wrong password?";
-        assert_eq!(failure(failed(encrypted), false), ExtractError::NeedsPassword);
-        assert_eq!(failure(failed(encrypted), true), ExtractError::WrongPassword);
+        assert_eq!(
+            failure(failed(encrypted), false),
+            ExtractError::NeedsPassword
+        );
+        assert_eq!(
+            failure(failed(encrypted), true),
+            ExtractError::WrongPassword
+        );
         assert_eq!(
             failure(failed("ERROR: Missing volume : a.part2.rar"), false),
             ExtractError::MissingVolume
@@ -457,7 +476,11 @@ mod real {
     async fn seven_zip() -> Option<SevenZip> {
         let path = std::env::var_os("WAYFETCH_TEST_7ZIP")?;
         let zip = SevenZip::detect(Some(path.into())).await;
-        assert!(Extractor::plugin(&zip).usable(), "{:?}", Extractor::plugin(&zip));
+        assert!(
+            Extractor::plugin(&zip).usable(),
+            "{:?}",
+            Extractor::plugin(&zip)
+        );
         Some(zip)
     }
 
@@ -482,7 +505,10 @@ mod real {
         std::fs::create_dir_all(src.join("d")).unwrap();
         std::fs::write(src.join("a.txt"), "hello").unwrap();
         std::fs::write(src.join("d/b.txt"), "world").unwrap();
-        make(&src, &["a", "-psecret word", "-mhe=on", "../p.7z", "a.txt", "d"]);
+        make(
+            &src,
+            &["a", "-psecret word", "-mhe=on", "../p.7z", "a.txt", "d"],
+        );
         let path = dir.path().join("p.7z");
         let without = archive_at(&path, None);
         assert_eq!(zip.list(without).await, Err(ExtractError::NeedsPassword));
@@ -498,8 +524,13 @@ mod real {
         assert_eq!(names, ["a.txt", "d", "d/b.txt"]);
         let out = dir.path().join("out");
         std::fs::create_dir(&out).unwrap();
-        zip.extract(archive_at(&path, Some(&right)), &out).await.unwrap();
-        assert_eq!(std::fs::read_to_string(out.join("d/b.txt")).unwrap(), "world");
+        zip.extract(archive_at(&path, Some(&right)), &out)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(out.join("d/b.txt")).unwrap(),
+            "world"
+        );
     }
 
     #[tokio::test]

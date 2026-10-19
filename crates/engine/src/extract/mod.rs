@@ -140,7 +140,9 @@ pub fn check_listing(entries: &[Entry]) -> Result<Option<u64>, String> {
                 total = total.zip(entry.size).and_then(|(t, s)| t.checked_add(s));
             }
             EntryKind::Directory => {}
-            EntryKind::Link => return Err("The archive holds links, which are not unpacked.".into()),
+            EntryKind::Link => {
+                return Err("The archive holds links, which are not unpacked.".into());
+            }
             EntryKind::Special => {
                 return Err("The archive holds devices or pipes, which are not unpacked.".into());
             }
@@ -184,7 +186,15 @@ mod tests {
         assert_eq!(check_listing(&ok), Ok(Some(10)));
         let unknown = [entry("a", EntryKind::File, None)];
         assert_eq!(check_listing(&unknown), Ok(None));
-        for bad in ["/etc/passwd", "../x", "d/../../x", "C:x", "\\x", "a\\..\\..\\x", ""] {
+        for bad in [
+            "/etc/passwd",
+            "../x",
+            "d/../../x",
+            "C:x",
+            "\\x",
+            "a\\..\\..\\x",
+            "",
+        ] {
             let listing = [entry(bad, EntryKind::File, Some(1))];
             assert!(check_listing(&listing).is_err(), "{bad}");
         }

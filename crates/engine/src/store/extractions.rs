@@ -79,7 +79,8 @@ fn row(tx: &Transaction<'_>, job: JobId) -> Result<Option<(ExtractionState, i64)
     .optional()?
     .map(|(state, generation)| {
         Ok((
-            ExtractionState::from_str(&state).map_err(|_| StoreError::Corrupt("extraction state"))?,
+            ExtractionState::from_str(&state)
+                .map_err(|_| StoreError::Corrupt("extraction state"))?,
             generation,
         ))
     })
@@ -265,26 +266,27 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let tx = self.write()?;
         let current = row(&tx, job)?;
-        let ours = current
-            .is_some_and(|(state, g)| state == ExtractionState::Extracting && g == sql(generation).unwrap_or(0));
+        let ours = current.is_some_and(|(state, g)| {
+            state == ExtractionState::Extracting && g == sql(generation).unwrap_or(0)
+        });
         let staging = format!("{}-g{}", job.get(), generation.get());
         tx.execute(
             "UPDATE extractions SET staging = NULL WHERE job_id = ?1 AND staging = ?2",
             params![sql(job)?, staging],
         )?;
         if ours {
-            let (state, output, problem): (ExtractionState, Option<&str>, Option<&str>) =
-                match end {
-                    ExtractionEnd::Complete(output) => {
-                        (ExtractionState::Complete, Some(output.as_str()), None)
-                    }
-                    ExtractionEnd::NeedsPassword(problem) => {
-                        (ExtractionState::NeedsPassword, None, problem.as_deref())
-                    }
-                    ExtractionEnd::Failed(problem) => {
-                        (ExtractionState::Failed, None, Some(problem.as_str()))
-                    }
-                };
+            let (state, output, problem): (ExtractionState, Option<&str>, Option<&str>) = match end
+            {
+                ExtractionEnd::Complete(output) => {
+                    (ExtractionState::Complete, Some(output.as_str()), None)
+                }
+                ExtractionEnd::NeedsPassword(problem) => {
+                    (ExtractionState::NeedsPassword, None, problem.as_deref())
+                }
+                ExtractionEnd::Failed(problem) => {
+                    (ExtractionState::Failed, None, Some(problem.as_str()))
+                }
+            };
             let state: &'static str = state.into();
             let problem = problem.map(DiagnosticText::new);
             tx.execute(
@@ -374,7 +376,9 @@ pub(super) fn extract(
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let job = jobs::load_listed(tx, id)?;
-    job.state.check_complete(expected).map_err(StoreError::from)?;
+    job.state
+        .check_complete(expected)
+        .map_err(StoreError::from)?;
     if !job.archive().is_some_and(|a| a.first) {
         return Err(ProtocolError::new(
             ErrorCode::NotApplicable,
@@ -403,7 +407,9 @@ pub(super) fn cancel(
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let job = jobs::load_listed(tx, id)?;
-    job.state.check_complete(expected).map_err(StoreError::from)?;
+    job.state
+        .check_complete(expected)
+        .map_err(StoreError::from)?;
     let active = row(tx, id)?.is_some_and(|(state, _)| {
         matches!(
             state,

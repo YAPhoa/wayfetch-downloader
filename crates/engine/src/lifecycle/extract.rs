@@ -67,7 +67,8 @@ impl Extractions {
 
     /// Keeps `password` for `job`'s next attempt.
     pub(super) fn give_password(&mut self, job: JobId, password: Secret) {
-        self.passwords.retain(|_, (_, at)| at.elapsed() < PASSWORD_TTL);
+        self.passwords
+            .retain(|_, (_, at)| at.elapsed() < PASSWORD_TTL);
         self.passwords.insert(job, (password, Instant::now()));
     }
 
@@ -171,7 +172,11 @@ impl Coordinator {
 
     /// Keeps `password` for `job`'s next attempt, from a request to unpack
     /// it.
-    pub(super) fn give_password(&mut self, job: JobId, password: String) -> Result<(), ProtocolError> {
+    pub(super) fn give_password(
+        &mut self,
+        job: JobId,
+        password: String,
+    ) -> Result<(), ProtocolError> {
         if let Some(why) = self.extractions.unavailable() {
             return Err(why);
         }
@@ -394,12 +399,7 @@ impl Attempt {
         }
         let (staging, parent, stem) = (
             self.start.staging.clone(),
-            self.start
-                .archive
-                .path
-                .split_last()
-                .0
-                .map(str::to_owned),
+            self.start.archive.path.split_last().0.map(str::to_owned),
             self.start.stem.clone(),
         );
         self.on_root(root, move |root| {

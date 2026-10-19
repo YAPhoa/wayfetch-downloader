@@ -79,7 +79,11 @@ impl Root {
     /// Counts what the private folder `name` holds, stopping early once it
     /// passes `budget` bytes or [`MAX_ENTRIES`]. Also says how many bytes
     /// are free on the root's filesystem, where it can tell.
-    pub fn tally_extraction(&self, name: &str, budget: u64) -> Result<(Tally, Option<u64>), FsError> {
+    pub fn tally_extraction(
+        &self,
+        name: &str,
+        budget: u64,
+    ) -> Result<(Tally, Option<u64>), FsError> {
         let dir = self.extraction(name)?;
         let mut tally = Tally::default();
         walk(&dir, 0, &mut |_, _, meta| {
@@ -169,16 +173,19 @@ impl Root {
             .open_dir(name)
             .map_err(FsError::io("open extraction folder"))?;
         let mut top = Vec::new();
-        for entry in staged.entries().map_err(FsError::io("list extraction folder"))? {
+        for entry in staged
+            .entries()
+            .map_err(FsError::io("list extraction folder"))?
+        {
             let entry = entry.map_err(FsError::io("list extraction folder"))?;
             top.push(entry.file_name());
             if top.len() > 1 {
                 break;
             }
         }
-        let target = self.parent_dir(parent, false)?.ok_or_else(|| {
-            FsError::io("open archive folder")(io::ErrorKind::NotFound.into())
-        })?;
+        let target = self
+            .parent_dir(parent, false)?
+            .ok_or_else(|| FsError::io("open archive folder")(io::ErrorKind::NotFound.into()))?;
         // Its only entry, if its name is one every platform accepts.
         let single = match top.as_slice() {
             [only] => only
@@ -236,7 +243,10 @@ impl Root {
 
     /// The root's folder of private extraction folders, if it exists.
     fn extractions(&self) -> Result<Option<Dir>, FsError> {
-        match self.dir.open_dir(std::path::Path::new(PRIVATE_DIR).join(EXTRACT)) {
+        match self
+            .dir
+            .open_dir(std::path::Path::new(PRIVATE_DIR).join(EXTRACT))
+        {
             Ok(dir) => Ok(Some(dir)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(FsError::io("open extraction directory")(e)),
@@ -285,7 +295,9 @@ fn walk(
         ));
     }
     for entry in dir.entries().map_err(FsError::io("list unpacked folder"))? {
-        let name = entry.map_err(FsError::io("list unpacked folder"))?.file_name();
+        let name = entry
+            .map_err(FsError::io("list unpacked folder"))?
+            .file_name();
         let meta = dir
             .symlink_metadata(&name)
             .map_err(FsError::io("inspect unpacked entry"))?;
@@ -347,10 +359,16 @@ mod tests {
         std::fs::create_dir(tmp.path().join("Game")).unwrap();
         let path = root.publish_extraction("7-g1", None, "Game").unwrap();
         assert_eq!(path.as_str(), "Game (2)");
-        assert_eq!(std::fs::read(tmp.path().join("Game (2)/d/b.txt")).unwrap(), b"bye");
+        assert_eq!(
+            std::fs::read(tmp.path().join("Game (2)/d/b.txt")).unwrap(),
+            b"bye"
+        );
         assert!(!staging.exists());
         // The name taken first was left alone.
-        assert_eq!(std::fs::read_dir(tmp.path().join("Game")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(tmp.path().join("Game")).unwrap().count(),
+            0
+        );
     }
 
     #[test]
@@ -365,7 +383,10 @@ mod tests {
             .publish_extraction("8-g2", Some("Movies"), "film")
             .unwrap();
         assert_eq!(path.as_str(), "Movies/film (2).mkv");
-        assert_eq!(std::fs::read(tmp.path().join("Movies/film.mkv")).unwrap(), b"mine");
+        assert_eq!(
+            std::fs::read(tmp.path().join("Movies/film.mkv")).unwrap(),
+            b"mine"
+        );
 
         let staging = root.create_extraction("8-g3").unwrap();
         fill(&staging, &[("Game/data.bin", b"d")]);
@@ -400,7 +421,10 @@ mod tests {
         )
         .unwrap();
         root.check_extraction("1-g1", 100).unwrap();
-        let mode = std::fs::metadata(staging.join("a")).unwrap().permissions().mode();
+        let mode = std::fs::metadata(staging.join("a"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o7777, 0o600);
 
         root.remove_extraction("1-g1").unwrap();

@@ -518,8 +518,16 @@ mod tests {
         let stale = update_settings(&tx, first, Some(root), None, None, None, now()).unwrap_err();
         assert_eq!(stale.code, ErrorCode::RevisionConflict);
         assert_eq!(stale.current_revision, first.next().ok());
-        let same =
-            update_settings(&tx, first.next().unwrap(), Some(root), None, None, None, now()).unwrap();
+        let same = update_settings(
+            &tx,
+            first.next().unwrap(),
+            Some(root),
+            None,
+            None,
+            None,
+            now(),
+        )
+        .unwrap();
         assert_eq!(
             same,
             CommandResult::SettingsUpdated {

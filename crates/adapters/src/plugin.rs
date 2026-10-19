@@ -203,7 +203,12 @@ impl Program {
     /// standard input, and returns `into`'s output if both succeeded.
     /// Neither has other input. A failure is the first one's, if it
     /// failed, since the second then usually fails for want of input.
-    pub async fn pipe<I, J, S, T>(&self, from: I, into: J, limits: Limits) -> Result<Output, RunError>
+    pub async fn pipe<I, J, S, T>(
+        &self,
+        from: I,
+        into: J,
+        limits: Limits,
+    ) -> Result<Output, RunError>
     where
         I: IntoIterator<Item = S>,
         J: IntoIterator<Item = T>,

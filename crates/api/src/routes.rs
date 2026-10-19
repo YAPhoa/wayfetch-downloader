@@ -60,8 +60,8 @@ use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::{FolderListing, JobFilter, PageSize, RootSummary};
 use wayfetch_engine::protocol::request::{
     AccountCommandRequest, AddRootRequest, AuthorizeAccountRequest, ChangePluginRequest,
-    CollectRequest, ExtractRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
-    UpdateSettingsRequest,
+    CollectRequest, ExtractRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest,
+    SubmitRequest, UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
     CommandEnvelope, ErrorCode, EventCursor, Hello, InstanceId, Query, QueryResult, StreamItem,
@@ -196,7 +196,9 @@ pub async fn extract(
     Path(id): Path<String>,
     JsonBody(request): JsonBody<ExtractRequest>,
 ) -> ApiResult<CommandResult> {
-    Ok(Json(app.engine.extract(job_id(&id)?, request, &grant.0).await?))
+    Ok(Json(
+        app.engine.extract(job_id(&id)?, request, &grant.0).await?,
+    ))
 }
 
 /// The default destination, the roots a client may choose, and the

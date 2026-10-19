@@ -118,6 +118,20 @@ impl StoredJob {
         self.artifact.as_ref().map(|a| a.root)
     }
 
+    /// Every complete download of an archive's first volume can be
+    /// unpacked, whether or not it was yet; nothing else shows unpacking.
+    fn offer_extraction(&mut self) {
+        if self.state.stage() != JobStage::Complete || !self.archive().is_some_and(|a| a.first) {
+            self.extraction = None;
+        } else if self.extraction.is_none() {
+            self.extraction = Some(ExtractionSummary {
+                state: ExtractionState::Idle,
+                output: None,
+                problem: None,
+            });
+        }
+    }
+
     /// The file name the job has or will have, if known.
     pub(super) fn name(&self) -> Option<&str> {
         match &self.artifact {
@@ -256,17 +270,9 @@ impl RawJob {
             route: operations::decode_route(self.route.0, self.route.1)?,
             name,
             media: decode_media(self.media.0, self.media.1.as_deref())?,
-            extraction: None,
+            extraction,
         };
-        // Every complete download of an archive's first volume can be
-        // unpacked, whether or not it was yet.
-        if job.state.stage() == JobStage::Complete && job.archive().is_some_and(|a| a.first) {
-            job.extraction = Some(extraction.unwrap_or(ExtractionSummary {
-                state: ExtractionState::Idle,
-                output: None,
-                problem: None,
-            }));
-        }
+        job.offer_extraction();
         Ok(job)
     }
 }
@@ -377,6 +383,7 @@ pub(super) fn save(
     if matches!(job.state.stage(), JobStage::Complete | JobStage::Cancelled) {
         operations::retire_links(tx, job.id)?;
     }
+    job.offer_extraction();
     outbox::append(
         tx,
         &EventKind::JobChanged {
