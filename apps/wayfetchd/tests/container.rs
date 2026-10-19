@@ -50,7 +50,7 @@ fn image() -> &'static str {
         if let Ok(image) = std::env::var("WAYFETCH_IMAGE") {
             return image;
         }
-        // The README's build command.
+        // deploy/README.md's build command.
         let out = Command::new("docker")
             .args(["build", "--quiet", "--tag", "wayfetch:local", REPO])
             .output()

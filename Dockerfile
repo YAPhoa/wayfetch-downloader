@@ -2,8 +2,8 @@
 #
 # The wayfetchd server image (architecture brief section 11.4): built with
 # the toolchain pinned in rust-toolchain.toml and the locked dependencies,
-# and run as a non-root user with no shell or package manager. See the
-# README's "Running in a container" and deploy/compose.yaml.
+# and run as a non-root user with no shell or package manager. See
+# deploy/README.md and deploy/compose.yaml.
 
 # Base images are pinned by digest; update tag and digest together. The
 # Rust tag names the toolchain in rust-toolchain.toml (a packaging test

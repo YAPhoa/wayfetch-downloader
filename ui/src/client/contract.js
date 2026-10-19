@@ -15,7 +15,7 @@ export const PROTOCOL = Object.freeze({ major: 5, minor: 0 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
- * `./generated` (see the README's web UI section).
+ * `./generated` (see ui/README.md).
  * @typedef {import('./generated/JobId.js').JobId} JobId
  * @typedef {import('./generated/ProtocolVersion.js').ProtocolVersion} ProtocolVersion
  * @typedef {import('./generated/EventCursor.js').EventCursor} EventCursor

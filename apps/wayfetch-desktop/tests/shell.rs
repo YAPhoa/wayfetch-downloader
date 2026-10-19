@@ -27,7 +27,7 @@
 //!
 //! These tests need an X display (`DISPLAY`, for example from `xvfb-run`)
 //! and `WebKitWebDriver` on `PATH`, so they are ignored by default; see
-//! the README's desktop section.
+//! apps/wayfetch-desktop/README.md.
 
 #![cfg(target_os = "linux")]
 
