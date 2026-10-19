@@ -37,6 +37,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0014_download_removal.sql")),
     M::up(include_str!("migrations/0015_job_names.sql")),
     M::up(include_str!("migrations/0016_media_links.sql")),
+    M::up(include_str!("migrations/0017_root_removal.sql")),
     M::up(include_str!("migrations/0018_link_checks.sql")),
 ];
 

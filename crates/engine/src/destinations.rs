@@ -376,7 +376,7 @@ pub(crate) struct Destinations {
     /// Configured paths not identified yet, in configuration order.
     pending: Vec<PathBuf>,
     /// Every path the operator configured, the download root included:
-    /// permitted while configured, so the user cannot remove them.
+    /// permitted while configured, unless the user removed it.
     configured: Vec<PathBuf>,
     /// Settings revision.
     revision: Revision,
@@ -415,15 +415,17 @@ impl Destinations {
         self.pending.is_empty()
     }
 
-    /// Identifies configured paths the store already records. A path
-    /// being registered is left for later: its record may not have a
-    /// sentinel yet. No filesystem access.
+    /// Identifies configured paths the store already records, and drops
+    /// those the user removed. A path being registered is left for later:
+    /// its record may not have a sentinel yet. No filesystem access.
     pub(crate) fn recall(&mut self, store: &mut Store, probes: &Probes) {
         let pending = std::mem::take(&mut self.pending);
         for path in pending {
-            match recorded(store, &path) {
-                Ok(Some(id)) if !probes.busy(&path) => {
-                    self.known.insert(id, path);
+            match store.root_at(&path) {
+                Ok(Some(row)) if !probes.busy(&path) => {
+                    if !row.removed {
+                        self.known.insert(row.id, path);
+                    }
                 }
                 _ => self.pending.push(path),
             }
@@ -455,7 +457,7 @@ impl Destinations {
     }
 
     /// Whether permitted root `id` was added by the user rather than
-    /// configured, so they may remove it.
+    /// configured.
     pub(crate) fn added(&self, id: RootId) -> bool {
         self.known
             .get(&id)

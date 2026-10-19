@@ -192,7 +192,7 @@ is never printed.
 | `PUT /v1/settings` | `{"idempotency_key", "target", "expected_revision"}` with `"default_root": "root-N"`, `"max_active_downloads": {"set": N}` or `"use_default"`, `"download_speed_limit": {"set": "unlimited"}`, `{"set": {"bytes_per_second": N}}` or `"use_default"`, or any of them together, all or none (needs `control`) |
 | `GET /v1/folders` | The folders inside `path` (absolute; the top of the filesystem if absent), without hidden ones, at most 1,000 (needs `control`) |
 | `POST /v1/roots` | Add the server folder `{"path"}` as a destination, returning it with its `id` (needs `control`) |
-| `POST /v1/roots/remove` | Stop offering a folder the user added (`{"idempotency_key", "target", "expected_revision", "root"}`); its files stay (needs `control`) |
+| `POST /v1/roots/remove` | Stop offering a folder that is not the default, configured ones included (`{"idempotency_key", "target", "expected_revision", "root"}`); its files stay (needs `control`) |
 | `GET /v1/accounts` | The credential vault's state, the services accounts can be added for, and the accounts added, redacted (needs `accounts`) |
 | `POST /v1/accounts/authorizations` | Start a sign-in: `{"idempotency_key", "target", "service": "real-debrid", "alias"?}`, or `"account": {"account", "revision"}` to sign an account in again (needs `accounts`) |
 | `GET /v1/accounts/authorizations/{id}`, `POST .../{id}/cancel` | A sign-in's code and state, or cancel it (needs `accounts`) |
@@ -472,9 +472,10 @@ response filename metadata while downloading. These safe hints survive restart;
 published or renamed file names take precedence. Opaque links keep their job ID
 until a name is available. No extra source requests are made for names.
 
-Settings chooses the default folder for new downloads among those the
-server permits, shown as server paths (jobs already added keep theirs),
-and the row density, which is kept in this browser. Its Accounts &
+Settings lists the folders new downloads may be saved to, shown as server
+paths: any folder but the default can be made the default or removed (its
+files stay; jobs already added keep their folder), and folders can be added.
+It also sets the row density, which is kept in this browser. Its Accounts &
 services section is a table of the accounts added, each with its status
 (Signed in, Sign in again, Could not check, Not checked, Disabled, or Locked),
 its plan and expiry when the provider reports them, and buttons to check

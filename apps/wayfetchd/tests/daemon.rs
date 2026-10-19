@@ -702,8 +702,8 @@ async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
     );
     assert_eq!(root["added"], true);
 
-    // A folder the user added can be removed, with `control`; the
-    // operator's cannot. Its files stay.
+    // A folder that is not the default can be removed, with `control`;
+    // the operator's is the default here, so it cannot. Its files stay.
     std::fs::write(parent.join("films/kept.bin"), b"kept").unwrap();
     let removal = |root: &serde_json::Value| {
         client.command(json!({ "expected_revision": settings["revision"], "root": root["id"] }))
@@ -737,6 +737,36 @@ async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
         "{settings}"
     );
     assert!(parent.join("films/kept.bin").exists());
+    // Once another folder is the default, the operator's goes too, and
+    // stays gone across a restart until it is added again.
+    let (_, root) = client.post("/v1/roots", &add).await;
+    let (_, settings) = client.get("/v1/settings").await;
+    let choose = client.command(json!({
+        "expected_revision": settings["revision"],
+        "default_root": root["id"],
+    }));
+    let (status, chosen) = client.put("/v1/settings", &choose).await;
+    assert_eq!(status, StatusCode::OK, "{chosen}");
+    let (_, settings) = client.get("/v1/settings").await;
+    let remove = client.command(json!({
+        "expected_revision": settings["revision"],
+        "root": configured["id"],
+    }));
+    let (status, removed) = client.post("/v1/roots/remove", &remove).await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    daemon.stop("TERM").await;
+    let daemon = Daemon::start(&dirs).await;
+    let client = daemon.owner();
+    let (_, settings) = client.get("/v1/settings").await;
+    assert_eq!(settings["default_root"], root["id"]);
+    assert!(
+        !settings["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == configured["id"]),
+        "{settings}"
+    );
     // The daemon's own state cannot become a destination.
     let (status, error) = client
         .post("/v1/roots", &json!({ "path": dirs.state }))
