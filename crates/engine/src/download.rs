@@ -136,15 +136,10 @@ fn failed(code: FailureCode, message: impl ToString) -> Stop {
     Stop::Park(JobStage::Failed, code, message.to_string())
 }
 
-/// Parks on a filesystem error: blocked on an unavailable destination,
-/// failed otherwise.
+/// Fails on a filesystem error, with the code that says whether the
+/// destination needs fixing.
 fn park_fs(err: &FsError) -> Stop {
-    let code = err.failure_code();
-    let stage = match code {
-        FailureCode::IntegrityMismatch => JobStage::Failed,
-        _ => JobStage::Blocked,
-    };
-    Stop::Park(stage, code, err.to_string())
+    failed(err.failure_code(), err)
 }
 
 /// Whether a filesystem error means the partial is gone or damaged, so the
@@ -951,11 +946,7 @@ impl Download {
             Err(e @ (WriteError::Overflow { .. } | WriteError::Truncated { .. })) => {
                 Err(failed(FailureCode::IntegrityMismatch, e))
             }
-            Err(e @ WriteError::File(_)) => Err(Stop::Park(
-                JobStage::Blocked,
-                FailureCode::DestinationUnavailable,
-                e.to_string(),
-            )),
+            Err(e @ WriteError::File(_)) => Err(failed(FailureCode::DestinationUnavailable, e)),
             // The commit loop stopped first and said why.
             Err(WriteError::CheckpointsClosed) => Err(Stop::Abandon),
         }
@@ -1021,8 +1012,7 @@ impl Download {
                 Err(e) => return Err(park_fs(&e)),
             }
         }
-        Err(Stop::Park(
-            JobStage::Blocked,
+        Err(failed(
             FailureCode::DestinationUnavailable,
             format!("no free name like {name} after {NAME_ATTEMPTS} attempts"),
         ))

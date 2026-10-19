@@ -249,10 +249,7 @@ pub async fn wait_for(
 
 pub async fn complete(owner: &EngineOwner, id: JobId) -> JobSummary {
     wait_for(owner, id, |j| {
-        assert!(
-            !matches!(j.stage, JobStage::Failed | JobStage::Blocked),
-            "{j:?}"
-        );
+        assert!(j.stage != JobStage::Failed, "{j:?}");
         j.stage == JobStage::Complete
     })
     .await

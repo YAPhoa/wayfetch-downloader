@@ -79,10 +79,7 @@ pub(super) struct NewMedia {
 
 /// Stages that are parked with a failure explaining why.
 fn parked(stage: JobStage) -> bool {
-    matches!(
-        stage,
-        JobStage::Waiting | JobStage::Blocked | JobStage::NeedsInput | JobStage::Failed
-    )
+    stage == JobStage::Failed
 }
 
 /// A stored job, decoded and validated.
