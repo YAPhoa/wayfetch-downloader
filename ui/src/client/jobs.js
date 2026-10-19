@@ -10,9 +10,9 @@
  * @typedef {import('./generated/FailureCode.js').FailureCode} FailureCode
  * @typedef {import('./generated/FailureSummary.js').FailureSummary} FailureSummary
  *
- * How a state reads at a glance: running, waiting on something, quietly
- * stopped, gone wrong, or finished.
- * @typedef {'run' | 'warn' | 'calm' | 'bad' | 'ok'} Tone
+ * How a state reads at a glance: running, waiting its turn, waiting on
+ * something, paused, quietly stopped, gone wrong, or finished.
+ * @typedef {'run' | 'queue' | 'warn' | 'hold' | 'calm' | 'bad' | 'ok'} Tone
  */
 
 /**
@@ -80,7 +80,7 @@ export function canRemove(job) {
  * @type {Readonly<Record<DisplayState, [string, Tone]>>}
  */
 const STATES = Object.freeze({
-  queued: ['Queued', 'calm'],
+  queued: ['Queued', 'queue'],
   resolving: ['Starting', 'run'],
   transferring: ['Downloading', 'run'],
   verifying: ['Checking file', 'run'],
@@ -88,12 +88,12 @@ const STATES = Object.freeze({
   recovering: ['Recovering', 'run'],
   waiting: ['Waiting', 'warn'],
   needs_input: ['Needs your answer', 'warn'],
-  paused: ['Paused', 'calm'],
+  paused: ['Paused', 'hold'],
   blocked: ['Blocked', 'warn'],
   complete: ['Done', 'ok'],
   failed: ['Failed', 'bad'],
   cancelled: ['Cancelled', 'calm'],
-  pausing: ['Pausing…', 'calm'],
+  pausing: ['Pausing…', 'hold'],
   stopping: ['Stopping…', 'calm'],
 });
 
@@ -196,8 +196,8 @@ export const GROUPS = Object.freeze([
     stages: stages('resolving', 'transferring', 'verifying', 'publishing', 'recovering'),
   },
   { key: 'waiting', label: 'Waiting', tone: 'warn', stages: stages('waiting', 'needs_input', 'blocked') },
-  { key: 'paused', label: 'Paused', tone: 'calm', stages: stages('paused') },
-  { key: 'queued', label: 'Queued', tone: 'calm', stages: stages('queued') },
+  { key: 'paused', label: 'Paused', tone: 'hold', stages: stages('paused') },
+  { key: 'queued', label: 'Queued', tone: 'queue', stages: stages('queued') },
   { key: 'failed', label: 'Failed', tone: 'bad', stages: stages('failed') },
   { key: 'cancelled', label: 'Cancelled', tone: 'calm', stages: stages('cancelled') },
   { key: 'done', label: 'Done', tone: 'ok', stages: stages('complete') },

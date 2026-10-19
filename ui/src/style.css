@@ -45,7 +45,9 @@
   --track: #e3e6ec;
   --run: #1f4fa0;
   --ok: #1d6b3a;
+  --queue: #0b6670;
   --warn: #8a4300;
+  --hold: #7a5c00;
   --bad: #b42318;
   --calm: #5f6878;
   --note-warn: #fbebd9;
@@ -83,7 +85,9 @@
   --track: #262d37;
   --run: #7da6ee;
   --ok: #6fcf97;
+  --queue: #5ec4cc;
   --warn: #f0a65a;
+  --hold: #e3c45a;
   --bad: #f2877c;
   --calm: #a0aab8;
   --note-warn: #33261a;
@@ -208,8 +212,10 @@ code { font-family: ui-monospace, monospace; }
 /* Tones: text and dots share one colour per tone. */
 
 .tone-run { color: var(--run); }
+.tone-queue { color: var(--queue); }
 .tone-ok { color: var(--ok); }
 .tone-warn { color: var(--warn); }
+.tone-hold { color: var(--hold); }
 .tone-bad { color: var(--bad); }
 .tone-calm { color: var(--calm); }
 
@@ -419,7 +425,6 @@ code { font-family: ui-monospace, monospace; }
   text-align: left;
 }
 
-.filter .dot { color: var(--calm); }
 .filter .filter-label { flex: 1; }
 .filter .count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
 .filter:hover:not(:disabled) { background: var(--filter-hover); }

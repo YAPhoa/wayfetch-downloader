@@ -124,6 +124,9 @@ test('states read as plain words with what went wrong', () => {
     tone: 'run',
   });
   assert.equal(describe(job({ stage: 'transferring', display: 'pausing' })).label, 'Pausing…');
+  assert.equal(describe(job({ stage: 'queued', display: 'queued' })).tone, 'queue');
+  assert.equal(describe(job({ stage: 'paused', display: 'paused' })).tone, 'hold');
+  assert.equal(describe(job({ stage: 'cancelled', display: 'cancelled' })).tone, 'calm');
   const expired = { code: /** @type {const} */ ('lease_expired') };
   assert.deepEqual(describe(job({ stage: 'failed', display: 'failed', failure: expired })), {
     label: 'Failed: link expired',
