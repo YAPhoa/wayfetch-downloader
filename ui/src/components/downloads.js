@@ -34,11 +34,12 @@ import {
   retryPlan,
 } from '../client/jobs.js';
 import { count, refusals } from '../client/links.js';
+import { pagePlace } from '../client/pages.js';
 import { routeLabel } from '../client/routes.js';
 import { Selection } from '../client/selection.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, refocus, show } from './dom.js';
+import { copyText, focusedKey, h, pagerBar, refocus, show } from './dom.js';
 import { icon } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu, rowMenuHandlers } from './menu.js';
@@ -205,6 +206,8 @@ export class Downloads {
     /** `after` of each earlier page, for going back. */
     /** @type {(JobId | null)[]} */
     this.earlier = [];
+    /** Set while going back from a page that emptied. */
+    this.goingBack = false;
     /** Rendered rows by job, reused while nothing they show changed. */
     /**
      * @type {Map<JobId, {
@@ -250,7 +253,6 @@ export class Downloads {
     /** Connection state, for the status bar. */
     this.status = h('span', { class: 'status', role: 'status', 'data-status': 'connecting' });
     this.speed = h('span', { class: 'speed' });
-    this.shown = h('span', { class: 'shown' });
     this.banner = h('div', { class: 'banner', role: 'alert', hidden: true });
     this.noticeLine = h('p', { class: 'notice', role: 'status' });
     /**
@@ -267,7 +269,7 @@ export class Downloads {
       'aria-label': 'Select all downloads shown',
       onchange: () => this.tick(this.shownJobs, this.selectAll.checked),
     });
-    this.selectionLine = h('p', { class: 'selection-summary', role: 'status' });
+    this.selectionLine = h('p', { class: 'selection-summary reserved', role: 'status' });
     this.actionButtons = STATE_ACTIONS.map((action) =>
       h(
         'button',
@@ -397,7 +399,6 @@ export class Downloads {
         { class: 'statusbar' },
         this.status,
         this.speed,
-        this.shown,
         h('span', { class: 'spacer' }),
         account,
       ),
@@ -1449,12 +1450,15 @@ export class Downloads {
 
   /**
    * How many downloads are ticked, with a way to untick them, and how
-   * many of them the name filter hides, which commands leave out.
+   * many of them the name filter hides, which commands leave out. While
+   * downloads are shown the line keeps its room, empty when none is
+   * ticked, so ticking one moves no row.
    * @param {readonly JobSummary[]} shown
    */
   renderSelection(shown) {
     const ticked = this.selection.chosen(shown).length;
     const hidden = this.selection.size - ticked;
+    this.selectionLine.hidden = shown.length === 0 && this.selection.size === 0;
     show(
       this.selectionLine,
       ticked > 0 && h('strong', null, `${count(ticked, 'download')} selected`),
@@ -1528,32 +1532,40 @@ export class Downloads {
       else empty = 'No downloads yet. Use Add links to collect some, then start them on the Links page.';
     }
     show(this.listStatus, empty);
+    const counts = feed.counts?.stages;
+    const group = GROUPS.find((g) => g.key === this.group);
+    const more = feed.nextAfter !== null;
+    // A page emptied by removals or filter changes: show the one before it.
+    if (feed.status === 'live' && feed.jobs.length === 0 && this.earlier.length > 0 && !this.goingBack) {
+      this.goingBack = true;
+      void this.page('back').finally(() => (this.goingBack = false));
+    }
     show(
       this.pager,
-      this.earlier.length > 0 &&
-        h(
-          'button',
-          { type: 'button', 'data-key': 'page-back', onclick: () => this.page('back') },
-          'Previous page',
-        ),
-      feed.nextAfter !== null &&
-        h(
-          'button',
-          { type: 'button', 'data-key': 'page-next', onclick: () => this.page('next') },
-          'Next page',
-        ),
+      (feed.jobs.length > 0 || this.earlier.length > 0) &&
+        pagerBar({
+          place: pagePlace({
+            earlier: this.earlier.length,
+            before: feed.before,
+            size: PAGE_SIZE,
+            rows: feed.jobs.length,
+            more,
+            total: counts && group ? groupCount(group, counts) : null,
+          }),
+          more,
+          key: 'page',
+          onPage: (direction) => this.page(direction),
+        }),
     );
 
     const rates = feed.jobs.flatMap((job) => feed.sample(job.id)?.bytes_per_second ?? []);
     show(this.speed, rates.length > 0 && `Down ${formatBytes(rates.reduce((a, b) => a + b, 0))}/s`);
-    const page = this.earlier.length + 1;
-    show(
-      this.shown,
-      `${feed.jobs.length} ${feed.jobs.length === 1 ? 'download' : 'downloads'} on page ${page}`,
-    );
   }
 
-  /** @param {'next' | 'back'} direction */
+  /**
+   * @param {'next' | 'back'} direction
+   * @returns {Promise<void>}
+   */
   page(direction) {
     const { feed } = this;
     let after;
@@ -1564,7 +1576,7 @@ export class Downloads {
       after = this.earlier.pop() ?? null;
     }
     this.notice = '';
-    feed.showPage(after).catch((error) => this.report(error));
+    return feed.showPage(after).catch((error) => this.report(error));
   }
 
   /**
@@ -1669,8 +1681,10 @@ export class Downloads {
   renderInspector() {
     const { feed } = this;
     const job = feed.watchedJob;
+    // With no download chosen there are no details, so the table keeps the room.
+    this.inspector.hidden = feed.watched === null;
     if (feed.watched === null) {
-      show(this.inspector, h('p', { class: 'empty' }, 'Select a download to see its details.'));
+      show(this.inspector);
       return;
     }
     if (!job) {

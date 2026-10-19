@@ -298,6 +298,12 @@ pub struct Page<T> {
     /// Pass as `after` to get the next page; absent on the last page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_after: Option<JobId>,
+    /// How many items that match the query come before this page, so a
+    /// client can say where the page sits. Added in protocol 4.3; an
+    /// older engine omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub before: Option<u64>,
     /// The page reflects every durable event up to and including this
     /// cursor. Subscribe after it to follow later changes.
     pub as_of: EventCursor,
@@ -556,6 +562,11 @@ pub struct LinkPage {
     pub next_after: Option<SourceLinkId>,
     /// How many links are collected in all.
     pub total: u64,
+    /// How many collected links come before this page. Added in protocol
+    /// 4.3; an older engine omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub before: Option<u64>,
     /// The page reflects every durable event up to and including this
     /// cursor.
     pub as_of: EventCursor,
