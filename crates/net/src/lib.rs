@@ -2,7 +2,8 @@
 //! host hands to the engine, and the broker that holds prepared requests
 //! and open responses for transfer leases (architecture brief sections 6.5,
 //! 7.5, and 8.2). The same transport is the engine's API client for
-//! account integrations' metadata requests.
+//! account integrations' metadata requests, and the inspector that sends
+//! collected links' checks.
 //!
 //! The engine decides what to request and whether a response may be
 //! written ([`wayfetch_engine::transfer`]); this crate sends requests under
@@ -13,6 +14,7 @@
 mod api;
 mod body;
 mod head;
+mod inspect;
 mod policy;
 mod transport;
 

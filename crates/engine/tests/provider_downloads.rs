@@ -32,7 +32,7 @@ use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
 use wayfetch_protocol::account::{
     AccountAlias, AccountPlan, AccountRef, AuthorizationMethod, AuthorizationState, ServiceSupport,
 };
-use wayfetch_protocol::command::{CollectItems, LinkRef, LinkRefs};
+use wayfetch_protocol::command::{CollectMode, CollectText, LinkRef, LinkRefs};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::{AccountId, JobId};
 use wayfetch_protocol::domain::job::JobStage;
@@ -597,9 +597,10 @@ async fn account_revision(
 }
 
 async fn collect(owner: &EngineOwner, links: &[&str]) -> Vec<CollectedLink> {
-    let items = links.iter().map(|l| (*l).to_owned()).collect::<Vec<_>>();
     let command = Command::CollectLinks {
-        items: CollectItems::try_from(items).unwrap(),
+        text: CollectText::try_from(links.join("\n")).unwrap(),
+        base_url: None,
+        mode: CollectMode::Analyze,
         destination: None,
     };
     owner

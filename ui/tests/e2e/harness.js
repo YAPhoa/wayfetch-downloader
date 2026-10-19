@@ -42,8 +42,10 @@ export function content(start, end) {
 
 /**
  * A plain-HTTP server on 127.0.0.1 serving generated files with ranges
- * and a strong validator. A file can stall at an offset until released,
- * so a test can act while its download is in progress.
+ * and a strong validator, and web pages. A file can stall at an offset
+ * until released, so a test can act while its download is in progress.
+ * `HEAD`, which link checks send, answers a file's headers and is logged
+ * apart from downloads.
  */
 export class Fixture {
   constructor() {
@@ -53,6 +55,10 @@ export class Fixture {
     this.requested = [];
     /** Each request's Range header, or null, in order. @type {(string | null)[]} */
     this.ranges = [];
+    /** Names of the files checked with `HEAD` so far, in order. @type {string[]} */
+    this.checked = [];
+    /** Web pages by name. @type {Map<string, string>} */
+    this.pages = new Map();
     this.server = createServer((request, response) => void this.serve(request, response));
   }
 
@@ -74,6 +80,16 @@ export class Fixture {
   put(name, size, stallAt = null, filename = null) {
     this.files.set(name, { size, stallAt, filename, etag: '"v1"', waiters: [] });
     return `${this.base}/files/${encodeURIComponent(name)}`;
+  }
+
+  /**
+   * Serves `html` as web page `name`.
+   * @param {string} name
+   * @param {string} html
+   */
+  page(name, html) {
+    this.pages.set(name, html);
+    return `${this.base}/pages/${encodeURIComponent(name)}`;
   }
 
   /** @param {string} name */
@@ -99,11 +115,23 @@ export class Fixture {
    */
   async serve(request, response) {
     // A query, like a CDN's signed token, does not name the file.
-    const name = decodeURIComponent(new URL(request.url ?? '/', this.base).pathname.replace(/^\/files\//, ''));
-    this.requested.push(name);
-    this.ranges.push(request.headers.range ?? null);
+    const path = new URL(request.url ?? '/', this.base).pathname;
+    const page = path.startsWith('/pages/') ? this.pages.get(decodeURIComponent(path.slice('/pages/'.length))) : undefined;
+    if (page !== undefined) {
+      const body = Buffer.from(page);
+      response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length });
+      response.end(request.method === 'HEAD' ? undefined : body);
+      return;
+    }
+    const name = decodeURIComponent(path.replace(/^\/files\//, ''));
     const file = this.files.get(name);
-    if (!file || request.method !== 'GET') {
+    if (request.method === 'HEAD') {
+      this.checked.push(name);
+    } else {
+      this.requested.push(name);
+      this.ranges.push(request.headers.range ?? null);
+    }
+    if (!file || (request.method !== 'GET' && request.method !== 'HEAD')) {
       response.writeHead(404).end();
       return;
     }
@@ -125,6 +153,10 @@ export class Fixture {
       });
     } else {
       response.writeHead(200, { ...headers, 'Content-Length': file.size });
+    }
+    if (request.method === 'HEAD') {
+      response.end();
+      return;
     }
     // The headers go out even if the body stalls at once.
     response.flushHeaders();

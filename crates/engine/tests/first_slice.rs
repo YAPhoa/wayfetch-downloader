@@ -31,8 +31,8 @@ use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, Tra
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
 use wayfetch_engine::{EngineOwner, IntegerPolicy, SpeedLimitPolicy, Timeouts};
 use wayfetch_protocol::command::{
-    AppliedLink, CollectItems, LinkRef, LinkRefs, MAX_COLLECTED_LINKS, MAX_SUBMIT_ITEMS,
-    PreferenceChange, SpeedLimitChange,
+    AppliedLink, CollectMode, CollectText, LinkRef, LinkRefs, MAX_COLLECTED_LINKS,
+    MAX_SUBMIT_ITEMS, PreferenceChange, SpeedLimitChange,
 };
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::{JobId, RootId};
@@ -2570,11 +2570,12 @@ async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
 const SIGNED: &str = "https://files.example/b.bin?token=secret#part";
 
 fn collect(owner: &EngineOwner, items: &[&str], destination: Option<RootId>) -> CommandEnvelope {
-    let items = items.iter().map(|i| (*i).to_owned()).collect::<Vec<_>>();
     envelope(
         owner,
         Command::CollectLinks {
-            items: CollectItems::try_from(items).unwrap(),
+            text: CollectText::try_from(items.join("\n")).unwrap(),
+            base_url: None,
+            mode: CollectMode::Analyze,
             destination,
         },
     )
@@ -2660,13 +2661,14 @@ async fn collected_links_wait_for_review_and_survive_restart() {
             ..
         }
     ));
-    // Nothing was created or fetched.
+    // Nothing was created or downloaded; this engine has no inspector, so
+    // the links' checks wait.
     assert!(jobs(&owner).await.is_empty());
     assert_eq!(counted(&owner).await, 0);
     assert!(env.server.requests.lock().unwrap().is_empty());
 
     let page = links(&owner).await;
-    assert_eq!(page.total, 3);
+    assert_eq!((page.total, page.checking), (3, 2));
     let [a, c, b] = &page.items[..] else {
         panic!("{page:?}")
     };
@@ -2677,7 +2679,7 @@ async fn collected_links_wait_for_review_and_survive_restart() {
             a.host.as_ref().unwrap().as_str(),
             a.name_hint.as_deref()
         ),
-        (LinkCheck::NotChecked, "files.example", Some("a.bin"))
+        (LinkCheck::Checking, "files.example", Some("a.bin"))
     );
     assert_eq!(a.destination, Some(ROOT));
     // The signed link is listed by host and name only; the whole link,

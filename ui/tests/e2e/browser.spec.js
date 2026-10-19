@@ -103,7 +103,7 @@ async function add(page, text, count = 1) {
 async function collect(page, text, collected) {
   await page.getByRole('button', { name: 'Add links' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/add`);
-  await page.getByLabel('Links, one per line').fill(text);
+  await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(text);
   await page.getByRole('button', { name: 'Collect links' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/links`);
   await expect(page.getByText(collected)).toBeVisible();
@@ -637,7 +637,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await discard.getByRole('button', { name: 'Discard changes' }).click();
   await page.getByRole('button', { name: 'Add links' }).click();
   await page.getByLabel('Save to').selectOption({ label: films });
-  await page.getByLabel('Links, one per line').fill(fixture.put('orphan.bin', MIB));
+  await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(fixture.put('orphan.bin', MIB));
   await page.getByRole('button', { name: 'Collect links' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/links`);
   const orphan = page.locator('tr[data-link]', { has: page.locator('td.name', { hasText: /^orphan\.bin$/ }) });
@@ -877,31 +877,34 @@ test('collected links wait on the Links page until chosen ones are started', asy
   // keeps what was typed.
   const first = fixture.put('review-a.bin', MIB);
   const signed = `${fixture.put('review-b.bin', MIB)}?token=secret`;
-  const text = `${first}\nexample.com/missing-scheme.bin\n${signed}`;
+  const text = `${first}\nftp://example.com/other-scheme.bin\n${signed}`;
   const addPage = page.locator('.add-page');
   await page.getByRole('button', { name: 'Add links' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/add`);
   await expect(page.getByRole('heading', { name: 'Add links', level: 1 })).toBeVisible();
-  await expect(page.getByLabel('Links, one per line')).toBeFocused();
-  await expect(addPage.getByText('Nothing is downloaded or checked until you start them there.')).toBeVisible();
-  await page.getByLabel('Links, one per line').fill(text);
+  await expect(page.getByLabel('Links, text with links in it, or a page’s HTML')).toBeFocused();
+  await expect(addPage.getByText('Nothing downloads until you start it.', { exact: false })).toBeVisible();
+  await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(text);
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(`${daemon.origin}/links`);
   await page.getByRole('button', { name: 'Add links' }).click();
-  await expect(page.getByLabel('Links, one per line')).toHaveValue(text);
+  await expect(page.getByLabel('Links, text with links in it, or a page’s HTML')).toHaveValue(text);
   await addPage.getByRole('button', { name: 'Back to Links' }).click();
   await expect(page.getByText('No links collected.')).toBeVisible();
 
-  // Collecting keeps the valid links and marks the invalid entry; nothing
-  // is checked or downloaded.
+  // Collecting keeps the valid links and marks the invalid entry. They are
+  // checked, which asks each file's server for its size, never its
+  // content; nothing is downloaded.
   await collect(page, text, 'Collected 2 links for review. 1 entry is not a valid link; it is marked below.');
   await expect(views.getByRole('link', { name: 'Links (3)' })).toBeVisible();
   const linkRow = (/** @type {string} */ name) =>
     page.locator('tr[data-link]', { has: page.locator('td.name', { hasText: new RegExp(`^${name}$`) }) });
-  await expect(linkRow('review-a.bin').locator('td.link-status')).toHaveText('Not checked');
+  await expect(linkRow('review-a.bin').locator('td.link-status')).toHaveText('Online');
   await expect(linkRow('review-a.bin').locator('td.host')).toHaveText('127.0.0.1');
-  await expect(linkRow('review-a.bin').locator('td.num')).toHaveText('Unknown');
-  await expect(linkRow('example\\.com/missing-scheme\\.bin').locator('td.link-status')).toContainText('Invalid link');
+  await expect(linkRow('review-a.bin').locator('td.num')).toHaveText('1.0 MiB');
+  await expect(linkRow('review-b.bin').locator('td.link-status')).toHaveText('Online');
+  expect(fixture.checked.filter((name) => name === 'review-a.bin' || name === 'review-b.bin')).toHaveLength(2);
+  await expect(linkRow('ftp://example\\.com/other-scheme\\.bin').locator('td.link-status')).toContainText('Invalid link');
   await expect(linkRow('review-b.bin')).toHaveCount(1);
   await expect(page.locator('.links-page')).not.toContainText('secret');
   expect(fixture.requested.filter((name) => name === 'review-a.bin' || name === 'review-b.bin')).toEqual([]);
@@ -912,7 +915,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   // They outlive a reload; the engine holds them.
   await page.reload();
   await expect(linkRow('review-a.bin')).toHaveCount(1);
-  await expect(linkRow('example\\.com/missing-scheme\\.bin')).toHaveCount(1);
+  await expect(linkRow('ftp://example\\.com/other-scheme\\.bin')).toHaveCount(1);
 
   // A column header sorts by it, again reverses, and the order is kept.
   const names = page.locator('.links-page tr[data-link] td.name');
@@ -925,13 +928,13 @@ test('collected links wait on the Links page until chosen ones are started', asy
   expect(Math.abs(Number(button?.height) - Number(cell?.height))).toBeLessThanOrEqual(1);
   await nameHeader.getByRole('button').click();
   await expect(nameHeader).toHaveAttribute('aria-sort', 'ascending');
-  await expect(names).toHaveText(['example.com/missing-scheme.bin', 'review-a.bin', 'review-b.bin']);
+  await expect(names).toHaveText(['ftp://example.com/other-scheme.bin', 'review-a.bin', 'review-b.bin']);
   await expect(nameHeader.getByRole('button')).toBeFocused();
   await nameHeader.getByRole('button').click();
   await expect(nameHeader).toHaveAttribute('aria-sort', 'descending');
-  await expect(names).toHaveText(['review-b.bin', 'review-a.bin', 'example.com/missing-scheme.bin']);
+  await expect(names).toHaveText(['review-b.bin', 'review-a.bin', 'ftp://example.com/other-scheme.bin']);
   await page.reload();
-  await expect(names).toHaveText(['review-b.bin', 'review-a.bin', 'example.com/missing-scheme.bin']);
+  await expect(names).toHaveText(['review-b.bin', 'review-a.bin', 'ftp://example.com/other-scheme.bin']);
   await page.getByRole('button', { name: 'Added at', exact: true }).click();
   await expect(page.locator('.links-page th[aria-sort="ascending"]')).toHaveText('Added at');
   await expect(page.locator('.links-page tr[data-link] td.added').first()).toHaveText(/^Today, /);
@@ -968,7 +971,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
 
   // The row menu, from the keyboard: an invalid link cannot start, and
   // can be removed.
-  await linkRow('example\\.com/missing-scheme\\.bin').getByRole('checkbox').focus();
+  await linkRow('ftp://example\\.com/other-scheme\\.bin').getByRole('checkbox').focus();
   await page.keyboard.press('Shift+F10');
   let menu = page.getByRole('menu', { name: 'Link actions' });
   await expect(menu).toBeVisible();
@@ -976,7 +979,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(menu.getByRole('menuitem', { name: /^Start download/ })).toContainText('Not a valid link');
   await page.keyboard.press('End');
   await page.keyboard.press('Enter');
-  await expect(linkRow('example\\.com/missing-scheme\\.bin')).toHaveCount(0);
+  await expect(linkRow('ftp://example\\.com/other-scheme\\.bin')).toHaveCount(0);
   await expect(page.getByText('Removed 1 link from the list.')).toBeVisible();
 
   // Copy link gives the whole link, token and all.
@@ -993,7 +996,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(page).toHaveURL(`${daemon.origin}/`);
   await views.getByRole('link', { name: 'Links (1)' }).click();
   await expect(linkRow('review-a.bin')).toHaveCount(0);
-  await expect(linkRow('review-b.bin').locator('td.link-status')).toHaveText('Not checked');
+  await expect(linkRow('review-b.bin').locator('td.link-status')).toHaveText('Online');
   await expect(views.getByRole('link', { name: 'Links (1)' })).toBeVisible();
   await expect
     .poll(async () => (await daemon.published('review-a.bin', daemon.root).catch(() => null))?.equals(content(0, MIB)))
@@ -1020,6 +1023,46 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await views.getByRole('link', { name: 'Downloads' }).click();
   await expect(page.getByRole('button', { name: `All (${jobsBefore + 1})` })).toBeVisible();
   await expect(daemon.published('review-b.bin', daemon.archive)).rejects.toThrow();
+
+  // A page's address leads to the files on it, which start like any link.
+  fixture.put('release-a.bin', 2 * MIB, null, 'Release A.bin');
+  const release = fixture.page(
+    'release',
+    '<html><body><a href="../files/release-a.bin">A</a> <a href="../files/release-gone.zip">B</a> ' +
+      '<a href="other">Another page</a></body></html>',
+  );
+  await collect(page, release, 'Collected 1 link for review.');
+  const foundRow = (/** @type {string} */ name) =>
+    page.locator('tr[data-link]', { has: page.locator('td.name .name-text', { hasText: new RegExp(`^${name}$`) }) });
+  // The page is read once; its files are listed with where they were found.
+  const pageRow = page.locator('tr[data-link]', { has: page.locator('td[data-check="page"]') });
+  await expect(pageRow.locator('td.link-status')).toHaveText(
+    'Web page2 files found on it, listed below it. 1 link to other pages left alone.',
+  );
+  await expect(foundRow('Release A\\.bin').locator('td.link-status')).toHaveText('Online');
+  await expect(foundRow('Release A\\.bin').locator('td.num')).toHaveText('2.0 MiB');
+  await expect(foundRow('Release A\\.bin').locator('.found-on')).toHaveText(`Found on ${release}`);
+  await expect(foundRow('release-gone\\.zip').locator('td.link-status')).toContainText('Offline');
+  expect(fixture.requested).not.toContain('release-a.bin');
+
+  // The page itself is started through its files.
+  await page.getByRole('checkbox', { name: 'Select all links shown' }).uncheck();
+  await pageRow.getByRole('button', { name: /^Actions for / }).click();
+  menu = page.getByRole('menu', { name: 'Link actions' });
+  await expect(menu.getByRole('menuitem', { name: /^Start download/ })).toHaveAttribute('aria-disabled', 'true');
+  await expect(menu.getByRole('menuitem', { name: /^Start download/ })).toContainText('Start the files found on it');
+  await page.keyboard.press('Escape');
+  await foundRow('Release A\\.bin').getByRole('checkbox').check();
+  await page.getByRole('button', { name: 'Start selected' }).click();
+  await expect(page.getByText('Started 1 download.')).toBeVisible();
+  await expect
+    .poll(async () => (await daemon.published('Release A.bin', daemon.archive).catch(() => null))?.equals(content(0, 2 * MIB)))
+    .toBe(true);
+  // The page and what is left of its links can be removed.
+  await views.getByRole('link', { name: /^Links/ }).click();
+  await page.getByRole('checkbox', { name: 'Select all links shown' }).check();
+  await page.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(page.getByText('No links collected.')).toBeVisible();
   await context.close();
 });
 
@@ -1483,7 +1526,7 @@ test('native provider links require sign-in and provider Forbidden keeps the Way
     const collectOne = async (link) => {
       await page.goto(`${local.origin}/links`);
       await page.getByRole('button', { name: 'Add links' }).click();
-      await page.getByLabel('Links, one per line').fill(link);
+      await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(link);
       await page.getByRole('button', { name: 'Collect links' }).click();
       await expect(page.getByText('Collected 1 link for review.')).toBeVisible();
       await page.locator('tr[data-link] input[type="checkbox"]').check();
@@ -1583,7 +1626,8 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
   await expect(choose.getByRole('radio')).toHaveCount(2);
   expect(asked()).toBe(0);
   await choose.getByRole('button', { name: 'Cancel' }).click();
-  await expect(linkRow('through-account').locator('td.link-status')).toHaveText('Not checked');
+  // Its host is beyond what this daemon may reach, so its check cannot tell.
+  await expect(linkRow('through-account').locator('td.link-status')).toContainText('Could not check');
   await linkRow('mixed-direct.bin').locator('input[type="checkbox"]').check();
   await page.getByRole('button', { name: 'Start selected' }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -1771,7 +1815,7 @@ test('Settings stays at the right end of the toolbar in every view and state', a
 
     // Links, with a notice and a count, then with links selected.
     const NAME = 'settings-place.bin';
-    await page.getByLabel('Links, one per line').fill(fixture.put(NAME, 10 * MIB, 9 * MIB));
+    await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(fixture.put(NAME, 10 * MIB, 9 * MIB));
     await page.getByRole('button', { name: 'Collect links' }).click();
     await expect(page).toHaveURL(`${own.origin}/links`);
     await expect(page.getByText('Collected 1 link for review.')).toBeVisible();
@@ -1825,7 +1869,7 @@ test('removing a download requires an explicit file choice and deletes only its 
     // A name filter left on Downloads cannot hide what is started next.
     await page.locator('#filter-names').fill('nothing matches this');
     await page.getByRole('button', { name: 'Add links' }).click();
-    await page.getByLabel('Links, one per line').fill(fixture.put('delete-choice.bin', MIB));
+    await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(fixture.put('delete-choice.bin', MIB));
     await page.getByRole('button', { name: 'Collect links' }).click();
     await expect(page.locator('.links-page .selection-summary strong')).toHaveText('1 link selected');
     await page.getByRole('button', { name: 'Start selected' }).click();
@@ -1879,7 +1923,7 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(page.getByText('No downloads yet.')).toBeVisible();
     await page.getByRole('button', { name: 'Add links' }).click();
     await page
-      .getByLabel('Links, one per line')
+      .getByLabel('Links, text with links in it, or a page’s HTML')
       .fill([fixture.put('bulk-a.bin', 10 * MIB, 9 * MIB), fixture.put('bulk-b.bin', 10 * MIB, 9 * MIB), fixture.put('bulk-c.bin', MIB)].join('\n'));
     await page.getByRole('button', { name: 'Collect links' }).click();
     await expect(page.locator('.links-page .selection-summary strong')).toHaveText('3 links selected');
@@ -1981,7 +2025,7 @@ test('a transferring download shows live progress, speed, and time left', async 
 
     await page.goto(own.origin);
     await page.getByRole('button', { name: 'Add links' }).click();
-    await page.getByLabel('Links, one per line').fill(fixture.put('live.bin', 8 * MIB));
+    await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(fixture.put('live.bin', 8 * MIB));
     await page.getByRole('button', { name: 'Collect links' }).click();
     await expect(page.locator('.links-page .selection-summary strong')).toHaveText('1 link selected');
     await page.getByRole('button', { name: 'Start selected' }).click();

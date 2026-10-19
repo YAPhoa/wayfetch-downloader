@@ -475,16 +475,67 @@ pub struct SpeedLimitSetting {
     pub conflict: bool,
 }
 
-/// What is known about a collected link. Added in protocol 1.1.
+/// What is known about a collected link. Added in protocol 1.1; checks
+/// since protocol 5.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum LinkCheck {
     /// A valid `http` or `https` link that was not checked: whether it
-    /// serves a file is not known.
+    /// serves a file is not known. It can be analyzed.
     NotChecked,
+    /// Its check is waiting or running.
+    Checking,
+    /// It served a file, or a video service read it, when last checked.
+    /// Not a promise that a download will succeed.
+    Online,
+    /// Its server said it is gone; `reason` says how.
+    Offline,
+    /// Checking could not tell; `reason` and `check_detail` say why. It
+    /// can still be started.
+    Unknown,
+    /// It is a web page, not a file. Once analyzed, the files found on it
+    /// are listed beside it.
+    Page,
     /// Not a link Wayfetch can download; `problem` says why.
     Invalid,
+}
+
+/// Why a check found a link offline or could not tell. Added in protocol
+/// 5.0.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::EnumString,
+    strum::IntoStaticStr,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum CheckReason {
+    /// The server says there is nothing there (404 or 410).
+    NotFound,
+    /// The server wants a sign-in, or refuses access (401, 403, 407).
+    AccessDenied,
+    /// The server asks to slow down (429).
+    RateLimited,
+    /// No answer in time.
+    TimedOut,
+    /// The server could not be reached.
+    Unreachable,
+    /// The network policy forbids the address, such as a private one.
+    Blocked,
+    /// The server failed (5xx).
+    ServerError,
+    /// The answer could not be understood.
+    Unreadable,
+    /// The page is larger than Wayfetch reads.
+    TooLarge,
 }
 
 /// A link in the collected list: waiting to be started, or started and
@@ -535,6 +586,37 @@ pub struct CollectedLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub problem: Option<DiagnosticText>,
+    /// For an offline link or one whose check could not tell: why. Added
+    /// in protocol 5.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub reason: Option<CheckReason>,
+    /// What its last check said beyond `reason`, such as the server's
+    /// status, or that links on a page were left out. Added in protocol
+    /// 5.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub check_detail: Option<DiagnosticText>,
+    /// The file's size, when its server said. Absent when unknown, which
+    /// is not zero. Added in protocol 5.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub size: Option<u64>,
+    /// The page it was found on, without the page link's query or
+    /// fragment. Added in protocol 5.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub found_on: Option<String>,
+    /// For a page that was analyzed: links on it collected beside it.
+    /// Added in protocol 5.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub found: Option<u32>,
+    /// For a page that was analyzed: links on it that lead to other pages,
+    /// which are never followed. Added in protocol 5.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub skipped: Option<u32>,
     /// For a link a media service recognized, such as a YouTube video:
     /// its title, once checked, and what it will be downloaded as. Added
     /// in protocol 4.0.
@@ -555,6 +637,10 @@ pub struct LinkPage {
     pub next_after: Option<SourceLinkId>,
     /// How many links are collected in all.
     pub total: u64,
+    /// How many of them are waiting for, or in, a check. Added in
+    /// protocol 5.0.
+    #[serde(default)]
+    pub checking: u64,
     /// The page reflects every durable event up to and including this
     /// cursor.
     pub as_of: EventCursor,

@@ -118,6 +118,61 @@ pub(crate) fn status_failure(status: StatusCode, replay_safe: bool) -> Transport
     error(code, format!("HTTP {status}"))
 }
 
+/// What a link check reads from an answer's headers. Lenient where
+/// [`read`] is strict: a malformed header is only unknown, since nothing is
+/// written from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Described {
+    /// `Content-Type` without parameters, lower case.
+    pub(crate) content_type: Option<String>,
+    /// The whole file's length, when the answer says and its body is not
+    /// encoded.
+    pub(crate) length: Option<u64>,
+    /// The file name `Content-Disposition` suggests.
+    pub(crate) filename: Option<String>,
+    /// Whether `Content-Disposition` says `attachment`.
+    pub(crate) attachment: bool,
+    /// Whether the body is in an encoding other than `identity`.
+    pub(crate) encoded: bool,
+}
+
+/// What `headers` of an answer with `status` say about the file.
+pub(crate) fn describe(status: StatusCode, headers: &HeaderMap) -> Described {
+    let encoded = refuse_encoding(headers).is_err();
+    let range = header_str(headers, header::CONTENT_RANGE)
+        .ok()
+        .flatten()
+        .and_then(content_range);
+    let length = match (status, range) {
+        (_, _) if encoded => None,
+        (StatusCode::PARTIAL_CONTENT, Some(ContentRange::Bytes { complete, .. })) => complete,
+        (StatusCode::RANGE_NOT_SATISFIABLE, Some(ContentRange::Unsatisfied(complete))) => {
+            Some(complete)
+        }
+        (StatusCode::OK, _) => content_length(headers).ok().flatten(),
+        _ => None,
+    };
+    let disposition = header_str(headers, header::CONTENT_DISPOSITION)
+        .ok()
+        .flatten();
+    Described {
+        content_type: header_str(headers, header::CONTENT_TYPE)
+            .ok()
+            .flatten()
+            .and_then(|v| v.split(';').next())
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty()),
+        length,
+        filename: disposition.and_then(disposition_filename),
+        attachment: disposition.is_some_and(|v| {
+            params(v)
+                .next()
+                .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("attachment"))
+        }),
+        encoded,
+    }
+}
+
 /// Transfers address the stored bytes, so a body in any encoding but
 /// `identity` is refused instead of decoded (rule 7.5.6, ADR-15, T07).
 fn refuse_encoding(headers: &HeaderMap) -> Result<(), TransportError> {

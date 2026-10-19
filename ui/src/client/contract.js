@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 4, minor: 0 });
+export const PROTOCOL = Object.freeze({ major: 5, minor: 0 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -46,6 +46,8 @@ export const PROTOCOL = Object.freeze({ major: 4, minor: 0 });
  * @typedef {import('./generated/SourceLinkId.js').SourceLinkId} LinkId
  * @typedef {import('./generated/CollectedLink.js').CollectedLink} CollectedLink
  * @typedef {import('./generated/LinkPage.js').LinkPage} LinkPage
+ * @typedef {import('./generated/CollectMode.js').CollectMode} CollectMode
+ * @typedef {import('./generated/CheckReason.js').CheckReason} CheckReason
  * @typedef {import('./generated/LinkRef.js').LinkRef} LinkRef
  * @typedef {import('./generated/LinksAction.js').LinksAction} LinksAction
  * @typedef {import('./generated/StartRouting.js').StartRouting} StartRouting
@@ -107,7 +109,9 @@ export const PROTOCOL = Object.freeze({ major: 4, minor: 0 });
  *   collectLinks: (request: {
  *     idempotencyKey: string,
  *     target: string,
- *     items: string[],
+ *     text: string,
+ *     baseUrl?: string | null,
+ *     mode?: CollectMode,
  *     destination?: RootId | null,
  *   }) => Promise<CommandResult>,
  *   linksCommand: (request: {

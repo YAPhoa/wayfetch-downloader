@@ -381,7 +381,8 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
         plugins.yt_dlp_js_runtimes,
     );
     let mut builder = EngineBuilder::new(config, tokio::runtime::Handle::current())
-        .transport(transport)
+        .transport(transport.clone())
+        .inspector(transport)
         .media_service(Arc::new(YouTube::new(Arc::new(ytdlp))))
         .converter(Arc::new(Ffmpeg::new(plugin(ffmpeg::PLUGIN))))
         .plugin_control(control.clone());

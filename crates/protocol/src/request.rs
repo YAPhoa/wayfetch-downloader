@@ -13,8 +13,8 @@ use wayfetch_domain::version::Revision;
 
 use crate::account::{AccountAlias, AccountRef};
 use crate::command::{
-    CollectItems, Command, CommandEnvelope, IdempotencyKey, InputUrl, LinkRef, LinkRefs,
-    PreferenceChange, SpeedLimitChange, StartRouting, SubmitItems,
+    CollectMode, CollectText, Command, CommandEnvelope, IdempotencyKey, InputUrl, LinkRef,
+    LinkRefs, PreferenceChange, SpeedLimitChange, StartRouting, SubmitItems,
 };
 use crate::error::{ErrorCode, ProtocolError};
 use crate::instance::InstanceId;
@@ -286,9 +286,19 @@ pub struct CollectRequest {
     pub idempotency_key: IdempotencyKey,
     /// The instance the client believes it is talking to.
     pub target: InstanceId,
-    /// The entries, one link each. An entry that is not a valid link is
-    /// collected as invalid rather than refusing the others.
-    pub items: Vec<String>,
+    /// Pasted text or HTML holding the links. Replaced the list of entries
+    /// in protocol 5.0.
+    pub text: String,
+    /// The page the text came from, for relative links in HTML. Added in
+    /// protocol 5.0.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub base_url: Option<String>,
+    /// How far to look into the links; analyze if absent. Added in
+    /// protocol 5.0.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub mode: Option<CollectMode>,
     /// Where the links will be saved; the default destination if absent.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -302,11 +312,19 @@ impl CollectRequest {
             idempotency_key: self.idempotency_key,
             target: self.target,
             command: Command::CollectLinks {
-                items: CollectItems::try_from(self.items)?,
+                text: CollectText::try_from(self.text)?,
+                base_url: self.base_url.as_deref().map(page_address).transpose()?,
+                mode: self.mode.unwrap_or_default(),
                 destination: self.destination,
             },
         })
     }
+}
+
+/// The page address a collect names, checked like a link.
+fn page_address(raw: &str) -> Result<InputUrl, ProtocolError> {
+    InputUrl::parse(raw.trim())
+        .map_err(|e| ProtocolError::new(e.code, &format!("page address: {}", e.message.as_str())))
 }
 
 /// What to do with collected links. Added in protocol 1.1.
@@ -323,6 +341,10 @@ pub enum LinksAction {
     /// [`Command::ChooseLinkMedia`], with the request's `media`. Added in
     /// protocol 4.0.
     ChooseMedia,
+    /// [`Command::CheckLinks`]. Added in protocol 5.0.
+    Check,
+    /// [`Command::AnalyzeLinks`]. Added in protocol 5.0.
+    Analyze,
 }
 
 /// Starts, removes, or moves collected links at the revisions the client
@@ -404,6 +426,8 @@ impl LinksCommandRequest {
                 routing: self.routing,
             },
             (LinksAction::Remove, None) => Command::RemoveLinks { links },
+            (LinksAction::Check, None) => Command::CheckLinks { links },
+            (LinksAction::Analyze, None) => Command::AnalyzeLinks { links },
             (LinksAction::ChooseMedia, None) => Command::ChooseLinkMedia {
                 links,
                 choice: self.media.unwrap_or_default(),
@@ -850,32 +874,58 @@ mod tests {
     }
 
     #[test]
-    fn collected_entries_are_kept_as_typed_within_limits() {
-        let collect = |items: serde_json::Value| {
-            serde_json::from_value::<CollectRequest>(json!({
+    fn collected_text_is_kept_as_typed_within_limits() {
+        let collect = |body: serde_json::Value| {
+            let mut request = json!({
                 "idempotency_key": IdempotencyKey::generate(),
                 "target": InstanceId::generate(),
-                "items": items,
-            }))
-            .unwrap()
-            .into_envelope()
-        };
-        // An invalid entry does not refuse the others; the engine keeps it.
-        let Command::CollectLinks { items, destination } =
-            collect(json!(["https://a.example/1", "not a link"]))
+            });
+            request
+                .as_object_mut()
                 .unwrap()
-                .command
+                .extend(body.as_object().unwrap().clone());
+            serde_json::from_value::<CollectRequest>(request)
+                .unwrap()
+                .into_envelope()
+        };
+        let Command::CollectLinks {
+            text,
+            base_url,
+            mode,
+            destination,
+        } = collect(json!({ "text": " see https://a.example/1 " }))
+            .unwrap()
+            .command
         else {
             panic!()
         };
-        assert_eq!(items.as_slice(), ["https://a.example/1", "not a link"]);
-        assert_eq!(destination, None);
-        let long = "x".repeat(crate::command::MAX_URL_BYTES + 1);
-        let err = collect(json!(["https://a.example/", long])).unwrap_err();
-        assert_eq!(err.code, ErrorCode::LimitExceeded);
-        assert!(err.message.as_str().starts_with("item 2"), "{err}");
+        assert_eq!(text.as_str(), " see https://a.example/1 ");
         assert_eq!(
-            collect(json!([])).unwrap_err().code,
+            (base_url, mode, destination),
+            (None, CollectMode::Analyze, None)
+        );
+        let Command::CollectLinks { base_url, mode, .. } = collect(json!({
+            "text": "<a href=f.zip>f</a>",
+            "base_url": " https://a.example/dir/ ",
+            "mode": "supported_only",
+        }))
+        .unwrap()
+        .command
+        else {
+            panic!()
+        };
+        assert_eq!(
+            base_url.unwrap().as_url().as_str(),
+            "https://a.example/dir/"
+        );
+        assert_eq!(mode, CollectMode::SupportedOnly);
+        let err = collect(json!({ "text": "x", "base_url": "ftp://a.example/" })).unwrap_err();
+        assert!(err.message.as_str().starts_with("page address"), "{err}");
+        let long = "x".repeat(crate::command::MAX_COLLECT_TEXT_BYTES + 1);
+        let err = collect(json!({ "text": long })).unwrap_err();
+        assert_eq!(err.code, ErrorCode::LimitExceeded);
+        assert_eq!(
+            collect(json!({ "text": " \n " })).unwrap_err().code,
             ErrorCode::InvalidRequest
         );
     }

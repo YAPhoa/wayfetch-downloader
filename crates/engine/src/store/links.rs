@@ -19,14 +19,16 @@ use wayfetch_domain::name::{DiagnosticText, HostName, ProviderId};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
 use wayfetch_protocol::command::{
-    AppliedLink, CollectItems, InputUrl, LinkRef, LinkRefs, MAX_COLLECTED_LINKS, RefusedLink,
+    AppliedLink, CollectMode, LinkRef, LinkRefs, MAX_COLLECTED_LINKS, RefusedLink,
 };
 use wayfetch_protocol::event::{EventCursor, EventKind};
 use wayfetch_protocol::media::MediaChoice;
 use wayfetch_protocol::query::{CollectedLink, JobRoute, LinkCheck, LinkPage, PageSize};
 use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 
-use super::{Store, StoreError, jobs, key, media, outbox, sql};
+use super::{Store, StoreError, crawl, jobs, key, media, outbox, sql};
+use crate::crawl::extract::Entry;
+use crate::crawl::looks_like_file;
 
 /// The most characters of an invalid entry a list shows.
 const SHOWN_TEXT_CHARS: usize = 200;
@@ -35,51 +37,9 @@ const SHOWN_TEXT_CHARS: usize = 200;
 /// it, by root.
 pub type Unusable = BTreeMap<RootId, String>;
 
-/// One entry, checked.
-enum Entry {
-    Valid(InputUrl),
-    Invalid { text: String, problem: String },
-}
-
-impl Entry {
-    fn parse(raw: &str) -> Self {
-        let raw = raw.trim();
-        match InputUrl::parse(raw) {
-            Ok(url) => Self::Valid(url),
-            Err(e) => Self::Invalid {
-                text: without_credentials(raw),
-                problem: e.message.as_str().to_owned(),
-            },
-        }
-    }
-}
-
-/// `text` without the credentials a link in it may carry, which are never
-/// stored: from a parsed URL, and from text that only looks like one.
-fn without_credentials(text: &str) -> String {
-    if let Ok(mut url) = Url::parse(text) {
-        if !url.username().is_empty() || url.password().is_some() {
-            // Only a URL with a host has credentials, and those can be
-            // cleared.
-            let _ = url.set_username("");
-            let _ = url.set_password(None);
-            return url.into();
-        }
-        return text.to_owned();
-    }
-    if let Some(start) = text.find("://").map(|i| i + 3) {
-        let rest = &text[start..];
-        let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
-        if let Some(at) = authority.rfind('@') {
-            return format!("{}{}", &text[..start], &rest[at + 1..]);
-        }
-    }
-    text.to_owned()
-}
-
 /// An invalid entry as a list shows it: without its query or fragment,
 /// which can carry a token, and shortened.
-fn shown_text(text: &str) -> String {
+pub(super) fn shown_text(text: &str) -> String {
     let end = text.find(['?', '#']).unwrap_or(text.len());
     let mut shown: String = text[..end].chars().take(SHOWN_TEXT_CHARS).collect();
     if shown.len() < text.len() {
@@ -88,15 +48,41 @@ fn shown_text(text: &str) -> String {
     shown
 }
 
-/// Records `items` as a new batch of held links saved in `destination`
-/// (the operator's download root if `None`), with a `batch_accepted`
-/// event. Refused whole if the list would hold more than
-/// [`MAX_COLLECTED_LINKS`].
+/// A link of a collect, as the coordinator found it in the text.
+#[derive(Debug, Clone)]
+pub struct Collecting {
+    /// The link, or the entry that is not one.
+    pub entry: Entry,
+    /// The video service that recognizes it, if any.
+    pub media: Option<ProviderId>,
+}
+
+/// What the coordinator found in a collect's text.
+#[derive(Debug, Clone, Default)]
+pub struct CollectPlan {
+    /// The links to collect, in order, each once.
+    pub links: Vec<Collecting>,
+    /// Whether the text was HTML: its links are a page's content, which
+    /// are never read as pages themselves.
+    pub html: bool,
+    /// Links found more than once.
+    pub repeated: u32,
+    /// Links in HTML that lead to other pages, left alone.
+    pub skipped: u32,
+}
+
+/// Records `plan`'s links as a new batch of held links saved in
+/// `destination` (the operator's download root if `None`), with a
+/// `batch_accepted` event, and queues the checks `mode` asks for: in
+/// [`CollectMode::Analyze`] every link's, each link typed as text allowed
+/// to be read as a page; otherwise only those of links that look like
+/// files or that a video service recognizes. Refused whole if the list
+/// would hold more than [`MAX_COLLECTED_LINKS`].
 pub(super) fn collect(
     tx: &Transaction<'_>,
-    items: &CollectItems,
+    plan: &CollectPlan,
+    mode: CollectMode,
     destination: Option<RootId>,
-    media: &BTreeMap<usize, ProviderId>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let listed: i64 = tx
@@ -107,17 +93,17 @@ pub(super) fn collect(
         )
         .map_err(StoreError::from)?;
     let listed = usize::try_from(listed).map_err(|_| StoreError::Corrupt("link count"))?;
-    if listed + items.as_slice().len() > MAX_COLLECTED_LINKS {
+    if listed + plan.links.len() > MAX_COLLECTED_LINKS {
         return Err(ProtocolError::new(
             ErrorCode::LimitExceeded,
             &format!("the Links list holds at most {MAX_COLLECTED_LINKS} links; remove some first"),
         ));
     }
-    let entries: Vec<Entry> = items.as_slice().iter().map(|i| Entry::parse(i)).collect();
     // Name the package after the first valid link's host.
-    let name = entries
+    let name = plan
+        .links
         .iter()
-        .find_map(|e| match e {
+        .find_map(|l| match &l.entry {
             Entry::Valid(url) => url.as_url().host_str(),
             Entry::Invalid { .. } => None,
         })
@@ -129,30 +115,37 @@ pub(super) fn collect(
     )
     .map_err(StoreError::from)?;
     let package = tx.last_insert_rowid();
-    let count = u32::try_from(entries.len()).map_err(|_| StoreError::Corrupt("input count"))?;
+    let count = u32::try_from(plan.links.len()).map_err(|_| StoreError::Corrupt("input count"))?;
+    let analyze = mode == CollectMode::Analyze;
     tx.execute(
-        "INSERT INTO input_batches (package_id, input_count, root_id, created_at) \
-         VALUES (?1, ?2, ?3, ?4)",
-        params![package, count, root, now.unix_millis()],
+        "INSERT INTO input_batches (package_id, input_count, root_id, created_at, mode) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            package,
+            count,
+            root,
+            now.unix_millis(),
+            if analyze { "analyze" } else { "supported_only" }
+        ],
     )
     .map_err(StoreError::from)?;
     let batch: BatchId = key(tx.last_insert_rowid())?;
     let mut insert = tx
         .prepare(
             "INSERT INTO source_links (batch_id, ordinal, input_url, held, listed, root_id, \
-             invalid, problem, media_service, media_state) \
+             invalid, problem, media_service, media_state, may_analyze) \
              VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6, ?7, CASE WHEN ?7 IS NULL THEN NULL \
-             ELSE 'pending' END)",
+             ELSE 'pending' END, ?8)",
         )
         .map_err(StoreError::from)?;
     let mut invalid = 0u32;
-    for (position, entry) in entries.iter().enumerate() {
+    for (position, link) in plan.links.iter().enumerate() {
         let ordinal = i64::try_from(position).map_err(|_| StoreError::Corrupt("ordinal"))?;
-        let service = match entry {
-            Entry::Valid(_) => media.get(&position).map(ProviderId::as_str),
+        let service = match link.entry {
+            Entry::Valid(_) => link.media.as_ref().map(ProviderId::as_str),
             Entry::Invalid { .. } => None,
         };
-        let (text, problem) = match entry {
+        let (text, problem) = match &link.entry {
             Entry::Valid(url) => (url.as_url().as_str(), None),
             Entry::Invalid { text, problem } => {
                 invalid += 1;
@@ -168,8 +161,15 @@ pub(super) fn collect(
                 problem.is_some(),
                 problem.as_ref().map(DiagnosticText::as_str),
                 service,
+                analyze && !plan.html && problem.is_none() && service.is_none(),
             ])
             .map_err(StoreError::from)?;
+        if let Entry::Valid(url) = &link.entry {
+            let url = url.as_url();
+            if analyze || service.is_some() || looks_like_file(url) {
+                crawl::enqueue(tx, tx.last_insert_rowid(), url, service, now)?;
+            }
+        }
     }
     outbox::append(
         tx,
@@ -183,6 +183,8 @@ pub(super) fn collect(
         batch,
         collected: count - invalid,
         invalid,
+        repeated: plan.repeated,
+        skipped: plan.skipped,
     })
 }
 
@@ -197,6 +199,10 @@ struct Held {
     problem: Option<String>,
     job: Option<JobId>,
     media: media::LinkColumns,
+    /// The link as collected.
+    url: String,
+    /// Whether links were found on it, which keeps its row.
+    parent: bool,
 }
 
 fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreError> {
@@ -206,28 +212,34 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
         .query_row(
             &format!(
                 "SELECT s.batch_id, b.package_id, s.listed, s.invalid, s.revision, s.root_id, \
-                 s.problem, j.id, {MEDIA_COLUMNS} FROM source_links s \
+                 s.problem, j.id, s.input_url, \
+                 EXISTS(SELECT 1 FROM source_links c WHERE c.parent_id = s.id), \
+                 {MEDIA_COLUMNS} FROM source_links s \
                  JOIN input_batches b ON b.id = s.batch_id \
                  LEFT JOIN jobs j ON j.source_link_id = s.id WHERE s.id = ?1"
             ),
             [id],
             |r| {
                 Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, bool>(2)?,
-                    r.get::<_, bool>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, Option<i64>>(5)?,
+                    (
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, bool>(2)?,
+                        r.get::<_, bool>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, Option<i64>>(5)?,
+                    ),
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<i64>>(7)?,
-                    media::LinkColumns::read(r, 8)?,
+                    r.get::<_, String>(8)?,
+                    r.get::<_, bool>(9)?,
+                    media::LinkColumns::read(r, 10)?,
                 ))
             },
         )
         .optional()?;
     raw.map(
-        |(batch, package, listed, invalid, revision, root, problem, job, media)| {
+        |((batch, package, listed, invalid, revision, root), problem, job, url, parent, media)| {
             Ok(Held {
                 batch,
                 package,
@@ -238,6 +250,8 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
                 problem,
                 job: job.map(key).transpose()?,
                 media,
+                url,
+                parent,
             })
         },
     )
@@ -275,6 +289,19 @@ fn apply_each(
 const REMOVED: &str = "This link is no longer in the Links list.";
 const CHANGED: &str = "This link changed since the list was shown. Check it and try again.";
 const STARTED: &str = "This link was already started; it is in Downloads.";
+const PAGE: &str =
+    "This link is a web page; the files found on it are listed beside it. Start those instead.";
+
+/// Takes `link` off the list, keeping its record, and drops its check. A
+/// page never started is no longer held, and marked staged so ingestion
+/// never makes it a job; one started already is both.
+fn unlist(tx: &Transaction<'_>, link: i64) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE source_links SET listed = 0, held = 0, staged = 1 WHERE id = ?1",
+        [link],
+    )?;
+    crawl::drop_check(tx, link)
+}
 
 /// Refusals that apply to every command: a link no longer in the list (or
 /// never in it, submitted to start at once), one already started unless
@@ -358,6 +385,9 @@ pub(super) fn start(
                 ),
             )));
         }
+        if row.parent {
+            return Ok(Err((ErrorCode::NotApplicable, PAGE.to_owned())));
+        }
         if let Some(why) = row.root.and_then(|r| unusable.get(&r)) {
             let problem = format!("Its folder cannot be used: {why}. Choose another destination.");
             tx.execute(
@@ -420,11 +450,7 @@ pub(super) fn start(
             media.as_ref(),
             now,
         )?;
-        tx.execute(
-            "UPDATE source_links SET listed = 0 WHERE id = ?1",
-            [sql(link.link)?],
-        )
-        .map_err(StoreError::from)?;
+        unlist(tx, sql(link.link)?)?;
         Ok(Ok(AppliedLink {
             link: link.link,
             job: Some(job),
@@ -434,8 +460,10 @@ pub(super) fn start(
 }
 
 /// Removes links from the list. A link not started goes, with batches and
-/// packages left with nothing; a started one only leaves the list, since
-/// its download keeps its source. A link already gone counts as removed.
+/// packages left with nothing; a started one, or a page with links found
+/// on it, only leaves the list, since its download or those links keep it
+/// as their source. A page kept only for that goes once its last found
+/// link does. A link already gone counts as removed.
 pub(super) fn remove(
     tx: &Transaction<'_>,
     links: &LinkRefs,
@@ -456,15 +484,10 @@ pub(super) fn remove(
         if let Some(refused) = refusal(link, &row, true) {
             return Ok(Err(refused));
         }
-        if row.job.is_some() {
-            tx.execute(
-                "UPDATE source_links SET listed = 0 WHERE id = ?1",
-                [sql(link.link)?],
-            )
-            .map_err(StoreError::from)?;
+        if row.job.is_some() || row.parent {
+            unlist(tx, sql(link.link)?)?;
         } else {
-            tx.execute("DELETE FROM source_links WHERE id = ?1", [sql(link.link)?])
-                .map_err(StoreError::from)?;
+            delete_unused(tx, sql(link.link)?)?;
             batches.insert(row.batch);
         }
         Ok(Ok(applied))
@@ -489,6 +512,79 @@ pub(super) fn remove(
             )
             .map_err(StoreError::from)?;
         }
+    }
+    Ok(result)
+}
+
+/// Deletes link `id`, which has no download and no found links, and then
+/// the pages it was found on that are kept only for links found on them
+/// and have none left.
+fn delete_unused(tx: &Transaction<'_>, id: i64) -> Result<(), StoreError> {
+    let mut next = Some(id);
+    while let Some(id) = next {
+        let parent: Option<i64> = tx.query_row(
+            "DELETE FROM source_links WHERE id = ?1 RETURNING parent_id",
+            [id],
+            |r| r.get(0),
+        )?;
+        next = match parent {
+            Some(parent) => tx
+                .query_row(
+                    "SELECT id FROM source_links s WHERE id = ?1 AND listed = 0 \
+                     AND NOT EXISTS (SELECT 1 FROM jobs WHERE source_link_id = s.id) \
+                     AND NOT EXISTS (SELECT 1 FROM source_links c WHERE c.parent_id = s.id)",
+                    [parent],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            None => None,
+        };
+    }
+    Ok(())
+}
+
+/// Checks links again, from scratch; with `analyze`, a link that is a web
+/// page is also read, and the files and videos on it collected beside it.
+/// A link already started, or not a valid link, is refused.
+pub(super) fn check(
+    tx: &Transaction<'_>,
+    links: &LinkRefs,
+    analyze: bool,
+    now: UtcTimestamp,
+) -> Result<CommandResult, ProtocolError> {
+    let result = apply_each(tx, links, |link, row| {
+        let Some(row) = row else {
+            return Ok(Err((ErrorCode::NotFound, REMOVED.to_owned())));
+        };
+        if let Some(refused) = refusal(link, &row, false) {
+            return Ok(Err(refused));
+        }
+        if row.invalid {
+            return Ok(Err((
+                ErrorCode::NotApplicable,
+                "This is not a link Wayfetch can check.".to_owned(),
+            )));
+        }
+        let id = sql(link.link)?;
+        if analyze && row.media.service.is_none() {
+            tx.execute(
+                "UPDATE source_links SET may_analyze = 1 WHERE id = ?1",
+                [id],
+            )
+            .map_err(StoreError::from)?;
+        }
+        let url = Url::parse(&row.url).map_err(|_| StoreError::Corrupt("source URL"))?;
+        crawl::enqueue(tx, id, &url, row.media.service.as_deref(), now)?;
+        Ok(Ok(AppliedLink {
+            link: link.link,
+            job: None,
+            revision: Some(row.revision),
+        }))
+    })?;
+    if let CommandResult::LinksApplied { applied, .. } = &result
+        && !applied.is_empty()
+    {
+        outbox::append(tx, &EventKind::LinksChanged, now)?;
     }
     Ok(result)
 }
@@ -586,6 +682,138 @@ pub(super) fn choose_media(
     })
 }
 
+/// A listed link's columns, as [`list`] reads them.
+struct Listed {
+    id: i64,
+    batch: i64,
+    created: i64,
+    revision: i64,
+    invalid: bool,
+    text: String,
+    root: Option<i64>,
+    problem: Option<String>,
+    path: Option<String>,
+    job: Option<i64>,
+    checking: bool,
+    state: Option<String>,
+    reason: Option<String>,
+    detail: Option<String>,
+    size: Option<i64>,
+    name: Option<String>,
+    found: Option<u32>,
+    skipped: Option<u32>,
+    page: Option<String>,
+    media: media::LinkColumns,
+}
+
+impl Listed {
+    const COLUMNS: &str = "s.id, s.batch_id, b.created_at, s.revision, s.invalid, s.input_url, \
+         s.root_id, s.problem, r.path, j.id, t.id IS NOT NULL, s.check_state, s.check_reason, \
+         s.check_problem, s.size, s.observed_name, s.found, s.skipped, p.input_url";
+
+    fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get(0)?,
+            batch: r.get(1)?,
+            created: r.get(2)?,
+            revision: r.get(3)?,
+            invalid: r.get(4)?,
+            text: r.get(5)?,
+            root: r.get(6)?,
+            problem: r.get(7)?,
+            path: r.get(8)?,
+            job: r.get(9)?,
+            checking: r.get(10)?,
+            state: r.get(11)?,
+            reason: r.get(12)?,
+            detail: r.get(13)?,
+            size: r.get(14)?,
+            name: r.get(15)?,
+            found: r.get(16)?,
+            skipped: r.get(17)?,
+            page: r.get(18)?,
+            media: media::LinkColumns::read(r, 19)?,
+        })
+    }
+
+    /// What is known about the link: a media link by its service's check,
+    /// any other by its own.
+    fn check(&self) -> Result<LinkCheck, StoreError> {
+        if self.invalid {
+            return Ok(LinkCheck::Invalid);
+        }
+        if self.media.service.is_some() {
+            return Ok(match self.media.state.as_deref() {
+                Some("ready") => LinkCheck::Online,
+                Some("failed") => LinkCheck::Unknown,
+                _ if self.checking => LinkCheck::Checking,
+                _ => LinkCheck::NotChecked,
+            });
+        }
+        if self.checking {
+            return Ok(LinkCheck::Checking);
+        }
+        Ok(match self.state.as_deref() {
+            None => LinkCheck::NotChecked,
+            Some("online") => LinkCheck::Online,
+            Some("offline") => LinkCheck::Offline,
+            Some("unknown") => LinkCheck::Unknown,
+            Some("page") => LinkCheck::Page,
+            Some(_) => return Err(StoreError::Corrupt("check state")),
+        })
+    }
+
+    fn into_link(self, converter: bool) -> Result<CollectedLink, StoreError> {
+        let check = self.check()?;
+        let url = (!self.invalid)
+            .then(|| Url::parse(&self.text).ok())
+            .flatten();
+        if !self.invalid && url.is_none() {
+            return Err(StoreError::Corrupt("collected link"));
+        }
+        // What a new check has not answered yet is not shown as known.
+        let checked = check != LinkCheck::Checking;
+        Ok(CollectedLink {
+            id: key(self.id)?,
+            batch: key(self.batch)?,
+            collected_at: UtcTimestamp::from_unix_millis(self.created),
+            revision: key(self.revision)?,
+            check,
+            host: url.as_ref().and_then(|u| HostName::new(u.host_str()?).ok()),
+            name_hint: self.name.filter(|_| checked).or_else(|| {
+                url.as_ref()
+                    .and_then(crate::download::url_file_name)
+                    .map(|name| name.as_str().to_owned())
+            }),
+            text: self.invalid.then(|| shown_text(&self.text)),
+            destination: self.root.map(key).transpose()?,
+            destination_path: self.path,
+            job: self.job.map(key).transpose()?,
+            problem: self.problem.as_deref().map(DiagnosticText::new),
+            reason: self
+                .reason
+                .filter(|_| checked)
+                .map(|r| r.parse().map_err(|_| StoreError::Corrupt("check reason")))
+                .transpose()?,
+            check_detail: self
+                .detail
+                .filter(|_| checked)
+                .as_deref()
+                .map(DiagnosticText::new),
+            size: self
+                .size
+                .filter(|_| checked)
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| StoreError::Corrupt("file size"))?,
+            found_on: self.page.as_deref().map(crawl::shown_page),
+            found: self.found.filter(|_| checked),
+            skipped: self.skipped.filter(|_| checked),
+            media: self.media.summary(converter)?.map(Box::new),
+        })
+    }
+}
+
 /// A page of listed links after `after`, oldest first.
 pub(super) fn list(
     tx: &Transaction<'_>,
@@ -602,61 +830,20 @@ pub(super) fn list(
     let size = usize::from(page_size.get());
     let mut items = tx
         .prepare(&format!(
-            "SELECT s.id, s.batch_id, b.created_at, s.revision, s.invalid, s.input_url, \
-             s.root_id, s.problem, r.path, j.id, {MEDIA_COLUMNS} FROM source_links s \
+            "SELECT {}, {MEDIA_COLUMNS} FROM source_links s \
              JOIN input_batches b ON b.id = s.batch_id \
              LEFT JOIN roots r ON r.id = s.root_id \
              LEFT JOIN jobs j ON j.source_link_id = s.id \
-             WHERE s.listed = 1 AND s.id > ?1 ORDER BY s.id LIMIT ?2"
+             LEFT JOIN crawl_tasks t ON t.source_link_id = s.id \
+             LEFT JOIN source_links p ON p.id = s.parent_id \
+             WHERE s.listed = 1 AND s.id > ?1 ORDER BY s.id LIMIT ?2",
+            Listed::COLUMNS
         ))?
         .query_map(
             params_from_iter([after, i64::from(page_size.get()) + 1]),
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, bool>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, Option<i64>>(6)?,
-                    r.get::<_, Option<String>>(7)?,
-                    r.get::<_, Option<String>>(8)?,
-                    r.get::<_, Option<i64>>(9)?,
-                    media::LinkColumns::read(r, 10)?,
-                ))
-            },
+            Listed::read,
         )?
-        .map(|row| {
-            let (id, batch, created, revision, invalid, text, root, problem, path, job, media) =
-                row?;
-            let url = (!invalid).then(|| Url::parse(&text).ok()).flatten();
-            if !invalid && url.is_none() {
-                return Err(StoreError::Corrupt("collected link"));
-            }
-            Ok(CollectedLink {
-                id: key(id)?,
-                batch: key(batch)?,
-                collected_at: UtcTimestamp::from_unix_millis(created),
-                revision: key(revision)?,
-                check: if invalid {
-                    LinkCheck::Invalid
-                } else {
-                    LinkCheck::NotChecked
-                },
-                host: url.as_ref().and_then(|u| HostName::new(u.host_str()?).ok()),
-                name_hint: url
-                    .as_ref()
-                    .and_then(crate::download::url_file_name)
-                    .map(|name| name.as_str().to_owned()),
-                text: invalid.then(|| shown_text(&text)),
-                destination: root.map(key).transpose()?,
-                destination_path: path,
-                job: job.map(key).transpose()?,
-                problem: problem.as_deref().map(DiagnosticText::new),
-                media: media.summary(converter)?.map(Box::new),
-            })
-        })
+        .map(|row| row?.into_link(converter))
         .collect::<Result<Vec<_>, StoreError>>()?;
     let next_after = if items.len() > size {
         items.truncate(size);
@@ -664,15 +851,18 @@ pub(super) fn list(
     } else {
         None
     };
-    let total: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM source_links WHERE listed = 1",
+    let (total, checking): (i64, i64) = tx.query_row(
+        "SELECT COUNT(*), COUNT(t.id) FROM source_links s \
+         LEFT JOIN crawl_tasks t ON t.source_link_id = s.id WHERE s.listed = 1",
         [],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    let count = |n: i64| u64::try_from(n).map_err(|_| StoreError::Corrupt("link count"));
     Ok(LinkPage {
         items,
         next_after,
-        total: u64::try_from(total).map_err(|_| StoreError::Corrupt("link count"))?,
+        total: count(total)?,
+        checking: count(checking)?,
         as_of,
     })
 }
@@ -744,24 +934,6 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn credentials_are_never_kept() {
-        assert_eq!(
-            without_credentials("https://user:pw@files.example/a?t=1"),
-            "https://files.example/a?t=1"
-        );
-        assert_eq!(
-            without_credentials("ftp://user:pw@files.example/a"),
-            "ftp://files.example/a"
-        );
-        assert_eq!(without_credentials("htps//x y@z"), "htps//x y@z");
-        assert_eq!(
-            without_credentials("https://us er:p w@files .example/a"),
-            "https://files .example/a"
-        );
-        assert_eq!(without_credentials("not a link"), "not a link");
-    }
 
     #[test]
     fn shown_text_hides_queries_and_is_bounded() {
