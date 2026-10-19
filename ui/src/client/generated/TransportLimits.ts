@@ -20,4 +20,8 @@ max_url_bytes: number,
 /**
  * Maximum links waiting in the collected list. Added in protocol 1.1.
  */
-max_collected_links: number, };
+max_collected_links: number, 
+/**
+ * Maximum bytes of text one collect may carry. Added in protocol 5.0.
+ */
+max_collect_text_bytes: number, };

@@ -3,4 +3,4 @@
 /**
  * What the engine is observed to be doing with the job.
  */
-export type JobStage = "queued" | "resolving" | "transferring" | "verifying" | "publishing" | "recovering" | "waiting" | "needs_input" | "paused" | "blocked" | "complete" | "failed" | "cancelled";
+export type JobStage = "queued" | "resolving" | "transferring" | "verifying" | "publishing" | "recovering" | "paused" | "complete" | "failed" | "cancelled";

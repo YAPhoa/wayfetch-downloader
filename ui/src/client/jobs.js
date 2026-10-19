@@ -10,13 +10,13 @@
  * @typedef {import('./generated/FailureCode.js').FailureCode} FailureCode
  * @typedef {import('./generated/FailureSummary.js').FailureSummary} FailureSummary
  *
- * How a message or link check reads at a glance: running, waiting on
- * something, quietly stopped, gone wrong, or finished.
+ * How a message or link check reads at a glance: running, quietly
+ * stopped, gone wrong, or finished.
  * @typedef {'run' | 'warn' | 'calm' | 'bad' | 'ok'} Tone
  *
  * Which group of states a download is in, for its colour. Each state
  * filter is one; anything else is drawn in a neutral colour.
- * @typedef {'active' | 'waiting' | 'paused' | 'queued' | 'failed' | 'cancelled' | 'done'} Status
+ * @typedef {'active' | 'paused' | 'queued' | 'failed' | 'cancelled' | 'done'} Status
  */
 
 /**
@@ -91,10 +91,7 @@ const STATES = Object.freeze({
   verifying: ['Checking file', 'active'],
   publishing: ['Saving', 'active'],
   recovering: ['Recovering', 'active'],
-  waiting: ['Waiting', 'waiting'],
-  needs_input: ['Needs your answer', 'waiting'],
   paused: ['Paused', 'paused'],
-  blocked: ['Blocked', 'waiting'],
   complete: ['Done', 'done'],
   failed: ['Failed', 'failed'],
   cancelled: ['Cancelled', 'cancelled'],
@@ -156,11 +153,11 @@ const FAILURES = Object.freeze({
   },
   destination_unavailable: {
     short: 'folder unavailable',
-    explain: 'The download folder is full, missing or unavailable. Fix the folder to continue.',
+    explain: 'The download folder is full, missing or unavailable. Fix the folder, then retry.',
   },
   permission_denied: {
     short: 'access denied',
-    explain: 'Wayfetch may not write to the download folder. Check its permissions.',
+    explain: 'Wayfetch may not write to the download folder. Fix its permissions, then retry.',
   },
   integrity_mismatch: {
     short: 'file check failed',
@@ -201,7 +198,6 @@ export const GROUPS = Object.freeze([
     status: 'active',
     stages: stages('resolving', 'transferring', 'verifying', 'publishing', 'recovering'),
   },
-  { key: 'waiting', label: 'Waiting', status: 'waiting', stages: stages('waiting', 'needs_input', 'blocked') },
   { key: 'paused', label: 'Paused', status: 'paused', stages: stages('paused') },
   { key: 'queued', label: 'Queued', status: 'queued', stages: stages('queued') },
   { key: 'failed', label: 'Failed', status: 'failed', stages: stages('failed') },
@@ -220,22 +216,17 @@ export function groupCount(group, counts) {
 }
 
 /**
- * A job's state in plain words, such as "Waiting until 17:42" or
- * "Failed: link expired", and its status. A state this UI does not know
- * keeps the engine's name and no status.
+ * A job's state in plain words, such as "Failed: link expired", and its
+ * status. A state this UI does not know keeps the engine's name and no
+ * status.
  * @param {JobSummary} job
- * @param {(time: Date) => string} [clock] formats a retry time
  * @returns {{ label: string, status: Status | null }}
  */
-export function describe(job, clock = shortTime) {
+export function describe(job) {
   /** @type {[string, Status | null]} */
   const [name, status] = STATES[job.display] ?? [String(job.display), null];
   const failure = job.failure;
-  if (job.display === 'waiting' && failure?.retry_at !== undefined && failure.retry_at !== null) {
-    return { label: `Waiting until ${clock(new Date(failure.retry_at))}`, status };
-  }
-  const explained = job.display === 'failed' || job.display === 'blocked' || job.display === 'waiting';
-  if (failure && explained) {
+  if (failure && job.display === 'failed') {
     return { label: `${name}: ${FAILURES[failure.code].short}`, status };
   }
   return { label: name, status };
@@ -250,11 +241,6 @@ export function explain(failure) {
   // other account refusals and supplies the provider-specific next step.
   if (failure.code === 'invalid_credentials' && failure.message?.trim()) return failure.message;
   return FAILURES[failure.code].explain;
-}
-
-/** @param {Date} time */
-function shortTime(time) {
-  return time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 const UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];

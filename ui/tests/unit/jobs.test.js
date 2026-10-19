@@ -47,7 +47,7 @@ test('only published files are renamed, and only ended jobs removed', () => {
   for (const stage of /** @type {const} */ (['complete', 'failed', 'cancelled'])) {
     assert.equal(canRemove(job({ stage })), true, stage);
   }
-  for (const stage of /** @type {const} */ (['queued', 'transferring', 'paused', 'publishing', 'waiting'])) {
+  for (const stage of /** @type {const} */ (['queued', 'transferring', 'paused', 'publishing'])) {
     assert.equal(canRemove(job({ stage })), false, stage);
   }
 });
@@ -113,7 +113,7 @@ test('percentages keep one decimal and never round up to 100', () => {
 test('every state filter but All has a status', () => {
   assert.deepEqual(
     GROUPS.map((g) => g.status),
-    [null, 'active', 'waiting', 'paused', 'queued', 'failed', 'cancelled', 'done'],
+    [null, 'active', 'paused', 'queued', 'failed', 'cancelled', 'done'],
   );
 });
 
@@ -133,14 +133,12 @@ test('job names follow engine hints until publication or rename supplies the fin
 });
 
 test('states read as plain words with what went wrong', () => {
-  const clock = () => '17:42';
   assert.deepEqual(describe(job({ stage: 'transferring', display: 'transferring' })), {
     label: 'Downloading',
     status: 'active',
   });
   assert.deepEqual(describe(job({ stage: 'transferring', display: 'pausing' })), { label: 'Pausing…', status: 'paused' });
   assert.equal(describe(job({ stage: 'transferring', display: 'stopping' })).status, 'cancelled');
-  assert.equal(describe(job({ stage: 'waiting', display: 'needs_input' })).status, 'waiting');
   // A state this UI does not know keeps its name and stays neutral.
   const unknown = /** @type {import('../../src/client/contract.js').DisplayState} */ (/** @type {unknown} */ ('archiving'));
   assert.deepEqual(describe(job({ stage: 'transferring', display: unknown })), { label: 'archiving', status: null });
@@ -149,11 +147,11 @@ test('states read as plain words with what went wrong', () => {
     label: 'Failed: link expired',
     status: 'failed',
   });
-  const later = { code: /** @type {const} */ ('request_timeout'), retry_at: 1_800_000_000_000 };
-  assert.equal(
-    describe(job({ stage: 'waiting', display: 'waiting', failure: later }), clock).label,
-    'Waiting until 17:42',
-  );
+  // A folder only the user can fix fails the download, which Retry continues.
+  const folder = { code: /** @type {const} */ ('destination_unavailable') };
+  const unavailable = job({ stage: 'failed', display: 'failed', failure: folder });
+  assert.deepEqual(describe(unavailable), { label: 'Failed: folder unavailable', status: 'failed' });
+  assert.ok(availableActions(unavailable).includes('retry'));
   assert.match(explain(expired), /Add the link again/);
 });
 
@@ -174,15 +172,14 @@ test('account refusals retain the engine’s redacted authorization details and 
 
 test('each state filter counts the stages it shows', () => {
   /** @type {Parameters<typeof groupCount>[1]} */
-  const counts = { queued: 4, transferring: 2, verifying: 1, waiting: 3, blocked: 1, complete: 9 };
+  const counts = { queued: 4, transferring: 2, verifying: 1, failed: 4, complete: 9 };
   const count = Object.fromEntries(GROUPS.map((group) => [group.key, groupCount(group, counts)]));
   assert.deepEqual(count, {
     all: 20,
     active: 3,
-    waiting: 4,
     paused: 0,
     queued: 4,
-    failed: 0,
+    failed: 4,
     cancelled: 0,
     done: 9,
   });

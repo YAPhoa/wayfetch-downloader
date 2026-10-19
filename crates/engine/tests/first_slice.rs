@@ -31,8 +31,8 @@ use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, Tra
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
 use wayfetch_engine::{EngineOwner, IntegerPolicy, SpeedLimitPolicy, Timeouts};
 use wayfetch_protocol::command::{
-    AppliedLink, CollectItems, LinkRef, LinkRefs, MAX_COLLECTED_LINKS, MAX_SUBMIT_ITEMS,
-    PreferenceChange, SpeedLimitChange,
+    AppliedLink, CollectMode, CollectText, LinkRef, LinkRefs, MAX_COLLECTED_LINKS,
+    MAX_SUBMIT_ITEMS, PreferenceChange, SpeedLimitChange,
 };
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::{JobId, RootId};
@@ -1648,7 +1648,7 @@ async fn a_job_keeps_its_root_and_blocks_while_it_is_not_permitted() {
     // to the download root, and its partial stays where it is.
     env.roots.clear();
     let owner = env.start().await;
-    let blocked = wait_for(&owner, id, |j| j.stage == JobStage::Blocked).await;
+    let blocked = wait_for(&owner, id, |j| j.stage == JobStage::Failed).await;
     assert_eq!(
         blocked.failure.unwrap().code,
         FailureCode::DestinationUnavailable
@@ -1664,25 +1664,9 @@ async fn a_job_keeps_its_root_and_blocks_while_it_is_not_permitted() {
     env.roots.push(media.clone());
     let owner = env.start().await;
     let blocked = job(&owner, id).await;
-    let pause = Command::Pause {
-        job: id,
-        expected_revision: blocked.revision,
-    };
-    let paused = owner
-        .handle()
-        .execute(envelope(&owner, pause), ALL)
-        .await
-        .unwrap();
-    let CommandResult::JobUpdated { revision, .. } = paused else {
-        panic!("{paused:?}")
-    };
-    let resume = Command::Resume {
-        job: id,
-        expected_revision: revision,
-    };
     owner
         .handle()
-        .execute(envelope(&owner, resume), ALL)
+        .execute(retry(&owner, &blocked), ALL)
         .await
         .unwrap();
     complete(&owner, id).await;
@@ -2354,7 +2338,7 @@ async fn blocked_jobs_do_not_hold_back_the_jobs_behind_them() {
     env.roots.clear();
     let owner = env.start().await;
     for id in held {
-        wait_for(&owner, id, |j| j.stage == JobStage::Blocked).await;
+        wait_for(&owner, id, |j| j.stage == JobStage::Failed).await;
     }
     assert_eq!(complete(&owner, later).await.destination, Some(ROOT));
     assert_eq!(env.published("c.bin"), body(5 * KIB));
@@ -2375,7 +2359,7 @@ async fn a_job_submitted_before_the_download_root_is_mounted_is_saved_there() {
     let [id] = submit(&owner, &["/early.bin"]).await[..] else {
         panic!()
     };
-    let blocked = wait_for(&owner, id, |j| j.stage == JobStage::Blocked).await;
+    let blocked = wait_for(&owner, id, |j| j.stage == JobStage::Failed).await;
     assert_eq!(blocked.destination, None);
 
     // Another folder becomes the default before the drive is mounted.
@@ -2386,47 +2370,12 @@ async fn a_job_submitted_before_the_download_root_is_mounted_is_saved_there() {
         .await
         .unwrap();
     Root::initialize(&env.root, ROOT, owner.identity().instance).unwrap();
-    // The download root cannot be removed while the job waits for it.
-    let refused = owner
-        .handle()
-        .execute(
-            remove_root(&owner, settings(&owner).await.revision, ROOT),
-            ALL,
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(refused.code, ErrorCode::NotApplicable, "{refused:?}");
-    assert!(
-        refused.message.as_str().contains("unfinished"),
-        "{refused:?}"
-    );
-    let paused = owner
-        .handle()
-        .execute(
-            envelope(
-                &owner,
-                Command::Pause {
-                    job: id,
-                    expected_revision: blocked.revision,
-                },
-            ),
-            ALL,
-        )
-        .await
-        .unwrap();
-    let CommandResult::JobUpdated { revision, .. } = paused else {
-        panic!("{paused:?}")
-    };
-    let resume = Command::Resume {
-        job: id,
-        expected_revision: revision,
-    };
     owner
         .handle()
-        .execute(envelope(&owner, resume), ALL)
+        .execute(retry(&owner, &blocked), ALL)
         .await
         .unwrap();
-    // It still goes where it was meant to.
+    // Retried, it still goes where it was meant to.
     assert_eq!(complete(&owner, id).await.destination, Some(ROOT));
     assert_eq!(env.published("early.bin"), body(5 * KIB));
     assert!(!media.join("early.bin").exists());
@@ -2668,11 +2617,12 @@ async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
 const SIGNED: &str = "https://files.example/b.bin?token=secret#part";
 
 fn collect(owner: &EngineOwner, items: &[&str], destination: Option<RootId>) -> CommandEnvelope {
-    let items = items.iter().map(|i| (*i).to_owned()).collect::<Vec<_>>();
     envelope(
         owner,
         Command::CollectLinks {
-            items: CollectItems::try_from(items).unwrap(),
+            text: CollectText::try_from(items.join("\n")).unwrap(),
+            base_url: None,
+            mode: CollectMode::Analyze,
             destination,
         },
     )
@@ -2758,13 +2708,14 @@ async fn collected_links_wait_for_review_and_survive_restart() {
             ..
         }
     ));
-    // Nothing was created or fetched.
+    // Nothing was created or downloaded; this engine has no inspector, so
+    // the links' checks wait.
     assert!(jobs(&owner).await.is_empty());
     assert_eq!(counted(&owner).await, 0);
     assert!(env.server.requests.lock().unwrap().is_empty());
 
     let page = links(&owner).await;
-    assert_eq!(page.total, 3);
+    assert_eq!((page.total, page.checking), (3, 2));
     let [a, c, b] = &page.items[..] else {
         panic!("{page:?}")
     };
@@ -2775,7 +2726,7 @@ async fn collected_links_wait_for_review_and_survive_restart() {
             a.host.as_ref().unwrap().as_str(),
             a.name_hint.as_deref()
         ),
-        (LinkCheck::NotChecked, "files.example", Some("a.bin"))
+        (LinkCheck::Checking, "files.example", Some("a.bin"))
     );
     assert_eq!(a.destination, Some(ROOT));
     // The signed link is listed by host and name only; the whole link,
@@ -3443,7 +3394,7 @@ async fn a_retry_into_an_unmounted_folder_blocks_without_writing() {
         .execute(retry(&owner, &failed), ALL)
         .await
         .unwrap();
-    let blocked = wait_for(&owner, failed.id, |j| j.stage == JobStage::Blocked).await;
+    let blocked = wait_for(&owner, failed.id, |j| j.stage == JobStage::Failed).await;
     assert_eq!(
         blocked.failure.unwrap().code,
         FailureCode::DestinationUnavailable

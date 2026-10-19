@@ -4,8 +4,13 @@
 // list; this page shows one page of it and never keeps its own copy as
 // the authority.
 //
-// - A valid link is "Not checked": collecting never contacts its server,
-//   so only its host and the file name its path suggests are known.
+// - Collected links are checked in the background, at most one at a time
+//   per host: a file shows its name and size, a missing one is Offline,
+//   and a web page typed or analyzed is read once for the files and
+//   videos on it, which are listed with the page they were found on. A
+//   page starts only through a provider account; directly, the engine
+//   refuses it and says why. Check again
+//   repeats a check; Analyze also reads a link that is a page.
 // - Commands act on the selected links that are shown. A filter never
 //   selects, starts, or removes links it hides; selected links it hides
 //   are counted and left out.
@@ -25,8 +30,10 @@
 // Route: `/links`.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
+import { formatBytes } from '../client/jobs.js';
 import {
   addedWhen,
+  checkable,
   count,
   linkName,
   linkStatus,
@@ -61,7 +68,7 @@ import { loadServices } from './services.js';
  * @typedef {import('./menu.js').Menu} Menu
  * @typedef {import('./menu.js').MenuEntry} MenuEntry
  * @typedef {import('./menu.js').Anchor} Anchor
- * @typedef {'name' | 'host' | 'status' | 'folder' | 'added'} LinkColumn
+ * @typedef {'name' | 'host' | 'size' | 'status' | 'folder' | 'added'} LinkColumn
  */
 
 /**
@@ -87,7 +94,7 @@ export const LINKS_PATH = '/links';
 export const LINKS_PAGE_SIZE = 100;
 
 /** The columns links can be sorted by. @type {readonly LinkColumn[]} */
-export const LINK_SORT_COLUMNS = ['name', 'host', 'status', 'folder', 'added'];
+export const LINK_SORT_COLUMNS = ['name', 'host', 'size', 'status', 'folder', 'added'];
 
 /** Where the chosen order is kept. */
 const SORT_KEY = 'wayfetch.links-sort';
@@ -129,6 +136,17 @@ function refused(error, account, automatic = false) {
   }
 }
 
+/**
+ * The hover text of a link's name: where a file's name comes from.
+ * @param {CollectedLink} link
+ * @param {string | null} name
+ */
+function nameTitle(link, name) {
+  if (!link.name_hint) return name;
+  if (link.check === 'online') return `${link.name_hint} (as its server names it)`;
+  return `${link.name_hint} (from the link; the server may name the file differently)`;
+}
+
 export class LinksPage {
   /** @param {LinksContext} context */
   constructor(context) {
@@ -144,6 +162,8 @@ export class LinksPage {
      * @type {number | null}
      */
     this.before = null;
+    /** Links in the whole list being checked, as last read. */
+    this.checking = 0;
     /** Where the shown page starts, and where the next one would. */
     /** @type {LinkId | null} */
     this.pageAfter = null;
@@ -311,6 +331,7 @@ export class LinksPage {
     this.links = page.items;
     this.total = Number(page.total);
     this.before = page.before ?? null;
+    this.checking = Number(page.checking ?? 0);
     this.nextAfter = page.next_after ?? null;
     this.selected.keepOnly(page.items.map((l) => l.id));
     this.context.onTotal(this.total);
@@ -447,12 +468,16 @@ export class LinksPage {
     const n = applied.length;
     const done = {
       start: n > 0 && `Started ${count(n, 'download')}.`,
+      check: n > 0 && `Checking ${count(n, 'link')} again.`,
+      analyze: n > 0 && `Checking ${count(n, 'link')}; web pages among them are read for files.`,
       remove: n > 0 && `Removed ${count(n, 'link')} from the list.`,
       move: n > 0 && destination && `${count(n, 'link')} will be saved to ${this.context.rootPath(destination)}.`,
       choose_media: n > 0 && media && `${count(n, 'video')} will download as ${choiceLabel(media)}.`,
     }[action];
     const not = {
       start: 'not started',
+      check: 'not checked',
+      analyze: 'not checked',
       remove: 'not removed',
       move: 'not changed',
       choose_media: 'not changed',
@@ -670,6 +695,8 @@ export class LinksPage {
     const changeable = this.canControl && !this.busy;
     const starts = targets.filter(startable);
     const pending = targets.filter((l) => !l.job);
+    const checks = targets.filter(checkable);
+    const pages = checks.filter((l) => !l.media);
     /** @type {MenuEntry[]} */
     const entries = [
       {
@@ -698,6 +725,21 @@ export class LinksPage {
         disabled: !changeable || pending.length === 0,
         hint: !this.canControl ? NO_CONTROL : pending.length === 0 ? 'Already in Downloads' : undefined,
         run: () => this.chooseFolder(pending),
+      },
+      'separator',
+      {
+        key: 'check-links',
+        label: `Check${many || ''} again`,
+        disabled: !allowed || checks.length === 0,
+        hint: !this.canSubmit ? NO_SUBMIT : undefined,
+        run: () => void this.act('check', checks),
+      },
+      {
+        key: 'analyze-links',
+        label: 'Analyze for files',
+        disabled: !allowed || pages.length === 0,
+        hint: !this.canSubmit ? NO_SUBMIT : undefined,
+        run: () => void this.act('analyze', pages),
       },
     ];
     if (n === 1 && this.context.client.permissions.includes('sources')) {
@@ -799,6 +841,7 @@ export class LinksPage {
         this.summary,
         // With no links it stays empty, so it takes no room.
         !!this.total && h('span', null, 'Select links to start them. Nothing downloads until you do.'),
+        this.checking > 0 && h('span', { class: 'label' }, `Checking ${count(this.checking, 'link')}…`),
         hiddenNote,
       );
       return;
@@ -875,7 +918,7 @@ export class LinksPage {
         sortable('name', 'Name', 'name'),
         sortable('host', 'Host', 'host'),
         h('th', { scope: 'col', class: 'format' }, 'Format'),
-        h('th', { scope: 'col', class: 'num' }, 'Size'),
+        sortable('size', 'Size', 'num'),
         sortable('status', 'Status', 'link-status'),
         sortable('folder', 'Save to', 'folder'),
         sortable('added', 'Added at', 'added'),
@@ -900,6 +943,7 @@ export class LinksPage {
     const keys = {
       name: (l) => linkName(l) ?? l.host,
       host: (l) => l.host,
+      size: (l) => l.size,
       status: (l) => linkStatus(l).label,
       folder: (l) => this.linkFolder(l),
       added: (l) => l.collected_at,
@@ -969,13 +1013,14 @@ export class LinksPage {
         'td',
         {
           class: name ? 'name' : 'name unknown',
-          title: link.name_hint ? `${link.name_hint} (from the link; the server may name the file differently)` : name,
+          title: nameTitle(link, name),
         },
-        shownName,
+        h('span', { class: 'name-text' }, shownName),
+        link.found_on && h('span', { class: 'found-on', title: link.found_on }, `Found on ${link.found_on}`),
       ),
       h('td', { class: 'host', title: link.host ?? null }, link.host ?? ''),
       h('td', { class: 'format' }, this.format(link, shownName)),
-      h('td', { class: 'num unknown' }, 'Unknown'),
+      link.size === undefined ? h('td', { class: 'num unknown' }, 'Unknown') : h('td', { class: 'num' }, formatBytes(link.size)),
       h(
         'td',
         { class: `link-status tone-${status.tone}`, 'data-check': link.check, title: status.detail },

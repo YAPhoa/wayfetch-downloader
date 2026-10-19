@@ -29,6 +29,7 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/contract.js').JobStage} JobStage
  * @typedef {import('../client/contract.js').Permission} Permission
  * @typedef {import('../client/contract.js').RootId} RootId
+ * @typedef {import('../client/contract.js').CollectMode} CollectMode
  * @typedef {import('../client/contract.js').SettingsChange} SettingsChange
  * @typedef {import('../client/contract.js').RootSummary} RootSummary
  * @typedef {import('../client/contract.js').LinkId} LinkId
@@ -147,10 +148,12 @@ export class DesktopIpcClient {
     return this.call('query', { query });
   }
 
-  /** @param {{ idempotencyKey: string, target: string, items: string[], destination?: RootId | null }} request */
-  collectLinks({ idempotencyKey, target, items, destination }) {
+  /** @param {{ idempotencyKey: string, target: string, text: string, baseUrl?: string | null, mode?: CollectMode, destination?: RootId | null }} request */
+  collectLinks({ idempotencyKey, target, text, baseUrl, mode, destination }) {
     /** @type {CollectRequest} */
-    const request = { idempotency_key: idempotencyKey, target, items };
+    const request = { idempotency_key: idempotencyKey, target, text };
+    if (baseUrl) request.base_url = baseUrl;
+    if (mode) request.mode = mode;
     if (destination) request.destination = destination;
     return this.call('collect_links', { request });
   }

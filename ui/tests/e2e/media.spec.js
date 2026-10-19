@@ -88,7 +88,7 @@ test('a YouTube link shows its title and formats, and downloads the one chosen',
     // Collected, the link is read for its title and formats; nothing is
     // downloaded yet.
     await page.getByRole('button', { name: 'Add links' }).click();
-    await page.getByLabel('Links, one per line').fill(VIDEO);
+    await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(VIDEO);
     await page.getByRole('button', { name: 'Collect links' }).click();
     await expect(page).toHaveURL(`${daemon.origin}/links`);
     const row = page.locator('tr[data-link]');
@@ -177,7 +177,7 @@ test('a plugin turned off stops its links until it is turned on again', async ({
     await page.goBack();
 
     await page.getByRole('button', { name: 'Add links' }).click();
-    await page.getByLabel('Links, one per line').fill(VIDEO);
+    await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(VIDEO);
     await page.getByRole('button', { name: 'Collect links' }).click();
     const row = page.locator('tr[data-link]');
     await expect(row.locator('td.link-status')).toContainText('turned off');

@@ -54,7 +54,17 @@ collected: number,
 /**
  * Entries kept as invalid.
  */
-invalid: number, } | { "type": "links_applied", 
+invalid: number, 
+/**
+ * Links found more than once in the text, collected once. Added
+ * in protocol 5.0.
+ */
+repeated?: number, 
+/**
+ * Links in pasted HTML that lead to other web pages, which are not
+ * collected. Added in protocol 5.0.
+ */
+skipped?: number, } | { "type": "links_applied", 
 /**
  * The links it applied to.
  */

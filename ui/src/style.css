@@ -55,10 +55,11 @@
   --row-alternate: #f8fafc;
   --row-hover: #f5f7fa;
   --row-selected: #e8eef8;
-  /* One colour per download state, for its mark and its progress. */
+  /* One colour per download state, for its mark and its progress;
+     Paused fills its bar in a second shade. */
   --status-active: #2563eb;
-  --status-waiting: #b45309;
-  --status-paused: #7c3aed;
+  --status-paused: #ca8a04;
+  --status-paused-fill: #eab308;
   --status-queued: #0e7490;
   --status-failed: #dc2626;
   --status-cancelled: #6b7280;
@@ -105,8 +106,8 @@
   --row-hover: #1c2430;
   --row-selected: #223047;
   --status-active: #60a5fa;
-  --status-waiting: #fbbf24;
-  --status-paused: #c4b5fd;
+  --status-paused: #eab308;
+  --status-paused-fill: #ca8a04;
   --status-queued: #22d3ee;
   --status-failed: #f87171;
   --status-cancelled: #9ca3af;
@@ -248,9 +249,9 @@ code { font-family: ui-monospace, monospace; }
 /* Download states: the mark and progress fill take the state's colour;
    its label stays in the text colour. A state the UI does not know is
    neutral. */
+[data-status] { --status-fill: var(--status-color); }
 [data-status='active'] { --status-color: var(--status-active); }
-[data-status='waiting'] { --status-color: var(--status-waiting); }
-[data-status='paused'] { --status-color: var(--status-paused); }
+[data-status='paused'] { --status-color: var(--status-paused); --status-fill: var(--status-paused-fill); }
 [data-status='queued'] { --status-color: var(--status-queued); }
 [data-status='failed'] { --status-color: var(--status-failed); }
 [data-status='cancelled'] { --status-color: var(--status-cancelled); }
@@ -551,7 +552,7 @@ table.jobs {
   overflow: hidden;
 }
 
-.bar .fill { display: block; width: 0; height: 100%; background: var(--status-color); }
+.bar .fill { display: block; width: 0; height: 100%; background: var(--status-fill); }
 
 .list-status:empty { display: none; }
 .list-status { margin: 0; padding: 16px; color: var(--muted); }
@@ -878,6 +879,9 @@ dd .link-text { overflow-wrap: anywhere; }
 
 .collect-destination label { display: inline; }
 .collect-destination select { flex: 1 1 240px; font-family: ui-monospace, monospace; }
+.collect-page { display: grid; gap: 4px; }
+.collect-page input { font-family: ui-monospace, monospace; }
+.collect-page .hint, .collect-form .choice .hint { margin: 0; flex-basis: 100%; }
 
 /* The Links page: collected links, with what is selected and
    where it will be saved above them. */
@@ -933,6 +937,14 @@ th[aria-sort] button.sort { color: var(--ink); }
 .links td.added { color: var(--muted); }
 
 .links td.name.unknown { color: var(--muted); font-weight: 400; }
+.links td.name .found-on {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
 .links tr.invalid td.name { font-family: ui-monospace, monospace; font-weight: 400; }
 .links tr.started td.name { color: var(--muted); font-weight: 400; }
 .links td.link-status a { color: inherit; }
