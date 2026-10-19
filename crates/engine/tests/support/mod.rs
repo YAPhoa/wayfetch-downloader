@@ -13,6 +13,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::runtime::Handle;
 use wayfetch_engine::accounts::provider::AccountProvider;
+use wayfetch_engine::crawl::Inspector;
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::media::{Converter, MediaService, PluginControl};
 use wayfetch_engine::transfer::transport::Transport;
@@ -63,6 +64,8 @@ pub struct Env<S> {
     pub converter: Option<Arc<dyn Converter>>,
     /// What changes plugins, if anything.
     pub plugin_control: Option<Arc<dyn PluginControl>>,
+    /// What sends collected links' checks, if anything.
+    pub inspector: Option<Arc<dyn Inspector>>,
 }
 
 impl<S> Env<S> {
@@ -101,6 +104,7 @@ impl<S> Env<S> {
             media: Vec::new(),
             converter: None,
             plugin_control: None,
+            inspector: None,
         }
     }
 
@@ -137,6 +141,9 @@ impl<S> Env<S> {
         }
         if let Some(control) = &self.plugin_control {
             builder = builder.plugin_control(control.clone());
+        }
+        if let Some(inspector) = &self.inspector {
+            builder = builder.inspector(inspector.clone());
         }
         builder.start().await.unwrap()
     }
@@ -242,10 +249,7 @@ pub async fn wait_for(
 
 pub async fn complete(owner: &EngineOwner, id: JobId) -> JobSummary {
     wait_for(owner, id, |j| {
-        assert!(
-            !matches!(j.stage, JobStage::Failed | JobStage::Blocked),
-            "{j:?}"
-        );
+        assert!(j.stage != JobStage::Failed, "{j:?}");
         j.stage == JobStage::Complete
     })
     .await

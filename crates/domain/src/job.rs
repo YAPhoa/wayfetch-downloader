@@ -72,7 +72,8 @@ pub enum DesiredState {
 )]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum JobStage {
-    /// Eligible and waiting for scheduler admission.
+    /// Ready to start, waiting for scheduler admission or a temporary
+    /// cooldown, which its failure's `retry_at` names.
     Queued,
     /// A provider is resolving the resource into a transfer lease.
     Resolving,
@@ -85,18 +86,14 @@ pub enum JobStage {
     /// Reconciling a partial or publication after an engine restart or
     /// block, before any further transfer or publication.
     Recovering,
-    /// Not eligible until a durable deadline or condition (cooldown, quota).
-    Waiting,
-    /// Waiting for a user answer, such as a challenge or password.
-    NeedsInput,
     /// Stopped at a checkpoint by user request.
     Paused,
-    /// Stopped by an environmental problem the user must fix, such as a full
-    /// disk or missing mount.
-    Blocked,
     /// Published and verified. Terminal.
     Complete,
-    /// Failed without automatic retry; the user may retry.
+    /// Cannot continue until the user acts: a failed attempt, or a problem
+    /// only they can fix, such as a full or missing download folder or an
+    /// answer the source asks for. The failure says which; the user may
+    /// retry.
     Failed,
     /// Cancelled by user request; the user may retry.
     Cancelled,
@@ -149,27 +146,20 @@ impl JobStage {
         use JobStage::*;
         matches!(
             (self, to),
-            (Queued, Resolving | Waiting | Blocked)
+            (Queued, Resolving | Failed)
                 | (
                     Resolving,
-                    Transferring | Queued | Waiting | NeedsInput | Blocked | Failed | Paused
-                        | Cancelled
+                    Transferring | Queued | Failed | Paused | Cancelled
                 )
-                | (
-                    Transferring,
-                    Verifying | Resolving | Waiting | Blocked | Failed | Paused | Cancelled
-                )
-                | (Verifying, Publishing | Queued | Blocked | Failed | Paused | Cancelled)
+                | (Transferring, Verifying | Resolving | Failed | Paused | Cancelled)
+                | (Verifying, Publishing | Queued | Failed | Paused | Cancelled)
                 // Publication is not interruptible; pause and cancel wait for it.
-                | (Publishing, Complete | Blocked | Failed)
+                | (Publishing, Complete | Failed)
                 | (
                     Recovering,
                     Resolving | Transferring | Verifying | Publishing | Complete | Queued
-                        | Blocked | Failed | Paused | Cancelled
+                        | Failed | Paused | Cancelled
                 )
-                | (Waiting, Queued)
-                | (NeedsInput, Queued | Failed)
-                | (Blocked, Queued | Recovering | Failed)
         )
     }
 }
@@ -355,9 +345,7 @@ impl JobState {
                 // publishing, which refuses them.
                 stage != JobStage::Publishing || desired == DesiredState::Running
             }
-            JobStage::Queued | JobStage::Waiting | JobStage::NeedsInput | JobStage::Blocked => {
-                desired == DesiredState::Running
-            }
+            JobStage::Queued => desired == DesiredState::Running,
             JobStage::Recovering => true,
         };
         if !consistent {
@@ -549,12 +537,7 @@ impl JobState {
             stage if stage.requires_running() => Some(DesiredState::Running),
             // Settled or parked stages: the coordinator must finish stopping
             // a pending request instead of parking the job elsewhere.
-            JobStage::Queued
-            | JobStage::Waiting
-            | JobStage::NeedsInput
-            | JobStage::Blocked
-            | JobStage::Complete
-            | JobStage::Failed => Some(DesiredState::Running),
+            JobStage::Queued | JobStage::Complete | JobStage::Failed => Some(DesiredState::Running),
             _ => None,
         };
         if let Some(required) = required
@@ -691,7 +674,7 @@ mod tests {
             (Transferring, Complete),
             (Transferring, Queued),
             (Verifying, Complete),
-            (Waiting, Resolving),
+            (Queued, Paused),
             (Paused, Resolving),
             (Paused, Queued),
             (Failed, Resolving),
@@ -769,11 +752,9 @@ mod tests {
 
     #[test]
     fn pause_of_parked_job_is_immediate() {
-        for stage in [Queued, Waiting, NeedsInput, Blocked] {
-            let mut job = running(stage);
-            job.request_pause(job.revision()).unwrap();
-            assert_eq!(job.stage(), Paused, "from {stage}");
-        }
+        let mut job = running(Queued);
+        job.request_pause(job.revision()).unwrap();
+        assert_eq!(job.stage(), Paused);
     }
 
     #[test]
@@ -807,7 +788,7 @@ mod tests {
 
     #[test]
     fn cancel_of_parked_job_is_immediate_and_retires_generation() {
-        let mut job = running(Waiting);
+        let mut job = running(Queued);
         let old = job.generation();
         job.request_cancel(job.revision()).unwrap();
         assert_eq!(job.stage(), Cancelled);
@@ -851,7 +832,7 @@ mod tests {
             assert_eq!(job.desired(), DesiredState::Running);
             assert!(job.generation() > old);
         }
-        for stage in [Queued, Transferring, Waiting, Complete] {
+        for stage in [Queued, Transferring, Complete] {
             let mut job = running(stage);
             assert!(
                 job.request_retry(job.revision()).is_err(),
@@ -865,7 +846,7 @@ mod tests {
         let mut job = running(Transferring);
         job.request_cancel(job.revision()).unwrap();
         let g = job.generation();
-        for to in [Waiting, Blocked, Failed, Paused] {
+        for to in [Failed, Paused] {
             let mut j = job;
             assert!(j.advance(to, g).is_err(), "cancelling job moved to {to}");
         }
@@ -915,7 +896,7 @@ mod tests {
         assert_eq!(job.display(), DisplayState::Pausing);
         job.advance(Paused, job.generation()).unwrap();
 
-        let mut job = running(Waiting);
+        let mut job = running(Queued);
         assert_eq!(job.recover_after_restart(), Ok(Outcome::Unchanged));
     }
 

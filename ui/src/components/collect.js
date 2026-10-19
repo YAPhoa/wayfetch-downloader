@@ -1,6 +1,10 @@
-// The Add links page: paste links and choose where they will be saved.
-// Collecting puts them on the Links page for review; nothing downloads,
-// and no server is contacted, until they are started there.
+// The Add links page: paste links, text holding them, or a page's HTML,
+// and choose where they will be saved. Collecting puts them on the Links
+// page for review, where they are checked: a file's server is asked for
+// its name and size, and a page's address is read once for the files on
+// it, unless reading pages is turned off. Nothing downloads until links
+// are started there. In pasted HTML only links to files and videos are
+// collected; the page it came from, if given, resolves relative links.
 //
 // The text stays when collecting fails, and when the page is left
 // without collecting, which sends nothing; it goes once the links are
@@ -13,7 +17,7 @@
 // Route: `/add`.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
-import { count, entries, entriesProblem } from '../client/links.js';
+import { count, textProblem } from '../client/links.js';
 import { h, show } from './dom.js';
 import { icon } from './icons.js';
 import { toolbar } from './toolbar.js';
@@ -68,12 +72,16 @@ function notCollected(error) {
 
 /**
  * What to say once links are collected.
- * @param {{ collected: number, invalid: number }} result
+ * @param {{ collected: number, invalid: number, repeated?: number, skipped?: number }} result
  */
-export function collectedText({ collected, invalid }) {
-  const valid = `Collected ${count(collected, 'link')} for review.`;
-  if (invalid === 0) return valid;
-  return `${valid} ${count(invalid, 'entry is', 'entries are')} not a valid link; ${invalid === 1 ? 'it is' : 'they are'} marked below.`;
+export function collectedText({ collected, invalid, repeated = 0, skipped = 0 }) {
+  const parts = [`Collected ${count(collected, 'link')} for review.`];
+  if (repeated > 0) parts.push(`${count(repeated, 'repeated link')} collected once.`);
+  if (skipped > 0) parts.push(`${count(skipped, 'link')} to other web pages left out.`);
+  if (invalid > 0) {
+    parts.push(`${count(invalid, 'entry is', 'entries are')} not a valid link; ${invalid === 1 ? 'it is' : 'they are'} marked below.`);
+  }
+  return parts.join(' ');
 }
 
 export class AddLinksPage {
@@ -84,7 +92,7 @@ export class AddLinksPage {
     /** The text typed and not yet collected. */
     this.text = '';
     /** What was last sent, and its key, for retrying it. */
-    /** @type {{ text: string, destination: string, key: string } | null} */
+    /** @type {{ text: string, page: string, analyze: boolean, destination: string, key: string } | null} */
     this.sent = null;
     /** Whether a folder other than the default was chosen. */
     this.chosen = false;
@@ -110,6 +118,15 @@ export class AddLinksPage {
         this.chosen = this.destination.value !== (this.listed?.default_root ?? '');
       },
     });
+    this.page = h('input', {
+      id: 'collect-page',
+      name: 'page',
+      type: 'url',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      placeholder: 'https://example.com/downloads',
+    });
+    this.analyze = h('input', { id: 'collect-analyze', name: 'analyze', type: 'checkbox', checked: true });
     this.serverPath = h('span', { class: 'tag', hidden: true }, 'Server path');
     this.collect = h('button', { type: 'submit', class: 'primary', 'data-key': 'collect' }, 'Collect links');
     this.backLabel = h('span', null, 'Back');
@@ -117,8 +134,26 @@ export class AddLinksPage {
     const form = h(
       'form',
       { class: 'collect-form', onsubmit: (/** @type {SubmitEvent} */ event) => void this.submit(event) },
-      h('label', { for: 'collect-links' }, 'Links, one per line'),
+      h('label', { for: 'collect-links' }, 'Links, text with links in it, or a page’s HTML'),
       this.field,
+      h(
+        'div',
+        { class: 'collect-page' },
+        h('label', { for: 'collect-page' }, 'Copied from (optional)'),
+        this.page,
+        h('p', { class: 'hint' }, 'The page pasted HTML came from, so its relative links can be followed.'),
+      ),
+      h(
+        'label',
+        { class: 'choice', for: 'collect-analyze' },
+        this.analyze,
+        h(
+          'span',
+          { class: 'choice-text' },
+          h('span', null, 'Read web pages for files'),
+          h('span', { class: 'hint' }, 'A link to a web page is read once, and the files and videos on it are collected. Its links to other pages are not followed.'),
+        ),
+      ),
       h(
         'div',
         { class: 'collect-destination' },
@@ -129,7 +164,7 @@ export class AddLinksPage {
       h(
         'p',
         { class: 'hint' },
-        'Links are collected on the Links page for review. Nothing is downloaded or checked until you start them there.',
+        'Links are collected on the Links page for review and checked there. Nothing downloads until you start it.',
       ),
       this.message,
       h(
@@ -222,13 +257,14 @@ export class AddLinksPage {
     event.preventDefault();
     const { context, field } = this;
     const text = field.value;
-    const items = entries(text);
+    const page = this.page.value.trim();
+    const analyze = this.analyze.checked;
     const connected = context.hello();
     if (!connected) {
       show(this.message, 'Not connected yet. Your links are still here; try again in a moment.');
       return;
     }
-    const problem = entriesProblem(items, connected.limits);
+    const problem = textProblem(text, connected.limits);
     if (problem) {
       show(this.message, problem);
       field.focus();
@@ -236,22 +272,27 @@ export class AddLinksPage {
     }
     // The default is left to the engine, which knows the current one.
     const folder = this.chosen ? this.destination.value : '';
-    if (this.sent?.text !== text || this.sent.destination !== folder) {
-      this.sent = { text, destination: folder, key: idempotencyKey() };
+    let sent = this.sent;
+    if (sent?.text !== text || sent.page !== page || sent.analyze !== analyze || sent.destination !== folder) {
+      sent = { text, page, analyze, destination: folder, key: idempotencyKey() };
+      this.sent = sent;
     }
     this.collect.disabled = true;
     show(this.message, '');
     try {
       const result = await context.client.collectLinks({
-        idempotencyKey: this.sent.key,
+        idempotencyKey: sent.key,
         target: connected.instance,
-        items,
+        text,
+        baseUrl: page === '' ? null : page,
+        mode: analyze ? 'analyze' : 'supported_only',
         destination: folder === '' ? null : /** @type {RootId} */ (folder),
       });
       this.text = '';
       this.sent = null;
       this.chosen = false;
       field.value = '';
+      this.page.value = '';
       if (result.type === 'links_collected') context.onCollected(result);
     } catch (error) {
       if (error instanceof WayfetchError && error.code === 'unauthenticated') {

@@ -16,6 +16,19 @@ use super::lease::Representation;
 use super::range::Framing;
 use super::writer::{BoxFuture, ChunkSource};
 
+/// Which addresses a request may reach.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Reach {
+    /// Public addresses, and the local networks the operator allows for
+    /// intentional downloads.
+    #[default]
+    Allowed,
+    /// Public addresses only: for a link found on a web page, which the
+    /// page's author chose, not the person, so it never gets the access
+    /// the operator granted for links they add themselves.
+    Public,
+}
+
 /// A request for a direct link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenRequest {
@@ -36,6 +49,8 @@ pub struct OpenRequest {
     /// A `User-Agent` to send instead of the transport's own, for a link
     /// made for one, such as a media stream's.
     pub user_agent: Option<String>,
+    /// Which addresses it may reach, redirects included.
+    pub reach: Reach,
 }
 
 /// A response whose headers arrived.

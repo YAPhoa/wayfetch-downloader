@@ -25,6 +25,7 @@ use wayfetch_engine::accounts::provider::{
     AccountProvider, Checked, DeviceAuthorization, GeneratedLink, PollOutcome, Profile,
     ProviderError, Reconciled, SupportedHosts, Unrestricted, WithCredentials,
 };
+use wayfetch_engine::crawl::{InspectError, InspectRequest, Inspection, Inspector};
 use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
@@ -32,13 +33,13 @@ use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
 use wayfetch_protocol::account::{
     AccountAlias, AccountPlan, AccountRef, AuthorizationMethod, AuthorizationState, ServiceSupport,
 };
-use wayfetch_protocol::command::{CollectItems, LinkRef, LinkRefs};
+use wayfetch_protocol::command::{CollectMode, CollectText, LinkRef, LinkRefs};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::{AccountId, JobId};
 use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::domain::name::ProviderId;
 use wayfetch_protocol::domain::time::UtcTimestamp;
-use wayfetch_protocol::query::{CollectedLink, JobRoute, JobSummary, PageSize};
+use wayfetch_protocol::query::{CollectedLink, JobRoute, JobSummary, LinkCheck, PageSize};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Permission, ProtocolError, Query,
     QueryResult,
@@ -597,9 +598,10 @@ async fn account_revision(
 }
 
 async fn collect(owner: &EngineOwner, links: &[&str]) -> Vec<CollectedLink> {
-    let items = links.iter().map(|l| (*l).to_owned()).collect::<Vec<_>>();
     let command = Command::CollectLinks {
-        items: CollectItems::try_from(items).unwrap(),
+        text: CollectText::try_from(links.join("\n")).unwrap(),
+        base_url: None,
+        mode: CollectMode::Analyze,
         destination: None,
     };
     owner
@@ -2380,5 +2382,127 @@ async fn native_starts_preserve_the_ordinary_host_catalogue_cache() {
         assert_eq!(provider.hosts.load(Ordering::SeqCst), lookups);
     }
     assert_eq!(provider.unrestricts(), 4);
+    shutdown(owner).await;
+}
+
+/// Answers link checks: every link is a web page linking to an unrelated
+/// PDF until `files` is set, then a file.
+#[derive(Default)]
+struct Pages {
+    files: AtomicBool,
+}
+
+impl Inspector for Pages {
+    fn inspect<'a>(
+        &'a self,
+        request: &'a InspectRequest,
+    ) -> BoxFuture<'a, Result<Inspection, InspectError>> {
+        let page =
+            !self.files.load(Ordering::SeqCst) && request.url.host_str() == Some("hoster.example");
+        let answer = if page {
+            Inspection {
+                status: 200,
+                final_url: Some(request.url.clone()),
+                content_type: Some("text/html".into()),
+                page: Some(Bytes::from_static(
+                    b"<a href=\"https://docs.example/terms.pdf\">Terms</a>",
+                )),
+                ..Inspection::default()
+            }
+        } else {
+            Inspection {
+                status: 200,
+                content_type: Some("application/octet-stream".into()),
+                length: Some(1),
+                ..Inspection::default()
+            }
+        };
+        Box::pin(async move { Ok(answer) })
+    }
+}
+
+/// The Links list once no check is waiting or running.
+async fn checked(owner: &EngineOwner) -> Vec<CollectedLink> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let query = Query::ListLinks {
+            after: None,
+            page_size: PageSize::DEFAULT,
+        };
+        let QueryResult::Links(page) = owner.handle().query(query, ALL).await.unwrap() else {
+            panic!()
+        };
+        if page.checking == 0 {
+            return page.items;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{page:?}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hoster_page_starts_through_an_account_or_once_it_is_a_file() {
+    let mut env = env();
+    let pages = Arc::new(Pages::default());
+    env.inspector = Some(pages.clone());
+    let (provider, host) = (&env.server.provider, &env.server.host);
+    let data = body(4 * KIB);
+    host.serve(data.clone());
+    *provider.size.lock().unwrap() = Some(data.len() as u64);
+    let owner = env.start().await;
+    let account = add_account(&owner, provider).await;
+    collect(&owner, &[ORIGINAL, "https://hoster.example/file/later"]).await;
+    let links = checked(&owner).await;
+    let [hoster, later, pdf] = &links[..] else {
+        panic!("{links:?}")
+    };
+    assert_eq!((hoster.check, hoster.found), (LinkCheck::Page, Some(1)));
+    assert_eq!(later.check, LinkCheck::Page);
+    assert_eq!(pdf.found_on.as_deref(), Some(ORIGINAL));
+
+    // Directly, the page's address would download the page itself.
+    let command = start_command(std::slice::from_ref(hoster), None);
+    let CommandResult::LinksApplied { applied, refused } = owner
+        .handle()
+        .execute(envelope(&owner, command), ALL)
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(applied.is_empty());
+    assert!(
+        refused[0].message.as_str().contains("web page"),
+        "{refused:?}"
+    );
+    // Through the account, the provider resolves it to its file.
+    let [id] = start(&owner, std::slice::from_ref(hoster), Some(account))
+        .await
+        .unwrap()[..]
+    else {
+        panic!()
+    };
+    support::complete(&owner, id).await;
+    assert_eq!(env.published("Provider Name.bin"), data);
+
+    // A page checked again as a file starts directly.
+    pages.files.store(true, Ordering::SeqCst);
+    let refs = LinkRefs::try_from(vec![LinkRef {
+        link: later.id,
+        revision: later.revision,
+    }])
+    .unwrap();
+    let check = Command::CheckLinks { links: refs };
+    owner
+        .handle()
+        .execute(envelope(&owner, check), ALL)
+        .await
+        .unwrap();
+    let links = checked(&owner).await;
+    let later = links.iter().find(|l| l.id == later.id).unwrap();
+    assert_eq!(later.check, LinkCheck::Online);
+    start(&owner, std::slice::from_ref(later), None)
+        .await
+        .unwrap();
     shutdown(owner).await;
 }

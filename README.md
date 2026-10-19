@@ -126,7 +126,8 @@ the operator names them: initialize each with `init-root` and pass it to
 be added, except its state directory, so a token or session with `control`
 decides where new downloads may be written. Changing the default affects
 only downloads added afterwards; earlier ones keep their folder, and one
-whose folder is no longer configured waits, blocked, instead of moving.
+whose folder is no longer configured fails instead of moving, and continues
+there when retried once the folder is back.
 
 ### Configuration file
 
@@ -184,9 +185,9 @@ is never printed.
 | `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
 | `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"delete_files"\|"rename", "expected_revision"}`, plus `"name"` for a rename, and `"repeat_provider_operation": true` to retry a provider request whose answer was lost (needs `provider_downloads`) |
 | `GET /v1/jobs/{id}/source` | The link the job was submitted with (needs `sources`) |
-| `POST /v1/staging/links` | Collect links for review without downloading them: `{"idempotency_key", "target", "items": [text...], "destination"?: "root-N"}` |
+| `POST /v1/staging/links` | Collect links for review without downloading them: `{"idempotency_key", "target", "text", "base_url"?, "mode"?: "analyze"\|"supported_only", "destination"?: "root-N"}`, where `text` is pasted text or a page's HTML (at most 512 KiB) and `base_url` the page it came from |
 | `GET /v1/staging/links` | A page of collected links: `after`, `page_size` |
-| `POST /v1/staging/commands` | `{"idempotency_key", "target", "action": "start"\|"remove"\|"move", "links": [{"link", "revision"}...]}`, plus `"destination"` for a move, and optional `"routing": "direct"\|"automatic"` or `"account"` for a start; automatic is the default and needs `provider_downloads`, explicit Direct needs only `submit` |
+| `POST /v1/staging/commands` | `{"idempotency_key", "target", "action": "start"\|"remove"\|"move"\|"check"\|"analyze", "links": [{"link", "revision"}...]}`, plus `"destination"` for a move, and optional `"routing": "direct"\|"automatic"` or `"account"` for a start; automatic is the default and needs `provider_downloads`, explicit Direct needs only `submit` |
 | `GET /v1/staging/links/{id}/source` | A collected link as entered (needs `sources`) |
 | `GET /v1/settings` | The default destination and the folders to choose from, as server paths with `available` and `problem`, `max_active_downloads` with its source, default, saved value, range, lock, and conflict, and `download_speed_limit` likewise, with whether Unlimited is allowed |
 | `PUT /v1/settings` | `{"idempotency_key", "target", "expected_revision"}` with `"default_root": "root-N"`, `"max_active_downloads": {"set": N}` or `"use_default"`, `"download_speed_limit": {"set": "unlimited"}`, `{"set": {"bytes_per_second": N}}` or `"use_default"`, or any of them together, all or none (needs `control`) |
@@ -219,10 +220,22 @@ until is refused with `not_applicable` and that `retry_at`. Like the other
 job actions it needs `control`.
 
 `/v1/inputs` starts downloads at once. Collected links instead survive restarts
-and are never fetched until started;
+and are never downloaded until started;
 accepted links move out of Links into Downloads, while refused links remain
-collected. An entry that is not a link is
-kept with its problem. A staging command reports each link it applied and
+collected. The engine finds the links in the text: in HTML, only links to
+files and supported videos, counting the rest. An entry written as a link
+that is not one Wayfetch can use is kept with its problem. Collected links
+are then checked in the background, one request at a time per host and two
+at most, through the same egress policy as downloads: `HEAD` (or a one-byte
+`GET` when `HEAD` is refused) gives a file's name and size, and a missing
+file is `offline`. In `analyze` mode, the default, a typed link that is a
+web page is read once (at most 2 MiB) and the files and videos on it are
+collected beside it with `found_on`; links to other pages are counted and
+never followed. Links in pasted HTML, and links found on a page that was
+not itself served from a local address, reach public addresses only, checks and downloads alike,
+whatever networks `network.allow_networks` opens. `check` checks links again and
+`analyze` also reads a link that is a page. A page starts only through a
+provider account; directly, it is refused. A staging command reports each link it applied and
 each it refused, with a reason, so a link changed since its `revision` was
 read, or bound for an unavailable folder, stays collected. Each link starts
 at most one download. Collecting and starting need `submit`; removing or
@@ -666,7 +679,8 @@ TOKEN=$(sudo awk '!/^#/ {print $1; exit}' "$WAYFETCH_TOKENS/api-tokens")
 
 The health check runs `wayfetchd ready` inside the container. While the root
 is uninitialized or its mount has gone, the container stays unhealthy and
-downloads wait in `blocked` instead of writing anywhere else. Only one
+downloads fail with `destination_unavailable` instead of writing anywhere
+else, and continue when retried. Only one
 engine can own a state directory: a second container on it exits with an
 error. `docker compose stop` shuts down gracefully, and unfinished downloads
 resume from their durable bytes when the container starts again, even after

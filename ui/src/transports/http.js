@@ -19,6 +19,7 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/contract.js').JobStage} JobStage
  * @typedef {import('../client/contract.js').Permission} Permission
  * @typedef {import('../client/contract.js').RootId} RootId
+ * @typedef {import('../client/contract.js').CollectMode} CollectMode
  * @typedef {import('../client/contract.js').SettingsChange} SettingsChange
  * @typedef {import('../client/contract.js').LinkId} LinkId
  * @typedef {import('../client/contract.js').LinkRef} LinkRef
@@ -151,10 +152,12 @@ export class HttpClient {
     return this.request('GET', `/v1/staging/links?${query}`);
   }
 
-  /** @param {{ idempotencyKey: string, target: string, items: string[], destination?: RootId | null }} request */
-  collectLinks({ idempotencyKey, target, items, destination }) {
+  /** @param {{ idempotencyKey: string, target: string, text: string, baseUrl?: string | null, mode?: CollectMode, destination?: RootId | null }} request */
+  collectLinks({ idempotencyKey, target, text, baseUrl, mode, destination }) {
     /** @type {CollectRequest} */
-    const body = { idempotency_key: idempotencyKey, target, items };
+    const body = { idempotency_key: idempotencyKey, target, text };
+    if (baseUrl) body.base_url = baseUrl;
+    if (mode) body.mode = mode;
     if (destination) body.destination = destination;
     return this.request('POST', '/v1/staging/links', { body });
   }

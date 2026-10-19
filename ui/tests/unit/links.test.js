@@ -3,14 +3,14 @@ import { test } from 'node:test';
 
 import {
   addedWhen,
+  checkable,
   count,
-  entries,
-  entriesProblem,
   linkName,
   linkStatus,
   matches,
   refusals,
   startable,
+  textProblem,
 } from '../../src/client/links.js';
 
 /**
@@ -28,27 +28,17 @@ function link(fields) {
   };
 }
 
-const LIMITS = { max_page_size: 500, max_submit_items: 3, max_url_bytes: 20, max_collected_links: 10 };
+const LIMITS = { max_page_size: 500, max_submit_items: 3, max_url_bytes: 20, max_collected_links: 10, max_collect_text_bytes: 2048 };
 
-test('entries are the words of pasted text, blank lines ignored', () => {
-  assert.deepEqual(entries('  https://a.example/x\n\n\thttps://b.example/y  z\n'), [
-    'https://a.example/x',
-    'https://b.example/y',
-    'z',
-  ]);
-  assert.deepEqual(entries(' \n '), []);
-});
-
-test('what stops entries being sent stays within the published limits', () => {
-  assert.equal(entriesProblem([], LIMITS), 'Paste or type at least one link.');
-  assert.equal(entriesProblem(['a', 'b', 'c', 'd'], LIMITS), 'At most 3 links at a time; this has 4.');
+test('what stops text being collected stays within the published limits', () => {
+  assert.equal(textProblem(' \n ', LIMITS), 'Paste or type at least one link.');
   // Bytes, not characters.
-  assert.equal(entriesProblem(['https://a/', `https://${'é'.repeat(7)}`], LIMITS), 'Link 2 is longer than 20 bytes.');
-  // An entry that is not a link is the engine's to mark, not a reason to send nothing.
-  assert.equal(entriesProblem(['not a link'], LIMITS), null);
+  assert.equal(textProblem('é'.repeat(1025), LIMITS), 'The text is longer than 2 KiB; collect it in parts.');
+  // Finding the links, and marking entries that are not, is the engine's.
+  assert.equal(textProblem('not a link', LIMITS), null);
 });
 
-test('a valid link is only ever "Not checked"; its file name is a hint', () => {
+test('an unchecked link names the file its path suggests', () => {
   const valid = link({ host: 'cdn.example', name_hint: 'film.mkv' });
   assert.equal(linkName(valid), 'film.mkv');
   assert.deepEqual(linkStatus(valid), { label: 'Not checked', tone: 'calm', detail: null });
@@ -62,6 +52,37 @@ test('a valid link is only ever "Not checked"; its file name is a hint', () => {
   const invalid = link({ check: 'invalid', text: 'example.com/x', problem: 'not a valid URL' });
   assert.equal(linkName(invalid), 'example.com/x');
   assert.deepEqual(linkStatus(invalid), { label: 'Invalid link', tone: 'bad', detail: 'not a valid URL' });
+  assert.equal(checkable(invalid), false);
+});
+
+test('checks say what the server answered', () => {
+  assert.deepEqual(linkStatus(link({ check: 'checking' })), { label: 'Checking', tone: 'calm', detail: null });
+  assert.deepEqual(linkStatus(link({ check: 'online', size: 10 })), { label: 'Online', tone: 'ok', detail: null });
+  assert.deepEqual(linkStatus(link({ check: 'offline', reason: 'not_found', check_detail: 'HTTP 404' })), {
+    label: 'Offline',
+    tone: 'bad',
+    detail: 'The server says it does not exist. HTTP 404',
+  });
+  assert.deepEqual(linkStatus(link({ check: 'unknown', reason: 'blocked' })), {
+    label: 'Could not check',
+    tone: 'warn',
+    detail: 'Wayfetch is not allowed to connect to this address.',
+  });
+  assert.ok(checkable(link({ check: 'offline' })));
+});
+
+test('a page read for files lists them, and starting it is the engine\'s call', () => {
+  const read = link({ check: 'page', found: 2, skipped: 3 });
+  assert.deepEqual(linkStatus(read), {
+    label: 'Web page',
+    tone: 'calm',
+    detail: '2 files found on it, listed below it. 3 links to other pages left alone.',
+  });
+  // Through a provider account a hoster's page is its file.
+  assert.equal(startable(read), true);
+  const unread = link({ check: 'page' });
+  assert.equal(linkStatus(unread).detail, 'Not read. Analyze it to find the files on it.');
+  assert.ok(matches(link({ found_on: 'https://a.example/release' }), 'release'));
 });
 
 test('a started link stays listed as added to Downloads, and starts no more', () => {
