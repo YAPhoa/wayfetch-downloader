@@ -75,6 +75,9 @@ pub use staging::{Removal, StagingFile, StagingRecord, SyncedRanges};
 use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::id::RootId;
 
+/// The step that opens a root's folder by its path.
+const OPEN_ROOT: &str = "open root";
+
 /// What makes a staging file "the one this generation created" rather than
 /// whatever now has its name: device and inode, plus the birth time where
 /// the filesystem reports one, because an inode number freed by a deleted
@@ -163,6 +166,20 @@ pub enum FsError {
 }
 
 impl FsError {
+    /// Whether opening a root failed because the folder is gone: it no
+    /// longer exists, or it no longer holds its sentinel, as when its
+    /// contents were deleted. An empty mount point looks the same.
+    pub fn is_absent_root(&self) -> bool {
+        match self {
+            Self::SentinelMissing(_) => true,
+            Self::Io {
+                op: OPEN_ROOT,
+                source,
+            } => source.kind() == io::ErrorKind::NotFound,
+            _ => false,
+        }
+    }
+
     /// Wraps an I/O error from `op`.
     fn io(op: &'static str) -> impl FnOnce(io::Error) -> Self {
         move |source| Self::Io { op, source }

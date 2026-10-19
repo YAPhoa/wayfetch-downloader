@@ -3455,6 +3455,47 @@ async fn explicit_data_deletion_is_confined_permission_checked_and_replayable() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn deleting_data_whose_folder_is_gone_removes_the_job() {
+    let env = env();
+    env.server.put("/emptied.bin", Resource::new(body(3 * KIB)));
+    env.server
+        .put("/vanished.bin", Resource::new(body(3 * KIB)));
+    let owner = env.start().await;
+    let ids = submit(&owner, &["/emptied.bin", "/vanished.bin"]).await;
+    let emptied = complete(&owner, ids[0]).await;
+    let vanished = complete(&owner, ids[1]).await;
+    let delete = |job: &JobSummary| {
+        envelope(
+            &owner,
+            Command::DeleteFiles {
+                job: job.id,
+                expected_revision: job.revision,
+            },
+        )
+    };
+    // Everything in the folder was deleted, Wayfetch's own data included.
+    for entry in std::fs::read_dir(&env.root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(path).unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    owner.handle().execute(delete(&emptied), ALL).await.unwrap();
+    assert_eq!(counted(&owner).await, 1);
+    // Then the folder itself.
+    std::fs::remove_dir(&env.root).unwrap();
+    owner
+        .handle()
+        .execute(delete(&vanished), ALL)
+        .await
+        .unwrap();
+    assert_eq!(counted(&owner).await, 0);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn failed_data_deletion_keeps_job_visible_and_allows_an_explicit_keep_choice() {
     let env = env();
     env.server.put("/changed.bin", Resource::new(body(3 * KIB)));
