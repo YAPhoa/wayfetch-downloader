@@ -250,7 +250,6 @@ export class Downloads {
     /** Connection state, for the status bar. */
     this.status = h('span', { class: 'status', role: 'status', 'data-status': 'connecting' });
     this.speed = h('span', { class: 'speed' });
-    this.shown = h('span', { class: 'shown' });
     this.banner = h('div', { class: 'banner', role: 'alert', hidden: true });
     this.noticeLine = h('p', { class: 'notice', role: 'status' });
     /**
@@ -397,7 +396,6 @@ export class Downloads {
         { class: 'statusbar' },
         this.status,
         this.speed,
-        this.shown,
         h('span', { class: 'spacer' }),
         account,
       ),
@@ -1549,11 +1547,6 @@ export class Downloads {
 
     const rates = feed.jobs.flatMap((job) => feed.sample(job.id)?.bytes_per_second ?? []);
     show(this.speed, rates.length > 0 && `Down ${formatBytes(rates.reduce((a, b) => a + b, 0))}/s`);
-    const page = this.earlier.length + 1;
-    show(
-      this.shown,
-      `${feed.jobs.length} ${feed.jobs.length === 1 ? 'download' : 'downloads'} on page ${page}`,
-    );
   }
 
   /** @param {'next' | 'back'} direction */
