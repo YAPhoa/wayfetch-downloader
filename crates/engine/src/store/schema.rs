@@ -38,6 +38,8 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0015_job_names.sql")),
     M::up(include_str!("migrations/0016_media_links.sql")),
     M::up(include_str!("migrations/0017_root_removal.sql")),
+    M::up(include_str!("migrations/0018_link_checks.sql")),
+    M::up(include_str!("migrations/0019_failed_stages.sql")),
 ];
 
 /// Newest schema version this engine knows.
@@ -253,6 +255,41 @@ mod tests {
                 []
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn blocked_jobs_fail_with_their_reason() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(&MIGRATIONS[..18])
+            .to_latest(&mut conn)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO packages (id, name, created_at) VALUES (1, 'p', 0); \
+             INSERT INTO input_batches (id, package_id, input_count, created_at) \
+                 VALUES (1, 1, 2, 0); \
+             INSERT INTO source_links (id, batch_id, ordinal, input_url) \
+                 VALUES (1, 1, 0, 'https://files.example/a'), (2, 1, 1, 'https://files.example/b'); \
+             INSERT INTO jobs (id, source_link_id, package_id, desired_state, stage, \
+                 generation, revision, failure_code, failure_message, created_at, updated_at) \
+                 VALUES (1, 1, 1, 'running', 'blocked', 1, 4, 'permission_denied', 'no', 0, 0), \
+                        (2, 2, 1, 'running', 'queued', 1, 1, NULL, NULL, 0, 0);",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
+        let jobs: Vec<(String, i64, Option<String>)> = conn
+            .prepare("SELECT stage, revision, failure_code FROM jobs ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            jobs,
+            [
+                ("failed".into(), 5, Some("permission_denied".into())),
+                ("queued".into(), 1, None)
+            ]
         );
     }
 

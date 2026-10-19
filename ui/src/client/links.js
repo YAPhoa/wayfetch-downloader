@@ -1,5 +1,5 @@
-// What the views say about collected links: how entered text becomes
-// entries, how a link is named and described, and what a command's
+// What the views say about collected links: what stops text from being
+// collected, how a link is named and described, and what a command's
 // refusals mean. No DOM, so it is tested
 // under Node.
 
@@ -9,33 +9,47 @@ import { durationText } from './media.js';
  * @typedef {import('./contract.js').CollectedLink} CollectedLink
  * @typedef {import('./contract.js').LinkId} LinkId
  * @typedef {import('./contract.js').Hello} Hello
+ * @typedef {import('./contract.js').CheckReason} CheckReason
  * @typedef {import('./jobs.js').Tone} Tone
  */
 
 /**
- * The entries in pasted or typed text: one per whitespace-separated word,
- * since a link has no spaces. Blank lines are ignored.
+ * What stops `text` from being sent to collect, within the engine's
+ * published limits, or `null`. The engine finds the links in it and has
+ * the final say.
  * @param {string} text
- */
-export function entries(text) {
-  return text.split(/\s+/).filter(Boolean);
-}
-
-/**
- * What stops `items` from being sent, within the engine's published
- * limits, or `null`. The engine checks again and has the final say.
- * @param {string[]} items
  * @param {Hello['limits']} limits
  */
-export function entriesProblem(items, limits) {
-  if (items.length === 0) return 'Paste or type at least one link.';
-  if (items.length > limits.max_submit_items) {
-    return `At most ${limits.max_submit_items} links at a time; this has ${items.length}.`;
+export function textProblem(text, limits) {
+  if (text.trim() === '') return 'Paste or type at least one link.';
+  const bytes = new TextEncoder().encode(text).length;
+  if (bytes > limits.max_collect_text_bytes) {
+    return `The text is longer than ${Math.floor(limits.max_collect_text_bytes / 1024)} KiB; collect it in parts.`;
   }
-  const encoder = new TextEncoder();
-  const long = items.findIndex((item) => encoder.encode(item).length > limits.max_url_bytes);
-  if (long >= 0) return `Link ${long + 1} is longer than ${limits.max_url_bytes} bytes.`;
   return null;
+}
+
+/** What each reason a check gives means. @type {Record<CheckReason, string>} */
+const REASONS = {
+  not_found: 'The server says it does not exist.',
+  access_denied: 'The server refused access.',
+  rate_limited: 'The server asked to wait before asking again.',
+  timed_out: 'The server did not answer in time.',
+  unreachable: 'The server could not be reached.',
+  blocked: 'Wayfetch is not allowed to connect to this address.',
+  server_error: 'The server had an error.',
+  unreadable: 'The server’s answer could not be read.',
+  too_large: 'The page is too large to read.',
+};
+
+/**
+ * Why a check found `link` offline or could not tell, with what the
+ * server said, or `null`.
+ * @param {CollectedLink} link
+ */
+export function checkReason(link) {
+  const parts = [link.reason && REASONS[link.reason], link.check_detail].filter(Boolean);
+  return parts.length > 0 ? parts.join(' ') : null;
 }
 
 /**
@@ -50,11 +64,12 @@ export function linkName(link) {
 }
 
 /**
- * What a link's status column says. `Not checked` is all that is known
- * about a valid link: collecting never contacts its server. A video link,
- * such as YouTube's, is the exception: its service reads its title and
- * formats in the background. A started
- * link stays listed, added to Downloads, until removed.
+ * What a link's status column says. Collected links are checked in the
+ * background: a file's server is asked for its name and size, never its
+ * content, and a page typed or analyzed is read once for the files on
+ * it, which are listed beside it. A video link's service reads its title
+ * and formats instead. A started link stays listed, added to Downloads,
+ * until removed.
  * @param {CollectedLink} link
  * @returns {{ label: string, tone: Tone, detail: string | null }}
  */
@@ -63,6 +78,7 @@ export function linkStatus(link) {
   if (link.check === 'invalid') {
     return { label: 'Invalid link', tone: 'bad', detail: link.problem ?? null };
   }
+  const refused = link.problem ? `Not started: ${link.problem}` : null;
   const media = link.media;
   if (media?.state === 'checking') return { label: 'Checking video', tone: 'calm', detail: null };
   if (media?.state === 'unavailable') {
@@ -70,21 +86,40 @@ export function linkStatus(link) {
   }
   if (media) {
     const length = media.duration_seconds === undefined ? null : durationText(media.duration_seconds);
-    return {
-      label: 'Video found',
-      tone: link.problem ? 'warn' : 'ok',
-      detail: link.problem ? `Not started: ${link.problem}` : length,
-    };
+    return { label: 'Video found', tone: refused ? 'warn' : 'ok', detail: refused ?? length };
   }
-  return {
-    label: 'Not checked',
-    tone: link.problem ? 'warn' : 'calm',
-    detail: link.problem ? `Not started: ${link.problem}` : null,
-  };
+  switch (link.check) {
+    case 'checking':
+      return { label: 'Checking', tone: 'calm', detail: null };
+    case 'online':
+      return { label: 'Online', tone: refused ? 'warn' : 'ok', detail: refused };
+    case 'offline':
+      return { label: 'Offline', tone: 'bad', detail: checkReason(link) };
+    case 'unknown':
+      return { label: 'Could not check', tone: 'warn', detail: checkReason(link) };
+    case 'page':
+      return { label: 'Web page', tone: 'calm', detail: pageDetail(link) };
+    default:
+      return { label: 'Not checked', tone: refused ? 'warn' : 'calm', detail: refused };
+  }
 }
 
 /**
- * Whether `link` can be started: valid, and not started already.
+ * What reading a page found, or that it was not read.
+ * @param {CollectedLink} link
+ */
+function pageDetail(link) {
+  if (link.found === undefined) return 'Not read. Analyze it to find the files on it.';
+  const found = link.found === 0 ? 'No files found on it.' : `${count(link.found, 'file')} found on it, listed below it.`;
+  const skipped = link.skipped ? ` ${count(link.skipped, 'link')} to other pages left alone.` : '';
+  const more = link.check_detail ? ` ${link.check_detail}` : '';
+  return `${found}${skipped}${more}`;
+}
+
+/**
+ * Whether `link` can be started: valid and not started already. A web
+ * page starts only through a provider account, which the engine decides
+ * when starting, and refuses otherwise with the reason.
  * @param {CollectedLink} link
  */
 export function startable(link) {
@@ -92,14 +127,22 @@ export function startable(link) {
 }
 
 /**
+ * Whether `link` can be checked again, or analyzed: valid and not started.
+ * @param {CollectedLink} link
+ */
+export function checkable(link) {
+  return link.check !== 'invalid' && !link.job;
+}
+
+/**
  * Whether `link` matches filter text `query`, already lower case: by
- * name (a video's title), host, or problem.
+ * name (a video's title), host, problem, or the page it was found on.
  * @param {CollectedLink} link
  * @param {string} query
  */
 export function matches(link, query) {
   if (query === '') return true;
-  return [linkName(link), link.host, link.problem].some((text) => text?.toLowerCase().includes(query));
+  return [linkName(link), link.host, link.problem, link.found_on].some((text) => text?.toLowerCase().includes(query));
 }
 
 /**

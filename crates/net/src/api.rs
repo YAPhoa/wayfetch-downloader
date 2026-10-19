@@ -18,6 +18,7 @@ use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
     ApiClient, ApiError, ApiErrorKind, ApiMethod, ApiRequest, ApiResponse,
 };
+use wayfetch_engine::transfer::transport::Reach;
 use wayfetch_engine::transfer::writer::BoxFuture;
 use zeroize::Zeroizing;
 
@@ -42,11 +43,11 @@ impl HttpTransport {
                 "only HTTP(S) APIs are supported",
             ));
         }
-        self.policy
+        self.policy(Reach::Allowed)
             .check(&request.url)
             .map_err(|Refused(why)| fail(ApiErrorKind::Refused, why))?;
         let client = self
-            .client(request.deadline.min(MAX_CONNECT))
+            .client(Reach::Allowed, request.deadline.min(MAX_CONNECT))
             .map_err(|e| fail(ApiErrorKind::Unreachable, e.message))?;
         let method = match request.method {
             ApiMethod::Get => Method::GET,

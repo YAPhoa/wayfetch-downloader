@@ -523,7 +523,7 @@ async fn a_missing_root_is_refused_not_written_into() {
     let deadline = Instant::now() + DEADLINE;
     loop {
         let job: Value = client.job(&id).await;
-        if job["stage"] == "blocked" {
+        if job["stage"] == "failed" {
             break;
         }
         assert!(Instant::now() < deadline, "{job}");

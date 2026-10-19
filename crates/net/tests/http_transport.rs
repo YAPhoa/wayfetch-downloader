@@ -26,7 +26,9 @@ use wayfetch_engine::transfer::lease::{
     Transfer, TransferLease, TransferOffer,
 };
 use wayfetch_engine::transfer::range::Framing;
-use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
+use wayfetch_engine::transfer::transport::{
+    OpenRequest, Reach, Response, Transport, TransportError,
+};
 use wayfetch_net::header::{self, HeaderMap, HeaderValue};
 use wayfetch_net::{BrokerError, HttpConfig, HttpTransport, LeaseRequest, Method, PreparedRequest};
 
@@ -44,6 +46,7 @@ fn request(url: &str) -> OpenRequest {
         connect_timeout: Duration::from_secs(5),
         read_buffer: READ_BUFFER,
         user_agent: None,
+        reach: Reach::Allowed,
     }
 }
 

@@ -66,6 +66,7 @@ use wayfetch_protocol::{
 };
 
 mod accounts;
+mod crawl;
 mod media;
 mod resolve;
 mod routing;
@@ -76,6 +77,7 @@ use crate::accounts::provider::AccountProvider;
 use crate::accounts::vault::Vault;
 use crate::cleanup;
 use crate::config::{ConfigError, EngineConfig, Preference};
+use crate::crawl::Inspector;
 use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::fs::Root;
@@ -129,6 +131,7 @@ pub struct EngineBuilder {
     config: EngineConfig,
     runtime: Handle,
     transport: Option<Arc<dyn Transport>>,
+    inspector: Option<Arc<dyn Inspector>>,
     providers: Vec<Arc<dyn AccountProvider>>,
     media_services: Vec<Arc<dyn MediaService>>,
     converter: Option<Arc<dyn Converter>>,
@@ -140,6 +143,7 @@ impl std::fmt::Debug for EngineBuilder {
         f.debug_struct("EngineBuilder")
             .field("config", &self.config)
             .field("transport", &self.transport.is_some())
+            .field("inspector", &self.inspector.is_some())
             .field("providers", &self.providers.len())
             .field("media_services", &self.media_services.len())
             .field("converter", &self.converter.is_some())
@@ -155,6 +159,7 @@ impl EngineBuilder {
             config,
             runtime,
             transport: None,
+            inspector: None,
             providers: Vec::new(),
             media_services: Vec::new(),
             converter: None,
@@ -199,6 +204,13 @@ impl EngineBuilder {
         self
     }
 
+    /// What sends collected links' checks. Without one, only video links
+    /// are checked, and other checks wait.
+    pub fn inspector(mut self, inspector: Arc<dyn Inspector>) -> Self {
+        self.inspector = Some(inspector);
+        self
+    }
+
     /// Validates the configuration, takes ownership of the state directory,
     /// and starts the engine's tasks. Fails if another engine owns the
     /// directory.
@@ -213,7 +225,8 @@ impl EngineBuilder {
                 let mut store = Store::open(state_dir.path())?;
                 store.set_media_converter(converter_ready);
                 // A plugin may have been installed since a check failed.
-                store.retry_failed_media()?;
+                store.retry_failed_media(now())?;
+                store.requeue_checks()?;
                 store.recover_after_restart(now())?;
                 stage_all(&mut store)?;
                 prune(&mut store, &config.limits)?;
@@ -273,6 +286,7 @@ impl EngineBuilder {
             supervisor,
             config: self.config,
             transport: self.transport,
+            checks: crawl::Checks::new(self.inspector),
             running: HashMap::new(),
             held: HashSet::new(),
             destinations,
@@ -781,7 +795,7 @@ fn admit(
         };
         let _ = store.record_stage(
             job.job,
-            JobStage::Blocked,
+            JobStage::Failed,
             job.generation,
             Some(failure),
             now(),
@@ -966,10 +980,13 @@ enum Internal {
     Resolve(ResolveRequest),
     /// A provider call for a download's link ended.
     Resolved(Box<resolve::Resolved>),
-    /// A media link's check ended.
-    MediaChecked(
+    /// A link's check ended: its check, link, the link as collected, and
+    /// what it found.
+    Checked(
+        i64,
         wayfetch_domain::id::SourceLinkId,
-        Result<crate::media::MediaInfo, String>,
+        url::Url,
+        crawl::Answer,
     ),
 }
 
@@ -1041,6 +1058,8 @@ struct Coordinator {
     supervisor: Supervisor,
     config: EngineConfig,
     transport: Option<Arc<dyn Transport>>,
+    /// Link checks running, and what sends them.
+    checks: crawl::Checks,
     /// Running downloads and what stops each.
     running: HashMap<JobId, CancellationToken>,
     /// Active jobs whose download gave up, left for restart recovery
@@ -1278,6 +1297,8 @@ impl Coordinator {
             | Command::RemoveLinks { .. }
             | Command::MoveLinks { .. }
             | Command::ChooseLinkMedia { .. }
+            | Command::CheckLinks { .. }
+            | Command::AnalyzeLinks { .. }
             | Command::AuthorizeAccount { .. }
             | Command::SetAccountEnabled { .. }
             | Command::RemoveAccount { .. }
@@ -1295,13 +1316,20 @@ impl Coordinator {
                 return;
             }
         };
+        let collect = match self.collect_plan(&envelope).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+        };
         let context = CommandContext {
             destination: self.destinations.default_root(),
             download_root: self.destinations.download_root(),
             unusable,
             route,
             routes,
-            media: self.media.collected(&envelope),
+            collect,
         };
         let settings = matches!(
             envelope.command,
@@ -1471,7 +1499,9 @@ impl Coordinator {
             } => self.checked(account, generation, result).await,
             Internal::Resolve(request) => self.resolve(request).await,
             Internal::Resolved(resolved) => self.resolved(resolved).await,
-            Internal::MediaChecked(link, found) => self.media_checked(link, found).await,
+            Internal::Checked(task, link, url, answer) => {
+                self.link_checked(task, link, url, answer).await;
+            }
         }
         self.changed().await;
     }
@@ -1630,6 +1660,8 @@ impl Coordinator {
             | Command::Remove { .. }
             | Command::RemoveLinks { .. }
             | Command::ChooseLinkMedia { .. }
+            | Command::CheckLinks { .. }
+            | Command::AnalyzeLinks { .. }
             | Command::AuthorizeAccount { .. }
             | Command::SetAccountEnabled { .. }
             | Command::RemoveAccount { .. }
@@ -1857,7 +1889,7 @@ impl Coordinator {
     /// events, and prune history when due.
     async fn changed(&mut self) {
         self.admit().await;
-        self.check_media().await;
+        self.run_checks().await;
         self.publish_events().await;
         if self.pruned_at.elapsed() >= PRUNE_INTERVAL {
             self.pruned_at = Instant::now();

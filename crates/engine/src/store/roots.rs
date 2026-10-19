@@ -276,7 +276,7 @@ impl Store {
                 params![sql(next)?, now.unix_millis()],
             )
             .map_err(StoreError::from)?;
-            super::media::retry_failed(&tx)?;
+            super::media::retry_failed(&tx, now)?;
             outbox::append(&tx, &EventKind::LinksChanged, now)?;
         }
         super::commands::record(&tx, envelope, result, now)?;

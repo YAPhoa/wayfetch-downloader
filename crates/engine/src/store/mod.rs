@@ -55,6 +55,7 @@
 
 mod accounts;
 mod commands;
+mod crawl;
 mod deletions;
 mod files;
 mod jobs;
@@ -71,10 +72,11 @@ pub mod schema;
 
 pub(crate) use accounts::{AccountRow, CheckResult, StoredCredential};
 pub use commands::CommandContext;
+pub(crate) use crawl::{Child, Found, Task};
 pub use deletions::DeleteStart;
 pub use files::Partial;
 pub use jobs::Admission;
-pub use links::Unusable;
+pub use links::{CollectPlan, Collecting, Unusable};
 pub(crate) use media::ConversionState;
 pub(crate) use operations::{Operation, OperationOutcome, OperationState};
 pub use renames::{RenameIntent, RenameStart};

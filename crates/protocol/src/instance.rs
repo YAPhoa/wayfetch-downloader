@@ -62,7 +62,7 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     /// The version this crate implements.
-    pub const CURRENT: Self = Self { major: 4, minor: 3 };
+    pub const CURRENT: Self = Self { major: 5, minor: 0 };
 
     /// Whether an engine speaking `self` can serve a client speaking
     /// `client`: same major version, and the client needs nothing newer than
@@ -86,6 +86,9 @@ pub struct TransportLimits {
     /// Maximum links waiting in the collected list. Added in protocol 1.1.
     #[serde(default)]
     pub max_collected_links: u32,
+    /// Maximum bytes of text one collect may carry. Added in protocol 5.0.
+    #[serde(default)]
+    pub max_collect_text_bytes: u32,
 }
 
 impl TransportLimits {
@@ -95,6 +98,7 @@ impl TransportLimits {
         max_submit_items: crate::command::MAX_SUBMIT_ITEMS as u16,
         max_url_bytes: crate::command::MAX_URL_BYTES as u32,
         max_collected_links: crate::command::MAX_COLLECTED_LINKS as u32,
+        max_collect_text_bytes: crate::command::MAX_COLLECT_TEXT_BYTES as u32,
     };
 }
 

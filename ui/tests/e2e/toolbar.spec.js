@@ -16,7 +16,7 @@ test('Downloads and Links keep toolbar widths as the window narrows', async ({ p
     await page.getByRole('button', { name: 'Create owner' }).click();
     await expect(page.locator('.statusbar .status')).toHaveText('Live');
     await page.getByRole('button', { name: 'Add links' }).click();
-    await page.getByLabel('Links, one per line').fill('https://example.test/queued.bin');
+    await page.getByLabel('Links, text with links in it, or a page’s HTML').fill('https://example.test/queued.bin');
     await page.getByRole('button', { name: 'Collect links' }).click();
     await expect(page.locator('.links-page .views .count')).toHaveText('1');
     await page.locator('.links-page [data-key="view-downloads"]').click();
