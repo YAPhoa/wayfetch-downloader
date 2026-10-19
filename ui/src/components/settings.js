@@ -901,7 +901,7 @@ export class SettingsPage {
     return section;
   }
 
-  /** The default destination, read from the engine. */
+  /** The folders new downloads may be saved to, and the default, read from the engine. */
   destinationSection() {
     const { context } = this;
     const { client } = context;
@@ -910,79 +910,146 @@ export class SettingsPage {
     /** What had focus before a control was disabled while it works. */
     /** @type {string | null} */
     let working = null;
-    /** Whether a save, removal, or addition is under way. */
+    /** Whether a change or an addition is under way. */
     let busy = false;
-    /** The settings the form shows. */
+    /** The settings shown. */
     /** @type {Settings | null} */
     let shown = null;
-    /** The folder checked, if any. */
-    const checked = () =>
-      /** @type {RootId | undefined} */ (
-        /** @type {HTMLInputElement | null} */ (destination.querySelector('input[name="default-root"]:checked'))?.value
-      );
-    const track = () => this.draft('folder', shown !== null && checked() !== undefined && checked() !== shown.default_root);
 
     /**
-     * The destination form for `settings`, keeping `selected` checked if
-     * it is still a choice, and saying `said`.
+     * The folders in `settings`, saying `said`.
      * @param {Settings} settings
-     * @param {RootId | null | undefined} selected
      * @param {string} said
      */
-    const render = (settings, selected = settings.default_root, said = '') => {
+    const render = (settings, said = '') => {
       context.onSettings(settings);
       shown = settings;
       const canChange = client.permissions.includes('control');
       const message = h('p', { class: 'message', role: 'status' }, said);
-      const choices = settings.roots.map((root) =>
-        h(
-          'div',
-          { class: 'choice-row' },
+
+      /**
+       * Runs `work` from `button`, which stays disabled meanwhile, then
+       * shows the folders again with what `work` says; a failure is shown
+       * as `explain` words it.
+       * @param {HTMLButtonElement} button
+       * @param {() => Promise<string | null>} work resolves to what to say, or null to keep the folders as shown
+       * @param {(error: WayfetchError) => string} [explain]
+       */
+      const run = async (button, work, explain = notSaved) => {
+        const hello = context.hello();
+        if (!hello) {
+          show(message, 'Not connected yet. Try again in a moment.');
+          return;
+        }
+        working = focusedKey(destination);
+        button.disabled = true;
+        busy = true;
+        show(message, '');
+        try {
+          const said = await work();
+          if (said === null) {
+            busy = false;
+            return;
+          }
+          const current = await client.settings();
+          busy = false;
+          render(current, said);
+        } catch (error) {
+          busy = false;
+          if (error instanceof WayfetchError && error.code === 'revision_conflict') {
+            await reload('The settings were changed elsewhere and have been reloaded. Try again.');
+            return;
+          }
+          failure(context, error, (text) => show(message, text), explain);
+        } finally {
+          if (button.isConnected) {
+            button.disabled = false;
+            refocus(destination, working);
+          }
+          working = null;
+        }
+      };
+
+      /**
+       * The command fields for a change at the revision shown.
+       * @returns {{ idempotencyKey: string, target: string, expectedRevision: number }}
+       */
+      const command = () => ({
+        idempotencyKey: idempotencyKey(),
+        target: /** @type {Hello} */ (context.hello()).instance,
+        expectedRevision: settings.revision,
+      });
+
+      const rows = settings.roots.map((root) => {
+        const isDefault = root.id === settings.default_root;
+        /**
+         * A button acting on this folder.
+         * @param {string} key
+         * @param {string} text
+         * @param {string} label
+         * @param {(button: HTMLButtonElement) => void} act
+         * @param {boolean} [disabled]
+         */
+        const action = (key, text, label, act, disabled = false) =>
           h(
-            'label',
-            { class: 'choice' },
-            h('input', {
-              type: 'radio',
-              name: 'default-root',
-              value: root.id,
-              'data-key': `default-root-${root.id}`,
-              checked: root.id === selected,
-              disabled: !canChange || (!root.available && root.id !== selected),
-            }),
+            'button',
+            {
+              type: 'button',
+              class: key,
+              'data-key': `${key}-${root.id}`,
+              'aria-label': label,
+              disabled,
+              onclick: (/** @type {MouseEvent} */ event) => act(/** @type {HTMLButtonElement} */ (event.currentTarget)),
+            },
+            text,
+          );
+        return h(
+          'div',
+          { class: `folder-row${isDefault ? ' default' : ''}`, 'data-root': root.id },
+          h(
+            'span',
+            { class: 'choice-text' },
+            icon('folder'),
+            h('span', { class: 'path' }, root.path),
+            isDefault && h('span', { class: 'tag current' }, 'Default'),
+            !root.available &&
+              h('span', { class: 'problem' }, `Unavailable: ${root.problem ?? 'the folder cannot be opened'}`),
+          ),
+          // Any folder but the default can become the default, while it
+          // can be opened, or be removed; files already saved there stay.
+          canChange &&
+            !isDefault &&
             h(
               'span',
-              { class: 'choice-text' },
-              icon('folder'),
-              h('span', { class: 'path' }, root.path),
-              root.id === settings.default_root && h('span', { class: 'tag current' }, 'Default'),
-              !root.available &&
-                h('span', { class: 'problem' }, `Unavailable: ${root.problem ?? 'the folder cannot be opened'}`),
+              { class: 'folder-actions' },
+              action(
+                'make-default',
+                'Make default',
+                `Make ${root.path} the default`,
+                (button) =>
+                  void run(button, async () => {
+                    await client.updateSettings({ ...command(), defaultRoot: root.id });
+                    return `New downloads now go to ${root.path}.`;
+                  }),
+                !root.available,
+              ),
+              action(
+                'remove-root',
+                'Remove',
+                `Remove ${root.path}`,
+                (button) =>
+                  void run(
+                    button,
+                    async () => {
+                      await client.removeRoot({ ...command(), root: root.id });
+                      return `Removed ${root.path}. Its files stay there; add it again to save new downloads there.`;
+                    },
+                    notRemoved,
+                  ),
+              ),
             ),
-          ),
-          // Only a folder the user added, and not the one new downloads go
-          // to; the operator's folders stay.
-          canChange &&
-            root.added &&
-            root.id !== settings.default_root &&
-            h(
-              'button',
-              {
-                type: 'button',
-                class: 'remove-root',
-                'data-key': `remove-root-${root.id}`,
-                'aria-label': `Remove ${root.path}`,
-                onclick: (/** @type {MouseEvent} */ event) =>
-                  void remove(settings, root, selected, /** @type {HTMLButtonElement} */ (event.currentTarget), message),
-              },
-              'Remove',
-            ),
-        ),
-      );
-      const save = h(
-        'button',
-        { type: 'submit', class: 'primary', 'data-key': 'settings-save', disabled: !canChange },
-        'Save',
-      );
+        );
+      });
       // The desktop app adds a folder through its own dialog; a browser
       // lists the server's folders.
       const { chooseDownloadFolder, browseFolders, addFolder } = client;
@@ -995,7 +1062,7 @@ export class SettingsPage {
               () =>
                 browseServerFolders(
                   { browseFolders: browseFolders.bind(client), addFolder: addFolder.bind(client) },
-                  settings.roots.find((r) => r.id === selected)?.path ?? null,
+                  settings.roots.find((r) => r.id === settings.default_root)?.path ?? null,
                 ),
             ]
           : null;
@@ -1007,92 +1074,33 @@ export class SettingsPage {
           {
             type: 'button',
             'data-key': 'settings-choose',
-            onclick: async (/** @type {MouseEvent} */ event) => {
-              const button = /** @type {HTMLButtonElement} */ (event.currentTarget);
-              working = focusedKey(destination);
-              button.disabled = true;
-              busy = true;
-              show(message, '');
-              try {
-                const root = await adding[1]();
-                if (root === null) {
+            onclick: (/** @type {MouseEvent} */ event) =>
+              void run(/** @type {HTMLButtonElement} */ (event.currentTarget), async () => {
+                if ((await adding[1]()) === null) {
                   show(message, 'No folder was chosen; nothing changed.');
-                  return;
+                  return null;
                 }
-                render(await client.settings(), root.id, 'Folder added. Save to use it for new downloads.');
-              } catch (error) {
-                failure(context, error, (text) => show(message, text));
-              } finally {
-                busy = false;
-                button.disabled = false;
-                if (button.isConnected) refocus(destination, working);
-                working = null;
-              }
-            },
+                return 'Folder added. Use Make default to save new downloads there.';
+              }),
           },
           adding[0],
         );
-      const form = h(
-        'form',
-        {
-          class: 'destination-form',
-          onchange: track,
-          onsubmit: async (/** @type {SubmitEvent} */ event) => {
-            event.preventDefault();
-            const hello = context.hello();
-            const picked = /** @type {HTMLInputElement | null} */ (
-              form.querySelector('input[name="default-root"]:checked')
-            );
-            if (!hello) {
-              show(message, 'Not connected yet. Try again in a moment.');
-              return;
-            }
-            if (!picked) {
-              show(message, 'Choose a folder first.');
-              return;
-            }
-            const root = /** @type {RootId} */ (picked.value);
-            working = focusedKey(destination);
-            save.disabled = true;
-            busy = true;
-            show(message, 'Saving…');
-            try {
-              await client.updateSettings({
-                idempotencyKey: idempotencyKey(),
-                target: hello.instance,
-                expectedRevision: settings.revision,
-                defaultRoot: root,
-              });
-              const saved = await client.settings();
-              busy = false;
-              const path = saved.roots.find((r) => r.id === saved.default_root)?.path;
-              render(saved, saved.default_root, `Saved. New downloads go to ${path}.`);
-            } catch (error) {
-              busy = false;
-              if (error instanceof WayfetchError && error.code === 'revision_conflict') {
-                await reload(notSaved(error), root);
-                return;
-              }
-              failure(context, error, (text) => show(message, text));
-              save.disabled = false;
-              refocus(destination, working);
-              working = null;
-            }
-          },
-        },
+      const group = h(
+        'div',
+        { class: 'destination-form' },
         h(
-          'fieldset',
-          { class: 'settings-group' },
+          'div',
+          { class: 'settings-group', role: 'group', 'aria-labelledby': 'folders-title' },
           h(
-            'legend',
+            'div',
             { class: 'group-head' },
-            h('span', { class: 'group-title' }, 'Save new downloads to'),
+            h('span', { class: 'group-title', id: 'folders-title' }, 'Save new downloads to'),
             h('span', { class: 'group-note' }, client.local ? 'Folders on this computer' : 'Server paths'),
           ),
-          choices.length > 0
-            ? h('div', { class: 'group-rows' }, choices)
+          rows.length > 0
+            ? h('div', { class: 'group-rows' }, rows)
             : h('p', { class: 'group-empty' }, 'There is no permitted folder.'),
-          h('div', { class: 'group-foot' }, message, choose, save),
+          h('div', { class: 'group-foot' }, message, choose),
         ),
         h(
           'p',
@@ -1101,75 +1109,24 @@ export class SettingsPage {
           client.local && ' Choose any folder on this computer to add it.',
         ),
       );
-      // Keyboard focus stays on the same control, such as Save, or moves
-      // from a disabled one to the next enabled one.
+      // Keyboard focus stays on the same control, or moves from one that
+      // is gone to the first enabled one.
       const focused = focusedKey(destination) ?? working;
-      working = null;
-      show(destination, form);
-      track();
+      show(destination, group);
       refocus(destination, focused);
       if (focused !== null && !destination.contains(document.activeElement)) {
-        /** @type {HTMLElement | null} */ (form.querySelector('input:checked:enabled, button:enabled'))?.focus();
+        /** @type {HTMLElement | null} */ (group.querySelector('button:enabled'))?.focus();
       }
     };
 
     /**
-     * Stops offering `root`, a folder the user added, and shows the folders
-     * left, keeping `selected` checked if it is still one of them.
-     * @param {Settings} settings
-     * @param {RootSummary} root
-     * @param {RootId | null | undefined} selected
-     * @param {HTMLButtonElement} button
-     * @param {HTMLElement} message
-     */
-    const remove = async (settings, root, selected, button, message) => {
-      const hello = context.hello();
-      if (!hello) {
-        show(message, 'Not connected yet. Try again in a moment.');
-        return;
-      }
-      working = focusedKey(destination);
-      button.disabled = true;
-      busy = true;
-      show(message, 'Removing…');
-      try {
-        await client.removeRoot({
-          idempotencyKey: idempotencyKey(),
-          target: hello.instance,
-          expectedRevision: settings.revision,
-          root: root.id,
-        });
-        const left = await client.settings();
-        busy = false;
-        render(
-          left,
-          selected === root.id ? undefined : selected,
-          `Removed ${root.path}. Its files stay there; add it again to save new downloads there.`,
-        );
-      } catch (error) {
-        if (error instanceof WayfetchError && error.code === 'revision_conflict') {
-          await reload('The settings were changed elsewhere and have been reloaded. Try again.', selected ?? undefined);
-          return;
-        }
-        busy = false;
-        failure(context, error, (text) => show(message, text), notRemoved);
-        button.disabled = false;
-        refocus(destination, working);
-        working = null;
-      }
-    };
-
-    /**
-     * Reads the settings again, keeping `selected` checked if it is still
-     * a choice.
+     * Reads the settings again.
      * @param {string} said
-     * @param {RootId | undefined} [selected]
      */
-    const reload = async (said = '', selected = undefined) => {
+    const reload = async (said = '') => {
       busy = false;
       try {
-        const settings = await client.settings();
-        render(settings, settings.roots.some((r) => r.id === selected) ? selected : undefined, said);
+        render(await client.settings(), said);
       } catch (error) {
         failure(context, error, (text) =>
           show(
@@ -1181,10 +1138,9 @@ export class SettingsPage {
       }
     };
     void reload();
-    // A change elsewhere keeps the folder checked here, saved or not.
     this.refreshers.push((revision) => {
       if (busy || shown === null || (revision !== null && shown.revision >= revision)) return;
-      void reload('', checked());
+      void reload();
     });
     return destination;
   }

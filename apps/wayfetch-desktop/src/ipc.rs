@@ -11,7 +11,7 @@
 //! | `collect_links` | [`CollectRequest`]: collect links for review |
 //! | `links_command` | [`LinksCommandRequest`]: start, remove, or move collected links |
 //! | `update_settings` | [`UpdateSettingsRequest`]: change the default destination or a preference |
-//! | `remove_root` | [`RemoveRootRequest`]: stop offering a folder the user added |
+//! | `remove_root` | [`RemoveRootRequest`]: stop offering a folder that is not the default |
 //! | `change_plugin` | [`ChangePluginRequest`]: turn a plugin on or off, update it, or remove its installed copy |
 //! | `authorize_account` | [`AuthorizeAccountRequest`]: starts signing a provider account in |
 //! | `cancel_authorization` | stops a sign-in still waiting for approval |
@@ -145,7 +145,7 @@ pub async fn update_settings(
     desktop.engine.execute(envelope, GRANTED).await
 }
 
-/// Stops offering a folder the user added as a destination; its files
+/// Stops offering a folder that is not the default as a destination; its files
 /// stay where they are.
 #[tauri::command]
 pub async fn remove_root(desktop: State<'_, Desktop>, request: Value) -> IpcResult<CommandResult> {

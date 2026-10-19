@@ -18,7 +18,7 @@
 //! | `PUT /v1/settings` | [`Command::UpdateSettings`] |
 //! | `GET /v1/folders` | [`EngineHandle::browse_folders`]: folders on the server, to choose one to add |
 //! | `POST /v1/roots` | [`EngineHandle::register_root`]: permits a server folder as a destination |
-//! | `POST /v1/roots/remove` | [`EngineHandle::execute`]: stops offering a folder the user added |
+//! | `POST /v1/roots/remove` | [`EngineHandle::execute`]: stops offering a folder that is not the default |
 //! | `POST /v1/plugins/change` | [`EngineHandle::execute`]: turns a plugin on or off, updates it, or removes its installed copy |
 //! | `GET /v1/accounts` | [`Query::Accounts`]: the vault, the services Wayfetch can sign in to, and the accounts added |
 //! | `POST /v1/accounts/authorizations` | [`Command::AuthorizeAccount`]: starts signing an account in |
@@ -238,7 +238,7 @@ pub async fn add_root(
     Ok(Json(app.engine.register_root(path, &grant.0).await?))
 }
 
-/// Stops offering a folder the user added as a destination; its files
+/// Stops offering a folder that is not the default as a destination; its files
 /// stay where they are. Needs the `control` permission.
 pub async fn remove_root(
     State(app): State<AppState>,

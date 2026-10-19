@@ -1234,7 +1234,7 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
         )
         .await;
 
-    // A folder chosen in the host's dialog, then saved.
+    // A folder chosen in the host's dialog, then made the default.
     let folder = dirs.tmp.path().join("chosen-from-page");
     std::fs::create_dir(&folder).unwrap();
     std::fs::write(dirs.picker(), folder.to_str().unwrap()).unwrap();
@@ -1243,32 +1243,45 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
     shell
         .wait_for(
             "document.querySelector('.destination-form .message')?.textContent
-               === 'Folder added. Save to use it for new downloads.'",
+               === 'Folder added. Use Make default to save new downloads there.'",
         )
         .await;
-    shell.click("[data-key=\"settings-save\"]").await;
-    let saved = json!(format!("Saved. New downloads go to {}.", folder.display()));
+    let make_default = |path: &std::path::Path| {
+        format!(
+            "button[aria-label={}]",
+            json!(format!("Make {} the default", path.display()))
+        )
+    };
+    shell.click(&make_default(&folder)).await;
+    let saved = json!(format!("New downloads now go to {}.", folder.display()));
     shell
         .wait_for(&format!(
             "document.querySelector('.destination-form .message')?.textContent === {saved}
-             && document.activeElement?.dataset.key === 'settings-save'"
+             && document.querySelector('.folder-row.default .path')?.textContent === {}",
+            json!(folder.display().to_string())
         ))
         .await;
 
-    // Another folder added can be removed again; the default and the
-    // configured folder cannot.
+    // Any folder but the default can be removed, the configured one too.
     let other = dirs.tmp.path().join("removed-from-page");
     std::fs::create_dir(&other).unwrap();
     std::fs::write(dirs.picker(), other.to_str().unwrap()).unwrap();
     shell.click("[data-key=\"settings-choose\"]").await;
+    let mut removable = [&dirs.root, &other].map(|p| format!("Remove {}", p.display()));
+    removable.sort();
     shell
         .wait_for(&format!(
             "[...document.querySelectorAll('.remove-root')].map((b) => b.getAttribute('aria-label'))
-               .join() === {}",
+               .sort().join() === {}",
+            json!(removable.join(","))
+        ))
+        .await;
+    shell
+        .click(&format!(
+            "button[aria-label={}]",
             json!(format!("Remove {}", other.display()))
         ))
         .await;
-    shell.click(".remove-root").await;
     let removed = json!(format!(
         "Removed {}. Its files stay there; add it again to save new downloads there.",
         other.display()
@@ -1276,7 +1289,7 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
     shell
         .wait_for(&format!(
             "document.querySelector('.destination-form .message')?.textContent === {removed}
-             && document.querySelectorAll('.destination-form :is(.remove-root, .choice)').length === 2"
+             && document.querySelectorAll('.destination-form .folder-row').length === 2"
         ))
         .await;
     assert!(other.is_dir());
@@ -1434,7 +1447,7 @@ async fn the_row_menu_opens_renames_and_removes_through_the_host() {
     shell
         .wait_for(
             "location.pathname === '/settings'
-             && document.querySelector('.settings-page form.destination-form')",
+             && document.querySelector('.settings-page .destination-form')",
         )
         .await;
     fits_window(&shell, ".settings-content").await;
