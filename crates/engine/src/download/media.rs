@@ -385,8 +385,7 @@ impl Download {
             .blocking(move || {
                 let output = r.reopen_staging(&reopening, 0).map_err(|e| park_fs(&e))?;
                 let unavailable = |e: std::io::Error| {
-                    Stop::Park(
-                        JobStage::Blocked,
+                    failed(
                         FailureCode::DestinationUnavailable,
                         format!("could not finish the converted file: {e}"),
                     )

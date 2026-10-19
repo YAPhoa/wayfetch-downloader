@@ -795,7 +795,7 @@ fn admit(
         };
         let _ = store.record_stage(
             job.job,
-            JobStage::Blocked,
+            JobStage::Failed,
             job.generation,
             Some(failure),
             now(),

@@ -126,7 +126,8 @@ the operator names them: initialize each with `init-root` and pass it to
 be added, except its state directory, so a token or session with `control`
 decides where new downloads may be written. Changing the default affects
 only downloads added afterwards; earlier ones keep their folder, and one
-whose folder is no longer configured waits, blocked, instead of moving.
+whose folder is no longer configured fails instead of moving, and continues
+there when retried once the folder is back.
 
 ### Configuration file
 
@@ -678,7 +679,8 @@ TOKEN=$(sudo awk '!/^#/ {print $1; exit}' "$WAYFETCH_TOKENS/api-tokens")
 
 The health check runs `wayfetchd ready` inside the container. While the root
 is uninitialized or its mount has gone, the container stays unhealthy and
-downloads wait in `blocked` instead of writing anywhere else. Only one
+downloads fail with `destination_unavailable` instead of writing anywhere
+else, and continue when retried. Only one
 engine can own a state directory: a second container on it exits with an
 error. `docker compose stop` shuts down gracefully, and unfinished downloads
 resume from their durable bytes when the container starts again, even after

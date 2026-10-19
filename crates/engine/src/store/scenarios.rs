@@ -298,8 +298,8 @@ fn parked_stages_carry_their_failure() {
     let generation = f.summary(job).generation;
     assert!(matches!(
         f.store
-            .advance_job(job, JobStage::Waiting, generation, None, NOW),
-        Err(StoreError::MissingFailure(JobStage::Waiting))
+            .advance_job(job, JobStage::Failed, generation, None, NOW),
+        Err(StoreError::MissingFailure(JobStage::Failed))
     ));
 
     let retry_at = UtcTimestamp::from_unix_millis(1_700_000_060_000);
@@ -311,16 +311,12 @@ fn parked_stages_carry_their_failure() {
     .with_earliest_retry(retry_at)
     .with_context(DiagnosticText::new("no response"));
     f.store
-        .advance_job(job, JobStage::Waiting, generation, Some(failure), NOW)
+        .advance_job(job, JobStage::Failed, generation, Some(failure), NOW)
         .unwrap();
     let parked = f.summary(job).failure.unwrap();
     assert_eq!(parked.code, FailureCode::RequestTimeout);
     assert_eq!(parked.retry_at, Some(retry_at));
     assert_eq!(parked.message.unwrap().as_str(), "no response");
-
-    // Leaving the parked stage clears it.
-    f.advance(job, JobStage::Queued).unwrap();
-    assert_eq!(f.summary(job).failure, None);
 }
 
 #[test]

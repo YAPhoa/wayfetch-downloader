@@ -175,7 +175,7 @@ impl Client {
             if done(&job) {
                 return job;
             }
-            let parked = matches!(job["stage"].as_str(), Some("failed" | "blocked"));
+            let parked = job["stage"] == "failed";
             assert!(!parked, "{job}");
             assert!(tokio::time::Instant::now() < deadline, "{job}");
             tokio::time::sleep(Duration::from_millis(20)).await;
