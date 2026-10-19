@@ -21,6 +21,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 # The native folder dialog, with the GTK 3 backend the WebView already
 # links; no XDG portal or D-Bus stack (see src/picker.rs).
 rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
+# The platform's data and download folders, for a start from the app
+# menu (see src/installed.rs); Tauri already depends on it.
+dirs = "7.0.0"
 # Opens a finished download, or the folder holding it, through the
 # desktop's own handler (xdg-open) with the path as one argument;
 # never a shell command line (see src/ipc.rs).

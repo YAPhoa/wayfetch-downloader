@@ -31,30 +31,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && install -D target/release/wayfetchd /out/wayfetchd
 
 # The plugins Settings > Plugins shows (ADR-27), pinned by version and
-# hash: yt-dlp with its YouTube player-code scripts as one zip program
-# run by the image's Python, and deno, which runs those scripts. Update a
-# version and its hashes together (https://pypi.org/pypi/NAME/VERSION/json).
+# hash in deploy/plugins, which the desktop packages share: yt-dlp with
+# its YouTube player-code scripts as one zip program run by the image's
+# Python, and deno, which runs those scripts.
 FROM ${PLUGINS_IMAGE} AS plugins
-COPY <<REQUIREMENTS /tmp/yt-dlp.txt
-yt-dlp==2026.8.19 --hash=sha256:1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf
-yt-dlp-ejs==0.8.0 --hash=sha256:79300e5fca7f937a1eeede11f0456862c1b41107ce1d726871e0207424f4bdb4
-REQUIREMENTS
-# The x86_64 and aarch64 builds.
-COPY <<REQUIREMENTS /tmp/deno.txt
-deno==2.9.5 --hash=sha256:e5aec0419739fd0359663a78765d4feda19d1d0b60a682d25add9b78e19f95b4 --hash=sha256:bccec0965917b6daa323f9ce6ad8e884e0854506b0cdaec9de41bdac7620109a
-REQUIREMENTS
-RUN set -eu; \
-    install='python3 -m pip install --no-cache-dir --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes'; \
-    $install --target /tmp/yt-dlp -r /tmp/yt-dlp.txt; \
-    $install --target /tmp/deno -r /tmp/deno.txt; \
-    rm -rf /tmp/yt-dlp/bin; \
-    mkdir /out; \
-    python3 -m zipapp /tmp/yt-dlp --compress --python /usr/bin/python3 --main yt_dlp:main --output /out/yt-dlp; \
-    chmod 0755 /out/yt-dlp; \
-    install -m 0755 /tmp/deno/bin/deno /out/deno; \
-    install -D -m 0644 /tmp/yt-dlp/yt_dlp-*.dist-info/licenses/LICENSE /out/licenses/yt-dlp/LICENSE; \
-    install -D -m 0644 /tmp/yt-dlp/yt_dlp_ejs-*.dist-info/licenses/LICENSE /out/licenses/yt-dlp-ejs/LICENSE; \
-    install -D -m 0644 /tmp/deno/deno-*.dist-info/licenses/LICENSE /out/licenses/deno/LICENSE
+COPY deploy/plugins /plugins
+RUN /plugins/build.sh /out /usr/bin/python3
 
 FROM ${FFMPEG_IMAGE} AS ffmpeg
 

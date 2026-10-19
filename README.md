@@ -585,14 +585,38 @@ window's page is `ui/src/shell/desktop.html`, which needs no sign-in.
 Only Linux is built and tested so far. Building needs WebKitGTK 4.1 and
 GTK 3 development packages (on Debian or Ubuntu: `libwebkit2gtk-4.1-dev
 libgtk-3-dev libsoup-3.0-dev librsvg2-dev`); running needs WebKitGTK 4.1.
-Installers, a tray, and default state paths are not part of the proof
-yet, so the directories are named as for the daemon:
+
+Started with no arguments, as from the app menu, the app keeps its state
+in `~/.local/share/wayfetch-downloader` (`$XDG_DATA_HOME`) and downloads
+into the XDG download folder, usually `~/Downloads`; Settings chooses
+other folders. The download folder is set up only on the first start,
+when the state directory does not exist yet, so a drive that is missing
+later is reported, not set up again. A failure to start is shown in a
+message box. For development, or to name the directories, use the
+subcommands, as for the daemon:
 
 ```sh
 cargo build --locked -p wayfetch-desktop
 target/debug/wayfetch-desktop init-root --state-dir /tmp/wf/state /tmp/wf/downloads
 target/debug/wayfetch-desktop run --state-dir /tmp/wf/state --download-root /tmp/wf/downloads
 ```
+
+### Desktop packages
+
+`deploy/desktop-release.sh` builds a `.deb` and an `.rpm` with the Tauri
+CLI (`cargo install tauri-cli --version 2.12.3 --locked`), plus their
+`SHA256SUMS`, in `target/release/bundle/`. The packages depend on
+WebKitGTK 4.1 and GTK 3, and recommend Python 3.10 or later, which runs
+yt-dlp, and the distribution's `ffmpeg`. They ship yt-dlp and deno from
+the same pinned versions and hashes as the container image
+(`deploy/plugins`) in `/usr/lib/wayfetch-downloader/plugins`; the app uses
+those before any on `PATH`, unless the configuration names others. Build
+on the oldest distribution the packages should run on, since they need
+its glibc or newer: the release workflow
+(`.github/workflows/desktop-release.yml`) builds on Ubuntu 22.04 for a
+`v*` tag and attaches the packages to a draft release. The packages are
+not signed yet; check them against `SHA256SUMS` and the release's build
+attestation (`gh attestation verify FILE --repo YAPhoa/wayfetch-downloader`).
 
 The engine starts before the window opens, so a state directory another
 engine owns (a daemon, the CLI, or another window) is refused with no

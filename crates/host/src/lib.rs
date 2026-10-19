@@ -21,7 +21,7 @@ use std::time::Duration;
 use clap::Args;
 use serde::de::{DeserializeOwned, IgnoredAny};
 use wayfetch_adapters::ffmpeg::{self, Ffmpeg};
-use wayfetch_adapters::plugin::{Describe, find_on_path};
+use wayfetch_adapters::plugin::{Describe, find_in, find_on_path};
 use wayfetch_adapters::plugins::{Plugins, Spec};
 use wayfetch_adapters::release;
 use wayfetch_adapters::youtube::YouTube;
@@ -44,7 +44,7 @@ pub const RUNTIME_RELEASE: Duration = Duration::from_secs(1);
 const MAX_CA_FILE_BYTES: u64 = 1024 * 1024;
 
 /// The configuration file and state directory options.
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct StateArgs {
     /// Read settings from this TOML configuration file at startup. Options
     /// given on the command line replace its values; repeatable ones add
@@ -90,7 +90,7 @@ pub struct InitRootArgs {
 }
 
 /// Options for running an engine.
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct EngineArgs {
     /// The state directory.
     #[command(flatten)]
@@ -133,6 +133,12 @@ pub struct EngineArgs {
         hide = true
     )]
     pub provider_endpoints: Vec<(String, String)>,
+    /// A folder of plugin programs shipped with the application, used
+    /// where the configuration names none and before `PATH`: `yt-dlp`,
+    /// `ffmpeg`, and `deno`, which yt-dlp is then told to run. Set by an
+    /// installed host, never on the command line.
+    #[arg(skip)]
+    pub bundled_plugins: Option<PathBuf>,
 }
 
 fn service_and_url(value: &str) -> Result<(String, String), String> {
@@ -242,14 +248,22 @@ impl EngineArgs {
             http.extra_roots.extend(read_ca(&path)?);
         }
         let plugins = file.map(|f| &f.plugins);
+        let bundled = |name| {
+            self.bundled_plugins
+                .as_deref()
+                .and_then(|dir| find_in(dir, name))
+        };
+        let find = |name| bundled(name).or_else(|| find_on_path(name));
         let plugins = PluginPaths {
             yt_dlp: plugins
                 .and_then(|p| p.yt_dlp.clone())
-                .or_else(|| find_on_path("yt-dlp")),
-            yt_dlp_js_runtimes: plugins.and_then(|p| p.yt_dlp_js_runtimes.clone()),
+                .or_else(|| find("yt-dlp")),
+            yt_dlp_js_runtimes: plugins
+                .and_then(|p| p.yt_dlp_js_runtimes.clone())
+                .or_else(|| bundled("deno").map(|deno| format!("deno:{}", deno.display()))),
             ffmpeg: plugins
                 .and_then(|p| p.ffmpeg.clone())
-                .or_else(|| find_on_path("ffmpeg")),
+                .or_else(|| find("ffmpeg")),
             updates: plugins.and_then(|p| p.updates).unwrap_or(true),
         };
         Ok(EngineSettings {
@@ -560,6 +574,42 @@ max = 8
         assert!(read_ca(&huge).unwrap_err().contains("too large"));
         assert!(read_ca(&tmp.path().join("missing")).is_err());
     }
+    #[test]
+    fn bundled_plugins_come_after_the_file_and_tell_yt_dlp_about_deno() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundled = dir.path().join("plugins");
+        std::fs::create_dir(&bundled).unwrap();
+        for name in ["yt-dlp", "deno"] {
+            std::fs::write(bundled.join(name), "").unwrap();
+        }
+        let file = dir.path().join("wayfetch.toml");
+        std::fs::write(
+            &file,
+            "schema_version = 1\n[storage]\nstate_dir = 's'\ndownload_root = 'd'\n",
+        )
+        .unwrap();
+        let mut args = engine_args(&["--config", file.to_str().unwrap()]);
+        args.bundled_plugins = Some(bundled.clone());
+        let (settings, _) = args.load::<NoServer>().unwrap();
+        assert_eq!(settings.plugins.yt_dlp, Some(bundled.join("yt-dlp")));
+        assert_eq!(
+            settings.plugins.yt_dlp_js_runtimes,
+            Some(format!("deno:{}", bundled.join("deno").display()))
+        );
+        // Not bundled: found on PATH or not at all, as without a folder.
+        assert_eq!(settings.plugins.ffmpeg, find_on_path("ffmpeg"));
+
+        std::fs::write(
+            &file,
+            "schema_version = 1\n[storage]\nstate_dir = 's'\ndownload_root = 'd'\n\
+             [plugins]\nyt_dlp = '/opt/yt-dlp'\nyt_dlp_js_runtimes = 'node'\n",
+        )
+        .unwrap();
+        let (settings, _) = args.load::<NoServer>().unwrap();
+        assert_eq!(settings.plugins.yt_dlp, Some("/opt/yt-dlp".into()));
+        assert_eq!(settings.plugins.yt_dlp_js_runtimes.as_deref(), Some("node"));
+    }
+
     #[test]
     fn desktop_key_and_providers_survive_loading_toml_settings() {
         let dir = tempfile::tempdir().unwrap();
