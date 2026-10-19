@@ -26,12 +26,13 @@ title?: string,
  */
 duration_seconds?: number, 
 /**
- * What it will be downloaded as.
+ * What it will be downloaded as. Once checked, the best video shows
+ * as the height it makes, one of the `options`.
  */
 choice: MediaChoice, 
 /**
- * The choices it offers, once checked: the best video first, then
- * each picture height the video has, tallest first, then audio only.
+ * The choices it offers, once checked: each picture height the video
+ * has, tallest first, then audio only.
  */
 options: Array<MediaOption>, 
 /**

@@ -30,7 +30,7 @@ export function mediaServiceName(id) {
  */
 export function choiceLabel(choice) {
   if (choice.kind === 'audio') return `${choice.format.toUpperCase()} audio`;
-  return choice.max_height === undefined ? 'Best video' : `${choice.max_height}p video`;
+  return choice.max_height === undefined ? 'Best available' : `${choice.max_height}p`;
 }
 
 /**
@@ -39,15 +39,6 @@ export function choiceLabel(choice) {
  */
 export function choiceKey(choice) {
   return choice.kind === 'audio' ? `audio-${choice.format}` : `video-${choice.max_height ?? 'best'}`;
-}
-
-/**
- * The option of `options` that `key` names.
- * @param {readonly MediaOption[]} options
- * @param {string} key
- */
-export function optionFor(options, key) {
-  return options.find((o) => choiceKey(o.choice) === key) ?? null;
 }
 
 /**
