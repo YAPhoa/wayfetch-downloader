@@ -1918,6 +1918,17 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(c.locator('td[data-state]')).toHaveText('Done');
     const summary = page.locator('.downloads-view .selection-summary');
 
+    // Rows alternate by position, and a finished bar says so in words.
+    expect(await page.locator('tr[data-job]').evaluateAll((rows) => rows.map((r) => r.getAttribute('data-stripe')))).toEqual([
+      'base',
+      'alternate',
+      'base',
+    ]);
+    const bar = c.getByRole('progressbar', { name: 'bulk-c.bin progress' });
+    await expect(bar).toHaveAttribute('aria-valuenow', '100');
+    await expect(bar).toHaveAttribute('aria-valuetext', 'Done; 100% downloaded');
+    await expect(c.locator('.dot')).toHaveAttribute('data-status', 'done');
+
     // The table's footer says which rows are shown; one page pages nowhere.
     const pager = page.locator('.downloads-view .pager');
     await expect(pager.locator('.range')).toHaveText('1–3 of 3');
@@ -2032,7 +2043,7 @@ test('a transferring download shows live progress, speed, and time left', async 
     await expect(live.locator('td[data-state]')).toHaveText('Downloading');
     // The first durable checkpoint is the whole file, so a percentage
     // between comes from live samples alone.
-    await expect(live.locator('.percent')).toHaveText(/^[1-9]\d?%$/);
+    await expect(live.locator('.percent')).toHaveText(/^[1-9]\d?(\.\d)?%$/);
     await expect(speed).toHaveText(/^\d+\.\d KiB\/s$/);
     await expect(left).toHaveText(/^\d+ s$/);
     await expect(page.locator('.statusbar .speed')).toHaveText(/^Down \d+\.\d KiB\/s$/);

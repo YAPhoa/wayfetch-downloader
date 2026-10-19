@@ -10,9 +10,13 @@
  * @typedef {import('./generated/FailureCode.js').FailureCode} FailureCode
  * @typedef {import('./generated/FailureSummary.js').FailureSummary} FailureSummary
  *
- * How a state reads at a glance: running, waiting its turn, waiting on
- * something, paused, quietly stopped, gone wrong, or finished.
- * @typedef {'run' | 'queue' | 'warn' | 'hold' | 'calm' | 'bad' | 'ok'} Tone
+ * How a message or link check reads at a glance: running, waiting on
+ * something, quietly stopped, gone wrong, or finished.
+ * @typedef {'run' | 'warn' | 'calm' | 'bad' | 'ok'} Tone
+ *
+ * Which group of states a download is in, for its colour. Each state
+ * filter is one; anything else is drawn in a neutral colour.
+ * @typedef {'active' | 'waiting' | 'paused' | 'queued' | 'failed' | 'cancelled' | 'done'} Status
  */
 
 /**
@@ -76,25 +80,26 @@ export function canRemove(job) {
 }
 
 /**
- * Each state's plain name and tone.
- * @type {Readonly<Record<DisplayState, [string, Tone]>>}
+ * Each state's plain name and status. Pausing and stopping are on their
+ * way to paused and cancelled.
+ * @type {Readonly<Record<DisplayState, [string, Status]>>}
  */
 const STATES = Object.freeze({
-  queued: ['Queued', 'queue'],
-  resolving: ['Starting', 'run'],
-  transferring: ['Downloading', 'run'],
-  verifying: ['Checking file', 'run'],
-  publishing: ['Saving', 'run'],
-  recovering: ['Recovering', 'run'],
-  waiting: ['Waiting', 'warn'],
-  needs_input: ['Needs your answer', 'warn'],
-  paused: ['Paused', 'hold'],
-  blocked: ['Blocked', 'warn'],
-  complete: ['Done', 'ok'],
-  failed: ['Failed', 'bad'],
-  cancelled: ['Cancelled', 'calm'],
-  pausing: ['Pausing…', 'hold'],
-  stopping: ['Stopping…', 'calm'],
+  queued: ['Queued', 'queued'],
+  resolving: ['Starting', 'active'],
+  transferring: ['Downloading', 'active'],
+  verifying: ['Checking file', 'active'],
+  publishing: ['Saving', 'active'],
+  recovering: ['Recovering', 'active'],
+  waiting: ['Waiting', 'waiting'],
+  needs_input: ['Needs your answer', 'waiting'],
+  paused: ['Paused', 'paused'],
+  blocked: ['Blocked', 'waiting'],
+  complete: ['Done', 'done'],
+  failed: ['Failed', 'failed'],
+  cancelled: ['Cancelled', 'cancelled'],
+  pausing: ['Pausing…', 'paused'],
+  stopping: ['Stopping…', 'cancelled'],
 });
 
 /**
@@ -185,22 +190,23 @@ function stages(...list) {
 
 /**
  * The state filters a list offers, with the stages each one shows.
- * @type {readonly { key: string, label: string, tone: Tone, stages: readonly JobStage[] | null }[]}
+ * `status` is null for All, which is every state rather than one.
+ * @type {readonly { key: string, label: string, status: Status | null, stages: readonly JobStage[] | null }[]}
  */
 export const GROUPS = Object.freeze([
-  { key: 'all', label: 'All', tone: 'calm', stages: null },
+  { key: 'all', label: 'All', status: null, stages: null },
   {
     key: 'active',
     label: 'Active',
-    tone: 'run',
+    status: 'active',
     stages: stages('resolving', 'transferring', 'verifying', 'publishing', 'recovering'),
   },
-  { key: 'waiting', label: 'Waiting', tone: 'warn', stages: stages('waiting', 'needs_input', 'blocked') },
-  { key: 'paused', label: 'Paused', tone: 'hold', stages: stages('paused') },
-  { key: 'queued', label: 'Queued', tone: 'queue', stages: stages('queued') },
-  { key: 'failed', label: 'Failed', tone: 'bad', stages: stages('failed') },
-  { key: 'cancelled', label: 'Cancelled', tone: 'calm', stages: stages('cancelled') },
-  { key: 'done', label: 'Done', tone: 'ok', stages: stages('complete') },
+  { key: 'waiting', label: 'Waiting', status: 'waiting', stages: stages('waiting', 'needs_input', 'blocked') },
+  { key: 'paused', label: 'Paused', status: 'paused', stages: stages('paused') },
+  { key: 'queued', label: 'Queued', status: 'queued', stages: stages('queued') },
+  { key: 'failed', label: 'Failed', status: 'failed', stages: stages('failed') },
+  { key: 'cancelled', label: 'Cancelled', status: 'cancelled', stages: stages('cancelled') },
+  { key: 'done', label: 'Done', status: 'done', stages: stages('complete') },
 ]);
 
 /**
@@ -215,22 +221,24 @@ export function groupCount(group, counts) {
 
 /**
  * A job's state in plain words, such as "Waiting until 17:42" or
- * "Failed: link expired", and its tone.
+ * "Failed: link expired", and its status. A state this UI does not know
+ * keeps the engine's name and no status.
  * @param {JobSummary} job
  * @param {(time: Date) => string} [clock] formats a retry time
- * @returns {{ label: string, tone: Tone }}
+ * @returns {{ label: string, status: Status | null }}
  */
 export function describe(job, clock = shortTime) {
-  const [name, tone] = STATES[job.display];
+  /** @type {[string, Status | null]} */
+  const [name, status] = STATES[job.display] ?? [String(job.display), null];
   const failure = job.failure;
   if (job.display === 'waiting' && failure?.retry_at !== undefined && failure.retry_at !== null) {
-    return { label: `Waiting until ${clock(new Date(failure.retry_at))}`, tone };
+    return { label: `Waiting until ${clock(new Date(failure.retry_at))}`, status };
   }
   const explained = job.display === 'failed' || job.display === 'blocked' || job.display === 'waiting';
   if (failure && explained) {
-    return { label: `${name}: ${FAILURES[failure.code].short}`, tone };
+    return { label: `${name}: ${FAILURES[failure.code].short}`, status };
   }
-  return { label: name, tone };
+  return { label: name, status };
 }
 
 /**
@@ -273,17 +281,29 @@ export function formatBytes(bytes) {
 export function progress(job, sample) {
   const done = sample ? Math.max(sample.bytes_received, job.bytes_done) : job.bytes_done;
   const total = sample?.bytes_total ?? job.bytes_total ?? job.artifact?.size;
-  const fraction = total ? Math.min(1, done / total) : undefined;
+  const ratio = total ? done / total : NaN;
+  const fraction = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : undefined;
   const text = total ? `${formatBytes(done)} of ${formatBytes(total)}` : formatBytes(done);
   const rate = sample?.bytes_per_second;
   return {
     fraction,
-    percent: fraction === undefined ? undefined : `${Math.floor(fraction * 100)}%`,
+    percent: fraction === undefined ? undefined : percent(fraction),
     text,
     size: total === undefined || total === null ? undefined : formatBytes(total),
     rate: rate === undefined ? undefined : `${formatBytes(rate)}/s`,
     left: rate && total && total > done ? formatDuration((total - done) / rate) : undefined,
   };
+}
+
+/**
+ * A fraction as a percentage with at most one decimal, rounded down so
+ * an unfinished download never reads 100%: 0.9996 is "99.9%", 0.72 "72%".
+ * @param {number} fraction between 0 and 1
+ */
+export function percent(fraction) {
+  // The nudge keeps float error (0.57 * 1000 = 569.99…) from losing a tenth.
+  const tenths = Math.min(fraction < 1 ? 999 : 1000, Math.floor(fraction * 1000 + 1e-6));
+  return `${tenths / 10}%`;
 }
 
 /**

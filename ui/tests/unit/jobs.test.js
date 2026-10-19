@@ -15,6 +15,7 @@ import {
   GROUPS,
   groupCount,
   jobName,
+  percent,
   progress,
   restartNote,
   retryPlan,
@@ -99,7 +100,21 @@ test('progress uses durable bytes unless a sample is ahead', () => {
   assert.equal(formatDuration(3600), '1 h');
   assert.equal(formatDuration(3700), '1 h 2 min');
   assert.equal(progress(job({ bytes_done: 10 }), undefined).fraction, undefined);
+  assert.equal(progress(job({ bytes_done: 10, bytes_total: 0 }), undefined).percent, undefined);
+  assert.equal(progress(job({ bytes_done: 0, bytes_total: 10 }), undefined).percent, '0%');
+  assert.equal(progress(job({ bytes_done: 20, bytes_total: 10 }), undefined).fraction, 1);
   assert.equal(formatBytes(1023), '1023 B');
+});
+
+test('percentages keep one decimal and never round up to 100', () => {
+  assert.deepEqual([0, 0.72, 0.57, 0.123, 0.9996, 1].map(percent), ['0%', '72%', '57%', '12.3%', '99.9%', '100%']);
+});
+
+test('every state filter but All has a status', () => {
+  assert.deepEqual(
+    GROUPS.map((g) => g.status),
+    [null, 'active', 'waiting', 'paused', 'queued', 'failed', 'cancelled', 'done'],
+  );
 });
 
 test('the file name is the artifact path’s last component', () => {
@@ -121,16 +136,18 @@ test('states read as plain words with what went wrong', () => {
   const clock = () => '17:42';
   assert.deepEqual(describe(job({ stage: 'transferring', display: 'transferring' })), {
     label: 'Downloading',
-    tone: 'run',
+    status: 'active',
   });
-  assert.equal(describe(job({ stage: 'transferring', display: 'pausing' })).label, 'Pausing…');
-  assert.equal(describe(job({ stage: 'queued', display: 'queued' })).tone, 'queue');
-  assert.equal(describe(job({ stage: 'paused', display: 'paused' })).tone, 'hold');
-  assert.equal(describe(job({ stage: 'cancelled', display: 'cancelled' })).tone, 'calm');
+  assert.deepEqual(describe(job({ stage: 'transferring', display: 'pausing' })), { label: 'Pausing…', status: 'paused' });
+  assert.equal(describe(job({ stage: 'transferring', display: 'stopping' })).status, 'cancelled');
+  assert.equal(describe(job({ stage: 'waiting', display: 'needs_input' })).status, 'waiting');
+  // A state this UI does not know keeps its name and stays neutral.
+  const unknown = /** @type {import('../../src/client/contract.js').DisplayState} */ (/** @type {unknown} */ ('archiving'));
+  assert.deepEqual(describe(job({ stage: 'transferring', display: unknown })), { label: 'archiving', status: null });
   const expired = { code: /** @type {const} */ ('lease_expired') };
   assert.deepEqual(describe(job({ stage: 'failed', display: 'failed', failure: expired })), {
     label: 'Failed: link expired',
-    tone: 'bad',
+    status: 'failed',
   });
   const later = { code: /** @type {const} */ ('request_timeout'), retry_at: 1_800_000_000_000 };
   assert.equal(

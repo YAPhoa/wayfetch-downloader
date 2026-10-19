@@ -39,7 +39,7 @@ import { routeLabel } from '../client/routes.js';
 import { Selection } from '../client/selection.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, pagerBar, refocus, show } from './dom.js';
+import { copyText, focusedKey, h, pagerBar, refocus, show, stripe } from './dom.js';
 import { icon } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu, rowMenuHandlers } from './menu.js';
@@ -59,7 +59,7 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('./menu.js').MenuEntry} MenuEntry
  * @typedef {import('./settings.js').Density} Density
  * @typedef {import('../client/feed.js').FeedStatus} FeedStatus
- * @typedef {import('../client/jobs.js').Tone} Tone
+ * @typedef {import('../client/jobs.js').Status} Status
  */
 
 /** Jobs per page. */
@@ -142,9 +142,40 @@ function asksProviderAgain(job) {
   return !!job.route && job.failure?.code === 'operation_ambiguous';
 }
 
-/** @param {Tone} tone */
-function dot(tone) {
-  return h('span', { class: `dot tone-${tone}`, 'aria-hidden': 'true' });
+/**
+ * A state's coloured mark; its label beside it says the same in words.
+ * @param {Status | null} status
+ */
+function dot(status) {
+  return h('span', { class: 'dot', 'data-status': status ?? 'unknown', 'aria-hidden': 'true' });
+}
+
+/**
+ * A download's progress in its state's colour. Unknown progress fills
+ * nothing and has no value, rather than reading 0%.
+ * @param {{ fraction: number | undefined, percent: string | undefined }} shown
+ * @param {{ label: string, status: Status | null }} state
+ * @param {string} name what the bar is for
+ */
+function progressBar(shown, state, name) {
+  const known = shown.fraction !== undefined && shown.percent !== undefined;
+  const fill = h('span', { class: 'fill' });
+  // Through the CSSOM: the CSP refuses style attributes.
+  if (known) fill.style.width = `${(shown.fraction ?? 0) * 100}%`;
+  return h(
+    'span',
+    {
+      class: 'bar',
+      role: 'progressbar',
+      'data-status': state.status ?? 'unknown',
+      'aria-label': name,
+      'aria-valuemin': 0,
+      'aria-valuemax': 100,
+      'aria-valuenow': known ? parseFloat(shown.percent ?? '') : null,
+      'aria-valuetext': known ? `${state.label}; ${shown.percent} downloaded` : `${state.label}; progress unknown`,
+    },
+    fill,
+  );
 }
 
 /**
@@ -1381,7 +1412,7 @@ export class Downloads {
             'aria-pressed': String(group.key === this.group),
             onclick: () => this.filter(group.key),
           },
-          dot(group.tone),
+          group.status ? dot(group.status) : icon('display'),
           h('span', { class: 'filter-label' }, group.label),
           count !== undefined && h('span', { class: 'count' }, count),
         );
@@ -1520,6 +1551,7 @@ export class Downloads {
       const ticked = this.selection.has(job.id);
       row.classList.toggle('ticked', ticked);
       /** @type {HTMLInputElement} */ (row.querySelector('td.check input')).checked = ticked;
+      stripe(row, rows.size);
       rows.set(job.id, { job, sample, selected: isSelected, row });
     }
     this.rows = rows;
@@ -1647,25 +1679,15 @@ export class Downloads {
         ),
       ),
       h('td', { class: 'host', title: job.original_host ?? null }, job.original_host ?? ''),
-      h(
-        'td',
-        { class: `state tone-${state.tone}`, 'data-state': job.display },
-        dot(state.tone),
-        state.label,
-      ),
+      h('td', { class: 'state', 'data-state': job.display }, dot(state.status), state.label),
       h(
         'td',
         { class: 'progress' },
         h(
           'span',
           { class: 'bar-cell' },
-          h('progress', {
-            class: `tone-${state.tone}`,
-            max: 1,
-            value: shown.fraction ?? 0,
-            'aria-label': `${name} progress`,
-          }),
-          h('span', { class: 'percent' }, shown.percent ?? ''),
+          progressBar(shown, state, `${name} progress`),
+          h('span', { class: 'percent' }, shown.percent ?? '—'),
         ),
         h('span', { class: 'bytes visually-hidden' }, shown.text),
       ),
@@ -1806,15 +1828,10 @@ export class Downloads {
           h('span', { class: 'percent' }, shown.percent ?? '—'),
           h('span', { class: 'saved' }, `${shown.text} saved`),
         ),
-        h('progress', {
-          class: `tone-${state.tone}`,
-          max: 1,
-          value: shown.fraction ?? 0,
-          'aria-label': 'Saved',
-        }),
+        progressBar(shown, state, 'Saved'),
       ),
       this.facts([
-        ['State', h('span', { class: `tone-${state.tone}` }, state.label)],
+        ['State', h('span', { class: 'state' }, dot(state.status), state.label)],
         ['Speed', shown.rate && [shown.rate, shown.left && `, ${shown.left} left`].join('')],
         ['File', name === undefined ? 'Named when it finishes' : h('span', { class: 'path', title: where.file }, name)],
         ['Type', name && fileKind(name)],
@@ -1823,7 +1840,7 @@ export class Downloads {
         ['Download via', this.via(job)],
         ...this.source(job),
       ]),
-      job.failure && h('p', { class: `note tone-${state.tone}` }, explain(job.failure)),
+      job.failure && h('p', { class: `note tone-${state.status === 'failed' ? 'bad' : 'warn'}` }, explain(job.failure)),
       restartNote(job) && h('p', { class: 'note tone-warn', 'data-note': 'restart' }, restartNote(job)),
     );
   }

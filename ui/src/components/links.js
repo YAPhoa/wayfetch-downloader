@@ -40,7 +40,7 @@ import { accountName, canChooseRoute, routeAccounts } from '../client/routes.js'
 import { Selection } from '../client/selection.js';
 import { saveSort, savedSort, sortedBy, toggleSort } from '../client/sort.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, pagerBar, refocus, show, sortHeader } from './dom.js';
+import { copyText, focusedKey, h, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
 import { icon } from './icons.js';
 import { pickerButton, rowMenuHandlers } from './menu.js';
 import { loadServices } from './services.js';
@@ -886,7 +886,7 @@ export class LinksPage {
       this.table,
       h('caption', { class: 'visually-hidden' }, 'Collected links'),
       head,
-      h('tbody', null, this.sorted(visible).map((link) => this.row(link))),
+      h('tbody', null, this.sorted(visible).map((link, index) => stripe(this.row(link), index))),
     );
   }
 
