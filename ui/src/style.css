@@ -40,6 +40,8 @@
   --on-accent: #ffffff;
   --selected: #e3ebf8;
   --hover: #f6f8fb;
+  --stripe: #f4f6f9;
+  --row-hover: #eaedf2;
   --filter-hover: #e3e7ee;
   --filter-selected: #ccd8ea;
   --track: #e3e6ec;
@@ -80,6 +82,8 @@
   --on-accent: #0d1626;
   --selected: #1b2740;
   --hover: #141a21;
+  --stripe: #151a21;
+  --row-hover: #1f2630;
   --filter-hover: #232c38;
   --filter-selected: #30415c;
   --track: #262d37;
@@ -497,7 +501,9 @@ table.jobs {
 .jobs td.name a:hover { text-decoration: underline; }
 
 .jobs tbody tr { cursor: default; }
-.jobs tbody tr:hover { background: var(--hover); }
+/* Every other row is shaded so a long row reads across. */
+.jobs tbody tr:nth-child(even) { background: var(--stripe); }
+.jobs tbody tr:hover { background: var(--row-hover); }
 .jobs tbody tr.selected,
 .jobs tbody tr.ticked { background: var(--selected); }
 
@@ -682,7 +688,8 @@ dd { margin: 0; overflow-wrap: anywhere; }
   color: var(--ink);
 }
 
-.jobs tbody tr.menu-open, .accounts-table tbody tr.menu-open { background: var(--hover); }
+.jobs tbody tr.menu-open { background: var(--row-hover); }
+.accounts-table tbody tr.menu-open { background: var(--hover); }
 .jobs tbody tr.selected.menu-open { background: var(--selected); }
 
 /* Coarse pointers get a target large enough to touch. */
