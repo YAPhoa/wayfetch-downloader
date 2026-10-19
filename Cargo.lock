@@ -6242,6 +6242,7 @@ dependencies = [
  "bytes",
  "cap-std",
  "fail",
+ "html5ever",
  "linkify",
  "percent-encoding",
  "rangemap",

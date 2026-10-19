@@ -17,8 +17,13 @@
 //! repeated parameters, escapes, and fragment as written. A truncated link
 //! is never repaired.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 
+use html5ever::tendril::StrTendril;
+use html5ever::tokenizer::{
+    BufferQueue, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
+};
 use linkify::{LinkFinder, LinkKind};
 use scraper::node::Node;
 use scraper::{Html, Selector};
@@ -126,23 +131,44 @@ pub fn page_links(html: &str, base: &Url) -> Vec<Url> {
         .collect()
 }
 
-/// Whether pasted text is markup: an HTML parser finds an element in it,
-/// however its tags are cased, spaced, or split across lines. A link in
-/// angle brackets (`<https://…>`) or an address (`<a@b.example>`) is not
-/// one: no HTML tag name has a `:`, `@`, or `.`.
+/// Whether pasted text is markup: the HTML tokenizer reads a doctype, a
+/// comment, or a tag written in it (`<html>` and `<body>` included),
+/// however its tags are cased, spaced, or split across lines. The tree a
+/// parser builds would not do, since it adds those wrappers to any text. A
+/// link in angle brackets (`<https://…>`) or an address (`<a@b.example>`)
+/// is not a tag: no HTML tag name has a `:`, `@`, or `.`.
 fn looks_like_html(text: &str) -> bool {
+    struct Markup(Cell<bool>);
+    impl TokenSink for Markup {
+        type Handle = ();
+        fn process_token(&self, token: Token, _line: u64) -> TokenSinkResult<()> {
+            let markup = match token {
+                Token::DoctypeToken(_) | Token::CommentToken(_) => true,
+                Token::TagToken(tag) => {
+                    tag.name.starts_with(|c: char| c.is_ascii_alphabetic())
+                        && tag
+                            .name
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                }
+                _ => false,
+            };
+            if markup {
+                self.0.set(true);
+            }
+            TokenSinkResult::Continue
+        }
+    }
+
     if !text.contains('<') {
         return false;
     }
-    let document = Html::parse_document(text);
-    document.root_element().descendants().any(|node| {
-        node.value().as_element().is_some_and(|e| {
-            let name = e.name();
-            !matches!(name, "html" | "head" | "body")
-                && name.starts_with(|c: char| c.is_ascii_alphabetic())
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        })
-    })
+    let tokenizer = Tokenizer::new(Markup(Cell::new(false)), TokenizerOpts::default());
+    let input = BufferQueue::default();
+    input.push_back(StrTendril::from_slice(text));
+    let _ = tokenizer.feed(&input);
+    tokenizer.end();
+    tokenizer.sink.0.get()
 }
 
 /// Entries found so far, each once.
@@ -446,6 +472,13 @@ mod tests {
             "<A\tHREF='http://127.0.0.1:8080/admin.bin'>x</A>",
             "<video\r\nsrc=http://127.0.0.1:8080/admin.bin></video>",
             "<p>http://127.0.0.1:8080/admin.bin</p>",
+            "<!doctype html><html><body>\nhttp://127.0.0.1:8080/admin.bin\n</body></html>\n",
+            "<!doctype html>\nhttp://127.0.0.1:8080/admin.bin",
+            "<html>http://127.0.0.1:8080/admin.bin</html>",
+            "<HEAD></HEAD>http://127.0.0.1:8080/admin.bin",
+            "<body\n>http://127.0.0.1:8080/admin.bin",
+            "</body>http://127.0.0.1:8080/admin.bin",
+            "<!-- saved -->http://127.0.0.1:8080/admin.bin",
         ] {
             let found = collected(html, None);
             assert!(found.html, "{html:?}");
