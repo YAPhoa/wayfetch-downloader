@@ -71,18 +71,17 @@ test('checks say what the server answered', () => {
   assert.ok(checkable(link({ check: 'offline' })));
 });
 
-test('a page read for files is started through them', () => {
+test('a page read for files lists them, and starting it is the engine\'s call', () => {
   const read = link({ check: 'page', found: 2, skipped: 3 });
   assert.deepEqual(linkStatus(read), {
     label: 'Web page',
     tone: 'calm',
     detail: '2 files found on it, listed below it. 3 links to other pages left alone.',
   });
-  assert.equal(startable(read), false);
+  // Through a provider account a hoster's page is its file.
+  assert.equal(startable(read), true);
   const unread = link({ check: 'page' });
   assert.equal(linkStatus(unread).detail, 'Not read. Analyze it to find the files on it.');
-  // With nothing found on it, the engine decides what starting it does.
-  assert.equal(startable(unread), true);
   assert.ok(matches(link({ found_on: 'https://a.example/release' }), 'release'));
 });
 

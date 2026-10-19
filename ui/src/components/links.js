@@ -8,7 +8,8 @@
 //   per host: a file shows its name and size, a missing one is Offline,
 //   and a web page typed or analyzed is read once for the files and
 //   videos on it, which are listed with the page they were found on. A
-//   page whose files were found is not started itself. Check again
+//   page starts only through a provider account; directly, the engine
+//   refuses it and says why. Check again
 //   repeats a check; Analyze also reads a link that is a page.
 // - Commands act on the selected links that are shown. A filter never
 //   selects, starts, or removes links it hides; selected links it hides
@@ -707,9 +708,7 @@ export class LinksPage {
           : pending.length === 0
             ? 'Already in Downloads'
             : starts.length === 0
-              ? targets.some((l) => l.check === 'page')
-                ? 'Start the files found on it'
-                : 'Not a valid link'
+              ? 'Not a valid link'
               : undefined,
         run: () => void this.start(starts),
       },

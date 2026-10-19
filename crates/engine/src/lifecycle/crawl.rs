@@ -19,6 +19,7 @@ use std::time::Duration;
 use url::Url;
 use wayfetch_domain::id::SourceLinkId;
 use wayfetch_protocol::command::{InputUrl, MAX_SUBMIT_ITEMS};
+use wayfetch_protocol::query::CheckReason;
 use wayfetch_protocol::{Command, CommandEnvelope, ErrorCode, ProtocolError};
 
 use super::{Coordinator, Internal, now};
@@ -155,14 +156,11 @@ impl Coordinator {
                         () = cancel.cancelled() => return,
                         checked = tokio::time::timeout(
                             CHECK_DEADLINE,
-                            crawler::check(inspector.as_ref(), &task.url, task.analyze),
+                            crawler::check(inspector.as_ref(), &task.url, task.reach, task.analyze),
                         ) => checked,
                     };
                     let checked = checked.unwrap_or_else(|_| {
-                        Checked::Unknown(
-                            wayfetch_protocol::query::CheckReason::TimedOut,
-                            "Checking took too long.".into(),
-                        )
+                        Checked::Unknown(CheckReason::TimedOut, "Checking took too long.".into())
                     });
                     let answer = Answer::Link(checked);
                     let _ = sender
@@ -223,14 +221,20 @@ impl Coordinator {
         let checked = match answer {
             Answer::Media(found) => {
                 let _ = self
-                    .with_store(move |s| s.record_media(task, link, found, now()))
+                    .with_store(move |s| {
+                        s.record_media(task, link, found, now())
+                            .or_else(|_| s.record_media(task, link, Err(UNRECORDED.into()), now()))
+                    })
                     .await;
                 return;
             }
             Answer::Link(checked) => checked,
         };
         let mut found = Found::default();
-        if let Checked::Page { links: Some(links) } = &checked {
+        if let Checked::Page {
+            links: Some(links), ..
+        } = &checked
+        {
             let mut page = url.clone();
             page.set_fragment(None);
             for child in links {
@@ -255,7 +259,18 @@ impl Coordinator {
             }
         }
         let _ = self
-            .with_store(move |s| s.record_link_check(task, link, &checked, &found, now()))
+            .with_store(move |s| {
+                s.record_link_check(task, link, &checked, &found, now())
+                    .or_else(|_| {
+                        let unrecorded =
+                            Checked::Unknown(CheckReason::Unreadable, UNRECORDED.into());
+                        s.record_link_check(task, link, &unrecorded, &Found::default(), now())
+                    })
+            })
             .await;
     }
 }
+
+/// What a link says when what its check found could not be recorded, so
+/// the check ends rather than staying "Checking" until a restart.
+const UNRECORDED: &str = "Wayfetch could not record what checking found. Check it again.";

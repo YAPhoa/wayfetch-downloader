@@ -1072,13 +1072,14 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(foundRow('release-gone\\.zip').locator('td.link-status')).toContainText('Offline');
   expect(fixture.requested).not.toContain('release-a.bin');
 
-  // The page itself is started through its files.
+  // Directly, the page itself is refused, and started through its files.
   await page.getByRole('checkbox', { name: 'Select all links shown' }).uncheck();
   await pageRow.getByRole('button', { name: /^Actions for / }).click();
   menu = page.getByRole('menu', { name: 'Link actions' });
-  await expect(menu.getByRole('menuitem', { name: /^Start download/ })).toHaveAttribute('aria-disabled', 'true');
-  await expect(menu.getByRole('menuitem', { name: /^Start download/ })).toContainText('Start the files found on it');
-  await page.keyboard.press('Escape');
+  await menu.getByRole('menuitem', { name: /^Start download/ }).click();
+  await expect(
+    page.getByText('1 link not started: This link is a web page; the files found on it are listed beside it.', { exact: false }),
+  ).toBeVisible();
   await foundRow('Release A\\.bin').getByRole('checkbox').check();
   await page.getByRole('button', { name: 'Start selected' }).click();
   await expect(page.getByText('Started 1 download.')).toBeVisible();

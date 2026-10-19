@@ -20,6 +20,7 @@ use wayfetch_engine::transfer::transport::TransportError;
 use wayfetch_engine::transfer::writer::BoxFuture;
 
 use crate::head;
+use crate::policy::EgressPolicy;
 use crate::transport::{HttpTransport, Outgoing};
 
 fn fail(reason: CheckReason, message: impl Into<String>) -> InspectError {
@@ -66,6 +67,7 @@ impl HttpTransport {
                 range,
                 validators: None,
                 connect_timeout: request.deadline,
+                reach: request.reach,
                 replay_safe: true,
             })
             .await
@@ -80,6 +82,10 @@ impl HttpTransport {
             filename: described.filename,
             attachment: described.attachment,
             page: None,
+            // Unknown counts as public, so links found on it stay public.
+            local: response
+                .remote_addr()
+                .is_some_and(|peer| !EgressPolicy::default().permits(peer.ip())),
         };
         let page = request.method == InspectMethod::Page
             && status == StatusCode::OK

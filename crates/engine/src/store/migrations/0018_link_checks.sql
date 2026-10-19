@@ -21,6 +21,12 @@ ALTER TABLE source_links ADD COLUMN parent_id INTEGER REFERENCES source_links (i
 -- found on a page never may, so analysis never spiders.
 ALTER TABLE source_links ADD COLUMN may_analyze INTEGER NOT NULL DEFAULT 0
     CHECK (may_analyze IN (0, 1));
+-- 1 if requests for the link, its checks and its download, may reach only
+-- public addresses: a link found on a page that was not itself served from
+-- a local address. The page's author chose it, not the person, so it never
+-- gets the local networks the operator allows for intentional downloads.
+ALTER TABLE source_links ADD COLUMN public_only INTEGER NOT NULL DEFAULT 0
+    CHECK (public_only IN (0, 1));
 -- What the last finished check found: NULL before any. A media link's
 -- check keeps its own columns (migration 16) instead.
 ALTER TABLE source_links ADD COLUMN check_state TEXT

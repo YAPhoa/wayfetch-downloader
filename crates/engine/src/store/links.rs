@@ -203,6 +203,8 @@ struct Held {
     url: String,
     /// Whether links were found on it, which keeps its row.
     parent: bool,
+    /// Whether its last check found a web page.
+    page: bool,
 }
 
 fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreError> {
@@ -214,7 +216,7 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
                 "SELECT s.batch_id, b.package_id, s.listed, s.invalid, s.revision, s.root_id, \
                  s.problem, j.id, s.input_url, \
                  EXISTS(SELECT 1 FROM source_links c WHERE c.parent_id = s.id), \
-                 {MEDIA_COLUMNS} FROM source_links s \
+                 s.check_state IS 'page', {MEDIA_COLUMNS} FROM source_links s \
                  JOIN input_batches b ON b.id = s.batch_id \
                  LEFT JOIN jobs j ON j.source_link_id = s.id WHERE s.id = ?1"
             ),
@@ -232,14 +234,21 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<i64>>(7)?,
                     r.get::<_, String>(8)?,
-                    r.get::<_, bool>(9)?,
-                    media::LinkColumns::read(r, 10)?,
+                    (r.get::<_, bool>(9)?, r.get::<_, bool>(10)?),
+                    media::LinkColumns::read(r, 11)?,
                 ))
             },
         )
         .optional()?;
     raw.map(
-        |((batch, package, listed, invalid, revision, root), problem, job, url, parent, media)| {
+        |(
+            (batch, package, listed, invalid, revision, root),
+            problem,
+            job,
+            url,
+            (parent, page),
+            media,
+        )| {
             Ok(Held {
                 batch,
                 package,
@@ -252,6 +261,7 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
                 media,
                 url,
                 parent,
+                page,
             })
         },
     )
@@ -291,6 +301,8 @@ const CHANGED: &str = "This link changed since the list was shown. Check it and 
 const STARTED: &str = "This link was already started; it is in Downloads.";
 const PAGE: &str =
     "This link is a web page; the files found on it are listed beside it. Start those instead.";
+const PAGE_UNREAD: &str =
+    "This link is a web page, not a file. Analyze it for files to list the files on it.";
 
 /// Takes `link` off the list, keeping its record, and drops its check. A
 /// page never started is no longer held, and marked staged so ingestion
@@ -385,9 +397,6 @@ pub(super) fn start(
                 ),
             )));
         }
-        if row.parent {
-            return Ok(Err((ErrorCode::NotApplicable, PAGE.to_owned())));
-        }
         if let Some(why) = row.root.and_then(|r| unusable.get(&r)) {
             let problem = format!("Its folder cannot be used: {why}. Choose another destination.");
             tx.execute(
@@ -409,6 +418,12 @@ pub(super) fn start(
             }
             None => route,
         };
+        // A page's address downloads the page itself, unless a provider
+        // account resolves it to the file it offers.
+        if row.page && route.is_none() {
+            let why = if row.parent { PAGE } else { PAGE_UNREAD };
+            return Ok(Err((ErrorCode::NotApplicable, why.to_owned())));
+        }
         // Automatic routing is revalidated in the same transaction as the
         // job. The coordinator also opened its current sealed credential.
         if automatic && let Some(route) = route {

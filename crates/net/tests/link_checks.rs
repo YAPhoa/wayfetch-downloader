@@ -15,7 +15,9 @@ use bytes::Bytes;
 use engine_support::{ALL, KIB, body, complete, envelope, jobs};
 use support::{Resource, Route, Server, config_for};
 use wayfetch_engine::EngineOwner;
+use wayfetch_engine::crawl::{InspectMethod, InspectRequest, Inspector};
 use wayfetch_engine::protocol::query::CheckReason;
+use wayfetch_engine::transfer::transport::{OpenRequest, Reach, Transport};
 use wayfetch_protocol::command::{
     CollectMode, CollectText, Command, CommandResult, LinkRef, LinkRefs, StartRouting,
 };
@@ -193,4 +195,51 @@ async fn checks_report_what_they_cannot_reach() {
         (LinkCheck::Unknown, Some(CheckReason::Blocked))
     );
     engine_support::shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn found_links_never_get_the_local_networks_the_operator_allows() {
+    // The fixture's loopback address is one the operator allowed.
+    let server = Server::https().await;
+    server.put("/files/a.bin", Resource::new(body(KIB)));
+    server.put("/page", html("<a href=\"files/a.bin\">A</a>"));
+    let transport = wayfetch_net::HttpTransport::new(config_for(&server)).unwrap();
+    let url = url::Url::parse(&server.url("/files/a.bin")).unwrap();
+    let inspect = |reach, method| InspectRequest {
+        url: url.clone(),
+        method,
+        max_page: 64 * KIB,
+        deadline: Duration::from_secs(5),
+        reach,
+    };
+    let open = |reach| OpenRequest {
+        url: url.clone(),
+        range: None,
+        validators: None,
+        connect_timeout: Duration::from_secs(5),
+        read_buffer: 16 * KIB,
+        user_agent: None,
+        reach,
+    };
+    for method in [InspectMethod::Head, InspectMethod::FirstByte] {
+        let refused = transport.inspect(&inspect(Reach::Public, method)).await;
+        assert_eq!(refused.unwrap_err().reason, CheckReason::Blocked);
+    }
+    assert!(transport.open(&open(Reach::Public)).await.is_err());
+    assert_eq!(server.hits("/files/a.bin"), 0);
+
+    // Links the person adds, and pages served from an allowed local
+    // address, keep the operator's allowance.
+    assert!(
+        transport
+            .inspect(&inspect(Reach::Allowed, InspectMethod::Head))
+            .await
+            .is_ok()
+    );
+    assert!(transport.open(&open(Reach::Allowed)).await.is_ok());
+    let page = InspectRequest {
+        url: url::Url::parse(&server.url("/page")).unwrap(),
+        ..inspect(Reach::Allowed, InspectMethod::Page)
+    };
+    assert!(transport.inspect(&page).await.unwrap().local);
 }
