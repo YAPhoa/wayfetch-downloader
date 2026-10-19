@@ -50,6 +50,7 @@ use crate::destinations::Destination;
 use crate::fs::{FsError, PublicationCheck, RelativePath, Root, StagingFile, StagingRecord};
 use crate::lifecycle::{Resolution, ResolvedLink, SoleAttempt, StoreClient};
 use crate::media::{Converter, MediaService};
+use crate::progress::{Metering, Progress};
 use crate::store::{Admission, Partial, Store, StoreError};
 use crate::transfer::lease::{
     LeaseSource, Parallelism, ReplayPolicy, Representation, RequestRef, ResumePolicy, Transfer,
@@ -197,6 +198,10 @@ pub(crate) struct Download {
     pub(crate) attempt: SoleAttempt,
     /// For a download of a media link: what makes it.
     pub(crate) media: Option<MediaJob>,
+    /// The engine's live progress.
+    pub(crate) progress: Progress,
+    /// The meter of the body being written, while one is.
+    pub(crate) metering: Option<Metering>,
 }
 
 /// What makes a media download.
@@ -215,7 +220,9 @@ impl Download {
     /// pause, cancel, or shutdown interrupted it, leaving the job for the
     /// coordinator to settle.
     pub(crate) async fn run(mut self) -> bool {
-        let stopped = match self.drive().await {
+        let driven = self.drive().await;
+        self.metering = None;
+        let stopped = match driven {
             Ok(()) | Err(Stop::Abandon) => return false,
             Err(Stop::Interrupted) => return true,
             Err(stop) => stop,
@@ -312,7 +319,9 @@ impl Download {
                     .await?
             }
         };
+        self.meter(target.start, target.end);
         let (size, file) = self.stream(file, response, &target).await?;
+        self.metering = None;
         let name = target_name(self.job.job, suggested.as_deref(), named);
         self.finish(&root, file, size, name).await
     }
@@ -868,6 +877,13 @@ impl Download {
         Ok(file)
     }
 
+    /// Meters the bodies written from now on, which continue from byte
+    /// `from` towards `total`, if known.
+    fn meter(&mut self, from: u64, total: Option<u64>) {
+        let (job, generation) = (self.job.job, self.job.generation);
+        self.metering = Some(self.progress.meter(job, generation, from, total));
+    }
+
     /// Streams the body into `file`, committing checkpoints as it goes.
     /// Returns the artifact's size and the file.
     async fn stream(
@@ -879,6 +895,9 @@ impl Download {
         let mut writer = IntervalWriter::new(Arc::new(file), target.start, target.end)
             .holding(self.guard.clone())
             .throttled(self.bandwidth.clone());
+        if let Some(metering) = &self.metering {
+            writer = writer.metered(metering.meter().clone());
+        }
         let (checkpoints, mut certified) = mpsc::channel(1);
         // Stops the writer when a checkpoint is rejected, as well as on a
         // pause, cancel, or shutdown.
@@ -1257,6 +1276,8 @@ mod tests {
             cancel: CancellationToken::new(),
             guard: Arc::new(()),
             media: None,
+            progress: Progress::new(epoch),
+            metering: None,
             job: Admission {
                 job,
                 stage,
