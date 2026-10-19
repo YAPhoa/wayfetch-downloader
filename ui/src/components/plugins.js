@@ -46,6 +46,16 @@ function explain(error) {
 }
 
 /**
+ * What stops while a plugin with each role is turned off.
+ * @type {Readonly<Record<PluginSummary['role'], string>>}
+ */
+const UNUSED = Object.freeze({
+  media_resolver: 'Video links that need it are not checked or downloaded',
+  media_converter: 'Formats that need it are not offered',
+  archive_extractor: 'Downloaded archives are kept but not unpacked',
+});
+
+/**
  * What a change did, in plain words.
  * @param {PluginSummary} plugin
  * @param {PluginChange} change
@@ -62,7 +72,7 @@ export function changeMessage(plugin, change, result) {
     case 'enable':
       return `${name} is turned on.`;
     case 'disable':
-      return `${name} is turned off. ${plugin.role === 'media_resolver' ? 'Video links that need it are not checked or downloaded' : 'Formats that need it are not offered'} until it is turned on.`;
+      return `${name} is turned off. ${UNUSED[plugin.role]} until it is turned on.`;
     case 'remove':
       return result.version
         ? `Removed the copy Wayfetch installed. ${name}${version} is used again.`

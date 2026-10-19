@@ -19,6 +19,8 @@ import {
   progress,
   restartNote,
   retryPlan,
+  unpackActions,
+  unpackNote,
 } from '../../src/client/jobs.js';
 
 /**
@@ -208,4 +210,33 @@ test('links are shown without credentials, query, or fragment', () => {
   assert.deepEqual(displayLink('https://example.com/f.zip'), { text: 'https://example.com/f.zip', hidden: false });
   assert.deepEqual(displayLink('https://example.com/f.zip?'), { text: 'https://example.com/f.zip', hidden: false });
   assert.equal(displayLink('not a link'), null);
+});
+
+test('a finished archive reads as its unpacking, and offers what the engine allows', () => {
+  const archive = (
+    /** @type {import('../../src/client/contract.js').ExtractionState} */ state,
+    /** @type {string | undefined} */ problem = undefined,
+  ) =>
+    job({ stage: 'complete', display: 'complete', extraction: { state, problem } });
+  assert.deepEqual(describe(archive('idle')), { label: 'Done', status: 'done' });
+  assert.deepEqual(describe(archive('extracting')), { label: 'Unpacking…', status: 'active' });
+  assert.deepEqual(describe(archive('needs_password')), { label: 'Needs password', status: 'paused' });
+  assert.deepEqual(describe(archive('failed')), { label: 'Unpack failed', status: 'failed' });
+  assert.deepEqual(unpackActions(archive('idle')), { start: { label: 'Unpack', password: false }, stop: false });
+  assert.deepEqual(unpackActions(archive('complete')), {
+    start: { label: 'Unpack again', password: false },
+    stop: false,
+  });
+  assert.deepEqual(unpackActions(archive('needs_password')), {
+    start: { label: 'Enter password…', password: true },
+    stop: true,
+  });
+  for (const state of /** @type {const} */ (['waiting', 'queued', 'extracting'])) {
+    assert.deepEqual(unpackActions(archive(state)), { start: null, stop: true }, state);
+  }
+  // Not an archive, or not finished: nothing to unpack.
+  assert.deepEqual(unpackActions(job({ stage: 'complete', display: 'complete' })), { start: null, stop: false });
+  assert.deepEqual(unpackActions({ ...archive('idle'), stage: 'queued' }), { start: null, stop: false });
+  assert.equal(unpackNote(archive('waiting', 'Waiting for 2 more parts to download.')), 'Waiting for 2 more parts to download.');
+  assert.equal(unpackNote(archive('complete')), undefined);
 });

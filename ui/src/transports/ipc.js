@@ -15,7 +15,7 @@
 // stream ended, after which the feed resumes from its cursor as it does
 // after a lost HTTP stream.
 
-import { WayfetchError, settingsRequest } from '../client/contract.js';
+import { WayfetchError, extractRequest, settingsRequest } from '../client/contract.js';
 
 /**
  * @typedef {import('../client/generated/StartRouting.js').StartRouting} StartRouting
@@ -31,6 +31,7 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/contract.js').RootId} RootId
  * @typedef {import('../client/contract.js').CollectMode} CollectMode
  * @typedef {import('../client/contract.js').SettingsChange} SettingsChange
+ * @typedef {import('../client/contract.js').ExtractChange} ExtractChange
  * @typedef {import('../client/contract.js').RootSummary} RootSummary
  * @typedef {import('../client/contract.js').LinkId} LinkId
  * @typedef {import('../client/contract.js').LinkRef} LinkRef
@@ -194,6 +195,15 @@ export class DesktopIpcClient {
     if (name !== undefined) request.name = name;
     if (repeatProviderOperation) request.repeat_provider_operation = true;
     return this.call('job_command', { job, request });
+  }
+
+  /**
+   * Unpacks a downloaded archive, with its password if it needs one.
+   * @param {JobId} job
+   * @param {ExtractChange} change
+   */
+  extract(job, change) {
+    return this.call('extract', { job, request: extractRequest(change) });
   }
 
   /** @param {JobId} job */

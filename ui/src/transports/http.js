@@ -6,7 +6,7 @@
 // a reload. A response that says the session is gone calls
 // `onUnauthenticated`, so the shell can ask the user to sign in again.
 
-import { WayfetchError, settingsRequest } from '../client/contract.js';
+import { WayfetchError, extractRequest, settingsRequest } from '../client/contract.js';
 
 /**
  * @typedef {import('../client/generated/StartRouting.js').StartRouting} StartRouting
@@ -21,6 +21,7 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/contract.js').RootId} RootId
  * @typedef {import('../client/contract.js').CollectMode} CollectMode
  * @typedef {import('../client/contract.js').SettingsChange} SettingsChange
+ * @typedef {import('../client/contract.js').ExtractChange} ExtractChange
  * @typedef {import('../client/contract.js').LinkId} LinkId
  * @typedef {import('../client/contract.js').LinkRef} LinkRef
  * @typedef {import('../client/contract.js').LinksAction} LinksAction
@@ -196,6 +197,15 @@ export class HttpClient {
     if (name !== undefined) body.name = name;
     if (repeatProviderOperation) body.repeat_provider_operation = true;
     return this.request('POST', `/v1/jobs/${encodeURIComponent(job)}/commands`, { body });
+  }
+
+  /**
+   * Unpacks a downloaded archive, with its password if it needs one.
+   * @param {JobId} job
+   * @param {ExtractChange} change
+   */
+  extract(job, change) {
+    return this.request('POST', `/v1/jobs/${encodeURIComponent(job)}/extract`, { body: extractRequest(change) });
   }
 
   /** @param {JobId} job */
