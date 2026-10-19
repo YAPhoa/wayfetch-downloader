@@ -167,9 +167,7 @@ impl Program {
         #[cfg(windows)]
         // No console window opens for it on the desktop.
         command.creation_flags(0x0800_0000);
-        let mut child = command
-            .spawn()
-            .map_err(|e| RunError::Spawn(e.to_string()))?;
+        let mut child = spawn(&mut command).await?;
         let (stdout, stderr) = (
             child.stdout.take().ok_or(RunError::Missing)?,
             child.stderr.take().ok_or(RunError::Missing)?,
@@ -319,6 +317,25 @@ impl Plugin {
     }
 }
 
+/// Starts `command`. A program file just written, such as an update
+/// Settings installed or a test's script, can be refused as busy while
+/// another thread's child, started at that moment, still holds it open
+/// for writing until that child execs; such a start is tried again.
+async fn spawn(command: &mut tokio::process::Command) -> Result<tokio::process::Child, RunError> {
+    /// Linux's `ETXTBSY`.
+    const BUSY: i32 = 26;
+    let mut tries = 0;
+    loop {
+        match command.spawn() {
+            Err(e) if cfg!(target_os = "linux") && e.raw_os_error() == Some(BUSY) && tries < 10 => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            started => return started.map_err(|e| RunError::Spawn(e.to_string())),
+        }
+    }
+}
+
 /// Reads `source` to its end, keeping at most `limit` bytes; more is an
 /// error if `strict`, else discarded.
 async fn read(
@@ -436,7 +453,7 @@ pub(crate) mod tests {
         let ok = script(dir.path(), "ok", "echo 1.2.3");
         let program = Program::detect(DESCRIBE, Some(ok), &check()).await;
         let summary = Plugin::new(DESCRIBE, check(), program, false).summary(Vec::new());
-        assert_eq!(summary.state, PluginState::Ready);
+        assert_eq!(summary.state, PluginState::Ready, "{:?}", summary.problem);
         assert_eq!(summary.version.as_deref(), Some("1.2.3"));
 
         let missing = Program::detect(DESCRIBE, None, &check()).await;
