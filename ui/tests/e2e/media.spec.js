@@ -96,19 +96,22 @@ test('a YouTube link shows its title and formats, and downloads the one chosen',
     await expect(row.locator('td.link-status')).toContainText('Video found');
     expect(fixture.requested).toEqual([]);
 
-    // Without ffmpeg, MP3 and the 1080p picture need a plugin; Best video
-    // is the format with sound included.
+    // Without ffmpeg, MP3 and the 1080p picture need a plugin, so the
+    // tallest picture served with sound, 360p, is chosen by default.
     const picker = row.locator('button[data-key^="link-format-"]');
-    await expect(picker).toHaveAccessibleName('Format of Wayfetch test video: Best video');
+    await expect(picker).toHaveAccessibleName('Format of Wayfetch test video: 360p');
     await picker.click();
     const formats = page.getByRole('menu', { name: 'Format' });
-    await expect(formats.getByRole('menuitemradio', { checked: true })).toHaveText('Best video');
+    await expect(formats.getByRole('menuitemradio')).toHaveText(['1080pNeeds a plugin', '360p', 'MP3 audioNeeds a plugin', 'M4A audio']);
+    await expect(formats.getByRole('menuitemradio', { checked: true })).toHaveText('360p');
     await expect(formats.getByRole('menuitemradio', { checked: true })).toBeFocused();
-    const mp3 = formats.getByRole('menuitemradio', { name: /MP3 audio/ });
-    await expect(mp3).toHaveAttribute('aria-disabled', 'true');
-    await expect(mp3).toHaveText('MP3 audioNeeds a plugin');
-    await formats.getByRole('menuitemradio', { name: '360p' }).click();
+    await expect(formats.getByRole('menuitemradio', { name: /MP3 audio/ })).toHaveAttribute('aria-disabled', 'true');
+    await formats.getByRole('menuitemradio', { name: 'M4A audio' }).click();
     await expect(formats).toBeHidden();
+    await expect(page.getByText('1 video will download as M4A audio.')).toBeVisible();
+    await expect(picker).toHaveText('M4A audio');
+    await picker.click();
+    await formats.getByRole('menuitemradio', { name: '360p' }).click();
     await expect(page.getByText('1 video will download as 360p.')).toBeVisible();
     await expect(picker).toBeFocused();
     await page.reload();

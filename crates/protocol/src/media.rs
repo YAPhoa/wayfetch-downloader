@@ -93,10 +93,11 @@ pub struct LinkMedia {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub duration_seconds: Option<u64>,
-    /// What it will be downloaded as.
+    /// What it will be downloaded as. Once checked, the best video shows
+    /// as the height it makes, one of the `options`.
     pub choice: MediaChoice,
-    /// The choices it offers, once checked: the best video first, then
-    /// each picture height the video has, tallest first, then audio only.
+    /// The choices it offers, once checked: each picture height the video
+    /// has, tallest first, then audio only.
     pub options: Vec<MediaOption>,
     /// What an unavailable option needs, such as a missing plugin.
     #[serde(default, skip_serializing_if = "Option::is_none")]

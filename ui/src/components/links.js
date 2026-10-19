@@ -18,7 +18,7 @@
 //   it, and now and then while shown, since removals and moves made in
 //   another window have no event of their own.
 // - A video link, such as YouTube's, shows its title once its service
-//   has read it, and a Format list: the best video, a picture height, or
+//   has read it, and a Format list: a picture height (the tallest available by default), or
 //   sound only as MP3 or M4A. Formats that need a missing plugin are
 //   listed but cannot be chosen.
 //
