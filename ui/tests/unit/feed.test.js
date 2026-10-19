@@ -444,6 +444,32 @@ test('a job that stops transferring drops its sample and takes no more', async (
   assert.equal(feed.sample('job-1'), undefined);
 });
 
+for (const where of ['page', 'detail']) {
+  test(`a ${where} read after a missed pause drops the stale sample`, async () => {
+    const client = new FakeClient();
+    client.change('job_added', job(1, { stage: 'transferring' }));
+    // Off the page, the job is held only as the inspected one.
+    const feed = await started(client, where === 'page' ? 2 : 1);
+    if (where === 'detail') {
+      client.change('job_added', job(2));
+      await feed.showStages(['failed']);
+      await feed.watch('job-1');
+      assert.equal(feed.jobs.length, 0);
+    }
+    const first = client.live[0];
+    const sample = { job: /** @type {const} */ ('job-1'), boot_epoch: 1, generation: 1, bytes_received: 5, bytes_per_second: 9 };
+    first.sink.item({ type: 'progress', ...sample });
+    assert.equal(feed.sample('job-1')?.bytes_per_second, 9);
+    // The pause is never delivered; the resync's snapshot shows it.
+    first.closed = true;
+    client.change('job_changed', job(1, { stage: 'paused' }));
+    first.sink.item({ type: 'resync', reason: 'lagged' });
+    await settle();
+    assert.equal(feed.held('job-1')?.job.stage, 'paused');
+    assert.equal(feed.sample('job-1'), undefined);
+  });
+}
+
 test('held jobs are never re-read on a timer', async () => {
   const client = new FakeClient();
   client.change('job_added', job(1, { stage: 'transferring' }));

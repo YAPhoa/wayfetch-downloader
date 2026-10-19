@@ -549,15 +549,7 @@ export class JobFeed {
         return;
       }
       case 'progress': {
-        const held = this.held(item.job);
-        if (!held || this.hello === null) return;
-        if (
-          item.boot_epoch !== this.hello.boot_epoch ||
-          item.generation !== held.job.generation ||
-          held.job.stage !== 'transferring'
-        ) {
-          return;
-        }
+        if (!this.current(item)) return;
         this.samples.set(item.job, item);
         this.changed();
         return;
@@ -606,9 +598,6 @@ export class JobFeed {
   hold(job, position) {
     for (const held of [this.page.get(job.id), this.detail]) {
       if (held && held.job.id === job.id && position > held.position) {
-        if (held.job.generation !== job.generation || job.stage !== 'transferring') {
-          this.samples.delete(job.id);
-        }
         held.job = job;
         held.position = position;
       }
@@ -619,6 +608,7 @@ export class JobFeed {
       this.page.delete(job.id);
       this.pageIds = this.pageIds.filter((id) => id !== job.id);
     }
+    this.prune();
   }
 
   /**
@@ -641,10 +631,28 @@ export class JobFeed {
     return this.page.get(job) ?? (this.detail?.job.id === job ? this.detail : undefined);
   }
 
-  /** Forgets samples of jobs no longer held. */
+  /**
+   * Whether `sample` belongs to this engine run and to the held copy of
+   * its job, which must be transferring under the same generation.
+   * @param {ProgressSample} sample
+   */
+  current(sample) {
+    const held = this.held(sample.job);
+    return (
+      held !== undefined &&
+      this.hello !== null &&
+      sample.boot_epoch === this.hello.boot_epoch &&
+      sample.generation === held.job.generation &&
+      held.job.stage === 'transferring'
+    );
+  }
+
+  /** Forgets samples that no longer match a held job, after any change to
+   * the held jobs: an event, or a page or detail read after a resync that
+   * missed the job's events. */
   prune() {
-    for (const job of this.samples.keys()) {
-      if (!this.held(job)) this.samples.delete(job);
+    for (const sample of this.samples.values()) {
+      if (!this.current(sample)) this.samples.delete(sample.job);
     }
   }
 }
