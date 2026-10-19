@@ -132,6 +132,31 @@ export function sortHeader({ column, label, sort, onSort, className }) {
 }
 
 /**
+ * The bar under a paged table: which rows are shown out of how many, and
+ * the way to the pages before and after. Both buttons stay in place,
+ * disabled at either end, so paging never moves them.
+ * @param {{ place: import('../client/pages.js').PagePlace, more: boolean, key: string, onPage: (direction: 'next' | 'back') => void }} pager
+ */
+export function pagerBar({ place, more, key, onPage }) {
+  const { first, last, total, page, pages } = place;
+  return [
+    h('span', { class: 'range' }, first > last ? '' : total === null ? `${first}\u2013${last}` : `${first}\u2013${last} of ${total}`),
+    h('span', { class: 'spacer' }),
+    h(
+      'button',
+      { type: 'button', 'aria-label': 'Previous page', 'data-key': `${key}-back`, disabled: page === 1, onclick: () => onPage('back') },
+      'Previous',
+    ),
+    h('span', { class: 'page' }, pages === null ? `Page ${page}` : `Page ${page} of ${pages}`),
+    h(
+      'button',
+      { type: 'button', 'aria-label': 'Next page', 'data-key': `${key}-next`, disabled: !more, onclick: () => onPage('next') },
+      'Next',
+    ),
+  ];
+}
+
+/**
  * Copies `text` to the clipboard: through the Clipboard API where the page
  * may use it, else through a selected, hidden field.
  * @param {string} text

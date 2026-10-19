@@ -340,6 +340,8 @@ test('a browser signs in, downloads, controls jobs, and outlives a daemon restar
   await expect(page.locator('dd[data-fact="job"]')).toHaveText('job-1');
   await page.getByRole('button', { name: 'Close details' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/`);
+  // With nothing chosen the details pane is gone, not a placeholder.
+  await expect(page.locator('.inspector')).toBeHidden();
 
   // The state filters list only matching jobs, with how many there are,
   // and keep keyboard focus while the list reloads.
@@ -755,6 +757,8 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   const signed = `${fixture.put('menu.bin', MIB)}?token=secret`;
   await add(page, signed);
   await page.getByRole('button', { name: 'Next page' }).click();
+  await expect(page.locator('.downloads-view .pager .page')).toHaveText(/^Page 2 of 2$/);
+  await expect(page.getByRole('button', { name: 'Next page' })).toBeDisabled();
   const menuRow = page.locator('tr[data-job]', { has: page.locator('td.name', { hasText: /^menu\.bin$/ }) });
   await expect(menuRow).toHaveCount(1);
   const job = await menuRow.getAttribute('data-job');
@@ -834,6 +838,30 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(page.getByRole('button', { name: 'All (53)' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Done (52)' })).toBeVisible();
   expect((await daemon.published('renamed.bin', daemon.archive)).equals(content(0, MIB))).toBe(true);
+
+  // The footer counts from where the page really starts: removing a
+  // download on page 1 elsewhere moves this page's range.
+  const pager = page.locator('.downloads-view .pager');
+  await expect(pager.locator('.range')).toHaveText('51\u201353 of 53');
+  const other = await context.newPage();
+  await other.goto(`${daemon.origin}/`);
+  const firstRow = other.locator('tr[data-job]').first();
+  await firstRow.getByRole('button', { name: /^Actions for / }).click();
+  await (await openMenu(other)).getByRole('menuitem', { name: /^Remove…/ }).click();
+  await other.getByRole('dialog', { name: 'Remove download' }).getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(other.getByRole('button', { name: 'All (52)' })).toBeVisible();
+  await other.close();
+  await expect(pager.locator('.range')).toHaveText('50\u201352 of 52');
+  await expect(pager.locator('.page')).toHaveText('Page 2 of 2');
+
+  // Emptying the page goes back to the one before it.
+  await page.getByRole('checkbox', { name: 'Select all downloads shown' }).check();
+  await page.locator('tr[data-job]').first().getByRole('button', { name: /^Actions for / }).click();
+  await (await openMenu(page)).getByRole('menuitem', { name: /^Remove 3 downloads…/ }).click();
+  await page.getByRole('dialog', { name: 'Remove 3 downloads' }).getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(pager.locator('.page')).toHaveText('Page 1 of 1');
+  await expect(pager.locator('.range')).toHaveText('1\u201349 of 49');
+  await expect(page.locator('tr[data-job]')).toHaveCount(49);
 
   // The chosen default outlives a reload.
   await page.reload();
@@ -937,8 +965,11 @@ test('collected links wait on the Links page until chosen ones are started', asy
 
   // Filtering never acts on what it hides.
   const start = page.getByRole('button', { name: 'Start selected' });
+  // Ticking moves no row: the selection line keeps its room.
+  const before = await linkRow('review-a.bin').boundingBox();
   await linkRow('review-a.bin').getByRole('checkbox').check();
   await expect(page.locator('.links-page .selection-summary')).toContainText('1 link selected');
+  expect((await linkRow('review-a.bin').boundingBox())?.y).toBe(before?.y);
   await expect(page.locator('.links-page .selection-summary .path')).toHaveText(/** @type {string} */ (daemon.archive));
   await page.getByLabel('Filter links').fill('review-b');
   await expect(linkRow('review-a.bin')).toHaveCount(0);
@@ -1931,8 +1962,22 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(c.locator('td[data-state]')).toHaveText('Done');
     const summary = page.locator('.downloads-view .selection-summary');
 
-    // Ticking two: the toolbar acts on both, not on a download in the details.
+    // The table's footer says which rows are shown; one page pages nowhere.
+    const pager = page.locator('.downloads-view .pager');
+    await expect(pager.locator('.range')).toHaveText('1–3 of 3');
+    await expect(pager.locator('.page')).toHaveText('Page 1 of 1');
+    await expect(pager.getByRole('button', { name: 'Previous page' })).toBeDisabled();
+    await expect(pager.getByRole('button', { name: 'Next page' })).toBeDisabled();
+
+    // The selection line keeps its room while empty, so ticking moves no row.
+    await expect(summary).toBeEmpty();
+    await expect(summary).toBeVisible();
+    const before = await a.boundingBox();
     await a.getByRole('checkbox').check();
+    await expect(summary.locator('strong')).toHaveText('1 download selected');
+    expect((await a.boundingBox())?.y).toBe(before?.y);
+
+    // Ticking two: the toolbar acts on both, not on a download in the details.
     await b.getByRole('checkbox').check();
     await expect(summary.locator('strong')).toHaveText('2 downloads selected');
     await expect(a).toHaveClass(/ticked/);
