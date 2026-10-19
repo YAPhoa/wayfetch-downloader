@@ -274,6 +274,18 @@ impl Plugins {
             .filter(|p| p.ready())
             .unwrap_or_else(|| plugin.found());
         let current_version = current.ready().then(|| current.version()).flatten();
+        // A repair never goes below the version last installed, which the
+        // record keeps though its copy is gone.
+        let recorded = match repair {
+            true => self
+                .record
+                .lock()
+                .await
+                .installed
+                .get(describe.id)
+                .map(|i| i.version.clone()),
+            false => None,
+        };
         let asset = (release.asset)(current.path()).ok_or_else(|| {
             PluginError::NotApplicable(format!(
                 "{} publishes no build for this system",
@@ -343,14 +355,16 @@ impl Plugins {
             manifest,
             version: version.clone(),
         };
-        // Repairing accepts the version that works now, never an older one.
-        let stale = current_version.is_some_and(|v| {
-            if repair {
-                release::newer(v, &version)
-            } else {
-                !release::newer(&version, v)
-            }
-        });
+        // Repairing accepts the version installed or working now, never
+        // an older one.
+        let stale = if repair {
+            [current_version, recorded.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|v| release::newer(v, &version))
+        } else {
+            current_version.is_some_and(|v| !release::newer(&version, v))
+        };
         if stale {
             self.forget(&file_path, &[&file, &part], work).await;
             self.edit(
@@ -362,7 +376,7 @@ impl Plugins {
             .await?;
             if repair {
                 return Err(PluginError::Rejected(format!(
-                    "the newest {} is older than the copy found; remove the update to use that copy",
+                    "the newest {} is older than the copy installed before, so it is not used; remove the update to go back to the copy found",
                     describe.name
                 )));
             }
@@ -860,5 +874,48 @@ mod tests {
             ["a65f5b61819a2df6-tool"],
             "the copy in use stays"
         );
+    }
+
+    #[tokio::test]
+    async fn a_repair_never_installs_a_release_older_than_the_one_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        // Installed 2100.01.01 once; its copy has since gone.
+        let record = Record {
+            installed: BTreeMap::from([(
+                "tool".to_owned(),
+                Installed {
+                    file: "tool/0000000000000000-tool".into(),
+                    version: "2100.01.01".into(),
+                    sha256: "00".repeat(32),
+                },
+            )]),
+            ..Record::default()
+        };
+        std::fs::write(
+            plugins_dir.join(RECORD),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        let releases = Arc::new(Releases::default());
+        let plugins = open(dir.path(), None, &releases).await;
+        let tool = plugins.get("tool").unwrap();
+        assert!(!tool.usable());
+
+        // The signed release is 2099.01.01, older than the one recorded.
+        let refused = plugins
+            .change(&id(), PluginChange::Update, PluginWork::unowned())
+            .await;
+        assert!(
+            matches!(&refused, Err(PluginError::Rejected(m)) if m.contains("older")),
+            "{refused:?}"
+        );
+        assert!(!tool.usable());
+        assert!(files(dir.path()).is_empty());
+        let kept: Record =
+            serde_json::from_slice(&std::fs::read(plugins_dir.join(RECORD)).unwrap()).unwrap();
+        assert_eq!(kept.installed, record.installed);
+        assert!(kept.discard.is_empty(), "{kept:?}");
     }
 }
