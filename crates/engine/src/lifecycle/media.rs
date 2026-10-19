@@ -270,12 +270,24 @@ impl Coordinator {
             version: outcome.version,
         });
         let (instance, converter) = (self.identity.instance, self.media.converter().is_some());
-        let recorded = self
+        let (recorded, saved) = self
             .with_store(move |store| {
                 store.set_media_converter(converter);
-                store.record_plugin_change(&envelope, instance, &result, outcome.changed, now())
+                let recorded = store.record_plugin_change(
+                    &envelope,
+                    instance,
+                    &result,
+                    outcome.changed,
+                    now(),
+                );
+                (recorded, store.settings().ok())
             })
             .await;
+        // Settings answers carry the revision the change moved to.
+        if let Some(saved) = saved {
+            self.destinations
+                .set_settings(saved.revision, saved.default_root);
+        }
         let _ = reply.send(recorded);
         self.changed().await;
     }

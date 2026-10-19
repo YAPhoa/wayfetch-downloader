@@ -260,7 +260,12 @@ impl Store {
             return Ok(result);
         }
         if changed {
-            next_revision(&tx, &settings(&tx)?, now)?;
+            let next = next_revision(&tx, &settings(&tx)?, now)?;
+            tx.execute(
+                "UPDATE settings SET revision = ?1, updated_at = ?2 WHERE id = 1",
+                params![sql(next)?, now.unix_millis()],
+            )
+            .map_err(StoreError::from)?;
             super::media::retry_failed(&tx)?;
             outbox::append(&tx, &EventKind::LinksChanged, now)?;
         }
