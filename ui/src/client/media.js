@@ -68,6 +68,7 @@ export function durationText(seconds) {
  * @returns {[string, Tone]}
  */
 export function pluginStatus(plugin) {
+  if (!plugin.enabled) return ['Turned off', 'calm'];
   switch (plugin.state) {
     case 'ready':
       return ['Ready', 'ok'];

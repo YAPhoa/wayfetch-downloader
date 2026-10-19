@@ -151,6 +151,13 @@ impl Store {
                     "file mutations run through their intent and completion methods",
                 ));
             }
+            // The host changes plugins outside the store.
+            Command::ChangePlugin { .. } => {
+                return Err(ProtocolError::new(
+                    ErrorCode::Internal,
+                    "a plugin change is recorded through Store::record_plugin_change",
+                ));
+            }
             // The account is stored once the person approved it.
             Command::AuthorizeAccount { .. } => {
                 return Err(ProtocolError::new(

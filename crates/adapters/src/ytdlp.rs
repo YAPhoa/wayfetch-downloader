@@ -9,7 +9,8 @@
 //! used; fragmented formats (DASH, HLS) are not offered yet.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -20,7 +21,7 @@ use wayfetch_engine::media::{
 };
 use wayfetch_engine::protocol::media::{AudioFormat, MediaChoice, PluginRole};
 
-use crate::plugin::{Describe, Limits, Program, RunError, last_line};
+use crate::plugin::{Check, Describe, Limits, Plugin, Program, RunError, last_line};
 
 /// The plugin.
 pub const PLUGIN: Describe = Describe {
@@ -39,41 +40,57 @@ const MAX_ANSWER_BYTES: usize = 32 * 1024 * 1024;
 /// yt-dlp and how to run it.
 #[derive(Debug, Clone)]
 pub struct YtDlp {
-    program: Program,
+    plugin: Arc<Plugin>,
     cache_dir: Option<PathBuf>,
     js_runtimes: Option<String>,
 }
 
 impl YtDlp {
-    /// yt-dlp at `path`, if found, checked by asking its version. It keeps
-    /// its cache (player code it has read) in `cache_dir`, or none;
+    /// How yt-dlp is checked. It keeps its cache (player code it has read)
+    /// in `cache_dir`, if any, and Deno, which reads YouTube's player code
+    /// for it, keeps its own cache beside it rather than in a home
+    /// directory that may be read-only.
+    pub fn check(cache_dir: Option<&Path>) -> Check {
+        Check {
+            args: &["--ignore-config", "--version"],
+            version: |out| out.lines().next().map(|v| v.trim().to_owned()),
+            env: cache_dir
+                .map(|dir| ("DENO_DIR", dir.join("deno").into_os_string()))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// yt-dlp as `plugin`, keeping its cache in `cache_dir`, or none;
     /// `js_runtimes` is passed to its `--js-runtimes` option if given.
-    pub async fn detect(
-        path: Option<PathBuf>,
+    pub fn new(
+        plugin: Arc<Plugin>,
         cache_dir: Option<PathBuf>,
         js_runtimes: Option<String>,
     ) -> Self {
-        let program = Program::detect(PLUGIN, path, &["--ignore-config", "--version"], |out| {
-            out.lines().next().map(|v| v.trim().to_owned())
-        })
-        .await;
-        // Deno, which reads YouTube's player code for it, keeps its own
-        // cache beside yt-dlp's rather than in a home directory that may
-        // be read-only.
-        let program = match &cache_dir {
-            Some(dir) => program.with_env("DENO_DIR", dir.join("deno")),
-            None => program,
-        };
         Self {
-            program,
+            plugin,
             cache_dir,
             js_runtimes,
         }
     }
 
-    /// The program.
-    pub fn program(&self) -> &Program {
-        &self.program
+    /// yt-dlp at `path`, if found, checked by asking its version, as a
+    /// plugin Settings cannot update.
+    pub async fn detect(
+        path: Option<PathBuf>,
+        cache_dir: Option<PathBuf>,
+        js_runtimes: Option<String>,
+    ) -> Self {
+        let check = Self::check(cache_dir.as_deref());
+        let program = Program::detect(PLUGIN, path, &check).await;
+        let plugin = Arc::new(Plugin::new(PLUGIN, check, program, false));
+        Self::new(plugin, cache_dir, js_runtimes)
+    }
+
+    /// The plugin.
+    pub fn plugin(&self) -> &Arc<Plugin> {
+        &self.plugin
     }
 
     /// The video `page` shows, described.
@@ -101,7 +118,12 @@ impl YtDlp {
             deadline: DEADLINE,
             stdout_bytes: MAX_ANSWER_BYTES,
         };
-        let output = self.program.run(&args, limits).await.map_err(failure)?;
+        let output = self
+            .plugin
+            .program()
+            .run(&args, limits)
+            .await
+            .map_err(failure)?;
         serde_json::from_slice(&output.stdout).map_err(|_| {
             MediaError::new(
                 FailureCode::AdapterParseFailure,
@@ -680,7 +702,7 @@ mod tests {
         );
         let path = crate::plugin::tests::script(dir.path(), "yt-dlp", &body);
         let ytdlp = YtDlp::detect(Some(path), None, Some("quickjs".into())).await;
-        let summary = ytdlp.program().summary(Vec::new());
+        let summary = ytdlp.plugin().summary(Vec::new());
         assert_eq!(summary.version.as_deref(), Some("2026.09.30"));
         let page = Url::parse("https://www.youtube.com/watch?v=abcdefghijk").unwrap();
         let info = ytdlp.describe(&page).await.unwrap().info().unwrap();

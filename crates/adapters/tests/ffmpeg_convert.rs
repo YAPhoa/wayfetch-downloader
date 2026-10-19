@@ -55,7 +55,7 @@ fn streams(file: &Path) -> Vec<String> {
 #[ignore = "runs the ffmpeg and ffprobe on PATH"]
 async fn streams_in_one_file_are_joined_and_converted() {
     let ffmpeg = Ffmpeg::detect(find_on_path("ffmpeg")).await;
-    assert!(ffmpeg.program().ready(), "{:?}", ffmpeg.program());
+    assert!(ffmpeg.plugin().usable(), "{:?}", ffmpeg.plugin());
     let dir = tempfile::tempdir().unwrap();
     let picture = generate(
         dir.path(),

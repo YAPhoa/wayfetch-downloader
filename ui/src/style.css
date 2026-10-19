@@ -1108,6 +1108,9 @@ th[aria-sort] button.sort { color: var(--ink); }
 /* The menu button, and beside it a command the account needs now. */
 .settings-group .accounts-table td.row-actions { width: 1%; padding-top: 0; padding-bottom: 0; text-align: right; white-space: nowrap; }
 .accounts-table .row-actions button { vertical-align: middle; }
+/* What a plugin is for, and what is wrong with it, wrap so its menu stays in view. */
+.plugins-table td.use, .plugins-table td.status { white-space: normal; }
+.plugins-table .status-detail { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .accounts-table .row-actions button:not(.more) { min-height: 28px; padding: 0 10px; margin-right: 4px; }
 .settings-section > .message.notice { margin-bottom: 12px; }
 .service-title .pick-service { margin-left: auto; min-height: 28px; padding: 0 12px; }

@@ -258,6 +258,7 @@ fn run_on(
             ipc::links_command,
             ipc::update_settings,
             ipc::remove_root,
+            ipc::change_plugin,
             ipc::authorize_account,
             ipc::cancel_authorization,
             ipc::account_command,

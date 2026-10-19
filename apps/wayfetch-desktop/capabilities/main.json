@@ -11,6 +11,7 @@
     "allow-links-command",
     "allow-update-settings",
     "allow-remove-root",
+    "allow-change-plugin",
     "allow-authorize-account",
     "allow-cancel-authorization",
     "allow-account-command",

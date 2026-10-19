@@ -779,6 +779,10 @@ mod tests {
                 state: crate::media::PluginState::Ready,
                 version: Some("2026.08.19".into()),
                 problem: None,
+                enabled: true,
+                updatable: true,
+                installed: true,
+                fallback_version: Some("2026.07.04".into()),
             }],
         });
         assert_eq!(
@@ -801,9 +805,19 @@ mod tests {
                 "plugins": [{
                     "id": "yt-dlp", "name": "yt-dlp", "role": "media_resolver",
                     "services": ["youtube"], "state": "ready", "version": "2026.08.19",
+                    "enabled": true, "updatable": true, "installed": true,
+                    "fallback_version": "2026.07.04",
                 }],
             })
         );
+        // A 4.0 engine's plugins carry none of 4.1's fields: each is on,
+        // and none can be updated or removed.
+        let older: crate::media::PluginSummary = from_value(json!({
+            "id": "ffmpeg", "name": "ffmpeg", "role": "media_converter",
+            "services": [], "state": "missing",
+        }))
+        .unwrap();
+        assert!(older.enabled && !older.updatable && !older.installed);
         // A 1.0 engine's roots carry no `added`: none can be removed.
         let older: RootSummary =
             from_value(json!({"id": "root-2", "path": "/media", "available": true})).unwrap();

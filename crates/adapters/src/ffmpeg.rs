@@ -7,6 +7,7 @@
 //! address. ffmpeg writes the output file the engine created, in place.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use wayfetch_engine::domain::failure::FailureCode;
@@ -14,7 +15,7 @@ use wayfetch_engine::media::{Container, Conversion, Converter, MediaError, Part,
 use wayfetch_engine::protocol::media::{PluginRole, PluginSummary};
 use wayfetch_engine::transfer::writer::BoxFuture;
 
-use crate::plugin::{Describe, Limits, Program};
+use crate::plugin::{Check, Describe, Limits, Plugin, Program};
 
 /// The plugin.
 pub const PLUGIN: Describe = Describe {
@@ -30,24 +31,37 @@ const DEADLINE: Duration = Duration::from_secs(4 * 60 * 60);
 /// ffmpeg, found and checked.
 #[derive(Debug, Clone)]
 pub struct Ffmpeg {
-    program: Program,
+    plugin: Arc<Plugin>,
 }
 
 impl Ffmpeg {
-    /// ffmpeg at `path`, if found, checked by asking its version.
-    pub async fn detect(path: Option<PathBuf>) -> Self {
-        let program = Program::detect(PLUGIN, path, &["-hide_banner", "-version"], |out| {
-            // `ffmpeg version 7.1.1 Copyright ...`
-            let version = out.lines().next()?.strip_prefix("ffmpeg version ")?;
-            version.split_whitespace().next().map(str::to_owned)
-        })
-        .await;
-        Self { program }
+    /// How ffmpeg is checked.
+    pub fn check() -> Check {
+        Check {
+            args: &["-hide_banner", "-version"],
+            version: |out| {
+                // `ffmpeg version 7.1.1 Copyright ...`
+                let version = out.lines().next()?.strip_prefix("ffmpeg version ")?;
+                version.split_whitespace().next().map(str::to_owned)
+            },
+            env: Vec::new(),
+        }
     }
 
-    /// The program.
-    pub fn program(&self) -> &Program {
-        &self.program
+    /// ffmpeg as `plugin`.
+    pub fn new(plugin: Arc<Plugin>) -> Self {
+        Self { plugin }
+    }
+
+    /// ffmpeg at `path`, if found, checked by asking its version.
+    pub async fn detect(path: Option<PathBuf>) -> Self {
+        let program = Program::detect(PLUGIN, path, &Self::check()).await;
+        Self::new(Arc::new(Plugin::new(PLUGIN, Self::check(), program, false)))
+    }
+
+    /// The plugin.
+    pub fn plugin(&self) -> &Arc<Plugin> {
+        &self.plugin
     }
 }
 
@@ -108,7 +122,7 @@ pub fn arguments(conversion: &Conversion<'_>) -> Option<Vec<String>> {
 
 impl Converter for Ffmpeg {
     fn plugin(&self) -> PluginSummary {
-        self.program.summary(Vec::new())
+        self.plugin.summary(Vec::new())
     }
 
     fn convert<'a>(&'a self, conversion: Conversion<'a>) -> BoxFuture<'a, Result<(), MediaError>> {
@@ -120,7 +134,8 @@ impl Converter for Ffmpeg {
                 deadline: DEADLINE,
                 stdout_bytes: 64 * 1024,
             };
-            self.program
+            self.plugin
+                .program()
                 .run(&args, limits)
                 .await
                 .map(drop)

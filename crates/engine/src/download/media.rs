@@ -34,8 +34,7 @@ const RESOLVE_DEADLINE: Duration = Duration::from_secs(90);
 const LAYOUT_TAG: &str = "wfm1";
 
 /// What a recipe that converts needs while the converter is missing.
-const NEEDS_CONVERTER: &str =
-    "This format needs the ffmpeg plugin, which is not available. See Settings > Plugins.";
+const NEEDS_CONVERTER: &str = "This format needs the ffmpeg plugin, which is turned off or not available. See Settings > Plugins.";
 
 /// How a media download's staging file is laid out.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,11 +243,8 @@ impl Download {
                 "Wayfetch has no integration for this video site any more.",
             ));
         };
-        if !service.ready() {
-            return Err(failed(
-                FailureCode::UnsupportedCapability,
-                "The yt-dlp plugin is not available. See Settings > Plugins.",
-            ));
+        if let Some(problem) = crate::media::unusable(&service.plugins()) {
+            return Err(failed(FailureCode::UnsupportedCapability, problem));
         }
         let resolving = tokio::time::timeout(
             RESOLVE_DEADLINE,

@@ -12,6 +12,7 @@
 //! | `links_command` | [`LinksCommandRequest`]: start, remove, or move collected links |
 //! | `update_settings` | [`UpdateSettingsRequest`]: change the default destination or a preference |
 //! | `remove_root` | [`RemoveRootRequest`]: stop offering a folder the user added |
+//! | `change_plugin` | [`ChangePluginRequest`]: turn a plugin on or off, update it, or remove its installed copy |
 //! | `authorize_account` | [`AuthorizeAccountRequest`]: starts signing a provider account in |
 //! | `cancel_authorization` | stops a sign-in still waiting for approval |
 //! | `account_command` | [`AccountCommandRequest`]: enable, disable, or remove an account |
@@ -52,8 +53,9 @@ use wayfetch_engine::protocol::account::{AccountSummary, Authorization, Authoriz
 use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::RootSummary;
 use wayfetch_engine::protocol::request::{
-    AccountCommandRequest, AuthorizeAccountRequest, CollectRequest, JobCommandRequest,
-    LinksCommandRequest, RemoveRootRequest, SubmitRequest, UpdateSettingsRequest,
+    AccountCommandRequest, AuthorizeAccountRequest, ChangePluginRequest, CollectRequest,
+    JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
+    UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
     ErrorCode, EventCursor, Hello, Permission, ProtocolError, Query, QueryResult, StreamItem,
@@ -148,6 +150,17 @@ pub async fn update_settings(
 #[tauri::command]
 pub async fn remove_root(desktop: State<'_, Desktop>, request: Value) -> IpcResult<CommandResult> {
     let envelope = decode::<RemoveRootRequest>(request)?.into_envelope();
+    desktop.engine.execute(envelope, GRANTED).await
+}
+
+/// Turns a plugin on or off, updates it, or removes the copy Wayfetch
+/// installed.
+#[tauri::command]
+pub async fn change_plugin(
+    desktop: State<'_, Desktop>,
+    request: Value,
+) -> IpcResult<CommandResult> {
+    let envelope = decode::<ChangePluginRequest>(request)?.into_envelope();
     desktop.engine.execute(envelope, GRANTED).await
 }
 

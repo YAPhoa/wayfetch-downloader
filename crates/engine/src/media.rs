@@ -19,12 +19,19 @@
 //! not its expiring URL, so a download continues after its links expire
 //! as long as the service still serves the same formats.
 
+use std::any::Any;
+use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use wayfetch_domain::failure::FailureCode;
+use wayfetch_domain::name::PluginId;
 use wayfetch_domain::name::ProviderId;
-use wayfetch_protocol::media::{AudioFormat, MediaChoice, MediaOption, PluginState, PluginSummary};
+use wayfetch_protocol::media::{
+    AudioFormat, MediaChoice, MediaOption, PluginChange, PluginSummary,
+};
 
 use crate::fs::RelativePath;
 use crate::transfer::writer::BoxFuture;
@@ -288,7 +295,7 @@ pub trait MediaService: Send + Sync + 'static {
 
     /// Whether its plugins can be used.
     fn ready(&self) -> bool {
-        self.plugins().iter().all(|p| p.state == PluginState::Ready)
+        self.plugins().iter().all(PluginSummary::usable)
     }
 
     /// Reads the title and formats of `link`, without downloading.
@@ -336,11 +343,157 @@ pub trait Converter: Send + Sync + 'static {
 
     /// Whether it can be used.
     fn ready(&self) -> bool {
-        self.plugin().state == PluginState::Ready
+        self.plugin().usable()
     }
 
     /// Runs `conversion`. Dropping the future stops it.
     fn convert<'a>(&'a self, conversion: Conversion<'a>) -> BoxFuture<'a, Result<(), MediaError>>;
+}
+
+/// What a person is told when `plugins` cannot all be used, naming each
+/// that cannot and whether it is turned off or unavailable; `None` when
+/// every one can.
+pub fn unusable(plugins: &[PluginSummary]) -> Option<String> {
+    let names = |off: bool| {
+        plugins
+            .iter()
+            .filter(|p| !p.usable() && p.enabled != off)
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+    };
+    let (off, missing) = (names(true), names(false));
+    let say = |names: &[&str], what: &str| match names {
+        [] => None,
+        [one] => Some(format!("the {one} plugin, which is {what}")),
+        _ => Some(format!(
+            "the {} plugins, which are {what}",
+            names.join(" and ")
+        )),
+    };
+    let parts: Vec<_> = [say(&off, "turned off"), say(&missing, "not available")]
+        .into_iter()
+        .flatten()
+        .collect();
+    (!parts.is_empty()).then(|| {
+        format!(
+            "This needs {}. See Settings > Plugins.",
+            parts.join(", and ")
+        )
+    })
+}
+
+/// Changes plugins for Settings > Plugins: the host's implementation knows
+/// where each plugin is, how to update it, and what it installed. A change
+/// takes effect for work started after it; work already running keeps the
+/// copy it started with.
+///
+/// Its file work runs through [`PluginWork::blocking`], so the engine
+/// keeps the state directory until that work ends, and it stops between
+/// steps once [`PluginWork::stopping`].
+pub trait PluginControl: Send + Sync + 'static {
+    /// Makes `change` to `plugin`, answering whether anything changed and
+    /// the version in use afterwards.
+    fn change<'a>(
+        &'a self,
+        plugin: &'a PluginId,
+        change: PluginChange,
+        work: PluginWork,
+    ) -> BoxFuture<'a, Result<PluginOutcome, PluginError>>;
+}
+
+/// What a plugin change runs with: the engine's hold on its state
+/// directory, and whether the change should stop.
+#[derive(Clone)]
+pub struct PluginWork {
+    guard: Arc<dyn Any + Send + Sync>,
+    stop: CancellationToken,
+}
+
+impl std::fmt::Debug for PluginWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginWork")
+            .field("stopping", &self.stopping())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PluginWork {
+    pub(crate) fn new(guard: Arc<dyn Any + Send + Sync>, stop: CancellationToken) -> Self {
+        Self { guard, stop }
+    }
+
+    /// Work that holds no state directory and never stops, for a host
+    /// without an engine and for tests.
+    pub fn unowned() -> Self {
+        Self::new(Arc::new(()), CancellationToken::new())
+    }
+
+    /// Whether the change should stop at its next step: the engine is
+    /// shutting down, or the change ran out of time.
+    pub fn stopping(&self) -> bool {
+        self.stop.is_cancelled()
+    }
+
+    /// Resolves once the change should stop.
+    pub async fn stopped(&self) {
+        self.stop.cancelled().await;
+    }
+
+    /// Runs file work on a blocking thread, holding the state directory
+    /// until it ends, even if whoever awaits it gives up.
+    pub fn blocking<T, F>(
+        &self,
+        work: F,
+    ) -> impl Future<Output = Result<T, PluginError>> + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let guard = self.guard.clone();
+        let running = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            work()
+        });
+        async {
+            running.await.map_err(|e| {
+                PluginError::Storage(format!("the plugin files could not be changed: {e}"))
+            })
+        }
+    }
+}
+
+/// What a plugin change did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginOutcome {
+    /// Whether anything changed.
+    pub changed: bool,
+    /// The version in use afterwards, if known.
+    pub version: Option<String>,
+}
+
+/// Why a plugin change was refused or failed; the copy in use is
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PluginError {
+    /// No such plugin.
+    #[error("no plugin is called {0}")]
+    Unknown(PluginId),
+    /// The change does not apply to it, such as updating a plugin Wayfetch
+    /// cannot update or removing one Wayfetch did not install.
+    #[error("{0}")]
+    NotApplicable(String),
+    /// Another change of the same plugin is running.
+    #[error("{0}")]
+    Busy(String),
+    /// The release could not be fetched; trying again may work.
+    #[error("{0}")]
+    Unreachable(String),
+    /// The release failed its checks, or the new copy did not run.
+    #[error("{0}")]
+    Rejected(String),
+    /// Saving the change failed.
+    #[error("{0}")]
+    Storage(String),
 }
 
 /// Characters a file name never holds on any platform Wayfetch saves to.
