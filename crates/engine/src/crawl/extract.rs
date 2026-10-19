@@ -126,14 +126,23 @@ pub fn page_links(html: &str, base: &Url) -> Vec<Url> {
         .collect()
 }
 
-/// Whether pasted text is markup: it has a tag that links.
+/// Whether pasted text is markup: an HTML parser finds an element in it,
+/// however its tags are cased, spaced, or split across lines. A link in
+/// angle brackets (`<https://…>`) or an address (`<a@b.example>`) is not
+/// one: no HTML tag name has a `:`, `@`, or `.`.
 fn looks_like_html(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("<a ")
-        || lower.contains("<html")
-        || lower.contains("<body")
-        || lower.contains(" href=")
-        || lower.contains(" src=")
+    if !text.contains('<') {
+        return false;
+    }
+    let document = Html::parse_document(text);
+    document.root_element().descendants().any(|node| {
+        node.value().as_element().is_some_and(|e| {
+            let name = e.name();
+            !matches!(name, "html" | "head" | "body")
+                && name.starts_with(|c: char| c.is_ascii_alphabetic())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+    })
 }
 
 /// Entries found so far, each once.
@@ -428,6 +437,27 @@ mod tests {
         );
         assert!(found.html);
         assert_eq!(valid(&found.entries), ["https://a.example/abs.zip"]);
+    }
+
+    #[test]
+    fn markup_is_html_however_its_tags_are_written() {
+        for html in [
+            "<a\nhref=\"http://127.0.0.1:8080/admin.bin\">Download</a>",
+            "<A\tHREF='http://127.0.0.1:8080/admin.bin'>x</A>",
+            "<video\r\nsrc=http://127.0.0.1:8080/admin.bin></video>",
+            "<p>http://127.0.0.1:8080/admin.bin</p>",
+        ] {
+            let found = collected(html, None);
+            assert!(found.html, "{html:?}");
+            assert_eq!(valid(&found.entries), ["http://127.0.0.1:8080/admin.bin"]);
+        }
+        for text in [
+            "<https://a.example/f.zip>",
+            "mail <me@a.example> https://a.example/f.zip",
+            "1 < 2 and 3 > 2: https://a.example/f.zip",
+        ] {
+            assert!(!collected(text, None).html, "{text:?}");
+        }
     }
 
     #[test]
