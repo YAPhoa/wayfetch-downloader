@@ -79,7 +79,7 @@ use crate::config::{ConfigError, EngineConfig, Preference};
 use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::fs::Root;
-use crate::media::{Converter, MediaService};
+use crate::media::{Converter, MediaService, PluginControl};
 use crate::state_dir::{Identity, StateDir, StateDirError};
 use crate::store::{Admission, CommandContext, Store, StoreError, StoreInfo, Unusable};
 use crate::subscription::Subscription;
@@ -131,6 +131,7 @@ pub struct EngineBuilder {
     providers: Vec<Arc<dyn AccountProvider>>,
     media_services: Vec<Arc<dyn MediaService>>,
     converter: Option<Arc<dyn Converter>>,
+    plugin_control: Option<Arc<dyn PluginControl>>,
 }
 
 impl std::fmt::Debug for EngineBuilder {
@@ -141,6 +142,7 @@ impl std::fmt::Debug for EngineBuilder {
             .field("providers", &self.providers.len())
             .field("media_services", &self.media_services.len())
             .field("converter", &self.converter.is_some())
+            .field("plugin_control", &self.plugin_control.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -155,6 +157,7 @@ impl EngineBuilder {
             providers: Vec::new(),
             media_services: Vec::new(),
             converter: None,
+            plugin_control: None,
         }
     }
 
@@ -171,6 +174,13 @@ impl EngineBuilder {
     /// The converter media downloads join and convert streams with.
     pub fn converter(mut self, converter: Arc<dyn Converter>) -> Self {
         self.converter = Some(converter);
+        self
+    }
+
+    /// What changes plugins for Settings > Plugins. Without it, plugin
+    /// changes are refused.
+    pub fn plugin_control(mut self, control: Arc<dyn PluginControl>) -> Self {
+        self.plugin_control = Some(control);
         self
     }
 
@@ -278,7 +288,11 @@ impl EngineBuilder {
             pruned_at: Instant::now(),
             accounts: accounts::AccountService::new(self.providers, vault, credential_key),
             routing: routing::RoutingService::default(),
-            media: media::MediaServices::new(self.media_services, self.converter),
+            media: media::MediaServices::new(
+                self.media_services,
+                self.converter,
+                self.plugin_control,
+            ),
         };
         owner.supervisor.spawn(coordinator.run());
         // Unless a task already failed.
@@ -897,6 +911,12 @@ enum Internal {
         result: Result<RootId, ProtocolError>,
         reply: oneshot::Sender<Result<RootSummary, ProtocolError>>,
     },
+    /// A plugin change ended.
+    PluginChanged {
+        envelope: Box<CommandEnvelope>,
+        result: Result<crate::media::PluginOutcome, crate::media::PluginError>,
+        reply: oneshot::Sender<Result<CommandResult, ProtocolError>>,
+    },
     /// A provider started an authorization, or could not.
     AccountBegun {
         key: IdempotencyKey,
@@ -1107,6 +1127,11 @@ impl Coordinator {
                 self.authorize(envelope, reply).await;
             }
             Request::Execute(envelope, reply)
+                if matches!(envelope.command, Command::ChangePlugin { .. }) =>
+            {
+                self.change_plugin(envelope, reply).await;
+            }
+            Request::Execute(envelope, reply)
                 if matches!(envelope.command, Command::Rename { .. }) =>
             {
                 self.refresh_destinations().await;
@@ -1226,7 +1251,8 @@ impl Coordinator {
             | Command::ChooseLinkMedia { .. }
             | Command::AuthorizeAccount { .. }
             | Command::SetAccountEnabled { .. }
-            | Command::RemoveAccount { .. } => None,
+            | Command::RemoveAccount { .. }
+            | Command::ChangePlugin { .. } => None,
         };
         let account_command = matches!(
             envelope.command,
@@ -1388,6 +1414,11 @@ impl Coordinator {
                 });
                 let _ = reply.send(registered);
             }
+            Internal::PluginChanged {
+                envelope,
+                result,
+                reply,
+            } => self.plugin_changed(envelope, result, reply).await,
             Internal::AccountBegun {
                 key,
                 target,
@@ -1577,7 +1608,8 @@ impl Coordinator {
             | Command::ChooseLinkMedia { .. }
             | Command::AuthorizeAccount { .. }
             | Command::SetAccountEnabled { .. }
-            | Command::RemoveAccount { .. } => {}
+            | Command::RemoveAccount { .. }
+            | Command::ChangePlugin { .. } => {}
         }
         Ok(Unusable::new())
     }

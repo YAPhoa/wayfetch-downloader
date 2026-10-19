@@ -19,6 +19,7 @@
 //! | `GET /v1/folders` | [`EngineHandle::browse_folders`]: folders on the server, to choose one to add |
 //! | `POST /v1/roots` | [`EngineHandle::register_root`]: permits a server folder as a destination |
 //! | `POST /v1/roots/remove` | [`EngineHandle::execute`]: stops offering a folder the user added |
+//! | `POST /v1/plugins/change` | [`EngineHandle::execute`]: turns a plugin on or off, updates it, or removes its installed copy |
 //! | `GET /v1/accounts` | [`Query::Accounts`]: the vault, the services Wayfetch can sign in to, and the accounts added |
 //! | `POST /v1/accounts/authorizations` | [`Command::AuthorizeAccount`]: starts signing an account in |
 //! | `GET /v1/accounts/authorizations/{id}` | [`Query::Authorization`] |
@@ -57,8 +58,8 @@ use wayfetch_engine::protocol::account::{AccountSummary, Authorization, Authoriz
 use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::{FolderListing, JobFilter, PageSize, RootSummary};
 use wayfetch_engine::protocol::request::{
-    AccountCommandRequest, AddRootRequest, AuthorizeAccountRequest, CollectRequest,
-    JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
+    AccountCommandRequest, AddRootRequest, AuthorizeAccountRequest, ChangePluginRequest,
+    CollectRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
     UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
@@ -243,6 +244,16 @@ pub async fn remove_root(
     State(app): State<AppState>,
     Extension(grant): Extension<Grant>,
     JsonBody(request): JsonBody<RemoveRootRequest>,
+) -> ApiResult<CommandResult> {
+    execute(&app, &grant, request.into_envelope()).await
+}
+
+/// Turns a plugin on or off, updates it from its official signed release,
+/// or removes the copy Wayfetch installed. Needs the `control` permission.
+pub async fn change_plugin(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    JsonBody(request): JsonBody<ChangePluginRequest>,
 ) -> ApiResult<CommandResult> {
     execute(&app, &grant, request.into_envelope()).await
 }

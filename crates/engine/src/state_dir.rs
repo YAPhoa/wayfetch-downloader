@@ -140,16 +140,28 @@ fn advance_identity(dir: &Path) -> Result<Identity, StateDirError> {
         },
         Err(e) => return Err(io_err(&path)(e)),
     };
-    let write = || -> io::Result<()> {
-        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-        serde_json::to_writer(&mut tmp, &identity)?;
-        tmp.flush()?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(&path).map_err(|e| e.error)?;
-        File::open(dir)?.sync_all()
-    };
-    write().map_err(io_err(&path))?;
+    let bytes = serde_json::to_vec(&identity).map_err(io::Error::from);
+    bytes
+        .and_then(|bytes| replace_file(&path, &bytes))
+        .map_err(io_err(&path))?;
     Ok(identity)
+}
+
+/// Replaces the file at `path` with `bytes` atomically and durably: a
+/// temporary file in the same directory, synced, renamed over it, and the
+/// directory synced. A crash leaves the old content or the new, never a
+/// mix.
+pub fn replace_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("no parent directory"))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    #[cfg(unix)]
+    File::open(dir)?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(test)]

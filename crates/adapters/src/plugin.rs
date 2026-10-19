@@ -6,10 +6,16 @@
 //! without a shell, with no standard input, with its output bounded and a
 //! deadline; dropping a run stops the process. A helper the program
 //! starts itself is not tracked.
+//!
+//! A [`Plugin`] is the program as Settings changes it: turned on or off,
+//! and either the copy found that way or one Wayfetch installed in its
+//! place ([`crate::plugins`]). Each run takes the copy in use when it
+//! starts and keeps it to the end.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -45,10 +51,23 @@ pub struct Describe {
     pub role: PluginRole,
 }
 
+/// How a plugin's program is checked: the arguments that make it print
+/// its version, how to read the version from what it printed, and the
+/// environment every run of it gets.
+#[derive(Debug, Clone)]
+pub struct Check {
+    /// The arguments.
+    pub args: &'static [&'static str],
+    /// Reads the version.
+    pub version: fn(&str) -> Option<String>,
+    /// Variables set for every run, unless the host's own environment
+    /// sets them.
+    pub env: Vec<(&'static str, OsString)>,
+}
+
 /// A helper program and what its version check found.
 #[derive(Debug, Clone)]
 pub struct Program {
-    describe: Describe,
     path: Option<PathBuf>,
     state: PluginState,
     version: Option<String>,
@@ -58,22 +77,18 @@ pub struct Program {
 
 impl Program {
     /// Finds the program at `path` and checks it runs by asking it for its
-    /// version with `args`; `version` reads the version from the answer.
-    /// No path means the program is missing.
-    pub async fn detect(
-        describe: Describe,
-        path: Option<PathBuf>,
-        args: &[&str],
-        version: fn(&str) -> Option<String>,
-    ) -> Self {
+    /// version as `check` says. No path means the program is missing.
+    pub async fn detect(describe: Describe, path: Option<PathBuf>, check: &Check) -> Self {
         let mut program = Self {
-            describe,
             path,
             state: PluginState::Missing,
             version: None,
             problem: None,
             env: Vec::new(),
         };
+        for (key, value) in &check.env {
+            program = program.with_env(key, value.clone());
+        }
         let Some(path) = &program.path else {
             program.problem = Some(format!("{} was not found.", describe.name));
             return program;
@@ -90,10 +105,10 @@ impl Program {
             deadline: VERSION_DEADLINE,
             stdout_bytes: 64 * 1024,
         };
-        match program.run(args, limits).await {
+        match program.run(check.args, limits).await {
             Ok(output) => {
                 program.state = PluginState::Ready;
-                program.version = version(&String::from_utf8_lossy(&output.stdout));
+                program.version = (check.version)(&String::from_utf8_lossy(&output.stdout));
             }
             Err(e) => {
                 program.state = PluginState::Failed;
@@ -103,27 +118,24 @@ impl Program {
         program
     }
 
-    /// Whether it can be used.
+    /// Whether it runs.
     pub fn ready(&self) -> bool {
         self.state == PluginState::Ready
     }
 
-    /// The plugin as Settings shows it, used by `services`.
-    pub fn summary(&self, services: Vec<ProviderId>) -> PluginSummary {
-        PluginSummary {
-            id: self.describe.id.into(),
-            name: self.describe.name.into(),
-            role: self.describe.role,
-            services,
-            state: self.state,
-            version: self.version.clone(),
-            problem: self.problem.as_deref().map(DiagnosticText::new),
-        }
+    /// The version it reports, if known.
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+
+    /// Why it cannot be used, if it cannot.
+    pub fn problem(&self) -> Option<&str> {
+        self.problem.as_deref()
     }
 
     /// The program run with `key` set to `value` in its environment,
     /// unless the host's own environment sets `key`.
-    pub fn with_env(mut self, key: &'static str, value: impl Into<OsString>) -> Self {
+    fn with_env(mut self, key: &'static str, value: impl Into<OsString>) -> Self {
         if std::env::var_os(key).is_none() {
             self.env.push((key, value.into()));
         }
@@ -186,6 +198,124 @@ impl Program {
             });
         }
         Ok(Output { stdout, stderr })
+    }
+}
+
+/// A plugin as Settings changes it.
+#[derive(Debug)]
+pub struct Plugin {
+    describe: Describe,
+    check: Check,
+    found: Arc<Program>,
+    updatable: bool,
+    active: RwLock<Active>,
+}
+
+/// What a plugin uses now.
+#[derive(Debug, Clone)]
+struct Active {
+    installed: Option<Arc<Program>>,
+    enabled: bool,
+}
+
+impl Plugin {
+    /// The plugin, using `found` (at a configured path or on `PATH`) until
+    /// a copy is installed; `updatable` if Wayfetch can install releases
+    /// of it.
+    pub fn new(describe: Describe, check: Check, found: Program, updatable: bool) -> Self {
+        Self {
+            describe,
+            check,
+            found: Arc::new(found),
+            updatable,
+            active: RwLock::new(Active {
+                installed: None,
+                enabled: true,
+            }),
+        }
+    }
+
+    fn active(&self) -> Active {
+        self.active
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn update_active(&self, change: impl FnOnce(&mut Active)) {
+        change(&mut self.active.write().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// What it is.
+    pub fn describe(&self) -> Describe {
+        self.describe
+    }
+
+    /// How its program is checked.
+    pub fn check(&self) -> &Check {
+        &self.check
+    }
+
+    /// Whether Wayfetch can install releases of it.
+    pub fn updatable(&self) -> bool {
+        self.updatable
+    }
+
+    /// The copy in use: the installed one if any, else the one found.
+    pub fn program(&self) -> Arc<Program> {
+        self.active()
+            .installed
+            .unwrap_or_else(|| self.found.clone())
+    }
+
+    /// The copy found without Wayfetch installing one.
+    pub fn found(&self) -> &Program {
+        &self.found
+    }
+
+    /// The copy Wayfetch installed, if one is in use.
+    pub fn installed(&self) -> Option<Arc<Program>> {
+        self.active().installed
+    }
+
+    /// Uses `installed` from now on, or the copy found if `None`.
+    pub fn set_installed(&self, installed: Option<Program>) {
+        self.update_active(|a| a.installed = installed.map(Arc::new));
+    }
+
+    /// Whether it is turned on.
+    pub fn enabled(&self) -> bool {
+        self.active().enabled
+    }
+
+    /// Turns it on or off.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.update_active(|a| a.enabled = enabled);
+    }
+
+    /// Whether its services can use it: turned on and working.
+    pub fn usable(&self) -> bool {
+        let active = self.active();
+        active.enabled && active.installed.as_deref().unwrap_or(&self.found).ready()
+    }
+
+    /// The plugin as Settings shows it, used by `services`.
+    pub fn summary(&self, services: Vec<ProviderId>) -> PluginSummary {
+        let active = self.active();
+        let program = active.installed.as_deref().unwrap_or(&self.found);
+        PluginSummary {
+            id: self.describe.id.into(),
+            name: self.describe.name.into(),
+            role: self.describe.role,
+            services,
+            state: program.state,
+            version: program.version.clone(),
+            problem: program.problem.as_deref().map(DiagnosticText::new),
+            enabled: active.enabled,
+            updatable: self.updatable,
+            installed: active.installed.is_some(),
+            fallback_version: active.installed.as_ref().and(self.found.version.clone()),
+        }
     }
 }
 
@@ -292,22 +422,30 @@ pub(crate) mod tests {
         out.lines().next().map(str::to_owned)
     }
 
+    pub(crate) fn check() -> Check {
+        Check {
+            args: &["--version"],
+            version: first_line,
+            env: Vec::new(),
+        }
+    }
+
     #[tokio::test]
     async fn detection_reads_the_version_or_says_what_is_wrong() {
         let dir = tempfile::tempdir().unwrap();
         let ok = script(dir.path(), "ok", "echo 1.2.3");
-        let program = Program::detect(DESCRIBE, Some(ok), &["--version"], first_line).await;
-        let summary = program.summary(Vec::new());
+        let program = Program::detect(DESCRIBE, Some(ok), &check()).await;
+        let summary = Plugin::new(DESCRIBE, check(), program, false).summary(Vec::new());
         assert_eq!(summary.state, PluginState::Ready);
         assert_eq!(summary.version.as_deref(), Some("1.2.3"));
 
-        let missing = Program::detect(DESCRIBE, None, &[], first_line).await;
-        assert_eq!(missing.summary(Vec::new()).state, PluginState::Missing);
+        let missing = Program::detect(DESCRIBE, None, &check()).await;
+        assert_eq!(missing.state, PluginState::Missing);
         assert!(!missing.ready());
 
         let broken = script(dir.path(), "broken", "echo nope >&2; exit 3");
-        let program = Program::detect(DESCRIBE, Some(broken), &[], first_line).await;
-        let summary = program.summary(Vec::new());
+        let program = Program::detect(DESCRIBE, Some(broken), &check()).await;
+        let summary = Plugin::new(DESCRIBE, check(), program, false).summary(Vec::new());
         assert_eq!(summary.state, PluginState::Failed);
         assert_eq!(
             summary.problem.as_ref().map(DiagnosticText::as_str),
@@ -324,7 +462,7 @@ pub(crate) mod tests {
         };
         let slow = Program {
             path: Some(script(dir.path(), "slow", "sleep 30")),
-            ..Program::detect(DESCRIBE, None, &[], first_line).await
+            ..Program::detect(DESCRIBE, None, &check()).await
         };
         let started = std::time::Instant::now();
         assert_eq!(
@@ -361,5 +499,33 @@ pub(crate) mod tests {
         }
         .with_env("WAYFETCH_TEST_PLUGIN_DIR", "/x/y");
         assert_eq!(env.run(["x"], limits).await.unwrap().stdout, b"/x/y");
+    }
+
+    #[tokio::test]
+    async fn a_plugin_uses_its_installed_copy_until_it_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let found = script(dir.path(), "found", "echo 1.0");
+        let found = Program::detect(DESCRIBE, Some(found), &check()).await;
+        let plugin = Plugin::new(DESCRIBE, check(), found, true);
+        let summary = plugin.summary(Vec::new());
+        assert!(summary.enabled && summary.updatable && !summary.installed);
+        assert_eq!(summary.fallback_version, None);
+
+        let newer = script(dir.path(), "newer", "echo 2.0");
+        plugin.set_installed(Some(Program::detect(DESCRIBE, Some(newer), &check()).await));
+        // A run that already took the program keeps it.
+        let running = plugin.program();
+        let summary = plugin.summary(Vec::new());
+        assert_eq!(summary.version.as_deref(), Some("2.0"));
+        assert!(summary.installed);
+        assert_eq!(summary.fallback_version.as_deref(), Some("1.0"));
+
+        plugin.set_installed(None);
+        plugin.set_enabled(false);
+        assert_eq!(running.version(), Some("2.0"));
+        assert_eq!(plugin.program().version(), Some("1.0"));
+        let summary = plugin.summary(Vec::new());
+        assert!(!summary.enabled && !summary.usable());
+        assert!(!plugin.usable());
     }
 }

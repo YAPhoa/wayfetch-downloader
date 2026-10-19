@@ -20,10 +20,12 @@ use std::time::Duration;
 
 use clap::Args;
 use serde::de::{DeserializeOwned, IgnoredAny};
-use wayfetch_adapters::ffmpeg::Ffmpeg;
-use wayfetch_adapters::plugin::find_on_path;
+use wayfetch_adapters::ffmpeg::{self, Ffmpeg};
+use wayfetch_adapters::plugin::{Describe, find_on_path};
+use wayfetch_adapters::plugins::{Plugins, Spec};
+use wayfetch_adapters::release;
 use wayfetch_adapters::youtube::YouTube;
-use wayfetch_adapters::ytdlp::YtDlp;
+use wayfetch_adapters::ytdlp::{self, YtDlp};
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::state_dir::StateDir;
 use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner};
@@ -175,6 +177,7 @@ struct PluginPaths {
     yt_dlp: Option<PathBuf>,
     yt_dlp_js_runtimes: Option<String>,
     ffmpeg: Option<PathBuf>,
+    updates: bool,
 }
 
 impl EngineSettings {
@@ -247,6 +250,7 @@ impl EngineArgs {
             ffmpeg: plugins
                 .and_then(|p| p.ffmpeg.clone())
                 .or_else(|| find_on_path("ffmpeg")),
+            updates: plugins.and_then(|p| p.updates).unwrap_or(true),
         };
         Ok(EngineSettings {
             config,
@@ -348,18 +352,45 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
     // yt-dlp keeps the player code it read in the state directory, so
     // checks after the first are faster.
     let cache = config.state_dir.join("cache").join("yt-dlp");
-    let (ytdlp, ffmpeg) = tokio::join!(
-        YtDlp::detect(plugins.yt_dlp, Some(cache), plugins.yt_dlp_js_runtimes),
-        Ffmpeg::detect(plugins.ffmpeg),
+    let specs = vec![
+        Spec {
+            describe: ytdlp::PLUGIN,
+            check: YtDlp::check(Some(&cache)),
+            found: plugins.yt_dlp,
+            release: plugins.updates.then_some(&release::YT_DLP),
+        },
+        Spec {
+            describe: ffmpeg::PLUGIN,
+            check: Ffmpeg::check(),
+            found: plugins.ffmpeg,
+            release: None,
+        },
+    ];
+    let control = Arc::new(
+        Plugins::open(
+            config.state_dir.join("plugins"),
+            specs,
+            Some(transport.clone()),
+        )
+        .await?,
+    );
+    let plugin = |describe: Describe| control.get(describe.id).expect("a plugin named above");
+    let ytdlp = YtDlp::new(
+        plugin(ytdlp::PLUGIN),
+        Some(cache),
+        plugins.yt_dlp_js_runtimes,
     );
     let mut builder = EngineBuilder::new(config, tokio::runtime::Handle::current())
         .transport(transport)
         .media_service(Arc::new(YouTube::new(Arc::new(ytdlp))))
-        .converter(Arc::new(ffmpeg));
+        .converter(Arc::new(Ffmpeg::new(plugin(ffmpeg::PLUGIN))))
+        .plugin_control(control.clone());
     for provider in providers {
         builder = builder.account_provider(provider);
     }
     let owner = builder.start().await.map_err(|e| e.to_string())?;
+    // The engine holds the state directory now, and no plugin has run.
+    control.sweep().await?;
     Ok(Started { owner, root })
 }
 

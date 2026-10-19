@@ -51,6 +51,7 @@ export const PROTOCOL = Object.freeze({ major: 4, minor: 0 });
  * @typedef {import('./generated/StartRouting.js').StartRouting} StartRouting
  * @typedef {import('./generated/MediaChoice.js').MediaChoice} MediaChoice
  * @typedef {import('./generated/PluginSummary.js').PluginSummary} PluginSummary
+ * @typedef {import('./generated/PluginChange.js').PluginChange} PluginChange
  * @typedef {import('./generated/RefusedLink.js').RefusedLink} RefusedLink
  * @typedef {import('./generated/EventKind.js').EventKind} EventKind
  * @typedef {import('./generated/AccountId.js').AccountId} AccountId
@@ -136,6 +137,12 @@ export const PROTOCOL = Object.freeze({ major: 4, minor: 0 });
  *     target: string,
  *     expectedRevision: number,
  *     root: RootId,
+ *   }) => Promise<CommandResult>,
+ *   changePlugin: (request: {
+ *     idempotencyKey: string,
+ *     target: string,
+ *     plugin: string,
+ *     change: PluginChange,
  *   }) => Promise<CommandResult>,
  *   accounts: () => Promise<Accounts>,
  *   authorizeAccount: (request: {

@@ -7,9 +7,13 @@
 //! answer with `links_changed`. Before starting it, the person chooses a
 //! video quality or an audio-only format; the choice is kept with the
 //! link, then with its download.
+//!
+//! Protocol 4.1 lets Settings turn a plugin off and on, update one that
+//! Wayfetch can update from its official signed releases, and remove the
+//! copy Wayfetch installed ([`crate::Command::ChangePlugin`]).
 
 use serde::{Deserialize, Serialize};
-use wayfetch_domain::name::{DiagnosticText, ProviderId};
+use wayfetch_domain::name::{DiagnosticText, PluginId, ProviderId};
 
 /// What to make of a media link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -160,6 +164,68 @@ pub struct PluginSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub problem: Option<DiagnosticText>,
+    /// Whether its services use it; a plugin turned off is still checked
+    /// and listed. Added in protocol 4.1; true when absent.
+    #[serde(default = "on")]
+    pub enabled: bool,
+    /// Whether Settings can install a newer official release of it. Added
+    /// in protocol 4.1.
+    #[serde(default)]
+    pub updatable: bool,
+    /// Whether the copy in use is one Wayfetch installed, which
+    /// [`PluginChange::Remove`] deletes. Added in protocol 4.1.
+    #[serde(default)]
+    pub installed: bool,
+    /// While an installed copy is in use: the version of the copy found
+    /// without it, used again once it is removed; absent if none was
+    /// found or its version is unknown. Added in protocol 4.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub fallback_version: Option<String>,
+}
+
+fn on() -> bool {
+    true
+}
+
+impl PluginSummary {
+    /// Whether its services can use it: turned on and working.
+    pub fn usable(&self) -> bool {
+        self.enabled && self.state == PluginState::Ready
+    }
+}
+
+/// A change to a plugin. Added in protocol 4.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum PluginChange {
+    /// Turn it on: its services use it again.
+    Enable,
+    /// Turn it off: its services stop using it; nothing is deleted.
+    Disable,
+    /// Install its newest official release if that is newer than the copy
+    /// in use, after checking the release's signature and that it runs;
+    /// if anything fails, the copy in use stays.
+    Update,
+    /// Delete the copy Wayfetch installed, going back to the copy found
+    /// without it, if any.
+    Remove,
+}
+
+/// What a [`PluginChange`] did. Added in protocol 4.1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct PluginChanged {
+    /// The plugin.
+    pub plugin: PluginId,
+    /// Whether anything changed; an update finding nothing newer, or
+    /// turning on a plugin already on, changes nothing.
+    pub changed: bool,
+    /// The version in use afterwards, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub version: Option<String>,
 }
 
 #[cfg(test)]

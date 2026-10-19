@@ -505,7 +505,12 @@ export class SettingsPage {
         hello: this.context.hello,
         onSignedOut: this.context.onSignedOut,
       }),
-      plugins: pluginsSection({ client: this.context.client, onSignedOut: this.context.onSignedOut }),
+      plugins: pluginsSection({
+        client: this.context.client,
+        hello: this.context.hello,
+        onSignedOut: this.context.onSignedOut,
+        onChanged: (refresh) => this.refreshers.push(refresh),
+      }),
     };
     show(
       this.content,

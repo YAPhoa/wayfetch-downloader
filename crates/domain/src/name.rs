@@ -80,7 +80,8 @@ macro_rules! validated_string {
     };
 }
 
-/// Maximum length of a [`Namespace`] or [`ProviderId`] in bytes.
+/// Maximum length of a [`Namespace`], [`ProviderId`], or [`PluginId`] in
+/// bytes.
 pub const SLUG_MAX_LEN: usize = 64;
 
 fn slug(kind: &'static str) -> impl Fn(String) -> Result<String, InvalidName> {
@@ -139,6 +140,13 @@ validated_string!(
     /// host (architecture brief section 3.4). Same syntax as [`Namespace`].
     ProviderId,
     |v| slug("provider id")(v)
+);
+
+validated_string!(
+    /// A helper program's identity, such as `yt-dlp`, stable across its
+    /// versions. Same syntax as [`Namespace`].
+    PluginId,
+    |v| slug("plugin id")(v)
 );
 
 /// Maximum length of a [`CanonicalKey`] in bytes.

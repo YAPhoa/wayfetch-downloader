@@ -35,4 +35,25 @@ version?: string,
 /**
  * Why it cannot be used.
  */
-problem?: DiagnosticText, };
+problem?: DiagnosticText, 
+/**
+ * Whether its services use it; a plugin turned off is still checked
+ * and listed. Added in protocol 4.1; true when absent.
+ */
+enabled: boolean, 
+/**
+ * Whether Settings can install a newer official release of it. Added
+ * in protocol 4.1.
+ */
+updatable: boolean, 
+/**
+ * Whether the copy in use is one Wayfetch installed, which
+ * [`PluginChange::Remove`] deletes. Added in protocol 4.1.
+ */
+installed: boolean, 
+/**
+ * While an installed copy is in use: the version of the copy found
+ * without it, used again once it is removed; absent if none was
+ * found or its version is unknown. Added in protocol 4.1.
+ */
+fallback_version?: string, };
