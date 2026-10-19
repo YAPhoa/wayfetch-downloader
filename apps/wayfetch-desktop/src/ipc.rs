@@ -7,7 +7,8 @@
 //! | `hello` | handshake: instance, boot epoch, protocol, head, limits |
 //! | `query` | a [`Query`]: list, inspect, or count jobs, settings, a job's link, collected links, accounts, a sign-in |
 //! | `submit` | [`SubmitRequest`] as a submit command |
-//! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, retry, rename, or remove |
+//! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, retry, rename, remove, or cancel unpacking |
+//! | `extract` | [`ExtractRequest`]: unpack a downloaded archive, with its password if given |
 //! | `collect_links` | [`CollectRequest`]: collect links for review |
 //! | `links_command` | [`LinksCommandRequest`]: start, remove, or move collected links |
 //! | `update_settings` | [`UpdateSettingsRequest`]: change the default destination or a preference |
@@ -54,7 +55,7 @@ use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::RootSummary;
 use wayfetch_engine::protocol::request::{
     AccountCommandRequest, AuthorizeAccountRequest, ChangePluginRequest, CollectRequest,
-    JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
+    ExtractRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
     UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
@@ -111,6 +112,19 @@ pub async fn job_command(
     let job: JobId = decode(job)?;
     let envelope = decode::<JobCommandRequest>(request)?.into_envelope(job)?;
     desktop.engine.execute(envelope, GRANTED).await
+}
+
+/// Unpacks a downloaded archive next to it, with the password the request
+/// gives, if any, kept in memory for this archive's next attempt only.
+#[tauri::command]
+pub async fn extract(
+    desktop: State<'_, Desktop>,
+    job: Value,
+    request: Value,
+) -> IpcResult<CommandResult> {
+    let job: JobId = decode(job)?;
+    let request = decode::<ExtractRequest>(request)?;
+    desktop.engine.extract(job, request, GRANTED).await
 }
 
 /// Collects links for review without starting them.

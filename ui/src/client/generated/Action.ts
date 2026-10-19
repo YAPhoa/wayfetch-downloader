@@ -3,4 +3,4 @@
 /**
  * A job command's action.
  */
-export type Action = "pause" | "resume" | "cancel" | "rename" | "remove" | "delete_files" | "retry";
+export type Action = "pause" | "resume" | "cancel" | "rename" | "remove" | "delete_files" | "retry" | "cancel_extraction";

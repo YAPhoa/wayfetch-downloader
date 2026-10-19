@@ -68,15 +68,18 @@ default = "unlimited"
 min = 1024
 locked = false
 
-# Helper programs for video links such as YouTube, shown in Settings >
-# Plugins. Each is found on PATH unless given here; without yt-dlp, video
-# links are collected but cannot be checked or downloaded, and without
-# ffmpeg only formats that need no joining or converting are offered.
+# Helper programs for video links such as YouTube and for archives, shown
+# in Settings > Plugins. Each is found on PATH unless given here; without
+# yt-dlp, video links are collected but cannot be checked or downloaded,
+# without ffmpeg only formats that need no joining or converting are
+# offered, and without 7-Zip (25.01 or newer) archives are kept but not
+# unpacked.
 [plugins]
 yt_dlp = "/usr/local/bin/yt-dlp"
 # yt-dlp's --js-runtimes option, for reading YouTube's player code.
 # yt_dlp_js_runtimes = "quickjs:/usr/local/bin/qjs"
 ffmpeg = "/usr/local/bin/ffmpeg"
+seven_zip = "/usr/local/bin/7zz"
 # Whether Settings > Plugins may install yt-dlp's newer signed releases
 # into the state directory; turning plugins off works either way.
 # updates = true

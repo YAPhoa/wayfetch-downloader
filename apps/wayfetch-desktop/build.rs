@@ -8,6 +8,7 @@ const COMMANDS: &[&str] = &[
     "query",
     "submit",
     "job_command",
+    "extract",
     "collect_links",
     "links_command",
     "update_settings",

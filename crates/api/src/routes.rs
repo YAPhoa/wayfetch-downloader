@@ -8,7 +8,8 @@
 //! | `GET /v1/jobs` | [`Query::ListJobs`] |
 //! | `GET /v1/jobs/{id}` | [`Query::InspectJob`] |
 //! | `GET /v1/job-counts` | [`Query::CountJobs`] |
-//! | `POST /v1/jobs/{id}/commands` | [`Command::Pause`], [`Command::Resume`], [`Command::Cancel`], [`Command::Rename`], [`Command::Remove`] |
+//! | `POST /v1/jobs/{id}/commands` | [`Command::Pause`], [`Command::Resume`], [`Command::Cancel`], [`Command::Rename`], [`Command::Remove`], [`Command::CancelExtraction`] |
+//! | `POST /v1/jobs/{id}/extract` | [`EngineHandle::extract`]: unpacks a downloaded archive, with its password if given |
 //! | `GET /v1/jobs/{id}/source` | [`Query::JobSource`] |
 //! | `GET /v1/staging/links` | [`Query::ListLinks`]: links collected for review |
 //! | `POST /v1/staging/links` | [`Command::CollectLinks`] |
@@ -59,7 +60,7 @@ use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::{FolderListing, JobFilter, PageSize, RootSummary};
 use wayfetch_engine::protocol::request::{
     AccountCommandRequest, AddRootRequest, AuthorizeAccountRequest, ChangePluginRequest,
-    CollectRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
+    CollectRequest, ExtractRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
     UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
@@ -184,6 +185,18 @@ pub async fn job_command(
     JsonBody(request): JsonBody<JobCommandRequest>,
 ) -> ApiResult<CommandResult> {
     execute(&app, &grant, request.into_envelope(job_id(&id)?)?).await
+}
+
+/// Unpacks a downloaded archive next to it, with the password the request
+/// gives, if any, which is kept in memory for this archive's next attempt
+/// only. Needs the `control` permission.
+pub async fn extract(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    Path(id): Path<String>,
+    JsonBody(request): JsonBody<ExtractRequest>,
+) -> ApiResult<CommandResult> {
+    Ok(Json(app.engine.extract(job_id(&id)?, request, &grant.0).await?))
 }
 
 /// The default destination, the roots a client may choose, and the

@@ -1,11 +1,13 @@
-//! Helper programs integrations run, such as yt-dlp and ffmpeg (ADR-27).
+//! Helper programs integrations run, such as yt-dlp, ffmpeg, and 7-Zip
+//! (ADR-27).
 //!
 //! A program is found at a path the host configures, or on `PATH`, and
 //! asked for its version once when the host starts: that answer is what
 //! Settings > Plugins shows. Each run is a separate process started
-//! without a shell, with no standard input, with its output bounded and a
-//! deadline; dropping a run stops the process. A helper the program
-//! starts itself is not tracked.
+//! without a shell, with no standard input unless the run gives it some
+//! (a password, which so never appears on a command line), with its
+//! output bounded and a deadline; dropping a run stops the process. A
+//! helper the program starts itself is not tracked.
 //!
 //! A [`Plugin`] is the program as Settings changes it: turned on or off,
 //! and either the copy found that way or one Wayfetch installed in its
@@ -18,7 +20,7 @@ use std::process::Stdio;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use wayfetch_engine::domain::name::{DiagnosticText, ProviderId};
 use wayfetch_engine::protocol::media::{PluginRole, PluginState, PluginSummary};
 
@@ -153,6 +155,101 @@ impl Program {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.run_with(args, None, limits).await
+    }
+
+    /// Runs it with `args`, writing `input` to its standard input, which
+    /// is otherwise empty, and returns its output if it succeeded. The
+    /// input is not passed on a command line, so other processes cannot
+    /// read it there.
+    pub async fn run_with<I, S>(
+        &self,
+        args: I,
+        input: Option<&[u8]>,
+        limits: Limits,
+    ) -> Result<Output, RunError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = self.command(args)?;
+        if input.is_some() {
+            command.stdin(Stdio::piped());
+        }
+        let mut child = spawn(&mut command).await?;
+        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+            // A program that never reads it closes the pipe: not an error.
+            let _ = stdin.write_all(input).await;
+        }
+        let (stdout, stderr) = (
+            child.stdout.take().ok_or(RunError::Missing)?,
+            child.stderr.take().ok_or(RunError::Missing)?,
+        );
+        let ran = async {
+            tokio::try_join!(
+                read(stdout, limits.stdout_bytes, true),
+                read(stderr, STDERR_BYTES, false),
+                wait(&mut child),
+            )
+        };
+        // On a timeout or an error, dropping the child stops it.
+        let (stdout, stderr, status) = tokio::time::timeout(limits.deadline, ran)
+            .await
+            .map_err(|_| RunError::TimedOut(limits.deadline))??;
+        finished(status, stdout, stderr)
+    }
+
+    /// Runs it twice at once, with `from`'s standard output as `into`'s
+    /// standard input, and returns `into`'s output if both succeeded.
+    /// Neither has other input. A failure is the first one's, if it
+    /// failed, since the second then usually fails for want of input.
+    pub async fn pipe<I, J, S, T>(&self, from: I, into: J, limits: Limits) -> Result<Output, RunError>
+    where
+        I: IntoIterator<Item = S>,
+        J: IntoIterator<Item = T>,
+        S: AsRef<OsStr>,
+        T: AsRef<OsStr>,
+    {
+        let mut first = spawn(&mut self.command(from)?).await?;
+        let between: Stdio = first
+            .stdout
+            .take()
+            .ok_or(RunError::Missing)?
+            .try_into()
+            .map_err(|e: std::io::Error| RunError::Spawn(e.to_string()))?;
+        let mut command = self.command(into)?;
+        command.stdin(between);
+        let mut second = spawn(&mut command).await?;
+        let (first_err, stdout, second_err) = (
+            first.stderr.take().ok_or(RunError::Missing)?,
+            second.stdout.take().ok_or(RunError::Missing)?,
+            second.stderr.take().ok_or(RunError::Missing)?,
+        );
+        let ran = async {
+            tokio::try_join!(
+                read(first_err, STDERR_BYTES, false),
+                read(stdout, limits.stdout_bytes, true),
+                read(second_err, STDERR_BYTES, false),
+                wait(&mut first),
+                wait(&mut second),
+            )
+        };
+        // On a timeout or an error, dropping the children stops them.
+        let (first_err, stdout, second_err, first_status, second_status) =
+            tokio::time::timeout(limits.deadline, ran)
+                .await
+                .map_err(|_| RunError::TimedOut(limits.deadline))??;
+        finished(first_status, Vec::new(), first_err)?;
+        finished(second_status, stdout, second_err)
+    }
+
+    /// The program as a command with `args` and its environment, without
+    /// input, its output piped, and stopped when dropped.
+    fn command<I, S>(&self, args: I) -> Result<tokio::process::Command, RunError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let path = self.path.as_ref().ok_or(RunError::Missing)?;
         let mut command = tokio::process::Command::new(path);
         command
@@ -167,36 +264,32 @@ impl Program {
         #[cfg(windows)]
         // No console window opens for it on the desktop.
         command.creation_flags(0x0800_0000);
-        let mut child = spawn(&mut command).await?;
-        let (stdout, stderr) = (
-            child.stdout.take().ok_or(RunError::Missing)?,
-            child.stderr.take().ok_or(RunError::Missing)?,
-        );
-        let ran = async {
-            tokio::try_join!(
-                read(stdout, limits.stdout_bytes, true),
-                read(stderr, STDERR_BYTES, false),
-                async {
-                    child
-                        .wait()
-                        .await
-                        .map_err(|e| RunError::Spawn(e.to_string()))
-                },
-            )
-        };
-        // On a timeout or an error, dropping the child stops it.
-        let (stdout, stderr, status) = tokio::time::timeout(limits.deadline, ran)
-            .await
-            .map_err(|_| RunError::TimedOut(limits.deadline))??;
-        let stderr = String::from_utf8_lossy(&stderr).into_owned();
-        if !status.success() {
-            return Err(RunError::Failed {
-                status: status.code(),
-                stderr,
-            });
-        }
-        Ok(Output { stdout, stderr })
+        Ok(command)
     }
+}
+
+/// Waits for `child` to exit.
+async fn wait(child: &mut tokio::process::Child) -> Result<std::process::ExitStatus, RunError> {
+    child
+        .wait()
+        .await
+        .map_err(|e| RunError::Spawn(e.to_string()))
+}
+
+/// What a run that exited with `status` wrote, if it succeeded.
+fn finished(
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+) -> Result<Output, RunError> {
+    let stderr = String::from_utf8_lossy(&stderr).into_owned();
+    if !status.success() {
+        return Err(RunError::Failed {
+            status: status.code(),
+            stderr,
+        });
+    }
+    Ok(Output { stdout, stderr })
 }
 
 /// A plugin as Settings changes it.

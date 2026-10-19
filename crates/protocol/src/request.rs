@@ -270,6 +270,13 @@ impl ExtractRequest {
                 "the password is empty",
             ));
         }
+        // It is handed to the extractor as one line.
+        if self.password.as_deref().is_some_and(|p| p.contains(['\n', '\r', '\0'])) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "the password holds a line break",
+            ));
+        }
         if self.password.as_ref().is_some_and(|p| p.len() > MAX_PASSWORD_BYTES) {
             return Err(ProtocolError::new(
                 ErrorCode::LimitExceeded,
@@ -1087,6 +1094,10 @@ mod tests {
         assert_eq!(none, None);
         assert_eq!(
             request(json!("")).into_parts(job).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            request(json!("a\nb")).into_parts(job).unwrap_err().code,
             ErrorCode::InvalidRequest
         );
         let long = "x".repeat(MAX_PASSWORD_BYTES + 1);

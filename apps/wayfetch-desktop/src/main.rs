@@ -254,6 +254,7 @@ fn run_on(
             ipc::query,
             ipc::submit,
             ipc::job_command,
+            ipc::extract,
             ipc::collect_links,
             ipc::links_command,
             ipc::update_settings,

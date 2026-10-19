@@ -58,7 +58,7 @@ pub struct ConfigFile<S> {
     /// Policy for download preferences.
     #[serde(default)]
     pub downloads: Downloads,
-    /// Helper programs video links use.
+    /// Helper programs video links and archives use.
     #[serde(default)]
     pub plugins: Plugins,
     /// The host's own section.
@@ -66,8 +66,8 @@ pub struct ConfigFile<S> {
     pub server: Option<S>,
 }
 
-/// `[plugins]`: the helper programs video links use. Each is found on
-/// `PATH` unless given here.
+/// `[plugins]`: the helper programs video links and archives use. Each is
+/// found on `PATH` unless given here.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plugins {
@@ -78,6 +78,9 @@ pub struct Plugins {
     pub yt_dlp_js_runtimes: Option<String>,
     /// ffmpeg, which joins video with its sound and makes MP3.
     pub ffmpeg: Option<PathBuf>,
+    /// 7-Zip (`7zz`, or the distributions' `7z`), which unpacks downloaded
+    /// archives.
+    pub seven_zip: Option<PathBuf>,
     /// Whether Settings may install yt-dlp's newer official releases in
     /// place of the copy found; true if not set. Turning plugins off and
     /// removing installed copies stay possible either way.
@@ -305,6 +308,7 @@ pub fn load<S: DeserializeOwned>(path: &Path) -> Result<Loaded<S>, String> {
     let plugins = &mut file.plugins;
     plugins.yt_dlp.iter_mut().for_each(resolve);
     plugins.ffmpeg.iter_mut().for_each(resolve);
+    plugins.seven_zip.iter_mut().for_each(resolve);
     if plugins
         .yt_dlp_js_runtimes
         .as_ref()
@@ -436,6 +440,7 @@ ca_certs = ["ca.pem"]
 [plugins]
 yt_dlp = "bin/yt-dlp"
 ffmpeg = "/usr/bin/ffmpeg"
+seven_zip = "bin/7zz"
 updates = false
 "#,
         );
@@ -454,6 +459,7 @@ updates = false
         let plugins = &loaded.file.plugins;
         assert_eq!(plugins.yt_dlp, Some(dir.join("bin/yt-dlp")));
         assert_eq!(plugins.ffmpeg, Some("/usr/bin/ffmpeg".into()));
+        assert_eq!(plugins.seven_zip, Some(dir.join("bin/7zz")));
         assert_eq!(plugins.updates, Some(false));
         let runtimes = "schema_version = 1\n[plugins]\nyt_dlp_js_runtimes = \"--exec=x\"\n";
         assert!(parse(runtimes).unwrap_err().contains("yt_dlp_js_runtimes"));

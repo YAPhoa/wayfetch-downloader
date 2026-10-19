@@ -38,4 +38,9 @@ download_speed_limit: SpeedLimitSetting,
  * The helper programs media services run, and whether each can be
  * used. Added in protocol 4.0.
  */
-plugins: Array<PluginSummary>, };
+plugins: Array<PluginSummary>, 
+/**
+ * Whether downloaded archives are unpacked as they finish. Added in
+ * protocol 6.0.
+ */
+extract_archives: boolean, };

@@ -24,6 +24,7 @@ use wayfetch_adapters::ffmpeg::{self, Ffmpeg};
 use wayfetch_adapters::plugin::{Describe, find_on_path};
 use wayfetch_adapters::plugins::{Plugins, Spec};
 use wayfetch_adapters::release;
+use wayfetch_adapters::sevenzip::{self, SevenZip};
 use wayfetch_adapters::youtube::YouTube;
 use wayfetch_adapters::ytdlp::{self, YtDlp};
 use wayfetch_engine::fs::Root;
@@ -177,6 +178,7 @@ struct PluginPaths {
     yt_dlp: Option<PathBuf>,
     yt_dlp_js_runtimes: Option<String>,
     ffmpeg: Option<PathBuf>,
+    seven_zip: Option<PathBuf>,
     updates: bool,
 }
 
@@ -250,6 +252,10 @@ impl EngineArgs {
             ffmpeg: plugins
                 .and_then(|p| p.ffmpeg.clone())
                 .or_else(|| find_on_path("ffmpeg")),
+            seven_zip: plugins
+                .and_then(|p| p.seven_zip.clone())
+                .or_else(|| find_on_path("7zz"))
+                .or_else(|| find_on_path("7z")),
             updates: plugins.and_then(|p| p.updates).unwrap_or(true),
         };
         Ok(EngineSettings {
@@ -365,6 +371,12 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
             found: plugins.ffmpeg,
             release: None,
         },
+        Spec {
+            describe: sevenzip::PLUGIN,
+            check: SevenZip::check(),
+            found: plugins.seven_zip,
+            release: None,
+        },
     ];
     let control = Arc::new(
         Plugins::open(
@@ -385,6 +397,7 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
         .inspector(transport)
         .media_service(Arc::new(YouTube::new(Arc::new(ytdlp))))
         .converter(Arc::new(Ffmpeg::new(plugin(ffmpeg::PLUGIN))))
+        .extractor(Arc::new(SevenZip::new(plugin(sevenzip::PLUGIN))))
         .plugin_control(control.clone());
     for provider in providers {
         builder = builder.account_provider(provider);
