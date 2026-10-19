@@ -10,17 +10,16 @@
 //   handshake, and resumes from its cursor; a `resync` makes it take a new
 //   snapshot instead. A handshake refused as `unauthenticated` stops the
 //   feed with that status, so the shell can ask the user to sign in again.
-// - Progress samples are shown only for the current boot epoch and the
-//   job's current generation.
+// - Progress samples are shown only for the current boot epoch, the
+//   job's current generation, and while it is transferring; a job that
+//   stops transferring drops its sample, so a paused row never shows a
+//   speed. Samples carry the bytes received between durable checkpoints,
+//   so no held job is re-read on a timer.
 // - Job counts per stage come with the snapshot and are read again after
 //   job events, at most one read at a time and one per `READ_DELAY`, so a
 //   burst of events costs one count. While the list is filtered by stage, a
 //   job entering or leaving the filter makes the page be read again the
 //   same way, since its rows may shift.
-// - Durable progress moves at each checkpoint without an event, so while a
-//   held job is active, the held jobs are re-read now and then: one page
-//   query, never the whole queue. Live progress samples make this
-//   unnecessary once the engine sends them.
 //
 // Nothing here affects downloads: stopping the feed, or losing the page
 // that holds it, only stops watching.
@@ -50,15 +49,9 @@ export const RETRY_DELAYS = Object.freeze([500, 1000, 2000, 4000, 8000]);
 /** How often a snapshot older than the stream is taken again. */
 const SNAPSHOT_ATTEMPTS = 3;
 
-/** How often held active jobs are re-read, in milliseconds. */
-export const REFRESH_INTERVAL = 3000;
-
 /** How long job events gather before the counts or a filtered page are
  * read again, in milliseconds. */
 export const READ_DELAY = 1000;
-
-/** Stages whose durable progress can change without an event. */
-const ACTIVE = new Set(['resolving', 'transferring', 'verifying', 'publishing', 'recovering']);
 
 /**
  * Runs `read` once `delay` has passed after a request, one run at a time;
@@ -127,7 +120,6 @@ export class JobFeed {
    *   onChange: () => void,
    *   onEvent?: (kind: EventKind | null) => void,
    *   retryDelays?: readonly number[],
-   *   refreshInterval?: number,
    *   readDelay?: number,
    * }} options
    */
@@ -138,7 +130,6 @@ export class JobFeed {
     /** Told of each durable event, and of each (re)connection with `null`. */
     this.onEvent = options.onEvent ?? (() => {});
     this.retryDelays = options.retryDelays ?? RETRY_DELAYS;
-    this.refreshInterval = options.refreshInterval ?? REFRESH_INTERVAL;
     const readDelay = options.readDelay ?? READ_DELAY;
     /** @type {FeedStatus} */
     this.status = 'stopped';
@@ -194,9 +185,6 @@ export class JobFeed {
     this.attempt = 0;
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     this.timer = undefined;
-    /** @type {ReturnType<typeof setInterval> | undefined} */
-    this.refresher = undefined;
-    this.refreshing = false;
   }
 
   /** The current page's jobs, in order. */
@@ -233,7 +221,6 @@ export class JobFeed {
   stop() {
     this.run += 1;
     clearTimeout(this.timer);
-    clearInterval(this.refresher);
     this.recount.cancel();
     this.repage.cancel();
     this.subscription?.close();
@@ -348,7 +335,6 @@ export class JobFeed {
     }
     this.subscription?.close();
     this.subscription = null;
-    clearInterval(this.refresher);
     this.setStatus('reconnecting');
     const delays = this.retryDelays;
     const delay = delays[Math.min(this.attempt, delays.length - 1)];
@@ -535,8 +521,6 @@ export class JobFeed {
         this.attempt = 0;
         this.error = null;
         this.setStatus('live');
-        clearInterval(this.refresher);
-        this.refresher = setInterval(() => void this.refreshActive(run), this.refreshInterval);
         this.onEvent(null);
         return;
       case 'event': {
@@ -565,11 +549,7 @@ export class JobFeed {
         return;
       }
       case 'progress': {
-        const held = this.held(item.job);
-        if (!held || this.hello === null) return;
-        if (item.boot_epoch !== this.hello.boot_epoch || item.generation !== held.job.generation) {
-          return;
-        }
+        if (!this.current(item)) return;
         this.samples.set(item.job, item);
         this.changed();
         return;
@@ -581,25 +561,6 @@ export class JobFeed {
   }
 
   /**
-   * Re-reads the held jobs if any is active. Failures are left to the
-   * event stream, which notices a lost server or session too.
-   * @param {number} run
-   */
-  async refreshActive(run) {
-    const held = [...this.page.values(), ...(this.detail ? [this.detail] : [])];
-    if (this.refreshing || !held.some(({ job }) => ACTIVE.has(job.stage))) return;
-    this.refreshing = true;
-    try {
-      await this.loadPage(run);
-      await this.loadDetail(run);
-    } catch {
-      // The stream reports it.
-    } finally {
-      this.refreshing = false;
-    }
-  }
-
-  /**
    * Drops the stream and starts again from a new snapshot.
    * @param {number} run
    */
@@ -607,7 +568,6 @@ export class JobFeed {
     this.subscription?.close();
     this.subscription = null;
     this.cursor = null;
-    clearInterval(this.refresher);
     void this.connect(run);
   }
 
@@ -638,7 +598,6 @@ export class JobFeed {
   hold(job, position) {
     for (const held of [this.page.get(job.id), this.detail]) {
       if (held && held.job.id === job.id && position > held.position) {
-        if (held.job.generation !== job.generation) this.samples.delete(job.id);
         held.job = job;
         held.position = position;
       }
@@ -649,6 +608,7 @@ export class JobFeed {
       this.page.delete(job.id);
       this.pageIds = this.pageIds.filter((id) => id !== job.id);
     }
+    this.prune();
   }
 
   /**
@@ -671,10 +631,28 @@ export class JobFeed {
     return this.page.get(job) ?? (this.detail?.job.id === job ? this.detail : undefined);
   }
 
-  /** Forgets samples of jobs no longer held. */
+  /**
+   * Whether `sample` belongs to this engine run and to the held copy of
+   * its job, which must be transferring under the same generation.
+   * @param {ProgressSample} sample
+   */
+  current(sample) {
+    const held = this.held(sample.job);
+    return (
+      held !== undefined &&
+      this.hello !== null &&
+      sample.boot_epoch === this.hello.boot_epoch &&
+      sample.generation === held.job.generation &&
+      held.job.stage === 'transferring'
+    );
+  }
+
+  /** Forgets samples that no longer match a held job, after any change to
+   * the held jobs: an event, or a page or detail read after a resync that
+   * missed the job's events. */
   prune() {
-    for (const job of this.samples.keys()) {
-      if (!this.held(job)) this.samples.delete(job);
+    for (const sample of this.samples.values()) {
+      if (!this.current(sample)) this.samples.delete(sample.job);
     }
   }
 }

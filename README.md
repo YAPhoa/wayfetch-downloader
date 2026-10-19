@@ -537,9 +537,12 @@ The UI adds direct links (one per line), lists jobs a page of 50 at a time in
 the order they were added, shows one job at `/jobs/job-N`, and pauses,
 resumes, or cancels them. It follows the event stream and reconnects on its
 own, resuming from the last event it saw, or re-reading the list when the
-server says to resynchronize. Durable progress moves at each 8 MiB
-checkpoint without an event, so while a shown job is active the page
-re-reads its 50 jobs every few seconds. Reloading or closing the tab never
+server says to resynchronize. While a download transfers, the stream
+carries a `progress` sample for it about once a second (bytes received,
+total if known, and the speed over the last 5 seconds), which the page shows
+as Speed and Left. Samples are kept only in memory: they skip ahead for a
+slow client instead of queueing, stop when the transfer stops, and belong to
+one engine run and job generation. Reloading or closing the tab never
 affects a download. When the session ends (sign-out in any tab, expiry, or a
 daemon restart, which signs every browser out) the page says so and asks to
 sign in again; downloads keep running meanwhile.

@@ -1955,3 +1955,57 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await own.remove();
   }
 });
+
+test('a transferring download shows live progress, speed, and time left', async ({ browser }) => {
+  const own = await new Daemon(await freePort()).init();
+  await own.start();
+  const context = await browser.newContext();
+  try {
+    const page = await context.newPage();
+    await page.goto(own.origin);
+    await page.getByLabel('Setup secret').fill((await own.setupSecret()).trim());
+    await page.getByLabel('Owner name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
+    await page.getByLabel('Repeat password').fill(PASSWORD);
+    await page.getByRole('button', { name: 'Create owner' }).click();
+    await expect(page.getByText('No downloads yet.')).toBeVisible();
+
+    // 512 KiB/s makes an 8 MiB file take about 16 seconds.
+    await page.goto(`${own.origin}/settings/downloads`);
+    const pane = page.locator('.settings-content');
+    await pane.getByRole('radio', { name: 'Limit to' }).check();
+    await pane.getByRole('spinbutton', { name: 'Total download speed limit' }).fill('512');
+    await pane.getByLabel('Speed limit unit').selectOption('KiB');
+    await pane.getByRole('button', { name: 'Save' }).click();
+    await expect(pane.getByText('Downloads share at most 512 KiB/s.')).toBeVisible();
+
+    await page.goto(own.origin);
+    await page.getByRole('button', { name: 'Add links' }).click();
+    await page.getByLabel('Links, one per line').fill(fixture.put('live.bin', 8 * MIB));
+    await page.getByRole('button', { name: 'Collect links' }).click();
+    await expect(page.locator('.links-page .selection-summary strong')).toHaveText('1 link selected');
+    await page.getByRole('button', { name: 'Start selected' }).click();
+    await expect(page.getByText('Started 1 download.')).toBeVisible();
+    const live = page.locator('tr[data-job]', { hasText: 'live.bin' });
+    const [speed, left] = [live.locator('td.num').nth(1), live.locator('td.num').nth(2)];
+    await expect(live.locator('td[data-state]')).toHaveText('Downloading');
+    // The first durable checkpoint is the whole file, so a percentage
+    // between comes from live samples alone.
+    await expect(live.locator('.percent')).toHaveText(/^[1-9]\d?%$/);
+    await expect(speed).toHaveText(/^\d+\.\d KiB\/s$/);
+    await expect(left).toHaveText(/^\d+ s$/);
+    await expect(page.locator('.statusbar .speed')).toHaveText(/^Down \d+\.\d KiB\/s$/);
+
+    // Paused, it shows neither speed nor time left.
+    await live.click({ button: 'right' });
+    const menu = await openMenu(page);
+    await menu.getByRole('menuitem', { name: 'Pause' }).click();
+    await expect(live.locator('td[data-state]')).toHaveText('Paused');
+    await expect(speed).toHaveText('');
+    await expect(left).toHaveText('');
+    await expect(page.locator('.statusbar .speed')).toHaveText('');
+  } finally {
+    await context.close();
+    await own.remove();
+  }
+});

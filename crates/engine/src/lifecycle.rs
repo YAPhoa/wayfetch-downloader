@@ -80,6 +80,7 @@ use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::fs::Root;
 use crate::media::{Converter, MediaService, PluginControl, PluginWork};
+use crate::progress::Progress;
 use crate::state_dir::{Identity, StateDir, StateDirError};
 use crate::store::{Admission, CommandContext, Store, StoreError, StoreInfo, Unusable};
 use crate::subscription::Subscription;
@@ -239,6 +240,7 @@ impl EngineBuilder {
             usize::try_from(self.config.policy.max_active_downloads.max).unwrap_or(usize::MAX);
         let (internal_tx, internal) = mpsc::channel(most_downloads.saturating_mul(2));
         let (events, _) = broadcast::channel(self.config.limits.event_buffer.get());
+        let progress = Progress::new(identity.boot_epoch);
         let supervisor = Supervisor {
             runtime: self.runtime,
             cancel: CancellationToken::new(),
@@ -284,6 +286,7 @@ impl EngineBuilder {
             settings_waiting: Vec::new(),
             sweeps,
             events,
+            progress: progress.clone(),
             published: head,
             pruned_at: Instant::now(),
             accounts: accounts::AccountService::new(self.providers, vault, credential_key),
@@ -295,6 +298,9 @@ impl EngineBuilder {
             ),
         };
         owner.supervisor.spawn(coordinator.run());
+        owner
+            .supervisor
+            .spawn(progress.sample(owner.supervisor.cancel.clone()));
         // Unless a task already failed.
         owner.supervisor.readiness.send_if_modified(|r| {
             let starting = *r == Readiness::Starting;
@@ -1064,6 +1070,8 @@ struct Coordinator {
     sweeps: Probes,
     /// Live durable events for subscribers.
     events: broadcast::Sender<DurableEvent>,
+    /// Live transfer progress for subscribers.
+    progress: Progress,
     /// Position of the last event broadcast.
     published: u64,
     pruned_at: Instant,
@@ -1906,6 +1914,8 @@ impl Coordinator {
                     choice: m.choice,
                     converter: self.media.converter().cloned(),
                 }),
+                progress: self.progress.clone(),
+                metering: None,
                 job,
                 attempt,
             };
@@ -1979,6 +1989,7 @@ impl Coordinator {
             after,
             events,
             self.events.subscribe(),
+            self.progress.subscribe(),
         ))
     }
 
