@@ -13,6 +13,9 @@ wayfetch-domain.workspace = true
 wayfetch-protocol.workspace = true
 bytes.workspace = true
 cap-std.workspace = true
+# The tokenizer under scraper, already in the tree: tells pasted markup
+# from text by the tags actually written, which a parsed tree cannot.
+html5ever = "0.39.0"
 # Finds links in pasted text, with their boundaries against punctuation.
 linkify = "0.11.0"
 percent-encoding.workspace = true
