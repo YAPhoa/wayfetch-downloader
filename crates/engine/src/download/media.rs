@@ -207,6 +207,7 @@ impl Download {
                     .await?
             }
         };
+        self.meter(durable, Some(total));
         let mut base = 0;
         for (i, &length) in layout.lengths.iter().enumerate() {
             let end = base + length;
@@ -219,6 +220,7 @@ impl Download {
             }
             base = end;
         }
+        self.metering = None;
         let name = target_name(job, suggested.as_deref(), url);
         let Some(converter) = converter else {
             return self.finish(root, file, total, name).await;
