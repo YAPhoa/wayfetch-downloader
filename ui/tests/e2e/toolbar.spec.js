@@ -64,6 +64,28 @@ test('Downloads and Links keep toolbar widths as the window narrows', async ({ p
       await links.getByRole('link', { name: 'Downloads', exact: true }).click();
       await expect(downloads).toBeVisible();
     }
+
+    // A list just too long for a short window scrolls inside the table:
+    // the pager stays above the status bar, which stays at the bottom.
+    await page.getByRole('button', { name: 'Add links' }).click();
+    const more = Array.from({ length: 8 }, (_, index) => `https://example.test/more-${index}.bin`);
+    await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(more.join('\n'));
+    await page.getByRole('button', { name: 'Collect links' }).click();
+    await expect(page.locator('.links-page .views .count')).toHaveText('9');
+    for (const [width, height] of [[1000, 500], [1000, 720], [360, 720]]) {
+      await page.setViewportSize({ width, height });
+      const [pager, status] = await Promise.all([
+        page.locator('.links-page .pager').boundingBox(),
+        page.locator('.statusbar').boundingBox(),
+      ]);
+      assert(pager && status);
+      expect(pager.y + pager.height, `${width}x${height} pager`).toBeLessThanOrEqual(status.y + 0.5);
+      if (width > 720) {
+        // Wide windows fit the page to the window; narrow ones scroll it.
+        expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBe(height);
+        expect(status.y + status.height).toBeCloseTo(height, 0);
+      }
+    }
   } finally {
     await daemon.remove();
   }
