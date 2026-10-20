@@ -22,6 +22,17 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "r
 url.workspace = true
 zeroize = "1.9.1"
 
+# Confines 7-Zip (architecture brief section 9.3): Landlock for files,
+# seccomp to refuse sockets, and resource limits on the child.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+libc = "0.2.190"
+seccompiler = "0.5.0"
+
+# Stops a plugin run's whole process group, and sets the limits above.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.5", default-features = false, features = ["process", "std"] }
+
 [dev-dependencies]
 httparse.workspace = true
 tempfile.workspace = true
@@ -30,3 +41,8 @@ wayfetch-net.workspace = true
 
 [lints]
 workspace = true
+
+# Its own harness: the test program is also the launcher of confined runs.
+[[test]]
+name = "confined"
+harness = false

@@ -1,11 +1,17 @@
-//! Helper programs integrations run, such as yt-dlp and ffmpeg (ADR-27).
+//! Helper programs integrations run, such as yt-dlp, ffmpeg, and 7-Zip
+//! (ADR-27).
 //!
 //! A program is found at a path the host configures, or on `PATH`, and
 //! asked for its version once when the host starts: that answer is what
 //! Settings > Plugins shows. Each run is a separate process started
-//! without a shell, with no standard input, with its output bounded and a
-//! deadline; dropping a run stops the process. A helper the program
-//! starts itself is not tracked.
+//! without a shell, with no standard input unless the run gives it some
+//! (a password, which so never appears on a command line), with its
+//! output bounded and a deadline. Each run leads a process group that
+//! whatever it starts joins; when the run ends, is stopped, or is dropped,
+//! the whole group is killed, and on Linux a run returns only once none
+//! of it still runs. A program that reads
+//! untrusted input runs confined ([`Confinement`]), its version check
+//! included, so a system that cannot confine it reports it not working.
 //!
 //! A [`Plugin`] is the program as Settings changes it: turned on or off,
 //! and either the copy found that way or one Wayfetch installed in its
@@ -18,7 +24,9 @@ use std::process::Stdio;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+
+pub use crate::confine::Confinement;
 use wayfetch_engine::domain::name::{DiagnosticText, ProviderId};
 use wayfetch_engine::protocol::media::{PluginRole, PluginState, PluginSummary};
 
@@ -63,6 +71,8 @@ pub struct Check {
     /// Variables set for every run, unless the host's own environment
     /// sets them.
     pub env: Vec<(&'static str, OsString)>,
+    /// How the check runs confined, if the program's runs are.
+    pub confinement: Option<Confinement>,
 }
 
 /// A helper program and what its version check found.
@@ -105,7 +115,16 @@ impl Program {
             deadline: VERSION_DEADLINE,
             stdout_bytes: 64 * 1024,
         };
-        match program.run(check.args, limits).await {
+        match program
+            .run_with(
+                check.args,
+                None,
+                check.confinement.as_ref(),
+                limits,
+                std::future::pending(),
+            )
+            .await
+        {
             Ok(output) => {
                 program.state = PluginState::Ready;
                 program.version = (check.version)(&String::from_utf8_lossy(&output.stdout));
@@ -153,50 +172,257 @@ impl Program {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.run_with(args, None, None, limits, std::future::pending())
+            .await
+    }
+
+    /// Runs it with `args`, writing `input` to its standard input, which
+    /// is otherwise empty, under `confinement` if given, and returns its
+    /// output if it succeeded. The input is not passed on a command line,
+    /// so other processes cannot read it there. When `stop` resolves, the
+    /// run is stopped: see [`Groups::end`].
+    pub async fn run_with<I, S>(
+        &self,
+        args: I,
+        input: Option<&[u8]>,
+        confinement: Option<&Confinement>,
+        limits: Limits,
+        stop: impl Future<Output = ()>,
+    ) -> Result<Output, RunError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = self.command(args, confinement)?;
+        if input.is_some() {
+            command.stdin(Stdio::piped());
+        }
+        let mut child = spawn(&mut command).await?;
+        let groups = Groups::of([&child]);
+        let (stdin, stdout, stderr) = (
+            child.stdin.take(),
+            child.stdout.take().ok_or(RunError::Missing)?,
+            child.stderr.take().ok_or(RunError::Missing)?,
+        );
+        let ran = async {
+            if let (Some(input), Some(mut stdin)) = (input, stdin) {
+                // A program that never reads it closes the pipe: not an error.
+                let _ = stdin.write_all(input).await;
+            }
+            tokio::try_join!(
+                read(stdout, limits.stdout_bytes, true),
+                read(stderr, STDERR_BYTES, false),
+                wait(&mut child),
+            )
+        };
+        let ran = bounded(ran, limits.deadline, stop).await;
+        groups.end().await;
+        let (stdout, stderr, status) = ran?;
+        finished(status, stdout, stderr)
+    }
+
+    /// Runs it twice at once, with `from`'s standard output as `into`'s
+    /// standard input, each under its confinement if given, and returns
+    /// `into`'s output if both succeeded. Neither has other input. A
+    /// failure is the first one's, if it failed, since the second then
+    /// usually fails for want of input. When `stop` resolves, both are
+    /// stopped: see [`Groups::end`].
+    pub async fn pipe<I, J, S, T>(
+        &self,
+        (from, from_confinement): (I, Option<&Confinement>),
+        (into, into_confinement): (J, Option<&Confinement>),
+        limits: Limits,
+        stop: impl Future<Output = ()>,
+    ) -> Result<Output, RunError>
+    where
+        I: IntoIterator<Item = S>,
+        J: IntoIterator<Item = T>,
+        S: AsRef<OsStr>,
+        T: AsRef<OsStr>,
+    {
+        let mut first = spawn(&mut self.command(from, from_confinement)?).await?;
+        let between: Stdio = first
+            .stdout
+            .take()
+            .ok_or(RunError::Missing)?
+            .try_into()
+            .map_err(|e: std::io::Error| RunError::Spawn(e.to_string()))?;
+        let mut command = self.command(into, into_confinement)?;
+        command.stdin(between);
+        let mut second = spawn(&mut command).await?;
+        let groups = Groups::of([&first, &second]);
+        let (first_err, stdout, second_err) = (
+            first.stderr.take().ok_or(RunError::Missing)?,
+            second.stdout.take().ok_or(RunError::Missing)?,
+            second.stderr.take().ok_or(RunError::Missing)?,
+        );
+        let ran = async {
+            tokio::try_join!(
+                read(first_err, STDERR_BYTES, false),
+                read(stdout, limits.stdout_bytes, true),
+                read(second_err, STDERR_BYTES, false),
+                wait(&mut first),
+                wait(&mut second),
+            )
+        };
+        let ran = bounded(ran, limits.deadline, stop).await;
+        groups.end().await;
+        let (first_err, stdout, second_err, first_status, second_status) = ran?;
+        finished(first_status, Vec::new(), first_err)?;
+        finished(second_status, stdout, second_err)
+    }
+
+    /// The program as a command with `args` and its environment, or
+    /// confined by `confinement`, without input, its output piped, and
+    /// stopped when dropped.
+    fn command<I, S>(
+        &self,
+        args: I,
+        confinement: Option<&Confinement>,
+    ) -> Result<tokio::process::Command, RunError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let path = self.path.as_ref().ok_or(RunError::Missing)?;
-        let mut command = tokio::process::Command::new(path);
+        let mut command = match confinement {
+            Some(confinement) => confinement.command(path).map_err(RunError::Unconfined)?,
+            None => {
+                let mut command = tokio::process::Command::new(path);
+                command
+                    // A Python program writes UTF-8 whatever the host's locale.
+                    .env("PYTHONIOENCODING", "utf-8")
+                    .envs(self.env.iter().map(|(k, v)| (k, v)));
+                command
+            }
+        };
         command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            // A Python program writes UTF-8 whatever the host's locale.
-            .env("PYTHONIOENCODING", "utf-8")
-            .envs(self.env.iter().map(|(k, v)| (k, v)));
+            .kill_on_drop(true);
+        // It leads a process group of its own, which what it starts joins.
+        #[cfg(unix)]
+        command.process_group(0);
         #[cfg(windows)]
         // No console window opens for it on the desktop.
         command.creation_flags(0x0800_0000);
-        let mut child = spawn(&mut command).await?;
-        let (stdout, stderr) = (
-            child.stdout.take().ok_or(RunError::Missing)?,
-            child.stderr.take().ok_or(RunError::Missing)?,
-        );
-        let ran = async {
-            tokio::try_join!(
-                read(stdout, limits.stdout_bytes, true),
-                read(stderr, STDERR_BYTES, false),
-                async {
-                    child
-                        .wait()
-                        .await
-                        .map_err(|e| RunError::Spawn(e.to_string()))
-                },
-            )
-        };
-        // On a timeout or an error, dropping the child stops it.
-        let (stdout, stderr, status) = tokio::time::timeout(limits.deadline, ran)
-            .await
-            .map_err(|_| RunError::TimedOut(limits.deadline))??;
-        let stderr = String::from_utf8_lossy(&stderr).into_owned();
-        if !status.success() {
-            return Err(RunError::Failed {
-                status: status.code(),
-                stderr,
-            });
-        }
-        Ok(Output { stdout, stderr })
+        Ok(command)
     }
+}
+
+/// `work`, unless it takes longer than `deadline` or `stop` resolves
+/// first.
+async fn bounded<T>(
+    work: impl Future<Output = Result<T, RunError>>,
+    deadline: Duration,
+    stop: impl Future<Output = ()>,
+) -> Result<T, RunError> {
+    tokio::select! {
+        done = tokio::time::timeout(deadline, work) => {
+            done.map_err(|_| RunError::TimedOut(deadline))?
+        }
+        () = stop => Err(RunError::Stopped),
+    }
+}
+
+/// The process groups a run's programs lead. Whatever a program starts
+/// joins its group, and a confined one cannot leave it, so stopping the
+/// group stops them all. Dropping it kills them.
+struct Groups(Vec<u32>);
+
+impl Groups {
+    fn of<const N: usize>(children: [&tokio::process::Child; N]) -> Self {
+        Self(children.iter().filter_map(|c| c.id()).collect())
+    }
+
+    fn kill(&self) {
+        #[cfg(unix)]
+        for &group in &self.0 {
+            if let Some(group) = i32::try_from(group)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+            {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
+        }
+    }
+
+    /// Kills whatever the run left running, finished or stopped, and on
+    /// Linux waits until none of it runs, so nothing it started still
+    /// writes once the run returns.
+    async fn end(mut self) {
+        let mut pause = Duration::from_millis(1);
+        loop {
+            self.kill();
+            if !self.0.iter().any(|&group| running(group)) {
+                break;
+            }
+            tokio::time::sleep(pause).await;
+            pause = (pause * 2).min(Duration::from_millis(100));
+        }
+        self.0.clear();
+    }
+}
+
+impl Drop for Groups {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// Whether a process of `group` runs and has not exited: its fields after
+/// the command name in `/proc/<pid>/stat` are its state, parent, and group.
+#[cfg(target_os = "linux")]
+fn running(group: u32) -> bool {
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    let group = group.to_string();
+    processes.flatten().any(|process| {
+        let numbered = process.file_name().as_encoded_bytes()[..]
+            .iter()
+            .all(u8::is_ascii_digit);
+        numbered
+            && std::fs::read_to_string(process.path().join("stat")).is_ok_and(|stat| {
+                let mut fields = stat
+                    .rsplit_once(')')
+                    .map_or("", |(_, f)| f)
+                    .split_whitespace();
+                let (state, group_of) = (fields.next(), fields.nth(1));
+                !matches!(state, None | Some("Z" | "X" | "x")) && group_of == Some(group.as_str())
+            })
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running(_: u32) -> bool {
+    false
+}
+
+/// Waits for `child` to exit.
+async fn wait(child: &mut tokio::process::Child) -> Result<std::process::ExitStatus, RunError> {
+    child
+        .wait()
+        .await
+        .map_err(|e| RunError::Spawn(e.to_string()))
+}
+
+/// What a run that exited with `status` wrote, if it succeeded.
+fn finished(
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+) -> Result<Output, RunError> {
+    let stderr = String::from_utf8_lossy(&stderr).into_owned();
+    if !status.success() {
+        return Err(RunError::Failed {
+            status: status.code(),
+            stderr,
+        });
+    }
+    Ok(Output { stdout, stderr })
 }
 
 /// A plugin as Settings changes it.
@@ -388,9 +614,15 @@ pub enum RunError {
     /// It could not be started or read.
     #[error("it could not be started: {0}")]
     Spawn(String),
+    /// It must run confined, and this system cannot confine it.
+    #[error("{0}, so it is not used")]
+    Unconfined(String),
     /// It ran past its deadline and was stopped.
     #[error("it took longer than {0:?} and was stopped")]
     TimedOut(Duration),
+    /// It was asked to stop, and stopped.
+    #[error("it was stopped")]
+    Stopped,
     /// It wrote more than its output limit and was stopped.
     #[error("it wrote more than {0} bytes and was stopped")]
     TooMuchOutput(usize),
@@ -444,6 +676,7 @@ pub(crate) mod tests {
             args: &["--version"],
             version: first_line,
             env: Vec::new(),
+            confinement: None,
         }
     }
 

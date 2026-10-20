@@ -363,13 +363,13 @@ export async function freePort() {
  * A `wayfetchd` with its own state directory, download root, a second
  * permitted folder, token file (with the credential key beside it), and auth directory,
  * serving browsers on a fixed loopback port across restarts, with
- * Real-Debrid's API at `realDebrid` and the media plugins at `plugins` if
+ * Real-Debrid's API at `realDebrid` and the plugins at `plugins` if
  * given.
  */
 export class Daemon {
   /**
    * @param {number} port
-   * @param {{ realDebrid?: string, plugins?: { ytDlp: string, ffmpeg: string } }} [options]
+   * @param {{ realDebrid?: string, plugins?: { ytDlp?: string, ffmpeg?: string, sevenZip?: string } }} [options]
    */
   constructor(port, options = {}) {
     this.port = port;
@@ -398,8 +398,11 @@ export class Daemon {
   async start() {
     const config = join(/** @type {string} */ (this.dir), 'wayfetch.toml');
     if (this.plugins) {
-      const { ytDlp, ffmpeg } = this.plugins;
-      await writeFile(config, `schema_version = 1\n[plugins]\nyt_dlp = ${JSON.stringify(ytDlp)}\nffmpeg = ${JSON.stringify(ffmpeg)}\n`);
+      const { ytDlp, ffmpeg, sevenZip } = this.plugins;
+      const paths = Object.entries({ yt_dlp: ytDlp, ffmpeg, seven_zip: sevenZip })
+        .filter(([, path]) => path !== undefined)
+        .map(([key, path]) => `${key} = ${JSON.stringify(path)}\n`);
+      await writeFile(config, `schema_version = 1\n[plugins]\n${paths.join('')}`);
     }
     const child = spawn(
       WAYFETCHD,

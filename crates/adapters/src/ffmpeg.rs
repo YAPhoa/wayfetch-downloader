@@ -45,6 +45,7 @@ impl Ffmpeg {
                 version.split_whitespace().next().map(str::to_owned)
             },
             env: Vec::new(),
+            confinement: None,
         }
     }
 

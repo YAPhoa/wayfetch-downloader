@@ -55,6 +55,7 @@ struct RunArgs {
 }
 
 fn main() -> ExitCode {
+    wayfetch_host::launch_confined_if_asked();
     let cli = Cli::parse();
     let terminal = Terminal::start();
     let result = match cli.command {

@@ -71,7 +71,7 @@ pub(super) fn holding(
 }
 
 /// The publication row of `job`'s published file, its root, and the file.
-fn published(
+pub(super) fn published(
     tx: &Transaction<'_>,
     job: JobId,
 ) -> Result<Option<(i64, RootId, PublishedFile)>, StoreError> {
@@ -154,6 +154,7 @@ impl Store {
             return Ok(RenameStart::Done(result));
         }
         super::deletions::check_idle(&tx, *id)?;
+        super::extractions::check_idle(&tx, *id)?;
         let job = jobs::load_listed(&tx, *id)?;
         // Checks the revision and stage without keeping the new revision:
         // that is recorded once the file has its name.

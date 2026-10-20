@@ -148,6 +148,7 @@ impl Store {
         if renames::pending(&tx, id)? {
             return Err(StoreError::Busy("the file is being renamed; try again").into());
         }
+        super::extractions::check_idle(&tx, id)?;
         if existing.is_none() {
             tx.execute(
                 "INSERT INTO deletions (job_id, revision, generation, idempotency_key, fingerprint) \

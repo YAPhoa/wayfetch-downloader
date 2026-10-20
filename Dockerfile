@@ -58,14 +58,43 @@ RUN set -eu; \
 
 FROM ${FFMPEG_IMAGE} AS ffmpeg
 
+# 7-Zip, which unpacks downloaded archives: the official static build,
+# pinned by version and hash for each architecture. Update the version and
+# both hashes together (https://github.com/ip7z/7zip/releases).
+FROM ${PLUGINS_IMAGE} AS sevenzip
+ARG TARGETARCH
+COPY <<'FETCH' /tmp/fetch.py
+import hashlib, io, os, sys, tarfile, urllib.request
+version = "26.04"
+builds = {
+    "amd64": ("x64", "fc0327ba27e89bd086cf426dff17d77de582953cdbbc10a6576540a06853ffcd"),
+    "arm64": ("arm64", "5b0ac3aa91c1e3499f011d6af69d7f6b4de3ef2f011d9e2ff44c58ebd04aa388"),
+}
+arch, digest = builds[sys.argv[1]]
+name = f"7z{version.replace('.', '')}-linux-{arch}.tar.xz"
+url = f"https://github.com/ip7z/7zip/releases/download/{version}/{name}"
+data = urllib.request.urlopen(url, timeout=120).read()
+if hashlib.sha256(data).hexdigest() != digest:
+    sys.exit(f"{name} does not match its pinned hash")
+with tarfile.open(fileobj=io.BytesIO(data), mode="r:xz") as archive:
+    for member, target, mode in (("7zzs", "/out/7zz", 0o755), ("License.txt", "/out/licenses/7-zip/License.txt", 0o644)):
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as out:
+            out.write(archive.extractfile(member).read())
+        os.chmod(target, mode)
+FETCH
+RUN python3 /tmp/fetch.py "${TARGETARCH}"
+
 FROM ${RUNTIME_IMAGE}
 COPY --from=build /out/wayfetchd /usr/local/bin/wayfetchd
 # Found on PATH, so no configuration names them.
 COPY --from=plugins /out/yt-dlp /out/deno /usr/local/bin/
 COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=sevenzip /out/7zz /usr/local/bin/7zz
 # Their licenses; `ffmpeg -L` prints FFmpeg's, and versions.json names the
 # libraries its static build includes.
 COPY --from=plugins /out/licenses /usr/local/share/licenses/
+COPY --from=sevenzip /out/licenses /usr/local/share/licenses/
 COPY --from=ffmpeg /versions.json /usr/local/share/licenses/ffmpeg/versions.json
 # Distroless's unprivileged user; Compose sets the deployment's UID/GID.
 USER 65532:65532

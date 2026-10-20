@@ -103,5 +103,9 @@ test('plugins say whether they work and what for', () => {
     pluginUse({ ...ytdlp, id: 'ffmpeg', role: 'media_converter', services: ['youtube', 'other'] }),
     'Joins video with its sound and makes MP3 files, for YouTube, other',
   );
+  assert.equal(
+    pluginUse({ ...ytdlp, id: '7zip', role: 'archive_extractor', services: [] }),
+    'Unpacks downloaded archives',
+  );
   assert.equal(mediaServiceName('toString'), 'toString');
 });

@@ -188,6 +188,11 @@ class FakeClient {
     throw new Error('unused');
   }
 
+  /** @returns {Promise<never>} */
+  async extract() {
+    throw new Error('unused');
+  }
+
   /**
    * @param {EventCursor | null} after
    * @param {StreamSink} sink

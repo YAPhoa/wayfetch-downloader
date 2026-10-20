@@ -62,7 +62,7 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     /// The version this crate implements.
-    pub const CURRENT: Self = Self { major: 5, minor: 0 };
+    pub const CURRENT: Self = Self { major: 6, minor: 0 };
 
     /// Whether an engine speaking `self` can serve a client speaking
     /// `client`: same major version, and the client needs nothing newer than

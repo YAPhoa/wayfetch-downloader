@@ -6,7 +6,7 @@
 // a reload. A response that says the session is gone calls
 // `onUnauthenticated`, so the shell can ask the user to sign in again.
 
-import { WayfetchError, settingsRequest } from '../client/contract.js';
+import { WayfetchError, extractRequest, jobCommandRequest, settingsRequest } from '../client/contract.js';
 
 /**
  * @typedef {import('../client/generated/StartRouting.js').StartRouting} StartRouting
@@ -21,6 +21,7 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/contract.js').RootId} RootId
  * @typedef {import('../client/contract.js').CollectMode} CollectMode
  * @typedef {import('../client/contract.js').SettingsChange} SettingsChange
+ * @typedef {import('../client/contract.js').ExtractChange} ExtractChange
  * @typedef {import('../client/contract.js').LinkId} LinkId
  * @typedef {import('../client/contract.js').LinkRef} LinkRef
  * @typedef {import('../client/contract.js').LinksAction} LinksAction
@@ -28,7 +29,6 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/generated/SetupRequest.js').SetupRequest} SetupRequest
  * @typedef {import('../client/generated/LoginRequest.js').LoginRequest} LoginRequest
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
- * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
  * @typedef {import('../client/generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
  * @typedef {import('../client/generated/ChangePluginRequest.js').ChangePluginRequest} ChangePluginRequest
  * @typedef {import('../client/generated/PluginChange.js').PluginChange} PluginChange
@@ -183,19 +183,19 @@ export class HttpClient {
 
   /**
    * @param {JobId} job
-   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number, name?: string, repeatProviderOperation?: boolean }} request
+   * @param {import('../client/contract.js').JobChange} change
    */
-  jobCommand(job, { idempotencyKey, target, action, expectedRevision, name, repeatProviderOperation }) {
-    /** @type {JobCommandRequest} */
-    const body = {
-      idempotency_key: idempotencyKey,
-      target,
-      action,
-      expected_revision: expectedRevision,
-    };
-    if (name !== undefined) body.name = name;
-    if (repeatProviderOperation) body.repeat_provider_operation = true;
-    return this.request('POST', `/v1/jobs/${encodeURIComponent(job)}/commands`, { body });
+  jobCommand(job, change) {
+    return this.request('POST', `/v1/jobs/${encodeURIComponent(job)}/commands`, { body: jobCommandRequest(change) });
+  }
+
+  /**
+   * Unpacks a downloaded archive, with its password if it needs one.
+   * @param {JobId} job
+   * @param {ExtractChange} change
+   */
+  extract(job, change) {
+    return this.request('POST', `/v1/jobs/${encodeURIComponent(job)}/extract`, { body: extractRequest(change) });
   }
 
   /** @param {JobId} job */
