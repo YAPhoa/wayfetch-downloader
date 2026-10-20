@@ -1,6 +1,18 @@
 name: Repository checks
 
-on: [push, pull_request, workflow_dispatch]
+# Branch pushes are checked through their pull request, so a PR commit
+# runs once rather than twice.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer commit to the same pull request supersedes a running check;
+# every commit to main is still checked.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -8,8 +20,9 @@ permissions:
 jobs:
   hygiene:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check repository hygiene
         shell: bash
         run: |
@@ -37,11 +50,12 @@ jobs:
 
   rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install pinned toolchain
         # With no arguments rustup installs the toolchain in rust-toolchain.toml.
         run: |
@@ -79,14 +93,15 @@ jobs:
 
   ui:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
     defaults:
       run:
         working-directory: ui
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -108,11 +123,12 @@ jobs:
 
   desktop:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install WebView libraries, WebKitWebDriver, and Xvfb
         run: |
           sudo apt-get update
