@@ -333,7 +333,7 @@ code { font-family: ui-monospace, monospace; }
 .brand {
   --logo-height: 36px;
   height: var(--logo-height);
-  aspect-ratio: 1389 / 207;
+  aspect-ratio: 1276 / 207;
   margin-right: 16px;
   background: url('brand/logo-light.svg') center / contain no-repeat;
 }
@@ -344,7 +344,7 @@ code { font-family: ui-monospace, monospace; }
    symbol alone stands for it. */
 @media (max-width: 1199px) {
   .brand, :root[data-theme='dark'] .brand {
-    aspect-ratio: 1042 / 422;
+    aspect-ratio: 812 / 422;
     background-image: url('brand/symbol.svg');
   }
 }
@@ -1350,7 +1350,12 @@ th[aria-sort] button.sort { color: var(--ink); }
   .toolbar .search { order: 1; }
   /* The name and Settings share the first row; the rest wraps below. */
   .toolbar { flex-wrap: wrap; justify-content: space-between; }
-  .brand { --logo-height: 32px; }
+  /* Phones get the pack's compact mobile mark. */
+  .brand, :root[data-theme='dark'] .brand {
+    --logo-height: 32px;
+    aspect-ratio: 715 / 485;
+    background-image: url('brand/symbol-compact.svg');
+  }
   .toolbar > :not(.brand) { margin-top: 0; }
   .toolbar-main { order: 1; flex-basis: 100%; }
   .views { align-self: auto; margin: 0; }
