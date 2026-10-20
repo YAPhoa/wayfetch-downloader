@@ -28,10 +28,10 @@ ui/
 ## Views & Workflows
 
 - **Downloads (`/`, `/jobs/job-N`)**:
-  - Dense desktop table showing 50 jobs per page in submission order with keyset pagination (`before` position counts), state filter sidebar with live per-stage job counts, name filter, and a bottom details inspector.
+  - Dense desktop table showing 50 jobs per page in submission order with keyset pagination (`before` position counts), state filter sidebar with live per-stage job counts, name filter, and a bottom details inspector. Name, Host, State, and Size headers sort the shown page (ascending, descending, then back to the original order), and `Ctrl`/`Cmd+A` selects every shown download.
   - Follows the event stream (`JobFeed`) and reconnects automatically using `Last-Event-ID`, or re-reads `/v1/jobs` when the engine sends `resync`.
   - Displays live 1-second transfer progress samples (bytes received, total size, 5-second rolling speed, and ETA) alongside colour-coded state badges and progress bars.
-  - Supports single and bulk actions via the toolbar or row context menu (`…` button, right-click, `Shift+F10`, or `Menu` key): **Pause**, **Resume**, **Cancel**, **Retry** (prompting for confirmation when `operation_ambiguous` would repeat a provider request), **Rename** (within the destination folder), **Copy link** (requires `sources` permission; query parameters are hidden in the inspector by default), **Remove from list** (keeps files on disk by default), and **Delete files** (requires `delete_files` permission).
+  - Supports single and bulk actions via the toolbar or row context menu (`…` button, right-click, `Shift+F10`, or `Menu` key): **Pause**, **Resume**, **Cancel**, **Retry** (prompting for confirmation when `operation_ambiguous` would repeat a provider request), **Rename** (within the destination folder), **Copy link** (requires `sources` permission; query parameters are hidden in the inspector by default), **Remove from list** (keeps files on disk by default), **Delete files** (requires `delete_files` permission), and, for finished archives, **Unpack** / **Unpack again** / **Cancel unpacking** and **Enter password…**.
 - **Add Links (`/add`) & Links (`/links`)**:
   - Collects pasted URLs or raw HTML into `/links` for review before starting downloads.
   - Background checks update each link with **Online**, **Offline** (with reason), **Page**, **Unknown**, or **Invalid** status, server-reported filename hints, and sizes. Web pages collected in `analyze` mode list extracted file and video links beside the source page (`found_on`).
@@ -39,10 +39,10 @@ ui/
   - Recognizes YouTube links (`Checking video`), displays the resolved video title, and offers a **Format** picker: **Best available**, height limits (such as `1080p`), or audio-only (`MP3` / `M4A`).
   - **Start selected** routes links automatically in the engine (`StartRouting::Automatic`) and switches to Downloads once all selected links start, or stays on `/links` to display per-link refusal reasons. Individual rows also offer **Download via…** (`Direct` or a specific enabled provider account).
 - **Settings (`/settings/*`)**:
-  - **Downloads**: Configure `max_active_downloads` and `download_speed_limit` (`KiB/s`, `MiB/s`, or `Unlimited`) within operator-defined policy ranges (`min`, `max`, `locked`), with clear conflict explanations.
+  - **Downloads**: Turn unpacking archives after download off or on, and configure `max_active_downloads` and `download_speed_limit` (`KiB/s`, `MiB/s`, or `Unlimited`) within operator-defined policy ranges (`min`, `max`, `locked`), with clear conflict explanations.
   - **Download folders**: Switch the default destination root, remove non-default roots, or add new folders (browsing server paths via `GET /v1/folders` in a browser, or opening the native OS folder dialog in the desktop app).
   - **Accounts & services**: Searchable catalogue of file hosts, cloud storage, and multi-host services (searchable by name, domain, or pasted URL). Supports **Real-Debrid** device-code sign-in, live status/plan/expiry checks, enable/disable toggles, and removal.
-  - **Plugins**: Shows detected `yt-dlp` and `ffmpeg` versions and status, with actions to enable/disable plugins, install or update `yt-dlp` from official PGP-signed GitHub releases, or remove an installed update to roll back.
+  - **Plugins**: Shows detected `yt-dlp`, `ffmpeg`, and 7-Zip versions and status, with actions to enable/disable plugins, install or update `yt-dlp` from official PGP-signed GitHub releases, or remove an installed update to roll back.
   - **Display**: System/Light/Dark theme toggle and Compact/Comfortable row density (stored locally per browser).
 
 ## Security & Asset Serving

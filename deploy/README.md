@@ -36,6 +36,7 @@ The root [`Dockerfile`](../Dockerfile) builds `wayfetchd` with the toolchain pin
 - `yt-dlp` and `yt-dlp-ejs` (packaged as a standalone Python zipapp)
 - `deno` (sandboxed JS runtime for YouTube player scripts)
 - `static-ffmpeg` (for muxing video/audio streams and MP3 conversion)
+- 7-Zip's official static `7zzs` (for unpacking downloaded archives, pinned in the `Dockerfile`)
 
 [`compose.yaml`](compose.yaml) runs the image with least privilege:
 - Configurable `WAYFETCH_UID:WAYFETCH_GID` (`568:568` by default, matching the TrueNAS SCALE `apps` user)
