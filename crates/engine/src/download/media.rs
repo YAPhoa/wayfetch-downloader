@@ -282,7 +282,10 @@ impl Download {
             let end = stream.chunk_bytes.map_or(stream.length, |chunk| {
                 at.saturating_add(chunk).min(stream.length)
             });
-            let requested = (at > 0 || end < stream.length).then_some((at, Some(end)));
+            // A host that hints a chunk size (YouTube) serves unranged
+            // requests slowly, so every request is ranged then, the first
+            // one too even when the whole stream fits in one chunk.
+            let requested = (stream.chunk_bytes.is_some() || at > 0).then_some((at, Some(end)));
             let request = OpenRequest {
                 url: stream.url.clone(),
                 range: requested,
@@ -302,6 +305,9 @@ impl Download {
                     end: Some(stop),
                     ..
                 } if start == at && stop > at => stop,
+                // The whole stream, sent in full for a range that asked
+                // for all of it, is what was asked for.
+                Plan::RestartFromZero { .. } if at == 0 && end == stream.length => end,
                 Plan::RestartFromZero { .. } => return Err(Stop::Restart(why::RANGE_IGNORED)),
                 Plan::Reconcile { .. } => return Err(Stop::Restart(why::NOTHING_LEFT)),
                 Plan::Write { .. } => {

@@ -59,6 +59,8 @@ struct Stream {
 struct Host {
     streams: Mutex<HashMap<String, Stream>>,
     requests: Mutex<Vec<Request>>,
+    /// Answers every request with the whole stream, as a plain server.
+    ignores_ranges: AtomicBool,
 }
 
 impl Host {
@@ -137,7 +139,10 @@ impl Transport for HostTransport {
                     message: "HTTP 404".into(),
                 })?;
             let len = stream.data.len() as u64;
-            let (framing, start, end) = match request.range {
+            let range = request
+                .range
+                .filter(|_| !host.ignores_ranges.load(Ordering::SeqCst));
+            let (framing, start, end) = match range {
                 Some((start, end)) => {
                     let end = end.unwrap_or(len).min(len);
                     (
@@ -579,6 +584,53 @@ async fn video_and_sound_are_joined_and_continued_with_fresh_links_after_a_pause
     );
     assert_eq!(f.env.staging_files(), 0);
     shutdown(owner).await;
+}
+
+/// Downloads one 6 KiB stream the service says to fetch in 10 MiB chunks,
+/// returning the ranges asked for.
+async fn one_hinted_chunk(ignores_ranges: bool) -> Vec<Option<(u64, Option<u64>)>> {
+    let length = 6 * KIB as u64;
+    let f = fixture(
+        true,
+        Formats {
+            streams: vec![("/audio", length, Some(10 << 20))],
+            ..audio_only()
+        },
+    );
+    let audio = body(6 * KIB);
+    f.env.server.put("/audio", audio.clone());
+    f.env
+        .server
+        .ignores_ranges
+        .store(ignores_ranges, Ordering::SeqCst);
+    let owner = f.env.start().await;
+    let link = collect(&owner).await;
+    let id = start(&owner, &link).await;
+    complete(&owner, id).await;
+    let mut expected = b"converted:Mp3:".to_vec();
+    expected.extend_from_slice(&audio);
+    assert_eq!(f.env.published("A_ synthetic_video.mp3"), expected);
+    shutdown(owner).await;
+    f.env
+        .server
+        .requests()
+        .into_iter()
+        .map(|(_, range, _)| range)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chunk_hint_ranges_even_a_stream_that_fits_in_one_chunk() {
+    // Hosts that hint a chunk size (YouTube) throttle unranged requests.
+    assert_eq!(
+        one_hinted_chunk(false).await,
+        [Some((0, Some(6 * KIB as u64)))]
+    );
+    // A host that sends the whole stream for that range is not asked again.
+    assert_eq!(
+        one_hinted_chunk(true).await,
+        [Some((0, Some(6 * KIB as u64)))]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
