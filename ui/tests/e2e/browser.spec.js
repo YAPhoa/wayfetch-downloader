@@ -980,6 +980,25 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await page.getByRole('checkbox', { name: 'Select all links shown' }).uncheck();
   await page.getByLabel('Filter links').fill('');
 
+  // Ctrl+A (Cmd+A on a Mac) ticks every link shown instead of selecting
+  // the page's text, once links are ticked or the table has focus. In the
+  // filter field it stays the field's own.
+  const summary = page.locator('.links-page .selection-summary strong');
+  await page.keyboard.press('ControlOrMeta+A');
+  await expect(summary).toHaveText('1 link selected');
+  await page.getByLabel('Filter links').blur();
+  await page.keyboard.press('ControlOrMeta+A');
+  await expect(summary).toHaveText('3 links selected');
+  expect(await page.evaluate(() => String(window.getSelection()))).toBe('');
+  const selectAll = page.getByRole('checkbox', { name: 'Select all links shown' });
+  await selectAll.uncheck();
+  await expect(page.locator('.links-page .selection-summary')).not.toContainText('selected');
+  await page.keyboard.press('ControlOrMeta+A');
+  await expect(summary).toHaveText('3 links selected');
+  await selectAll.uncheck();
+  await linkRow('review-a.bin').getByRole('checkbox').check();
+  await expect(summary).toHaveText('1 link selected');
+
   // A new folder for the selected link only: the default stays.
   await page.getByRole('button', { name: 'Save to…' }).click();
   const move = page.getByRole('dialog', { name: 'Change where links are saved' });

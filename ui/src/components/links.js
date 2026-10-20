@@ -188,6 +188,7 @@ export class LinksPage {
     this.readAgain = false;
     /** @type {ReturnType<typeof setInterval> | undefined} */
     this.timer = undefined;
+    this.onKey = (/** @type {KeyboardEvent} */ event) => this.selectAllKey(event);
 
     this.buttons = {
       start: this.tool('start', 'resume', 'Start selected', () => void this.start(this.chosen().filter(startable))),
@@ -280,6 +281,7 @@ export class LinksPage {
     this.render();
     this.refresh();
     this.timer = setInterval(() => this.refresh(), LINKS_REFRESH);
+    document.addEventListener('keydown', this.onKey);
   }
 
   /** Hides the page and stops reading the list. */
@@ -287,6 +289,23 @@ export class LinksPage {
     this.shown = false;
     this.element.hidden = true;
     clearInterval(this.timer);
+    document.removeEventListener('keydown', this.onKey);
+  }
+
+  /**
+   * Ctrl+A (Cmd+A on a Mac) ticks every link shown, as the header box
+   * does, instead of selecting the page's text: when the table has focus,
+   * or nothing does and some links are already ticked. Fields, menus and
+   * dialogs keep their own Select all.
+   * @param {KeyboardEvent} event
+   */
+  selectAllKey(event) {
+    if (event.key.toLowerCase() !== 'a' || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+    const target = /** @type {Element} */ (event.target);
+    const inTable = this.table.contains(target) && !(target instanceof HTMLInputElement && target.type !== 'checkbox');
+    if (!inTable && !(target === document.body && this.selected.size > 0)) return;
+    event.preventDefault();
+    this.selectShown(true);
   }
 
   /**
