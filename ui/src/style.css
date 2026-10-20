@@ -1194,6 +1194,9 @@ th[aria-sort] button.sort { color: var(--ink); }
 .accounts-table .row-actions button { vertical-align: middle; }
 /* What a plugin is for, and what is wrong with it, wrap so its menu stays in view. */
 .plugins-table td.use, .plugins-table td.plugin-status { white-space: normal; }
+/* Room for the longest status, "Turning off…", so the column keeps its
+   width while a change runs. */
+.plugins-table .plugin-status .status-label { min-width: 7.25em; }
 .plugins-table .status-detail { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .accounts-table .row-actions button:not(.more) { min-height: 28px; padding: 0 10px; margin-right: 4px; }
 .settings-section > .message.notice { margin-bottom: 12px; }

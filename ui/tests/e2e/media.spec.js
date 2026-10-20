@@ -85,6 +85,27 @@ test('a YouTube link shows its title and formats, and downloads the one chosen',
     // Every cell lines up with its row, however tall a wrapped cell makes it.
     const cells = await page.locator('.plugins-table td').evaluateAll((tds) => tds.map((td) => getComputedStyle(td).display));
     expect(new Set(cells)).toEqual(new Set(['table-cell']));
+    // The Status column keeps its width whatever a status says, such as
+    // while a change runs, even when the columns share little room.
+    const viewport = page.viewportSize();
+    await page.setViewportSize({ width: 820, height: 720 });
+    const widths = await page.locator('.plugins-table').evaluate((table) => {
+      const column = /** @type {HTMLElement} */ (table.querySelector('th:nth-child(3)'));
+      const details = [...table.querySelectorAll('.status-detail')].map((d) => /** @type {HTMLElement} */ (d));
+      const labels = [...table.querySelectorAll('.plugin-status .status-label')].map((l) => /** @type {Text} */ (l.lastChild));
+      const shown = labels.map((l) => l.data);
+      // Only the statuses decide the column's width here, every row showing each in turn.
+      for (const detail of details) detail.hidden = true;
+      const widths = ['Ready', 'Turned off', 'Not installed', 'Not working', 'Checking…', 'Turning on…', 'Turning off…', 'Removing…'].map((status) => {
+        for (const label of labels) label.data = status;
+        return column.getBoundingClientRect().width;
+      });
+      labels.forEach((label, i) => (label.data = shown[i]));
+      for (const detail of details) detail.hidden = false;
+      return widths;
+    });
+    expect(new Set(widths).size, `${widths}`).toBe(1);
+    if (viewport) await page.setViewportSize(viewport);
     await page.goBack();
     await page.goBack();
 

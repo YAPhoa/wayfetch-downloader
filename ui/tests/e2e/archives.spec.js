@@ -79,6 +79,8 @@ test('finished archives unpack beside them, and a protected one asks for its pas
       .fill([fixture.put('Photos.zip', 1000), fixture.put('secret.zip', 1000)].join('\n'));
     await page.getByRole('button', { name: 'Collect links' }).click();
     await expect(page).toHaveURL(`${daemon.origin}/links`);
+    // Both are shown before all are selected, or the second arrives unselected.
+    await expect(page.locator('tr[data-link]')).toHaveCount(2);
     await page.getByRole('checkbox', { name: 'Select all links shown' }).check();
     await page.getByRole('button', { name: 'Start selected' }).click();
     await expect(page.getByText('Started 2 downloads.')).toBeVisible();
@@ -127,6 +129,7 @@ test('finished archives unpack beside them, and a protected one asks for its pas
     await page.getByRole('button', { name: 'Add links' }).click();
     await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(fixture.put('Later.zip', 1000));
     await page.getByRole('button', { name: 'Collect links' }).click();
+    await expect(page.locator('tr[data-link]', { hasText: 'Later.zip' })).toBeVisible();
     await page.getByRole('checkbox', { name: 'Select all links shown' }).check();
     await page.getByRole('button', { name: 'Start selected' }).click();
     const later = page.locator('tr[data-job]', { hasText: 'Later.zip' });
