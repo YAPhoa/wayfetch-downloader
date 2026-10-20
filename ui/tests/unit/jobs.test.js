@@ -15,6 +15,7 @@ import {
   GROUPS,
   groupCount,
   jobName,
+  jobSortValue,
   percent,
   progress,
   restartNote,
@@ -75,6 +76,18 @@ test('retry says whether it continues saved data and why a job started over', ()
     restartNote(job({ restart_reason: 'the file on the server changed since the saved data was downloaded' })),
     'Started over from the beginning: the file on the server changed since the saved data was downloaded.',
   );
+});
+
+test('downloads sort by what their rows show, sizes as numbers', () => {
+  const mib = 1024 * 1024;
+  const running = job({ name: 'b.zip', original_host: 'files.example', bytes_done: 4 * mib, bytes_total: 16 * mib });
+  const sample = { boot_epoch: 1, job: /** @type {const} */ ('job-1'), generation: 1, bytes_received: 8 * mib, bytes_per_second: mib };
+  assert.equal(jobSortValue(running, sample, 'name'), 'b.zip');
+  assert.equal(jobSortValue(running, sample, 'host'), 'files.example');
+  assert.equal(jobSortValue(running, sample, 'state'), describe(running).label);
+  assert.equal(jobSortValue(running, sample, 'size'), 16 * mib);
+  // A row that shows no size sorts as having none.
+  assert.equal(jobSortValue(job({}), undefined, 'size'), undefined);
 });
 
 test('progress uses durable bytes unless a sample is ahead', () => {

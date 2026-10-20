@@ -51,7 +51,9 @@
   --note-warn: #fbebd9;
   --note-bad: #fbe4e1;
   --focus: #3b6fd1;
-  /* Download rows: alternate rows shaded; selected beats hovered. */
+  /* Download rows: alternate rows shaded; selected beats hovered. Their
+     rules stay visible against every row shade. */
+  --row-line: #d6dbe3;
   --row-alternate: #f8fafc;
   --row-hover: #f5f7fa;
   --row-selected: #e8eef8;
@@ -102,6 +104,7 @@
   --note-warn: #33261a;
   --note-bad: #3a1f1d;
   --focus: #7da6ee;
+  --row-line: #343d4a;
   --row-alternate: #151b23;
   --row-hover: #1c2430;
   --row-selected: #223047;
@@ -506,13 +509,37 @@ table.jobs {
 }
 
 /* A soft rule under the queue tables' header. A collapsed border does
-   not stick with the header, so it is drawn inside the cell. */
-.jobs th {
-  border-bottom-color: transparent;
-  box-shadow: inset 0 -1px 0 var(--header-line);
+   not stick with the header, so it is drawn inside the cell, above a
+   hovered sort button. */
+.jobs th { border-bottom-color: transparent; }
+.jobs th::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: var(--header-line);
+  pointer-events: none;
+}
+
+.jobs td { border-bottom-color: var(--row-line); }
+
+/* A thin rule between the column headers, drawn inside the sticky
+   cell and above its sort button. */
+.jobs th + th:not(.row-actions)::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--row-line);
+  pointer-events: none;
 }
 
 .jobs .num { text-align: right; }
+.jobs th.num button.sort { justify-content: flex-end; }
 .jobs th.progress { width: 200px; }
 
 .jobs td.name {
@@ -911,7 +938,9 @@ dd .link-text { overflow-wrap: anywhere; }
 
 .notice button.link { margin-left: 8px; }
 
-.jobs .check { width: 1%; padding-right: 0; }
+/* As much room right of the box as left, so a hovered Name header is
+   its own cell rather than flush against it. */
+.jobs .check { width: 1%; }
 .jobs .check input { display: block; }
 
 /* A sortable column's header is a button that looks like the header and

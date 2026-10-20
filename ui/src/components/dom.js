@@ -123,7 +123,7 @@ export function stripe(row, index) {
  * A column header that sorts its table: a button that sorts by `column`,
  * marked with the order while the table is sorted by it.
  * @template {string} C
- * @param {{ column: C, label: string, sort: import('../client/sort.js').Sort<C>, onSort: (column: C) => void, className?: string }} header
+ * @param {{ column: C, label: string, sort: import('../client/sort.js').Sort<C | null>, onSort: (column: C) => void, className?: string }} header
  */
 export function sortHeader({ column, label, sort, onSort, className }) {
   const active = sort.column === column;

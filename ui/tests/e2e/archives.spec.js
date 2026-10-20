@@ -124,7 +124,7 @@ test('finished archives unpack beside them, and a protected one asks for its pas
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.locator('[data-key="extract-off"]').check();
     await page.locator('[data-key="downloads-save"]').click();
-    await expect(page.getByText('Saved. Archives are kept as they download.')).toBeVisible();
+    await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Back to Downloads' }).click();
     await page.getByRole('button', { name: 'Add links' }).click();
     await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(fixture.put('Later.zip', 1000));
