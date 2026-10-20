@@ -5,7 +5,7 @@
 # the container, and Compose refuses to start if a path does not exist.
 services:
   wayfetchd:
-    image: ${WAYFETCH_IMAGE:-wayfetch:local}
+    image: ${WAYFETCH_IMAGE:-ghcr.io/yaphoa/wayfetch-downloader:v0.1.0}
     build:
       context: ..
       dockerfile: Dockerfile
