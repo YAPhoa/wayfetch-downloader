@@ -421,6 +421,10 @@ async fn ctrl_c_during_a_transfer_keeps_the_job_for_the_next_start() {
     let settled = session.settled(&id).await;
 
     signal(session.process.id().unwrap(), "INT");
+    // Keep stdin open until the signal is handled; finish() closes it,
+    // which would otherwise race Ctrl-C with an end-of-input shutdown.
+    let stopping = session.until(|v| v["type"] == "shutting_down").await;
+    assert_eq!(stopping["reason"], "interrupted");
     assert_clean_stop(&session.finish().await, "interrupted");
 
     // The next start takes the job over and asks only for the rest.
