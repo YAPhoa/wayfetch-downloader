@@ -25,8 +25,6 @@ available: boolean,
 problem?: DiagnosticText | null, 
 /**
  * Whether the user added it, rather than the operator's configuration.
- * Added in protocol 1.1, when only such a folder could be removed;
- * since 4.2 [`crate::Command::RemoveRoot`] removes any folder but the
- * default.
+ * [`crate::Command::RemoveRoot`] removes any folder but the default.
  */
 added: boolean, };

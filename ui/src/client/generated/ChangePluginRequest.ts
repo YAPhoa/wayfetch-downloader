@@ -5,7 +5,7 @@ import type { PluginChange } from "./PluginChange.js";
 import type { PluginId } from "./PluginId.js";
 
 /**
- * Changes a plugin. Added in protocol 4.1.
+ * Changes a plugin.
  */
 export type ChangePluginRequest = { 
 /**

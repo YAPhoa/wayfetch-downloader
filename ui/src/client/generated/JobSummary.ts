@@ -30,9 +30,9 @@ id: JobId,
 package: PackageId, 
 /**
  * A safe file-name hint from the source path or accepted provider/response
- * metadata. Absent for opaque links without a meaningful file name.
- * The published artifact's path takes precedence. Boxed to keep event
- * summaries small. Added in protocol 3.0.
+ * metadata. Absent for opaque links without a meaningful file name. The
+ * published artifact's path takes precedence. Boxed to keep event
+ * summaries small.
  */
 name?: string | null, 
 /**
@@ -74,19 +74,18 @@ artifact?: ArtifactSummary | null,
 /**
  * Host of the submitted link, which may differ from the provider that
  * serves it. Never the whole link, which can carry a signed token.
- * Added in protocol 0.2; absent from events recorded before it.
  */
 original_host?: HostName | null, 
 /**
  * The root the job saves its file in, fixed when it was submitted or,
  * for a job submitted before it could be, when it first started.
- * Absent until then. Added in protocol 0.3.
+ * Absent until then.
  */
 destination?: RootId | null, 
 /**
  * Why the job's latest attempt discarded its saved data and started
  * from zero, such as a file that changed on the server. Kept until the
- * job is retried again. Added in protocol 1.2.
+ * job is retried again.
  */
 restart_reason?: DiagnosticText | null, 
 /**
@@ -94,17 +93,17 @@ restart_reason?: DiagnosticText | null,
  * started; absent for a direct download. Names the account only by
  * its ID: its alias and username are for clients that may see
  * accounts. Boxed, as most jobs have none, to keep summaries and the
- * events carrying them small. Added in protocol 2.2.
+ * events carrying them small.
  */
 route?: JobRoute, 
 /**
  * For a download of a media link: its service and what it is made
- * as. Added in protocol 4.0.
+ * as.
  */
 media?: JobMedia, 
 /**
  * For a complete download of an archive, or of the first part of a
  * multi-part archive: whether and where it was unpacked. Boxed, as
- * most jobs have none. Added in protocol 6.0.
+ * most jobs have none.
  */
 extraction?: ExtractionSummary, };

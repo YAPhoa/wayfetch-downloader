@@ -148,7 +148,7 @@ export class JobFeed {
     this.nextAfter = null;
     /**
      * How many listed jobs come before this page, as the engine last said;
-     * `null` from an engine before protocol 4.3.
+     * `null` when the engine did not say.
      * @type {number | null}
      */
     this.before = null;

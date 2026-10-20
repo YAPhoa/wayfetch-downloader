@@ -3,8 +3,7 @@ import type { Revision } from "./Revision.js";
 import type { SourceLinkId } from "./SourceLinkId.js";
 
 /**
- * A collected link, at the revision the client last saw. Added in
- * protocol 1.1.
+ * A collected link, at the revision the client last saw.
  */
 export type LinkRef = { 
 /**

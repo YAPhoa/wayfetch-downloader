@@ -1,5 +1,5 @@
 # Only what `cargo build -p wayfetchd` reads is sent to the image build,
-# including the web UI it embeds.
+# including the web UI it embeds, and the plugins' pins.
 *
 !Cargo.toml
 !Cargo.lock
@@ -8,6 +8,7 @@
 !crates/
 # The web UI's source is served as it is; no JavaScript tooling is needed.
 !ui/src/
+!deploy/plugins/
 **/tests/
 **/target/
 # A test target its manifest declares, which cargo needs to find.

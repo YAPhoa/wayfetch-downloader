@@ -1,4 +1,4 @@
-//! Media links and the conversions of their downloads (protocol 4.0).
+//! Media links and the conversions of their downloads.
 //!
 //! A collected link a media service recognized is recorded `pending`; the
 //! coordinator checks pending links in the background and records what the

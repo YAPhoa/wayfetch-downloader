@@ -7,7 +7,7 @@ import type { ProviderId } from "./ProviderId.js";
 /**
  * Signs in to a provider: adds an account, or replaces an account's
  * credentials. Carries no credentials; the person approves Wayfetch on
- * the provider's site. Added in protocol 1.3.
+ * the provider's site.
  */
 export type AuthorizeAccountRequest = { 
 /**

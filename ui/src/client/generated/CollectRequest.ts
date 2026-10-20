@@ -5,8 +5,7 @@ import type { InstanceId } from "./InstanceId.js";
 import type { RootId } from "./RootId.js";
 
 /**
- * Collects links for review without starting them. Added in protocol
- * 1.1.
+ * Collects links for review without starting them.
  */
 export type CollectRequest = { 
 /**
@@ -18,18 +17,15 @@ idempotency_key: IdempotencyKey,
  */
 target: InstanceId, 
 /**
- * Pasted text or HTML holding the links. Replaced the list of entries
- * in protocol 5.0.
+ * Pasted text or HTML holding the links.
  */
 text: string, 
 /**
- * The page the text came from, for relative links in HTML. Added in
- * protocol 5.0.
+ * The page the text came from, for relative links in HTML.
  */
 base_url?: string, 
 /**
- * How far to look into the links; analyze if absent. Added in
- * protocol 5.0.
+ * How far to look into the links; analyze if absent.
  */
 mode?: CollectMode, 
 /**

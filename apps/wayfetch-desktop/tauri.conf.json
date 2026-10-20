@@ -36,7 +36,28 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/icon.png"]
+    "active": true,
+    "targets": ["deb", "rpm"],
+    "icon": ["icons/icon.png"],
+    "category": "Utility",
+    "shortDescription": "A download manager with its engine built in",
+    "longDescription": "Wayfetch Downloader downloads files and videos, resumes interrupted downloads, and keeps everything on this computer. No account or online service is needed.",
+    "license": "MIT OR Apache-2.0",
+    "homepage": "https://github.com/YAPhoa/wayfetch-downloader",
+    "linux": {
+      "deb": {
+        "section": "net",
+        "recommends": ["python3 (>= 3.10)", "ffmpeg"],
+        "files": {
+          "/usr/lib/wayfetch-downloader/plugins": "../../target/desktop-plugins"
+        }
+      },
+      "rpm": {
+        "recommends": ["python3 >= 3.10", "/usr/bin/ffmpeg"],
+        "files": {
+          "/usr/lib/wayfetch-downloader/plugins": "../../target/desktop-plugins"
+        }
+      }
+    }
   }
 }

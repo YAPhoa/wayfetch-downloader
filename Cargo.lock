@@ -6171,7 +6171,7 @@ dependencies = [
 
 [[package]]
 name = "wayfetch-adapters"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "hex",
@@ -6195,7 +6195,7 @@ dependencies = [
 
 [[package]]
 name = "wayfetch-api"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "argon2 0.6.0",
  "axum",
@@ -6221,7 +6221,7 @@ dependencies = [
 
 [[package]]
 name = "wayfetch-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "clap",
@@ -6241,10 +6241,11 @@ dependencies = [
 
 [[package]]
 name = "wayfetch-desktop"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "clap",
+ "dirs",
  "fantoccini",
  "httparse",
  "hyper-util",
@@ -6269,7 +6270,7 @@ dependencies = [
 
 [[package]]
 name = "wayfetch-domain"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6281,7 +6282,7 @@ dependencies = [
 
 [[package]]
 name = "wayfetch-engine"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "cap-std",
@@ -6310,7 +6311,7 @@ dependencies = [
 
 [[package]]
 name = "wayfetch-host"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "ipnet",
@@ -6328,7 +6329,7 @@ dependencies = [
 
 [[package]]
 name = "wayfetch-net"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "httparse",
@@ -6354,7 +6355,7 @@ dependencies = [
 
 [[package]]
 name = "wayfetch-protocol"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6369,7 +6370,7 @@ dependencies = [
 
 [[package]]
 name = "wayfetchd"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "clap",
