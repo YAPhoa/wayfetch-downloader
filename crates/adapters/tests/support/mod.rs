@@ -97,6 +97,7 @@ pub const TOKEN_PATH: &str = "/oauth/v2/token";
 pub const USER_PATH: &str = "/rest/1.0/user";
 pub const UNRESTRICT_PATH: &str = "/rest/1.0/unrestrict/link";
 pub const DOWNLOADS_PATH: &str = "/rest/1.0/downloads";
+pub const CHECK_PATH: &str = "/rest/1.0/unrestrict/check";
 /// What generated links carry that grants access.
 pub const SIGNATURE: &str = "synthetic-download-signature";
 
@@ -210,6 +211,20 @@ impl Rd {
                     Answer::json(401, r#"{"error":"bad_token","error_code":8}"#)
                 }
             }
+            CHECK_PATH => match f("link") {
+                Some(link) => Answer::json(
+                    200,
+                    serde_json::json!({
+                        "host": "hoster.example",
+                        "link": link,
+                        "filename": self.filename,
+                        "filesize": self.filesize,
+                        "supported": 1
+                    })
+                    .to_string(),
+                ),
+                None => Answer::json(400, r#"{"error":"parameter_missing","error_code":1}"#),
+            },
             UNRESTRICT_PATH | DOWNLOADS_PATH if !self.bearer_ok(request) => {
                 Answer::json(401, r#"{"error":"bad_token","error_code":8}"#)
             }

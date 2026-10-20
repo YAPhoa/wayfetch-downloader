@@ -71,6 +71,34 @@ test('checks say what the server answered', () => {
   assert.ok(checkable(link({ check: 'offline' })));
 });
 
+test('a link an account downloads is checked by its provider, and not failed when it cannot tell', () => {
+  const name = (/** @type {string} */ id) => (id === 'real-debrid' ? 'Real-Debrid' : id);
+  assert.deepEqual(linkStatus(link({ check: 'online', checked_via: 'real-debrid' }), name), {
+    label: 'Online',
+    tone: 'ok',
+    detail: 'Checked through Real-Debrid.',
+  });
+  const unsure = link({
+    check: 'unknown',
+    checked_via: 'real-debrid',
+    reason: 'server_error',
+    check_detail: 'Real-Debrid cannot reach this host right now.',
+  });
+  // The provider's own words, not the hoster's server's.
+  assert.deepEqual(linkStatus(unsure, name), {
+    label: 'Not confirmed',
+    tone: 'calm',
+    detail: 'Real-Debrid cannot reach this host right now. Starting downloads it through Real-Debrid.',
+  });
+  assert.deepEqual(linkStatus(link({ check: 'offline', checked_via: 'real-debrid', reason: 'not_found', check_detail: 'Gone.' }), name), {
+    label: 'Offline',
+    tone: 'bad',
+    detail: 'Gone.',
+  });
+  // Without a display name, the service's ID.
+  assert.equal(linkStatus(link({ check: 'online', checked_via: 'real-debrid' })).detail, 'Checked through real-debrid.');
+});
+
 test('a page read for files lists them, and starting it is the engine\'s call', () => {
   const read = link({ check: 'page', found: 2, skipped: 3 });
   assert.deepEqual(linkStatus(read), {

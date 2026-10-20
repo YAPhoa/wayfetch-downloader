@@ -7,16 +7,17 @@ mod support;
 
 use std::sync::Arc;
 
-use support::{Answer, DOWNLOADS_PATH, SIGNATURE, Server, TOKEN_PATH, UNRESTRICT_PATH};
+use support::{Answer, CHECK_PATH, DOWNLOADS_PATH, SIGNATURE, Server, TOKEN_PATH, UNRESTRICT_PATH};
 use url::Url;
 use wayfetch_adapters::Endpoint;
 use wayfetch_adapters::real_debrid::RealDebrid;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
-    AccountProvider, PollOutcome, Reconciled, Unrestricted, WithCredentials,
+    AccountProvider, Availability, PollOutcome, Reconciled, Unrestricted, WithCredentials,
 };
 use wayfetch_engine::domain::failure::FailureCode;
 use wayfetch_engine::domain::time::UtcTimestamp;
+use wayfetch_engine::protocol::query::CheckReason;
 use wayfetch_net::{HttpConfig, HttpTransport};
 
 const LINK: &str = "https://hoster.example/file/abc123";
@@ -529,4 +530,84 @@ async fn a_full_page_that_does_not_reach_the_request_proves_nothing() {
     .await
     .result;
     assert!(matches!(result, Reconciled::Inconclusive(_)), "{result:?}");
+}
+
+async fn availability(rd: &RealDebrid) -> Availability {
+    AccountProvider::availability(rd, &Url::parse(LINK).unwrap()).await
+}
+
+#[tokio::test]
+async fn a_link_check_asks_without_a_sign_in_and_generates_nothing() {
+    let server = Server::start().await;
+    let rd = provider(&server);
+    assert_eq!(
+        availability(&rd).await,
+        Availability::File {
+            name: Some("Synthetic File.bin".into()),
+            size: Some(34),
+        }
+    );
+    let sent = server.log();
+    let [sent] = &sent[..] else {
+        panic!("{sent:?}")
+    };
+    assert_eq!(
+        (sent.method.as_str(), sent.path.as_str()),
+        ("POST", CHECK_PATH)
+    );
+    assert_eq!(sent.form.get("link").map(String::as_str), Some(LINK));
+    assert_eq!(sent.authorization, None);
+    assert_eq!(server.hits(UNRESTRICT_PATH), 0);
+
+    server.with(|rd| rd.filesize = 0);
+    assert!(matches!(
+        availability(&rd).await,
+        Availability::File { size: None, .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_link_check_reports_gone_files_and_what_it_cannot_tell() {
+    let server = Server::start().await;
+    let rd = provider(&server);
+    let cases = [
+        (
+            Answer::json(503, r#"{"error":"unavailable_file","error_code":24}"#),
+            None,
+        ),
+        (
+            Answer::json(403, r#"{"error":"file_not_allowed","error_code":35}"#),
+            None,
+        ),
+        (
+            Answer::json(200, r#"{"host":"hoster.example","supported":0}"#),
+            Some(CheckReason::Unreadable),
+        ),
+        (
+            Answer::json(503, r#"{"error":"hoster_unavailable","error_code":19}"#),
+            Some(CheckReason::ServerError),
+        ),
+        (
+            Answer::json(429, r#"{"error":"too_many_requests","error_code":34}"#),
+            Some(CheckReason::RateLimited),
+        ),
+        (
+            Answer::json(502, "bad gateway"),
+            Some(CheckReason::ServerError),
+        ),
+        (Answer::json(200, "not json"), Some(CheckReason::Unreadable)),
+        (Answer::Raw(Vec::new()), Some(CheckReason::Unreachable)),
+    ];
+    for (answer, unknown) in cases {
+        server.with(|rd| {
+            rd.once.insert(CHECK_PATH, vec![answer.clone()]);
+        });
+        let found = availability(&rd).await;
+        match (unknown, &found) {
+            (None, Availability::Offline(_)) => {}
+            (Some(expected), Availability::Unknown(reason, _)) if *reason == expected => {}
+            _ => panic!("{answer:?} gave {found:?}"),
+        }
+    }
+    assert_eq!(server.hits(UNRESTRICT_PATH), 0);
 }
