@@ -33,6 +33,7 @@ import {
   jobName,
   jobSortValue,
   JOB_SORT_COLUMNS,
+  mayHaveDeleted,
   progress,
   restartNote,
   retryPlan,
@@ -1297,7 +1298,7 @@ export class Downloads {
             this.send(job, deleting ? 'delete_files' : 'remove', {
               refused: (text, error) => {
                 refused.push({ message: text });
-                partial ||= error?.code === 'not_applicable' || error?.code === 'internal';
+                partial ||= error !== undefined && mayHaveDeleted(error.code);
               },
             }).catch(() => {
               unconfirmed += 1;

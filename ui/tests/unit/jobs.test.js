@@ -16,6 +16,7 @@ import {
   groupCount,
   jobName,
   jobSortValue,
+  mayHaveDeleted,
   percent,
   progress,
   restartNote,
@@ -252,4 +253,17 @@ test('a finished archive reads as its unpacking, and offers what the engine allo
   assert.deepEqual(unpackActions({ ...archive('idle'), stage: 'queued' }), { start: null, stop: false });
   assert.equal(unpackNote(archive('waiting', 'Waiting for 2 more parts to download.')), 'Waiting for 2 more parts to download.');
   assert.equal(unpackNote(archive('complete')), undefined);
+});
+
+test('a failed deletion may have deleted data unless refused before it began', () => {
+  /** @type {import('../../src/client/contract.js').WayfetchErrorCode[]} */
+  const uncertain = ['not_applicable', 'internal', 'busy', 'shutting_down', 'overloaded', 'unavailable'];
+  /** @type {import('../../src/client/contract.js').WayfetchErrorCode[]} */
+  const before = ['permission_denied', 'revision_conflict', 'not_found', 'idempotency_conflict', 'wrong_instance'];
+  for (const code of uncertain) {
+    assert.equal(mayHaveDeleted(code), true, code);
+  }
+  for (const code of before) {
+    assert.equal(mayHaveDeleted(code), false, code);
+  }
 });

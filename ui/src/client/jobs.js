@@ -77,6 +77,31 @@ export function canRename(job) {
 }
 
 /**
+ * Refusals that come before a data deletion touches anything: the
+ * request was rejected as it arrived, or found the job not removable.
+ */
+const REFUSED_BEFORE_DELETING = new Set([
+  'invalid_request',
+  'permission_denied',
+  'not_found',
+  'revision_conflict',
+  'idempotency_conflict',
+  'wrong_instance',
+  'incompatible_protocol',
+  'incompatible_client',
+]);
+
+/**
+ * Whether a data deletion that failed with `code` may still have deleted
+ * some of it first. Every outcome not known to come before deleting
+ * counts, including a busy folder, shutdown, or a lost answer.
+ * @param {import('./contract.js').WayfetchErrorCode} code
+ */
+export function mayHaveDeleted(code) {
+  return !REFUSED_BEFORE_DELETING.has(code);
+}
+
+/**
  * Whether a job can be removed from the list: only once it has ended
  * (`JobState::check_remove`). Its file stays where it is.
  * @param {JobSummary} job
