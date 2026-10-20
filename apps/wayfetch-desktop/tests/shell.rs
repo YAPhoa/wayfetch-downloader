@@ -2095,13 +2095,20 @@ async fn a_link_automatically_downloads_through_a_matching_account_in_the_window
     accounts_say(&shell, "Account added and signed in.").await;
     shell.click("[data-key=\"settings-back\"]").await;
 
-    // Collecting asks the provider for nothing.
+    // Checking may discover supported hosts, but never generates a download.
     shell
         .collect(
             "https://hoster.example/file/abc",
             "Collected 1 link for review.",
         )
         .await;
+    // Finish background checking before asserting that Start reuses its
+    // host catalogue; concurrent discovery can legitimately request it twice.
+    shell
+        .wait_for("document.querySelector('.links-page tr[data-link] [data-check=\"online\"]')")
+        .await;
+    assert_eq!(provider.hits(rd::CHECK_PATH), 1);
+    assert_eq!(provider.hits("/rest/1.0/hosts/domains"), 1);
     assert_eq!(provider.hits(rd::UNRESTRICT_PATH), 0);
     // Collecting selected the link.
     shell

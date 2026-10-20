@@ -787,9 +787,16 @@ async fn an_interrupted_conversion_runs_again_from_the_saved_streams_after_a_res
     let link = collect(&owner).await;
     let id = start(&owner, &link).await;
     wait_for(&owner, id, |j| j.stage == JobStage::Verifying).await;
-    while outputs(&f.env).is_empty() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    // The engine creates the output before polling the converter. Wait for
+    // the converter itself, or shutdown may precede the first conversion.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while f.joiner.runs.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first conversion started");
+    assert_eq!(outputs(&f.env).len(), 1);
     shutdown(owner).await;
     assert_eq!(f.env.staging_files(), 2);
 

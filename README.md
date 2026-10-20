@@ -108,8 +108,6 @@ See [**`apps/wayfetchd/README.md`**](apps/wayfetchd/README.md) for the complete 
 The root `Dockerfile` packages `wayfetchd` alongside pinned, hash-verified copies of `yt-dlp`, `yt-dlp-ejs`, `deno`, and static `ffmpeg` on a distroless Debian 12 base (no shell or package manager). [`deploy/compose.yaml`](deploy/compose.yaml) runs it with a read-only root filesystem, `cap_drop: [ALL]`, `no-new-privileges`, a 128-process limit, and a configurable non-root UID/GID (`1000:1000` by default):
 
 ```sh
-docker build -t wayfetch:local .
-
 export WAYFETCH_STATE=/srv/wayfetch/state \
        WAYFETCH_TOKENS=/srv/wayfetch/tokens \
        WAYFETCH_DOWNLOADS=/srv/downloads
@@ -117,9 +115,15 @@ mkdir -p "$WAYFETCH_STATE" "$WAYFETCH_TOKENS"
 sudo chown 1000:1000 "$WAYFETCH_STATE" "$WAYFETCH_TOKENS" "$WAYFETCH_DOWNLOADS"
 sudo chmod 700 "$WAYFETCH_STATE" "$WAYFETCH_TOKENS"
 
+docker compose -f deploy/compose.yaml pull
 docker compose -f deploy/compose.yaml run --rm wayfetchd init-root --state-dir /state /downloads
-docker compose -f deploy/compose.yaml up -d
+docker compose -f deploy/compose.yaml up -d --no-build
 ```
+
+Compose pulls `ghcr.io/yaphoa/wayfetch-downloader:v0.1.0` (Linux x86-64).
+Override `WAYFETCH_IMAGE` to select another tag or an immutable digest.
+For a local build, set `WAYFETCH_IMAGE=wayfetch:local` and run
+`docker compose -f deploy/compose.yaml build` instead of `pull`.
 
 See [**`deploy/README.md`**](deploy/README.md) for full container operations, `wayfetch.toml` configuration policies, SSH port forwarding, and Caddy/Nginx reverse-proxy configurations.
 
