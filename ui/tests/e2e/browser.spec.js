@@ -1652,7 +1652,7 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
   await expect(accounts.locator('[data-key="accounts-message"]')).toHaveText('Account added and signed in.');
   await page.locator('[data-key="settings-back"]').click();
 
-  // Collecting asks the provider nothing.
+  // Collecting generates nothing at the provider.
   const asked = () => realDebrid.requested.filter((path) => path === '/rest/1.0/unrestrict/link').length;
   const original = 'https://hoster.example/file/through-account';
   const lost = 'https://hoster.example/file/answer-lost';
@@ -1673,8 +1673,12 @@ test('links download through a chosen Real-Debrid account, and a lost answer is 
   await expect(choose.getByRole('radio')).toHaveCount(2);
   expect(asked()).toBe(0);
   await choose.getByRole('button', { name: 'Cancel' }).click();
-  // Its host is beyond what this daemon may reach, so its check cannot tell.
-  await expect(linkRow('through-account').locator('td.link-status')).toContainText('Could not check');
+  // Its host is beyond what this daemon may reach, but the account's
+  // provider checks it, without generating a link.
+  await expect(linkRow('through-account').locator('td.link-status')).toContainText('Online');
+  await expect(linkRow('through-account').locator('td.link-status')).toHaveAttribute('title', 'Checked through Real-Debrid.');
+  expect(realDebrid.requested).toContain('/rest/1.0/unrestrict/check');
+  expect(asked()).toBe(0);
   await linkRow('mixed-direct.bin').locator('input[type="checkbox"]').check();
   await page.getByRole('button', { name: 'Start selected' }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);

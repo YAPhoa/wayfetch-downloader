@@ -153,6 +153,14 @@ export class LinksPage {
     this.before = null;
     /** Links in the whole list being checked, as last read. */
     this.checking = 0;
+    /** Services' display names, once the catalogue is read. @type {Map<string, string>} */
+    this.serviceNames = new Map();
+    void loadServices()
+      .then((services) => {
+        for (const service of services) this.serviceNames.set(service.id, service.name);
+        if (this.shown) this.render();
+      })
+      .catch(() => {});
     /** Where the shown page starts, and where the next one would. */
     /** @type {LinkId | null} */
     this.pageAfter = null;
@@ -527,10 +535,16 @@ export class LinksPage {
         this.say('Accounts could not be read. Direct is still available.');
       }
     }
-    /** @type {Map<string, string>} */
-    const names = new Map();
-    for (const service of await loadServices().catch(() => [])) names.set(service.id, service.name);
-    this.chooseRoute(links, accounts, (id) => names.get(id) ?? id);
+    await loadServices().catch(() => []);
+    this.chooseRoute(links, accounts, (id) => this.serviceName(id));
+  }
+
+  /**
+   * A service's display name, or its ID before the catalogue is read.
+   * @param {string} id
+   */
+  serviceName(id) {
+    return this.serviceNames.get(id) ?? id;
   }
 
   /**
@@ -952,7 +966,7 @@ export class LinksPage {
       name: (l) => linkName(l) ?? l.host,
       host: (l) => l.host,
       size: (l) => l.size,
-      status: (l) => linkStatus(l).label,
+      status: (l) => linkStatus(l, (id) => this.serviceName(id)).label,
       folder: (l) => this.linkFolder(l),
       added: (l) => l.collected_at,
     };
@@ -972,7 +986,7 @@ export class LinksPage {
   /** @param {CollectedLink} link */
   row(link) {
     const name = linkName(link);
-    const status = linkStatus(link);
+    const status = linkStatus(link, (id) => this.serviceName(id));
     const selected = this.selected.has(link.id);
     const shownName = name ?? link.host ?? 'Unknown name';
     const more = h(

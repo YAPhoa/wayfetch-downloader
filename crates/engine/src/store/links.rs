@@ -722,13 +722,14 @@ struct Listed {
     found: Option<u32>,
     skipped: Option<u32>,
     page: Option<String>,
+    via: Option<String>,
     media: media::LinkColumns,
 }
 
 impl Listed {
     const COLUMNS: &str = "s.id, s.batch_id, b.created_at, s.revision, s.invalid, s.input_url, \
          s.root_id, s.problem, r.path, j.id, t.id IS NOT NULL, s.check_state, s.check_reason, \
-         s.check_problem, s.size, s.observed_name, s.found, s.skipped, p.input_url";
+         s.check_problem, s.size, s.observed_name, s.found, s.skipped, p.input_url, s.checked_via";
 
     fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
@@ -751,7 +752,8 @@ impl Listed {
             found: r.get(16)?,
             skipped: r.get(17)?,
             page: r.get(18)?,
-            media: media::LinkColumns::read(r, 19)?,
+            via: r.get(19)?,
+            media: media::LinkColumns::read(r, 20)?,
         })
     }
 
@@ -828,6 +830,12 @@ impl Listed {
             found_on: self.page.as_deref().map(crawl::shown_page),
             found: self.found.filter(|_| checked),
             skipped: self.skipped.filter(|_| checked),
+            checked_via: self
+                .via
+                .filter(|_| checked)
+                .map(ProviderId::new)
+                .transpose()
+                .map_err(|_| StoreError::Corrupt("checking provider"))?,
             media: self.media.summary(converter)?.map(Box::new),
         })
     }

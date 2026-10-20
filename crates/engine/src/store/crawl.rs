@@ -96,7 +96,7 @@ pub(super) fn enqueue(
     )?;
     tx.execute(
         "UPDATE source_links SET check_state = NULL, check_reason = NULL, check_problem = NULL, \
-         size = NULL, observed_name = NULL, found = NULL, skipped = NULL, \
+         checked_via = NULL, size = NULL, observed_name = NULL, found = NULL, skipped = NULL, \
          media_state = CASE WHEN media_service IS NULL THEN NULL ELSE 'pending' END, \
          media_problem = NULL WHERE id = ?1",
         [link],
@@ -194,7 +194,8 @@ impl Store {
     }
 
     /// Records what check `task` of `link` found, if it is still the
-    /// link's check: the link's new state and, for a page that was read,
+    /// link's check: the link's new state, the provider that answered
+    /// (`via`) when its own server did not, and, for a page that was read,
     /// the links found on it, collected beside it with checks of their
     /// own. Links already in its batch are not collected again; once the
     /// Links list is full, the rest are left out and the page says so.
@@ -203,6 +204,7 @@ impl Store {
         task: i64,
         link: SourceLinkId,
         checked: &Checked,
+        via: Option<&ProviderId>,
         found: &Found,
         now: UtcTimestamp,
     ) -> Result<(), StoreError> {
@@ -254,7 +256,8 @@ impl Store {
         };
         tx.execute(
             "UPDATE source_links SET check_state = ?1, check_reason = ?2, check_problem = ?3, \
-             size = ?4, observed_name = ?5, found = ?6, skipped = ?7 WHERE id = ?8",
+             size = ?4, observed_name = ?5, found = ?6, skipped = ?7, checked_via = ?9 \
+             WHERE id = ?8",
             params![
                 state,
                 reason.map(<&str>::from),
@@ -268,6 +271,7 @@ impl Store {
                 collected,
                 collected.map(|_| found.skipped),
                 id,
+                via.map(ProviderId::as_str),
             ],
         )?;
         outbox::append(&tx, &EventKind::LinksChanged, now)?;
@@ -574,12 +578,19 @@ mod tests {
             size: Some(0),
         };
         f.store
-            .record_link_check(tasks[0].id, tasks[0].link, &file, &Found::default(), NOW)
+            .record_link_check(
+                tasks[0].id,
+                tasks[0].link,
+                &file,
+                None,
+                &Found::default(),
+                NOW,
+            )
             .unwrap();
         let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
         let gone = Checked::Offline(CheckReason::NotFound, "HTTP 404".into());
         f.store
-            .record_link_check(task.id, task.link, &gone, &Found::default(), NOW)
+            .record_link_check(task.id, task.link, &gone, None, &Found::default(), NOW)
             .unwrap();
         let (links, checking) = f.links();
         assert_eq!(checking, 0);
@@ -621,7 +632,7 @@ mod tests {
             local: false,
         };
         f.store
-            .record_link_check(task.id, task.link, &page, &found, NOW)
+            .record_link_check(task.id, task.link, &page, None, &found, NOW)
             .unwrap();
         let (links, _) = f.links();
         let [page, known, new] = &links[..] else {
@@ -684,7 +695,7 @@ mod tests {
             size: Some(1),
         };
         f.store
-            .record_link_check(old.id, old.link, &late, &Found::default(), NOW)
+            .record_link_check(old.id, old.link, &late, None, &Found::default(), NOW)
             .unwrap();
         let (links, checking) = f.links();
         assert_eq!(
@@ -726,7 +737,7 @@ mod tests {
                 local,
             };
             f.store
-                .record_link_check(task.id, task.link, &page, &found, NOW)
+                .record_link_check(task.id, task.link, &page, None, &found, NOW)
                 .unwrap();
             let child = f.store.take_checks(1, &[], true).unwrap().remove(0);
             assert_eq!(child.reach, reach, "page served locally: {local}");

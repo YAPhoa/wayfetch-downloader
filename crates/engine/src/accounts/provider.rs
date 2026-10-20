@@ -24,6 +24,7 @@ use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::name::{HostName, ProviderId};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_protocol::account::{AccountPlan, ServiceSupport};
+use wayfetch_protocol::query::CheckReason;
 
 use super::Secret;
 use crate::transfer::writer::BoxFuture;
@@ -301,6 +302,24 @@ impl<T> WithCredentials<T> {
     }
 }
 
+/// What a provider says about a link it would download, without
+/// generating anything or using an account: a link check of a hoster's
+/// link, which the hoster itself refuses to answer anonymously.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Availability {
+    /// The provider can download the file.
+    File {
+        /// The name the provider reported: an untrusted hint.
+        name: Option<String>,
+        /// Its size, when the provider knows it.
+        size: Option<u64>,
+    },
+    /// The provider says the file is gone.
+    Offline(String),
+    /// The provider could not tell; `reason` in a link check's terms.
+    Unknown(CheckReason, String),
+}
+
 /// A bounded, validated provider host-domain catalogue. Host identity is
 /// parsed separately from URLs; matches include subdomains at a dot boundary.
 #[derive(Debug, Clone)]
@@ -387,6 +406,18 @@ pub trait AccountProvider: Send + Sync + 'static {
             Err(ProviderError::Unavailable(
                 "supported hosts are not available for this service".into(),
             ))
+        })
+    }
+
+    /// Asks the provider whether it can download `link`, without
+    /// credentials, generating a link, or spending account quota (ADR-08:
+    /// a check is advisory). Unknown by default.
+    fn availability<'a>(&'a self, _link: &'a Url) -> BoxFuture<'a, Availability> {
+        Box::pin(async {
+            Availability::Unknown(
+                CheckReason::Unreadable,
+                "this service cannot check links".into(),
+            )
         })
     }
 

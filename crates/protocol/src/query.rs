@@ -691,6 +691,12 @@ pub struct CollectedLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub skipped: Option<u32>,
+    /// The service whose provider answered the last check, for a link an
+    /// enabled account would download; absent when the link's own server
+    /// did. Added in protocol 6.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub checked_via: Option<ProviderId>,
     /// For a link a media service recognized, such as a YouTube video:
     /// its title, once checked, and what it will be downloaded as. Added
     /// in protocol 4.0.
