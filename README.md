@@ -118,6 +118,10 @@ cp deploy/.env.example deploy/.env      # then set the two folders
 docker compose -f deploy/compose.yaml up -d
 ```
 
+Compose pulls `ghcr.io/yaphoa/wayfetch-downloader:v0.1.0` (Linux x86-64).
+Set `WAYFETCH_IMAGE` in `deploy/.env` to select another tag or an immutable
+digest, or `WAYFETCH_IMAGE=wayfetch:local` to build it from this repository.
+
 See [**`deploy/README.md`**](deploy/README.md) for full container operations, `wayfetch.toml` configuration policies, SSH port forwarding, and Caddy/Nginx reverse-proxy configurations.
 
 ## Running the desktop app

@@ -46,6 +46,20 @@ The root [`Dockerfile`](../Dockerfile) builds `wayfetchd` with the toolchain pin
 
 ### Quick start
 
+Compose pulls the published image, `ghcr.io/yaphoa/wayfetch-downloader:v0.1.0` (Linux x86-64), and builds it from this repository only if it cannot. The image includes the web UI; no separate frontend container is needed. To choose another version, or pin an immutable `ghcr.io/yaphoa/wayfetch-downloader@sha256:…` digest, set `WAYFETCH_IMAGE` in `deploy/.env`; to always build locally, set `WAYFETCH_IMAGE=wayfetch:local`.
+
+The **Container image** GitHub Actions workflow builds and runs the Compose
+integration tests before publishing. Published stable releases also update
+`latest`; a manual run with `ref: main` publishes `edge`. A manual version-tag
+run publishes that version without updating `latest`. Every published image
+also has a `sha-<full-commit>` tag, source labels, a BuildKit provenance
+attestation, and an SBOM. Prefer a version or digest for deployments: `edge`
+tracks development and can contain incompatible changes.
+
+GHCR packages initially default to private. A private package requires
+`docker login ghcr.io` with an account allowed to read it; public packages
+can be pulled without signing in.
+
 You need Docker with the Compose plugin, and two folders: one for Wayfetch's own data and one for downloads.
 
 **1. Create the data folder and give both folders to the container's user** (`568:568`, TrueNAS SCALE's `apps` user, unless you set `WAYFETCH_UID`/`WAYFETCH_GID`). Change ownership of these two folders only, never recursively across a whole media dataset:
@@ -63,7 +77,7 @@ cp deploy/.env.example deploy/.env
 nano deploy/.env        # WAYFETCH_DATA and WAYFETCH_DOWNLOADS
 ```
 
-**3. Start it** (the first time, this also builds the image, which takes a while):
+**3. Start it** (the first time, this downloads the image):
 
 ```sh
 docker compose -f deploy/compose.yaml up -d
