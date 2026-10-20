@@ -479,6 +479,21 @@ code { font-family: ui-monospace, monospace; }
 
 .notice:empty { display: none; }
 .notice { margin: 0; padding: 6px 16px; color: var(--bad); border-bottom: 1px solid var(--line); }
+
+/* Downloads: what is ticked, then the last notice, on one line of a
+   fixed height, so neither moves the rows below. */
+.list-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  min-height: 32px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.list-bar > .selection-summary, .list-bar > .notice { min-height: 0; padding: 0; border: 0; }
+.list-bar > .notice { margin-left: auto; }
 .notice.ok { color: var(--ok); }
 .notice.warn { color: var(--warn); }
 
@@ -604,10 +619,15 @@ table.jobs {
 
 /* The inspector for the selected job. */
 
+/* One height whatever the download, its state, or the tab: about six
+   rows of facts, the most either tab lays out per column. Anything
+   longer, such as a note or a diagnostic, scrolls inside the panel. */
 .inspector {
   flex: none;
+  display: flex;
+  flex-direction: column;
+  height: 17rem;
   max-height: 45%;
-  overflow-y: auto;
   border-top: 1px solid var(--line);
   background: var(--surface);
 }
@@ -615,8 +635,7 @@ table.jobs {
 .inspector .empty { margin: 0; padding: 12px 16px; color: var(--muted); }
 
 .inspector-head {
-  position: sticky;
-  top: 0;
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -650,11 +669,17 @@ table.jobs {
 .inspector .close { min-height: 28px; padding: 0 6px; border: 0; background: transparent; }
 
 .panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  align-content: start;
   gap: 14px 32px;
   padding: 14px 16px 18px;
 }
+
+.transfer { display: flex; flex-direction: column; gap: 14px; }
 
 .big-progress { display: flex; flex-direction: column; gap: 8px; }
 .big-progress .figure { display: flex; align-items: baseline; gap: 8px; }
@@ -933,8 +958,6 @@ dd .link-text { overflow-wrap: anywhere; }
 .selection-summary button.link { padding-top: 0; padding-bottom: 0; }
 .selection-summary .path { color: var(--ink); font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 .selection-summary:empty { display: none; }
-/* Downloads keeps the line's room while rows are shown, even when empty. */
-.selection-summary.reserved:empty { display: flex; }
 
 .notice button.link { margin-left: 8px; }
 
@@ -1321,7 +1344,8 @@ th[aria-sort] button.sort { color: var(--ink); }
   .views { align-self: auto; margin: 0; }
   .view { min-height: 32px; }
   .links-page .table-scroll { overflow-y: visible; }
-  .inspector { max-height: none; }
+  /* Its columns stack, so it is taller; the page scrolls to it. */
+  .inspector { height: 32rem; max-height: none; }
   .settings-body { flex-direction: column; }
   .settings-nav { flex: none; padding: 8px; border-right: 0; border-bottom: 1px solid var(--line); }
   .settings-nav ul { flex-direction: row; flex-wrap: wrap; }
