@@ -2036,9 +2036,10 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
       await expect(page.locator('.downloads-view thead th', { hasText: label }).locator('button')).toHaveCount(0);
     }
 
-    // The selection line keeps its room while empty, so ticking moves no row.
+    // The line above the table keeps its room while nothing is ticked, so
+    // ticking moves no row.
     await expect(summary).toBeEmpty();
-    await expect(summary).toBeVisible();
+    await expect(page.locator('.downloads-view .list-bar')).toBeVisible();
     const before = await a.boundingBox();
     await a.getByRole('checkbox').check();
     await expect(summary.locator('strong')).toHaveText('1 download selected');
