@@ -280,30 +280,6 @@ export function parseRate(text, unit, setting) {
 }
 
 /**
- * What a save of `change` did, as `saved` shows it.
- * @param {Change} change
- * @param {Settings} saved
- */
-export function savedMessage(change, saved) {
-  const parts = [];
-  if (change.maxActiveDownloads) parts.push(`Up to ${saved.max_active_downloads.value} downloads run at once.`);
-  if (change.downloadSpeedLimit) {
-    const limit = saved.download_speed_limit.value;
-    parts.push(
-      limit === 'unlimited'
-        ? 'Downloads are not speed limited.'
-        : `Downloads share at most ${formatRate(limit.bytes_per_second)}.`,
-    );
-  }
-  if (change.extractArchives !== undefined) {
-    parts.push(
-      saved.extract_archives ? 'Archives are unpacked after they download.' : 'Archives are kept as they download.',
-    );
-  }
-  return ['Saved.', ...parts].join(' ');
-}
-
-/**
  * The whole number typed for `setting`, or why it cannot be saved.
  * @param {string} text
  * @param {BoundedSetting} setting
@@ -870,11 +846,12 @@ export class SettingsPage {
     };
 
     /**
-     * Saves `change`, all or none.
+     * Saves `change`, all or none. The fields show what was saved, so
+     * the message only confirms it.
      * @param {Change} change
      * @param {(saved: Settings) => string} [said]
      */
-    const save = async (change, said = (saved) => savedMessage(change, saved)) => {
+    const save = async (change, said = () => 'Saved.') => {
       const hello = context.hello();
       if (!hello || !current) {
         show(message, 'Not connected yet. Try again in a moment.');

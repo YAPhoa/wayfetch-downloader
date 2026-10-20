@@ -1159,13 +1159,13 @@ test('the download limit and speed limit are server settings every window shares
   // of the change and keeps its draft.
   await b.limit.fill('3');
   await a.save.click();
-  await expect(a.pane.getByText('Saved. Up to 6 downloads run at once.')).toBeVisible();
+  await expect(a.pane.getByText('Saved.', { exact: true })).toBeVisible();
   await expect(a.unsaved).toBeHidden();
   await expect(b.pane.getByText('The settings were changed elsewhere. Your unsaved values are kept.')).toBeVisible();
   await expect(b.pane.getByText('Allowed: 1–64. Saved; the default is 4.')).toBeVisible();
   await expect(b.limit).toHaveValue('3');
   await b.save.click();
-  await expect(b.pane.getByText('Saved. Up to 3 downloads run at once.')).toBeVisible();
+  await expect(b.pane.getByText('Saved.', { exact: true })).toBeVisible();
   // The first window follows, having nothing unsaved.
   await expect(a.limit).toHaveValue('3');
 
@@ -1235,9 +1235,7 @@ test('the download limit and speed limit are server settings every window shares
     await b.count.fill('5');
     await a.count.fill('3');
     await a.save.click();
-    await expect(
-      a.pane.getByText('Saved. Up to 3 downloads run at once. Downloads share at most 1.5 MiB/s.'),
-    ).toBeVisible();
+    await expect(a.pane.getByText('Saved.', { exact: true })).toBeVisible();
     await expect(b.pane.getByText('The settings were changed elsewhere. Your unsaved values are kept.')).toBeVisible();
     await expect(b.count).toHaveValue('5');
     // The other window shows the saved limit, which its draft did not touch.
@@ -1251,7 +1249,7 @@ test('the download limit and speed limit are server settings every window shares
     await a.unlimited.check();
     await expect(a.rate).toBeDisabled();
     await a.save.click();
-    await expect(a.pane.getByText('Saved. Downloads are not speed limited.')).toBeVisible();
+    await expect(a.pane.getByText('Saved.', { exact: true })).toBeVisible();
     await expect(b.unlimited).toBeChecked();
     await expect(a.pane.getByText('Allowed: Unlimited, or 1 KiB/s–1 TiB/s. Saved; the default is Unlimited.')).toBeVisible();
 
@@ -2131,7 +2129,7 @@ test('a transferring download shows live progress, speed, and time left', async 
     await pane.getByRole('spinbutton', { name: 'Total download speed limit' }).fill('512');
     await pane.getByLabel('Speed limit unit').selectOption('KiB');
     await pane.getByRole('button', { name: 'Save' }).click();
-    await expect(pane.getByText('Downloads share at most 512 KiB/s.')).toBeVisible();
+    await expect(pane.getByText('Saved.', { exact: true })).toBeVisible();
 
     await page.goto(own.origin);
     await page.getByRole('button', { name: 'Add links' }).click();
