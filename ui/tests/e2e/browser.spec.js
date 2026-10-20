@@ -926,6 +926,8 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(linkRow('review-a.bin').locator('td.link-status')).toHaveText('Online');
   await expect(linkRow('review-a.bin').locator('td.host')).toHaveText('127.0.0.1');
   await expect(linkRow('review-a.bin').locator('td.num')).toHaveText('1.0 MiB');
+  // Hovering the name shows just the name.
+  await expect(linkRow('review-a.bin').locator('td.name')).toHaveAttribute('title', 'review-a.bin');
   await expect(linkRow('review-b.bin').locator('td.link-status')).toHaveText('Online');
   expect(fixture.checked.filter((name) => name === 'review-a.bin' || name === 'review-b.bin')).toHaveLength(2);
   await expect(linkRow('ftp://example\\.com/other-scheme\\.bin').locator('td.link-status')).toContainText('Invalid link');

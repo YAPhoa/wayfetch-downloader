@@ -136,17 +136,6 @@ function refused(error, account, automatic = false) {
   }
 }
 
-/**
- * The hover text of a link's name: where a file's name comes from.
- * @param {CollectedLink} link
- * @param {string | null} name
- */
-function nameTitle(link, name) {
-  if (!link.name_hint) return name;
-  if (link.check === 'online') return `${link.name_hint} (as its server names it)`;
-  return `${link.name_hint} (from the link; the server may name the file differently)`;
-}
-
 export class LinksPage {
   /** @param {LinksContext} context */
   constructor(context) {
@@ -1032,7 +1021,7 @@ export class LinksPage {
         'td',
         {
           class: name ? 'name' : 'name unknown',
-          title: nameTitle(link, name),
+          title: link.name_hint ?? name,
         },
         h('span', { class: 'name-text' }, shownName),
         link.found_on && h('span', { class: 'found-on', title: link.found_on }, `Found on ${link.found_on}`),
