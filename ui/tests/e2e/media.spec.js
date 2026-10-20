@@ -79,9 +79,12 @@ test('a YouTube link shows its title and formats, and downloads the one chosen',
     await expect(page).toHaveURL(`${daemon.origin}/settings/plugins`);
     const ytDlp = page.locator('tr[data-plugin="yt-dlp"]');
     await expect(ytDlp.locator('td.version')).toHaveText('2099.01.01');
-    await expect(ytDlp.locator('td.status')).toHaveText('Ready');
+    await expect(ytDlp.locator('td.plugin-status')).toHaveText('Ready');
     await expect(ytDlp.locator('td.use')).toHaveText('Reads video titles and formats, for YouTube');
-    await expect(page.locator('tr[data-plugin="ffmpeg"] td.status')).toContainText('Not installed');
+    await expect(page.locator('tr[data-plugin="ffmpeg"] td.plugin-status')).toContainText('Not installed');
+    // Every cell lines up with its row, however tall a wrapped cell makes it.
+    const cells = await page.locator('.plugins-table td').evaluateAll((tds) => tds.map((td) => getComputedStyle(td).display));
+    expect(new Set(cells)).toEqual(new Set(['table-cell']));
     await page.goBack();
     await page.goBack();
 
@@ -166,13 +169,13 @@ test('a plugin turned off stops its links until it is turned on again', async ({
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.getByRole('link', { name: 'Plugins' }).click();
     const ytDlp = page.locator('tr[data-plugin="yt-dlp"]');
-    await expect(ytDlp.locator('td.status')).toHaveText('Ready');
+    await expect(ytDlp.locator('td.plugin-status')).toHaveText('Ready');
     await ytDlp.getByRole('button', { name: 'Actions for yt-dlp' }).click();
     // Nothing was installed by Wayfetch, so there is nothing to remove.
     await expect(page.getByRole('menuitem', { name: 'Remove…' })).toHaveAttribute('aria-disabled', 'true');
     await page.getByRole('menuitem', { name: 'Turn off' }).click();
     await expect(page.locator('[data-key="plugins-message"]')).toContainText('yt-dlp is turned off.');
-    await expect(ytDlp.locator('td.status')).toHaveText('Turned off');
+    await expect(ytDlp.locator('td.plugin-status')).toHaveText('Turned off');
     await page.goBack();
     await page.goBack();
 
@@ -187,7 +190,7 @@ test('a plugin turned off stops its links until it is turned on again', async ({
     await page.getByRole('link', { name: 'Plugins' }).click();
     await ytDlp.getByRole('button', { name: 'Actions for yt-dlp' }).click();
     await page.getByRole('menuitem', { name: 'Turn on' }).click();
-    await expect(ytDlp.locator('td.status')).toHaveText('Ready');
+    await expect(ytDlp.locator('td.plugin-status')).toHaveText('Ready');
     await page.goBack();
     await page.goBack();
     await expect(row.locator('td.name')).toHaveText('Wayfetch test video');

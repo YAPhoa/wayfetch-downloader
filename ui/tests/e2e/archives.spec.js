@@ -69,7 +69,7 @@ test('finished archives unpack beside them, and a protected one asks for its pas
     await page.getByRole('link', { name: 'Plugins' }).click();
     const sevenZip = page.locator('tr[data-plugin="7zip"]');
     await expect(sevenZip.locator('td.version')).toHaveText('26.04');
-    await expect(sevenZip.locator('td.status')).toHaveText('Ready');
+    await expect(sevenZip.locator('td.plugin-status')).toHaveText('Ready');
     await expect(sevenZip.locator('td.use')).toHaveText('Unpacks downloaded archives');
     await page.getByRole('button', { name: 'Back to Downloads' }).click();
 
