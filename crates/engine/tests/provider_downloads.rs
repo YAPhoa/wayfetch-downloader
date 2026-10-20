@@ -114,6 +114,7 @@ struct Provider {
     /// What a link check is told, instead of the file it would generate.
     availability: Mutex<Option<Availability>>,
     availabilities: AtomicUsize,
+    availability_panic: AtomicBool,
 }
 
 impl Provider {
@@ -144,6 +145,7 @@ impl Provider {
             size: Mutex::new(None),
             availability: Mutex::new(None),
             availabilities: AtomicUsize::new(0),
+            availability_panic: AtomicBool::new(false),
         })
     }
 
@@ -236,6 +238,10 @@ impl AccountProvider for Provider {
     fn availability<'a>(&'a self, _link: &'a Url) -> BoxFuture<'a, Availability> {
         Box::pin(async {
             self.availabilities.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                !self.availability_panic.load(Ordering::SeqCst),
+                "synthetic availability panic"
+            );
             self.availability
                 .lock()
                 .unwrap()
@@ -2522,6 +2528,22 @@ async fn a_hoster_page_starts_through_an_account_or_once_it_is_a_file() {
     assert_eq!(provider.availabilities.load(Ordering::SeqCst), 1);
     assert_eq!(provider.unrestricts(), 0);
 
+    // Its own server still serves a web page, so Direct still refuses it.
+    let command = start_command(std::slice::from_ref(hoster), None);
+    let CommandResult::LinksApplied { applied, refused } = owner
+        .handle()
+        .execute(envelope(&owner, command), ALL)
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(applied.is_empty());
+    assert!(
+        refused[0].message.as_str().contains("web page"),
+        "{refused:?}"
+    );
+
     // Through the account, the provider resolves it to its file.
     let [id] = start(&owner, std::slice::from_ref(hoster), Some(account))
         .await
@@ -2578,5 +2600,74 @@ async fn a_hoster_page_starts_through_an_account_or_once_it_is_a_file() {
     start(&owner, std::slice::from_ref(later), None)
         .await
         .unwrap();
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_provider_fails_only_the_check() {
+    for hosts in [true, false] {
+        let mut env = env();
+        env.inspector = Some(Arc::new(Pages::default()));
+        let provider = &env.server.provider;
+        let owner = env.start().await;
+        add_account(&owner, provider).await;
+        provider.hosts_panic.store(hosts, Ordering::SeqCst);
+        provider.availability_panic.store(!hosts, Ordering::SeqCst);
+        collect(&owner, &[ORIGINAL]).await;
+        let links = checked(&owner).await;
+        let link = links.iter().find(|l| l.found_on.is_none()).unwrap();
+        if hosts {
+            // Its supported hosts cannot be read: the link's own server
+            // answers.
+            assert_eq!(
+                (link.check, link.checked_via.as_ref()),
+                (LinkCheck::Page, None)
+            );
+        } else {
+            // Its check panics: unknown through it.
+            assert_eq!(
+                (link.check, link.checked_via.as_ref()),
+                (LinkCheck::Unknown, Some(&provider.service))
+            );
+            assert_eq!(provider.availabilities.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(
+            owner.handle().readiness(),
+            wayfetch_engine::Readiness::Ready
+        );
+        shutdown(owner).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_that_asks_to_slow_down_is_not_asked_again_for_a_while() {
+    let mut env = env();
+    env.inspector = Some(Arc::new(Pages::default()));
+    let provider = &env.server.provider;
+    *provider.availability.lock().unwrap() = Some(Availability::Unknown(
+        CheckReason::RateLimited,
+        "Slow down.".into(),
+    ));
+    let owner = env.start().await;
+    add_account(&owner, provider).await;
+    let many: Vec<String> = (0..12)
+        .map(|n| format!("https://hoster.example/file/{n}"))
+        .collect();
+    collect(&owner, &many.iter().map(String::as_str).collect::<Vec<_>>()).await;
+    let links = checked(&owner).await;
+    let typed: Vec<_> = links.iter().filter(|l| l.found_on.is_none()).collect();
+    assert_eq!(typed.len(), 12);
+    for link in &typed {
+        assert_eq!(
+            (link.check, link.reason, link.checked_via.as_ref()),
+            (
+                LinkCheck::Unknown,
+                Some(CheckReason::RateLimited),
+                Some(&provider.service)
+            )
+        );
+    }
+    // Only the checks already under way when it first asked reached it.
+    assert!(provider.availabilities.load(Ordering::SeqCst) <= 2);
     shutdown(owner).await;
 }

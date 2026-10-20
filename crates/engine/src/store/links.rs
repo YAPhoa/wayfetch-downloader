@@ -207,7 +207,7 @@ struct Held {
     url: String,
     /// Whether links were found on it, which keeps its row.
     parent: bool,
-    /// Whether its last check found a web page.
+    /// Whether its own server last answered with a web page.
     page: bool,
 }
 
@@ -220,7 +220,8 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
                 "SELECT s.batch_id, b.package_id, s.listed, s.invalid, s.revision, s.root_id, \
                  s.problem, j.id, s.input_url, \
                  EXISTS(SELECT 1 FROM source_links c WHERE c.parent_id = s.id), \
-                 s.check_state IS 'page', {MEDIA_COLUMNS} FROM source_links s \
+                 s.check_state IS 'page' OR s.origin_page = 1, {MEDIA_COLUMNS} \
+                 FROM source_links s \
                  JOIN input_batches b ON b.id = s.batch_id \
                  LEFT JOIN jobs j ON j.source_link_id = s.id WHERE s.id = ?1"
             ),
