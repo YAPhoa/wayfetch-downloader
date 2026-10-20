@@ -7,11 +7,14 @@
 //!   the desktop app's native picker, or a server folder the owner chose in
 //!   the browser after listing folders ([`browse`]). Jobs and settings name
 //!   roots only by ID. A folder holding the state directory is refused.
-//! * Each root's ID is allocated by the store and written into its
-//!   sentinel ([`initialize_root`]). A configured path the store has not
-//!   seen is identified from its sentinel, so a root earlier versions
-//!   marked keeps its ID; one without a sentinel waits until the operator
-//!   initializes it, and is retried as work arrives.
+//! * Each root's ID is allocated by the store and written into this
+//!   profile's marker in the folder ([`initialize_root`]). A configured
+//!   path the store has not seen is identified from that marker, so a root
+//!   earlier versions marked keeps its ID; one without it waits until the
+//!   operator initializes it, and is retried as work arrives.
+//! * A folder is not owned by one profile. Other Wayfetch profiles' markers
+//!   and files in it neither stop this one from using it nor are touched
+//!   by it; only the state directory belongs to one engine.
 //! * Each job records its root when it is submitted, so changing the
 //!   default never moves a job. A job submitted while the operator's
 //!   download root is configured but not identified yet (an unmounted
@@ -80,10 +83,10 @@ pub enum RootError {
     /// No more roots can be permitted.
     #[error("at most {} destinations are supported", EngineConfig::MAX_ROOTS)]
     TooMany,
-    /// The directory is unavailable or marked for another instance.
+    /// The directory is missing, not accessible, or not a folder.
     #[error(transparent)]
     Fs(#[from] FsError),
-    /// The store refused, for example because the folder's sentinel names a
+    /// The store refused, for example because the folder's marker names a
     /// root recorded at another path.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -96,9 +99,9 @@ impl From<RootError> for ProtocolError {
                 ProtocolError::new(ErrorCode::InvalidRequest, &err.to_string())
             }
             RootError::TooMany => ProtocolError::new(ErrorCode::LimitExceeded, &err.to_string()),
-            RootError::Fs(_) => ProtocolError::new(
+            RootError::Fs(e) => ProtocolError::new(
                 ErrorCode::NotApplicable,
-                &format!("the folder cannot be used: {err}"),
+                &format!("the folder cannot be used: {}", unavailable(&e)),
             ),
             RootError::Store(e) => e.into(),
         }
@@ -134,8 +137,8 @@ fn recorded(store: &mut Store, path: &Path) -> Result<Option<RootId>, StoreError
 }
 
 /// Records the root at `path`, which the store does not know yet: the one
-/// its sentinel named (`identified`), or a new ID, allocated before the
-/// sentinel is written so a crash leaves at most a recorded root without
+/// its marker named (`identified`), or a new ID, allocated before the
+/// marker is written so a crash leaves at most a recorded root without
 /// one, which initializing again completes. Returns the ID and whether it
 /// is new. No filesystem access.
 fn claim(
@@ -153,7 +156,7 @@ fn claim(
     }
 }
 
-/// Finishes initializing root `id` after its sentinel was written, or
+/// Finishes initializing root `id` after its marker was written, or
 /// forgets a new one whose directory could not be initialized.
 /// `registered` marks a root the user chose. No filesystem access.
 fn settle(
@@ -417,7 +420,7 @@ impl Destinations {
 
     /// Identifies configured paths the store already records, and drops
     /// those the user removed. A path being registered is left for later:
-    /// its record may not have a sentinel yet. No filesystem access.
+    /// its record may not have a marker yet. No filesystem access.
     pub(crate) fn recall(&mut self, store: &mut Store, probes: &Probes) {
         let pending = std::mem::take(&mut self.pending);
         for path in pending {
@@ -432,12 +435,12 @@ impl Destinations {
         }
     }
 
-    /// Configured paths not identified yet, to look for sentinels in.
+    /// Configured paths not identified yet, to look for markers in.
     pub(crate) fn unidentified(&self) -> Vec<PathBuf> {
         self.pending.clone()
     }
 
-    /// Records the root that the sentinel at the configured `path` names.
+    /// Records the root that the marker at the configured `path` names.
     /// No filesystem access.
     pub(crate) fn adopt(
         &mut self,
@@ -751,7 +754,7 @@ impl Probes {
         tokio::time::timeout(PROBE_TIMEOUT, check).await.ok()?.ok()
     }
 
-    /// Whether `root` opens and carries its sentinel. While another check
+    /// Whether `root` opens and carries this profile's marker. While another check
     /// of the same path runs, its answer is shared.
     pub(crate) async fn check(
         &self,
@@ -797,7 +800,7 @@ impl Probes {
         result
     }
 
-    /// The root the sentinel at `path` names, `None` if there is none or
+    /// The root this profile's marker at `path` names, `None` if there is none or
     /// the folder could not be read in time.
     pub(crate) async fn identify(&self, path: &Path, instance: InstanceId) -> Option<RootId> {
         let owned = path.to_owned();
@@ -826,7 +829,7 @@ impl Drop for Running<'_> {
 /// A root's problem in words for its owner.
 fn unavailable(err: &FsError) -> String {
     match err {
-        FsError::SentinelMissing(_) => {
+        FsError::MarkerMissing(_) => {
             "the folder is not initialized, or its drive is not mounted".to_owned()
         }
         FsError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
@@ -834,6 +837,9 @@ fn unavailable(err: &FsError) -> String {
         }
         FsError::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied => {
             "Wayfetch may not use the folder".to_owned()
+        }
+        FsError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotADirectory => {
+            "that is not a folder".to_owned()
         }
         other => other.to_string(),
     }
@@ -863,7 +869,7 @@ mod tests {
     }
 
     /// What the coordinator does: recall recorded paths, then look for
-    /// sentinels in the rest.
+    /// markers in the rest.
     fn refresh(destinations: &mut Destinations, f: &mut Fixture) {
         destinations.recall(&mut f.store, &Probes::default());
         for path in destinations.unidentified() {
@@ -913,19 +919,34 @@ mod tests {
             Err(RootError::Fs(_))
         ));
         assert!(f.store.root_rows().unwrap().is_empty());
-        // Another instance's folder is refused too, and left as it was.
-        let foreign = f.dir("foreign");
-        Root::initialize(
-            &foreign,
-            RootId::from_u64(7).unwrap(),
-            InstanceId::generate(),
-        )
-        .unwrap();
-        assert!(matches!(
-            initialize(&mut f.store, &foreign, f.instance, false),
-            Err(RootError::Fs(FsError::ForeignSentinel))
-        ));
+        let err =
+            ProtocolError::from(initialize(&mut f.store, &missing, f.instance, true).unwrap_err());
+        assert!(
+            err.message.as_str().contains("the folder is missing"),
+            "{err:?}"
+        );
+        // Nothing was created in its place.
+        assert!(!missing.exists());
+        let file = f.base.join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let err =
+            ProtocolError::from(initialize(&mut f.store, &file, f.instance, true).unwrap_err());
+        assert!(err.message.as_str().contains("not a folder"), "{err:?}");
         assert!(f.store.root_rows().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_folder_another_profile_uses_can_be_added() {
+        let mut f = fixture();
+        let shared = f.dir("shared");
+        let theirs = InstanceId::generate();
+        Root::initialize(&shared, RootId::from_u64(7).unwrap(), theirs).unwrap();
+        let id = initialize(&mut f.store, &shared, f.instance, true).unwrap();
+        assert_eq!(Root::identify(&shared, f.instance).unwrap(), Some(id));
+        assert_eq!(
+            Root::identify(&shared, theirs).unwrap(),
+            RootId::from_u64(7)
+        );
     }
 
     #[test]

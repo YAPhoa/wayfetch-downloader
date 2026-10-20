@@ -337,7 +337,11 @@ fn listing(root: &Path) -> Vec<String> {
 /// Private extraction folders left in the root.
 fn private_folders(root: &Path) -> usize {
     std::fs::read_dir(root.join(".wayfetch/extract"))
-        .map(|d| d.count())
+        .map(|profiles| {
+            profiles
+                .map(|p| std::fs::read_dir(p.unwrap().path()).unwrap().count())
+                .sum()
+        })
         .unwrap_or(0)
 }
 

@@ -1,6 +1,7 @@
 //! The filesystem side of unpacking an archive (architecture brief
 //! sections 9.3 to 9.5): a private folder per attempt under
-//! `.wayfetch/extract/` in the archive's root, checking what was unpacked
+//! `.wayfetch/extract/<instance>/` in the archive's root, apart from other
+//! profiles sharing the root, checking what was unpacked
 //! there, and moving it next to the archive without replacing anything.
 
 use std::io;
@@ -52,19 +53,27 @@ impl Root {
             .dir
             .open_dir(PRIVATE_DIR)
             .map_err(FsError::io("open private directory"))?;
-        match private.create_dir(EXTRACT) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(FsError::io("create extraction directory")(e)),
+        let shared = std::path::Path::new(EXTRACT);
+        for dir in [shared, &shared.join(&self.owner)] {
+            match private.create_dir(dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(FsError::io("create extraction directory")(e)),
+            }
         }
         let extract = private
-            .open_dir(EXTRACT)
+            .open_dir(shared.join(&self.owner))
             .map_err(FsError::io("open extraction directory"))?;
         remove_tree(&extract, name)?;
         extract
             .create_dir(name)
             .map_err(FsError::io("create extraction folder"))?;
-        Ok(self.path().join(PRIVATE_DIR).join(EXTRACT).join(name))
+        Ok(self
+            .path()
+            .join(PRIVATE_DIR)
+            .join(EXTRACT)
+            .join(&self.owner)
+            .join(name))
     }
 
     /// Removes the private extraction folder `name` and everything in it,
@@ -241,12 +250,14 @@ impl Root {
         Err(FsError::TargetExists(RelativePath::new(wanted)?))
     }
 
-    /// The root's folder of private extraction folders, if it exists.
+    /// This profile's folder of private extraction folders in the root, if
+    /// it exists.
     fn extractions(&self) -> Result<Option<Dir>, FsError> {
-        match self
-            .dir
-            .open_dir(std::path::Path::new(PRIVATE_DIR).join(EXTRACT))
-        {
+        match self.dir.open_dir(
+            std::path::Path::new(PRIVATE_DIR)
+                .join(EXTRACT)
+                .join(&self.owner),
+        ) {
             Ok(dir) => Ok(Some(dir)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(FsError::io("open extraction directory")(e)),
