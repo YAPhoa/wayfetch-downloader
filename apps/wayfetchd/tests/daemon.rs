@@ -1449,6 +1449,47 @@ async fn readiness_needs_no_token_and_requires_a_usable_root() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_first_start_may_initialize_the_download_root_but_no_later_one() {
+    let server = Server::https().await;
+    let mut dirs = Dirs::new(&server);
+    dirs.args.push("--init-root-on-first-start".into());
+
+    // A new state directory: the root is initialized, and the daemon is
+    // ready without `init-root`.
+    let daemon = Daemon::start(&dirs).await;
+    assert!(
+        daemon
+            .transcript
+            .iter()
+            .any(|l| l.contains("root_initialized")),
+        "{:?}",
+        daemon.transcript
+    );
+    let anonymous = Client::new(&daemon.base, &daemon.instance, None);
+    let (status, _) = anonymous.get("/v1/ready").await;
+    assert_eq!(status, StatusCode::OK);
+    daemon.stop("TERM").await;
+
+    // Later, the mount is gone and an empty folder is in its place: the
+    // state directory exists, so nothing initializes or writes into it.
+    let moved = dirs.tmp.path().join("moved");
+    std::fs::rename(&dirs.root, &moved).unwrap();
+    std::fs::create_dir(&dirs.root).unwrap();
+    let daemon = Daemon::start(&dirs).await;
+    assert!(
+        !daemon
+            .transcript
+            .iter()
+            .any(|l| l.contains("root_initialized"))
+    );
+    let anonymous = Client::new(&daemon.base, &daemon.instance, None);
+    let (status, _) = anonymous.get("/v1/ready").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(std::fs::read_dir(&dirs.root).unwrap().count(), 0);
+    daemon.stop("TERM").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_stuck_readiness_check_neither_piles_up_nor_holds_up_exit() {
     let server = Server::https().await;
     let dirs = Dirs::ready(&server);

@@ -87,7 +87,12 @@ STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=1s --retries=3 \
     CMD ["/usr/local/bin/wayfetchd", "ready"]
 ENTRYPOINT ["/usr/local/bin/wayfetchd"]
-# Every path is a mount; none exists in the image, so a missing mount
-# fails instead of writing into the container.
-CMD ["run", "--state-dir", "/state", "--download-root", "/downloads", \
-     "--token-file", "/tokens/api-tokens", "--listen", "0.0.0.0:7878"]
+# Two mounts: /data for Wayfetch's own files (the state directory, the API
+# token file, and beside it the account key and browser sign-in) and
+# /downloads. Neither exists in the image, so a missing mount fails instead
+# of writing into the container. The first start, with no state yet,
+# initializes /downloads; a later one never does, so a lost mount is
+# refused rather than written into.
+CMD ["run", "--state-dir", "/data/state", "--download-root", "/downloads", \
+     "--token-file", "/data/api-tokens", "--listen", "0.0.0.0:7878", \
+     "--init-root-on-first-start"]

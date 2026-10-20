@@ -196,6 +196,11 @@ impl EngineSettings {
     pub fn state_dir(&self) -> &Path {
         &self.config.state_dir
     }
+
+    /// The download root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 }
 
 impl EngineArgs {
@@ -319,11 +324,32 @@ pub fn init_root(args: &InitRootArgs) -> Result<PathBuf, String> {
     // Only the state directory matters here, whichever host the file is for.
     let loaded = args.state.load::<IgnoredAny>()?;
     let state_dir = args.state.state_dir(loaded.as_ref())?;
-    let state = StateDir::open(&state_dir).map_err(|e| e.to_string())?;
     let root = absolute(&args.root)?;
-    wayfetch_engine::initialize_root(&state, &root)
-        .map_err(|e| format!("cannot initialize {}: {e}", root.display()))?;
+    initialize(&state_dir, &root)?;
     Ok(root)
+}
+
+/// On a first start, when the state directory does not exist yet, creates
+/// it and initializes the download root as [`init_root`] does; returns
+/// whether it did. A later start never initializes a root, so a download
+/// root whose mount goes missing afterwards is still refused.
+pub fn init_root_on_first_start(settings: &EngineSettings) -> Result<bool, String> {
+    let state_dir = &settings.config.state_dir;
+    if state_dir
+        .try_exists()
+        .map_err(|e| format!("{}: {e}", state_dir.display()))?
+    {
+        return Ok(false);
+    }
+    initialize(state_dir, &settings.root)?;
+    Ok(true)
+}
+
+fn initialize(state_dir: &Path, root: &Path) -> Result<(), String> {
+    let state = StateDir::open(state_dir).map_err(|e| e.to_string())?;
+    wayfetch_engine::initialize_root(&state, root)
+        .map_err(|e| format!("cannot initialize {}: {e}", root.display()))?;
+    Ok(())
 }
 
 /// A started engine and the absolute path of its download root.

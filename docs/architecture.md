@@ -713,6 +713,8 @@ A protocol minor version may only add optional fields, which older decoders igno
 
 **Tradeoff:** intentional remounts may need operator revalidation. UI reports a blocked destination while preserving jobs.
 
+**Amendment (first start, 2026-10-20):** `wayfetchd run --init-root-on-first-start` initializes the download root only when the state directory does not exist yet, as the desktop app does on its first start; any later start never initializes a root, so a mount lost after setup still fails closed. The container image passes it, so `docker compose up -d` is the whole first run (owner request: setup as simple as `docker compose up -d`), and Compose's `create_host_path: false` already refuses a missing host path on that first start.
+
 **Gate:** wrong/missing mount, ACL denial, and read-only remount tests are differentiated and non-destructive.
 
 ### ADR-30 — Evidence-driven compatibility and performance claims

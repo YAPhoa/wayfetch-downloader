@@ -14,6 +14,11 @@ wayfetchd init-root --state-dir /srv/wayfetch/state /srv/downloads
 wayfetchd run --state-dir /srv/wayfetch/state --download-root /srv/downloads \
     --token-file /srv/wayfetch/api-tokens
 
+# Or let the first start (no state directory yet) initialize the download root,
+# as the container image does; later starts never initialize a root
+wayfetchd run --state-dir /srv/wayfetch/state --download-root /srv/downloads \
+    --token-file /srv/wayfetch/api-tokens --init-root-on-first-start
+
 # Or load storage, network, download policy, plugin, and server settings from TOML
 wayfetchd init-root --config /srv/wayfetch/wayfetch.toml /srv/downloads
 wayfetchd run --config /srv/wayfetch/wayfetch.toml
