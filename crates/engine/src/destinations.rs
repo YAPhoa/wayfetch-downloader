@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use wayfetch_domain::id::RootId;
 use wayfetch_domain::name::DiagnosticText;
@@ -565,9 +565,17 @@ impl Destinations {
 }
 
 /// Keys of work in progress, at most one piece of work per key: one
-/// that is still running when another is asked for is refused, not queued.
+/// that is still running when another is asked for is refused, or waited
+/// for ([`Claims::claim_within`]), never run alongside it.
 #[derive(Debug)]
-pub(crate) struct Claims<K>(Arc<Mutex<HashSet<K>>>);
+pub(crate) struct Claims<K>(Arc<Held<K>>);
+
+/// The claimed keys, and a signal each time one is released.
+#[derive(Debug)]
+struct Held<K> {
+    keys: Mutex<HashSet<K>>,
+    released: Notify,
+}
 
 impl<K> Clone for Claims<K> {
     fn clone(&self) -> Self {
@@ -577,16 +585,20 @@ impl<K> Clone for Claims<K> {
 
 impl<K> Default for Claims<K> {
     fn default() -> Self {
-        Self(Arc::default())
+        Self(Arc::new(Held {
+            keys: Mutex::default(),
+            released: Notify::new(),
+        }))
     }
 }
 
 /// A claimed key; dropping it releases the key.
-pub(crate) struct Slot<K: Hash + Eq>(Arc<Mutex<HashSet<K>>>, K);
+pub(crate) struct Slot<K: Hash + Eq>(Arc<Held<K>>, K);
 
 impl<K: Hash + Eq> Drop for Slot<K> {
     fn drop(&mut self) {
-        self.0.lock().expect("claim set").remove(&self.1);
+        self.0.keys.lock().expect("claim set").remove(&self.1);
+        self.0.released.notify_waiters();
     }
 }
 
@@ -594,15 +606,33 @@ impl<K: Hash + Eq + Clone> Claims<K> {
     /// Claims `key`, unless work on it is still running.
     pub(crate) fn claim(&self, key: &K) -> Option<Slot<K>> {
         self.0
+            .keys
             .lock()
             .expect("claim set")
             .insert(key.clone())
             .then(|| Slot(self.0.clone(), key.clone()))
     }
 
+    /// Claims `key` once work on it ends, waiting at most `wait`: `None`
+    /// if it is still running then.
+    pub(crate) async fn claim_within(&self, key: &K, wait: Duration) -> Option<Slot<K>> {
+        tokio::time::timeout(wait, async {
+            loop {
+                // Registered before trying, so a release in between is seen.
+                let released = self.0.released.notified();
+                if let Some(slot) = self.claim(key) {
+                    return slot;
+                }
+                released.await;
+            }
+        })
+        .await
+        .ok()
+    }
+
     /// Whether work on `key` is running.
     pub(crate) fn busy(&self, key: &K) -> bool {
-        self.0.lock().expect("claim set").contains(key)
+        self.0.keys.lock().expect("claim set").contains(key)
     }
 }
 
@@ -666,6 +696,15 @@ impl Probes {
     /// Claims `path`, unless work on it is still running.
     pub(crate) fn claim(&self, path: &Path) -> Option<Slot<PathBuf>> {
         self.running.claim(&path.to_owned())
+    }
+
+    /// Claims `path` once work on it ends, waiting at most
+    /// [`PROBE_TIMEOUT`]: `None` if it is still running then, as on a
+    /// folder that does not respond.
+    pub(crate) async fn claim_soon(&self, path: &Path) -> Option<Slot<PathBuf>> {
+        self.running
+            .claim_within(&path.to_owned(), PROBE_TIMEOUT)
+            .await
     }
 
     /// Whether work on `path` is running.

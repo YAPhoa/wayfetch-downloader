@@ -2049,6 +2049,19 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(summary.locator('strong')).toHaveText('1 download selected');
     expect((await a.boundingBox())?.y).toBe(before?.y);
 
+    // Ctrl+A (Cmd+A on a Mac) ticks every download shown instead of the
+    // page's text; in the filter field it stays the field's own.
+    await page.locator('#filter-names').focus();
+    await page.keyboard.press('ControlOrMeta+A');
+    await expect(summary.locator('strong')).toHaveText('1 download selected');
+    await page.locator('#filter-names').blur();
+    await page.keyboard.press('ControlOrMeta+A');
+    await expect(summary.locator('strong')).toHaveText('3 downloads selected');
+    expect(await page.evaluate(() => String(window.getSelection()))).toBe('');
+    await b.getByRole('checkbox').uncheck();
+    await c.getByRole('checkbox').uncheck();
+    await expect(summary.locator('strong')).toHaveText('1 download selected');
+
     // Ticking two: the toolbar acts on both, not on a download in the details.
     await b.getByRole('checkbox').check();
     await expect(summary.locator('strong')).toHaveText('2 downloads selected');
@@ -2101,12 +2114,15 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await menu.getByRole('menuitem', { name: 'Remove…' }).click();
     const dialog = page.getByRole('dialog', { name: 'Remove 3 downloads' });
     await expect(dialog.getByRole('radio', { name: 'Remove from list only (keep files)' })).toBeChecked();
-    await dialog.getByRole('button', { name: 'Remove', exact: true }).click();
+    // Deleting all three at once, in one folder, waits for each other
+    // rather than refusing as busy.
+    await dialog.getByRole('radio', { name: 'Delete downloaded files/data and remove from list' }).check();
+    await dialog.getByRole('button', { name: 'Delete files and remove' }).click();
     await expect(dialog).toHaveCount(0);
-    await expect(page.getByText('Removed 3 downloads from the list. Remaining files stay in their folders.')).toBeVisible();
+    await expect(page.getByText('Deleted downloaded data for 3 downloads and removed them from the list.')).toBeVisible();
     await expect(page.locator('tr[data-job]')).toHaveCount(0);
     await expect(summary).toBeEmpty();
-    expect((await own.published('bulk-c.bin')).equals(content(0, MIB))).toBe(true);
+    await expect(own.published('bulk-c.bin')).rejects.toThrow();
   } finally {
     await context.close();
     await own.remove();

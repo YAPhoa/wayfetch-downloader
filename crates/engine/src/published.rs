@@ -28,7 +28,7 @@ use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, InstanceId, ProtocolError,
 };
 
-use crate::destinations::{Claims, Destinations, Probes, Slot};
+use crate::destinations::{Claims, Destinations, PROBE_TIMEOUT, Probes, Slot};
 use crate::fs::{FsError, RenameCheck, Root};
 use crate::lifecycle::StoreClient;
 use crate::store::{DeleteStart, RenameIntent, RenameStart, Store, StoreError};
@@ -98,14 +98,18 @@ fn shutting_down() -> ProtocolError {
 }
 
 impl Files {
-    /// Claims `job` for the whole of a request about its file.
-    fn claim(&self, job: JobId) -> Result<Slot<JobId>, ProtocolError> {
-        self.jobs.claim(&job).ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::Busy,
-                "the file is being renamed or looked up; try again",
-            )
-        })
+    /// Claims `job` for the whole of a request about its file, once
+    /// another request about it ends, waiting a little for that.
+    async fn claim(&self, job: JobId) -> Result<Slot<JobId>, ProtocolError> {
+        self.jobs
+            .claim_within(&job, PROBE_TIMEOUT)
+            .await
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::Busy,
+                    "the file is being renamed or looked up; try again",
+                )
+            })
     }
 
     /// Runs `work` on the store.
@@ -147,7 +151,7 @@ impl Files {
                 "the file's folder is no longer a permitted destination",
             ))
         })?;
-        let slot = self.probes.claim(&root.path).ok_or_else(|| {
+        let slot = self.probes.claim_soon(&root.path).await.ok_or_else(|| {
             Failure::Untouched(ProtocolError::new(
                 ErrorCode::Busy,
                 "the file's folder is busy or not responding; try again",
@@ -217,7 +221,7 @@ impl Files {
             return;
         };
         for intent in pending {
-            let Ok(_slot) = self.claim(intent.job) else {
+            let Some(_slot) = self.jobs.claim(&intent.job) else {
                 continue;
             };
             // Read again under the claim: a request may have finished it.
@@ -239,7 +243,7 @@ impl Files {
     ) -> Result<CommandResult, ProtocolError> {
         let _slot = match envelope.command {
             Command::Rename { job, .. } => {
-                let slot = self.claim(job)?;
+                let slot = self.claim(job).await?;
                 self.reconcile_job(job).await;
                 Some(slot)
             }
@@ -288,7 +292,7 @@ impl Files {
                 ));
             }
         };
-        let _slot = self.claim(id)?;
+        let _slot = self.claim(id).await?;
         let instance = self.instance;
         if matches!(envelope.command, Command::Remove { .. }) {
             return self
@@ -328,7 +332,7 @@ impl Files {
     /// still hold the file Wayfetch published, for a host to open on its
     /// user's request.
     pub(crate) async fn locate(&self, job: JobId) -> Result<PathBuf, ProtocolError> {
-        let _slot = self.claim(job)?;
+        let _slot = self.claim(job).await?;
         self.reconcile_job(job).await;
         let (root, file) = self
             .store(move |store| store.published_file(job))

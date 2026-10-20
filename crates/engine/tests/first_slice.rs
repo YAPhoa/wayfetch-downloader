@@ -2444,9 +2444,92 @@ impl Drop for Hang {
     }
 }
 
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread")]
+async fn removals_wait_for_a_stopping_download_and_a_busy_folder() {
+    let mut env = env();
+    let stalled = folder(&env, "removals/stalled");
+    env.roots.push(stalled.clone());
+    let id = env.init_root(&stalled);
+    env.server
+        .put("/finishing.bin", Resource::new(body(3 * KIB)));
+    env.server.put("/done.bin", Resource::new(body(3 * KIB)));
+    let owner = env.start().await;
+    let handle = owner.handle();
+    let revision = settings(&owner).await.revision;
+    handle
+        .execute(choose(&owner, revision, id), ALL)
+        .await
+        .unwrap();
+
+    // A download removed once it is done but before its task has ended:
+    // the removal waits for it, however long, rather than being refused.
+    let mut hang = Hang::at("download-stopping");
+    let [finishing] = submit(&owner, &["/finishing.bin"]).await[..] else {
+        panic!()
+    };
+    let finished = complete(&owner, finishing).await;
+    hang.entered().await;
+    let removing = tokio::spawn({
+        let (handle, request) = (
+            handle.clone(),
+            envelope(
+                &owner,
+                Command::DeleteFiles {
+                    job: finishing,
+                    expected_revision: finished.revision,
+                },
+            ),
+        );
+        async move { handle.execute(request, ALL).await }
+    });
+    tokio::time::sleep(PROMPT + WAITED).await;
+    assert!(!removing.is_finished());
+    hang.release();
+    removing.await.unwrap().unwrap();
+    assert!(!stalled.join("finishing.bin").exists());
+    drop(hang);
+
+    // Deleting while other work holds the folder waits for it to end.
+    let [done] = submit(&owner, &["/done.bin"]).await[..] else {
+        panic!()
+    };
+    let done = complete(&owner, done).await;
+    let mut hang = Hang::start();
+    let locating = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.published_path(done.id, ALL).await }
+    });
+    hang.entered().await;
+    let deleting = tokio::spawn({
+        let (handle, request) = (
+            handle.clone(),
+            envelope(
+                &owner,
+                Command::DeleteFiles {
+                    job: done.id,
+                    expected_revision: done.revision,
+                },
+            ),
+        );
+        async move { handle.execute(request, ALL).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    hang.release();
+    locating.await.unwrap().unwrap();
+    deleting.await.unwrap().unwrap();
+    assert!(!stalled.join("done.bin").exists());
+    assert_eq!(counted(&owner).await, 0);
+    drop(hang);
+    shutdown(owner).await;
+}
+
 /// The engine answers within this while a folder hangs.
 #[cfg(feature = "failpoints")]
 const PROMPT: Duration = Duration::from_secs(1);
+/// How long a request waits for another on the same file or folder to end.
+#[cfg(feature = "failpoints")]
+const WAITED: Duration = Duration::from_secs(2);
 
 /// The only test of the hung folder, since the failpoint is process-wide.
 #[cfg(feature = "failpoints")]
@@ -2549,8 +2632,9 @@ async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
     assert_eq!(locating.await.unwrap().unwrap(), chosen.join("c.bin"));
 
     // While a rename is recorded but has not yet moved the file, looking
-    // the file up, or renaming it again, is refused rather than taking the
-    // rename for one a crash interrupted.
+    // the file up, or renaming it again, waits a moment for it, and is
+    // refused if it does not end, rather than taking the rename for one a
+    // crash interrupted.
     drop(hang);
     let mut hang = Hang::at("rename-recorded");
     let before = job(&owner, c).await;
@@ -2559,23 +2643,29 @@ async fn a_folder_that_hangs_delays_only_the_requests_about_it() {
         async move { handle.execute(change, ALL).await }
     });
     hang.entered().await;
-    let open = tokio::time::timeout(PROMPT, handle.published_path(c, ALL))
+    let open = tokio::time::timeout(PROMPT + WAITED, handle.published_path(c, ALL))
         .await
         .unwrap()
         .unwrap_err();
     assert_eq!(open.code, ErrorCode::Busy);
-    let again = tokio::time::timeout(PROMPT, refused(&owner, rename(&owner, &before, "c3.bin")))
-        .await
-        .unwrap();
+    let again = tokio::time::timeout(
+        PROMPT + WAITED,
+        refused(&owner, rename(&owner, &before, "c3.bin")),
+    )
+    .await
+    .unwrap();
     assert_eq!(again, ErrorCode::Busy);
+    // One that is still waiting when the rename ends goes ahead.
+    let locating = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.published_path(c, ALL).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
     hang.release();
     renaming.await.unwrap().unwrap();
+    assert_eq!(locating.await.unwrap().unwrap(), chosen.join("c2.bin"));
     assert!(!chosen.join("c.bin").exists() && !chosen.join("c3.bin").exists());
     assert_eq!(job(&owner, c).await.artifact.unwrap().path, "c2.bin");
-    assert_eq!(
-        handle.published_path(c, ALL).await.unwrap(),
-        chosen.join("c2.bin")
-    );
 
     // A registration still stuck in the folder at shutdown keeps the state
     // directory locked until the folder answers, and then stops without

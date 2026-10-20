@@ -33,6 +33,7 @@ import {
   jobName,
   jobSortValue,
   JOB_SORT_COLUMNS,
+  mayHaveDeleted,
   progress,
   restartNote,
   retryPlan,
@@ -46,7 +47,7 @@ import { cycleSort, saveSort, savedSort, sortedBy } from '../client/sort.js';
 import { Selection } from '../client/selection.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
+import { copyText, focusedKey, h, isSelectAllKey, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
 import { icon } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu, rowMenuHandlers } from './menu.js';
@@ -459,12 +460,20 @@ export class Downloads {
       this.linksMenu.element,
     );
     this.onPopState = () => this.route();
+    // Ctrl+A (Cmd+A) ticks every download shown, as the header box does.
+    this.onKey = (/** @type {KeyboardEvent} */ event) => {
+      const selected = this.selection.size > 0 || this.feed.watched !== null;
+      if (this.view.hidden || !isSelectAllKey(event, this.tableBody.closest('table') ?? this.tableBody, selected)) return;
+      event.preventDefault();
+      this.tick(this.shownJobs, true);
+    };
   }
 
   /** Starts following the engine and shows the current route. */
   start() {
     this.active = true;
     window.addEventListener('popstate', this.onPopState);
+    document.addEventListener('keydown', this.onKey);
     this.feed.start();
     this.route();
     this.loadSettings();
@@ -504,6 +513,7 @@ export class Downloads {
   stop() {
     this.active = false;
     window.removeEventListener('popstate', this.onPopState);
+    document.removeEventListener('keydown', this.onKey);
     this.feed.stop();
     this.linksPage.close();
   }
@@ -1287,9 +1297,6 @@ export class Downloads {
         event.preventDefault();
         if (sending) return;
         const deleting = erase.checked && mayDelete;
-        const unfinished = deleting
-          ? ' Deletion did not finish; some data may already have been deleted. You can retry or remove the entry only.'
-          : '';
         sending = true;
         save.disabled = cancel.disabled = keep.disabled = erase.disabled = true;
         const close = dialog.querySelector('button.close');
@@ -1297,12 +1304,17 @@ export class Downloads {
         show(message, '');
         /** @type {{ message: string }[]} */
         const refused = [];
+        /** Whether a refused deletion may have deleted some data first. */
+        let partial = false;
         let unconfirmed = 0;
         const sent = left;
         const outcomes = await Promise.all(
           sent.map((job) =>
             this.send(job, deleting ? 'delete_files' : 'remove', {
-              refused: (text) => refused.push({ message: text }),
+              refused: (text, error) => {
+                refused.push({ message: text });
+                partial ||= error !== undefined && mayHaveDeleted(error.code);
+              },
             }).catch(() => {
               unconfirmed += 1;
               return false;
@@ -1330,6 +1342,10 @@ export class Downloads {
           this.schedule();
           return;
         }
+        const unfinished =
+          deleting && partial
+            ? ' Deletion did not finish; some data may already have been deleted. You can retry or remove the entry only.'
+            : '';
         const notConfirmed = deleting
           ? 'Deletion could not be confirmed; some data may already have been deleted. Check the download, then retry or remove the entry only.'
           : 'The removal could not be confirmed. Check the download and try again.';
