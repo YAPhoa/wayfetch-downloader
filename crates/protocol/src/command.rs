@@ -30,7 +30,7 @@ use crate::instance::InstanceId;
 use crate::media::{MediaChoice, PluginChange, PluginChanged};
 use crate::query::SpeedLimit;
 
-/// How a collected link's download route is chosen. Added in protocol 3.0.
+/// How a collected link's download route is chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -48,8 +48,7 @@ pub const MAX_SUBMIT_ITEMS: usize = 1000;
 /// Maximum length of one submitted URL in bytes.
 pub const MAX_URL_BYTES: usize = 8192;
 /// Maximum links waiting in the collected list, across every batch. A
-/// collect command that would exceed it is refused whole. Added in
-/// protocol 1.1.
+/// collect command that would exceed it is refused whole.
 pub const MAX_COLLECTED_LINKS: usize = 10_000;
 
 /// A client-chosen key identifying one logical command across retries. A
@@ -103,20 +102,19 @@ pub enum Permission {
     Control,
     /// Read the links jobs were submitted with, which can carry signed
     /// tokens and so are not part of what [`Permission::Read`] shows.
-    /// Added in protocol 1.0.
     Sources,
     /// See and manage provider accounts: list them, sign them in, check,
     /// enable, disable, and remove them. No other permission implies it,
-    /// since accounts hold the user's provider credentials. Added in
-    /// protocol 1.3; clients treat permissions they do not know as absent.
+    /// since accounts hold the user's provider credentials. Clients treat
+    /// permissions they do not know as absent.
     Accounts,
     /// Download through provider accounts: choose an account when starting
     /// links, and confirm repeating a provider operation whose outcome was
     /// lost. Using an account spends its provider work, so no other
     /// permission implies it; it neither lists nor manages accounts, which
-    /// is [`Permission::Accounts`]. Added in protocol 2.2.
+    /// is [`Permission::Accounts`].
     ProviderDownloads,
-    /// Explicitly delete engine-owned downloaded data. Added in protocol 2.4.
+    /// Explicitly delete engine-owned downloaded data.
     DeleteFiles,
 }
 
@@ -220,14 +218,13 @@ impl From<SubmitItems> for Vec<InputUrl> {
 
 /// Most bytes of text one [`Command::CollectLinks`] may carry: half the
 /// HTTP API's default body limit, so the text fits even with every quote
-/// and line break escaped in JSON. Added in protocol 5.0.
+/// and line break escaped in JSON.
 pub const MAX_COLLECT_TEXT_BYTES: usize = 512 * 1024;
 
 /// Text to collect links from: pasted text holding links, or a page's
 /// HTML. Non-empty and at most [`MAX_COLLECT_TEXT_BYTES`]. The engine
 /// finds the links in it; an entry that looks like a link but is not one
-/// Wayfetch can download is kept as invalid, with its problem. Replaced the
-/// list of entries in protocol 5.0.
+/// Wayfetch can download is kept as invalid, with its problem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct CollectText(String);
@@ -265,7 +262,7 @@ impl From<CollectText> for String {
     }
 }
 
-/// How far the engine looks into collected links. Added in protocol 5.0.
+/// How far the engine looks into collected links.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -280,8 +277,7 @@ pub enum CollectMode {
     SupportedOnly,
 }
 
-/// A collected link, at the revision the client last saw. Added in
-/// protocol 1.1.
+/// A collected link, at the revision the client last saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -292,8 +288,7 @@ pub struct LinkRef {
     pub revision: Revision,
 }
 
-/// A bounded, non-empty list of collected links, each named once. Added
-/// in protocol 1.1.
+/// A bounded, non-empty list of collected links, each named once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Vec<LinkRef>", into = "Vec<LinkRef>")]
 pub struct LinkRefs(Vec<LinkRef>);
@@ -379,7 +374,7 @@ pub enum Command {
     /// account it downloads through. The attempt continues the job's
     /// verified saved data when it safely can, and otherwise starts from
     /// zero and says why. A failure whose retry deadline has not passed is
-    /// refused. Added in protocol 1.2.
+    /// refused.
     Retry {
         /// The job.
         job: JobId,
@@ -389,37 +384,33 @@ pub enum Command {
         /// failed as `operation_ambiguous`), accepting that the provider may
         /// do the work twice. The engine first looks once more for evidence
         /// that the earlier operation succeeded. Without it such a retry is
-        /// refused. Needs [`Permission::ProviderDownloads`] as well. Added in
-        /// protocol 2.2.
+        /// refused. Needs [`Permission::ProviderDownloads`] as well.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         repeat_provider_operation: bool,
     },
     /// Change the user's settings, all or none: where jobs submitted from
     /// now on are saved (jobs already submitted keep their destination),
     /// and engine preferences, within the operator's policy. At least one
-    /// change is required. Added in protocol 0.3; every change is optional
-    /// since protocol 2.0.
+    /// change is required; every change is optional.
     UpdateSettings {
         /// The settings revision the client last saw.
         expected_revision: Revision,
         /// One of the roots the settings list, which must be available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_root: Option<RootId>,
-        /// Most downloads transferring at once, engine-wide. Added in
-        /// protocol 2.0.
+        /// Most downloads transferring at once, engine-wide.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_active_downloads: Option<PreferenceChange>,
-        /// The combined rate of every download's body. Added in protocol
-        /// 2.3; older clients omit it, which leaves it unchanged.
+        /// The combined rate of every download's body; absent leaves it
+        /// unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         download_speed_limit: Option<SpeedLimitChange>,
-        /// Whether downloaded archives are unpacked as they finish. Added
-        /// in protocol 6.0.
+        /// Whether downloaded archives are unpacked as they finish.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extract_archives: Option<bool>,
     },
     /// Give a completed job's published file another name in the same
-    /// folder. Never replaces an existing file. Added in protocol 1.0.
+    /// folder. Never replaces an existing file.
     Rename {
         /// The job.
         job: JobId,
@@ -430,14 +421,14 @@ pub enum Command {
         name: String,
     },
     /// Remove a finished, failed, or cancelled job from lists and counts.
-    /// Its files, partial data, and records stay. Added in protocol 1.0.
+    /// Its files, partial data, and records stay.
     Remove {
         /// The job.
         job: JobId,
         /// The job revision the client last saw.
         expected_revision: Revision,
     },
-    /// Delete owned downloaded data and remove an ended job. Added in protocol 2.4.
+    /// Delete owned downloaded data and remove an ended job.
     DeleteFiles {
         /// The job whose recorded artifacts may be deleted.
         job: JobId,
@@ -446,9 +437,8 @@ pub enum Command {
     },
     /// Stop offering a folder as a destination. Its files stay; the
     /// current default, or a folder that unfinished jobs save to, is
-    /// refused. Added in protocol 1.1 for folders the user added; since
-    /// protocol 4.2 a folder the operator configured can be removed too,
-    /// and stays removed until the user adds it again.
+    /// refused. A folder the operator configured can be removed too, and
+    /// stays removed until the user adds it again.
     RemoveRoot {
         /// The settings revision the client last saw.
         expected_revision: Revision,
@@ -459,7 +449,6 @@ pub enum Command {
     /// check them in the background as `mode` says: nothing is downloaded
     /// until they are started. An entry that is not a valid link is kept as
     /// invalid, with its problem; text with no links at all is refused.
-    /// Added in protocol 1.1; takes text since protocol 5.0.
     CollectLinks {
         /// The text holding the links.
         text: CollectText,
@@ -477,17 +466,14 @@ pub enum Command {
     /// Turn collected links into downloads, each once; they stay listed
     /// with their download until removed. A link that changed since the
     /// client saw it, is invalid, or whose destination cannot be used is
-    /// refused and stays collected. Added in protocol 1.1.
+    /// refused and stays collected.
     StartLinks {
         /// The links.
         links: LinkRefs,
-        /// The provider account to download them through; selected
-        /// automatically if absent unless routing explicitly requests Direct. It must be an enabled account of a
-        /// service whose downloads the engine supports. The choice is kept
-        /// with each download, and never changed silently: a provider
-        /// failure fails the download instead of trying another route.
-        /// Needs [`Permission::ProviderDownloads`] as well. Added in
-        /// protocol 2.2.
+        /// The provider account to download them through; selected automatically if absent unless routing
+        /// explicitly requests Direct. It must be an enabled account of a service whose downloads the engine
+        /// supports. The choice is kept with each download, and never changed silently: a provider failure fails
+        /// the download instead of trying another route. Needs [`Permission::ProviderDownloads`] as well.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<AccountId>,
         /// Explicit route intent. Absent selects automatically in protocol
@@ -497,15 +483,13 @@ pub enum Command {
         routing: Option<StartRouting>,
     },
     /// Remove collected links from the list. Only their collected records
-    /// go; downloads already started are not affected. Added in protocol
-    /// 1.1.
+    /// go; downloads already started are not affected.
     RemoveLinks {
         /// The links.
         links: LinkRefs,
     },
     /// Choose where collected links will be saved. The default destination
     /// and other links keep theirs, and a link already started is refused.
-    /// Added in protocol 1.1.
     MoveLinks {
         /// The links.
         links: LinkRefs,
@@ -514,21 +498,21 @@ pub enum Command {
     },
     /// Check collected links again, from scratch: what was known about
     /// them is forgotten until the new check ends. A link already started
-    /// is refused. Added in protocol 5.0.
+    /// is refused.
     CheckLinks {
         /// The links.
         links: LinkRefs,
     },
     /// Read collected links that are web pages, or not checked yet, and
     /// collect the files and videos they link to beside them. Links on a
-    /// page to other pages are never followed. Added in protocol 5.0.
+    /// page to other pages are never followed.
     AnalyzeLinks {
         /// The links.
         links: LinkRefs,
     },
     /// Choose what collected media links are downloaded as. A link that is
     /// not a media link, does not offer the choice, or was started is
-    /// refused. Added in protocol 4.0.
+    /// refused.
     ChooseLinkMedia {
         /// The links.
         links: LinkRefs,
@@ -540,7 +524,7 @@ pub enum Command {
     /// person approves on the provider's site; the account is added, or
     /// its credentials replaced, only once they have. Carries no
     /// credentials. A retry with the same key answers with the same
-    /// authorization, or with the account it added. Added in protocol 1.3.
+    /// authorization, or with the account it added.
     AuthorizeAccount {
         /// The service.
         service: ProviderId,
@@ -553,8 +537,7 @@ pub enum Command {
         alias: Option<AccountAlias>,
     },
     /// Enable or disable an account. A disabled account is kept, with its
-    /// credentials, but its provider is not contacted. Added in protocol
-    /// 1.3.
+    /// credentials, but its provider is not contacted.
     SetAccountEnabled {
         /// The account.
         account: AccountId,
@@ -564,17 +547,17 @@ pub enum Command {
         enabled: bool,
     },
     /// Remove an account and its stored credentials. Work for it that has
-    /// not finished is discarded. Added in protocol 1.3.
+    /// not finished is discarded.
     RemoveAccount {
         /// The account.
         account: AccountId,
         /// The account revision the client last saw.
         expected_revision: Revision,
     },
-    /// Unpack a complete download of an archive, or of the first part of
-    /// a multi-part archive, into a new folder next to it, again if it was
+    /// Unpack a complete download of an archive, or of the first part of a
+    /// multi-part archive, into a new folder next to it, again if it was
     /// unpacked before. A password the archive needs is given apart from
-    /// the command, which never carries a secret. Added in protocol 6.0.
+    /// the command, which never carries a secret.
     Extract {
         /// The job.
         job: JobId,
@@ -587,7 +570,7 @@ pub enum Command {
         expected_generation: Option<Generation>,
     },
     /// Stop unpacking an archive, or waiting to. The archive is kept, and
-    /// nothing unpacked so far is. Added in protocol 6.0.
+    /// nothing unpacked so far is.
     CancelExtraction {
         /// The job.
         job: JobId,
@@ -597,8 +580,7 @@ pub enum Command {
         expected_generation: Generation,
     },
     /// Turn a plugin on or off, update it, or remove the copy Wayfetch
-    /// installed. Running work keeps the copy it started with. Added in
-    /// protocol 4.1.
+    /// installed. Running work keeps the copy it started with.
     ChangePlugin {
         /// The plugin.
         plugin: PluginId,
@@ -607,7 +589,7 @@ pub enum Command {
     },
 }
 
-/// A change to one engine preference. Added in protocol 2.0.
+/// A change to one engine preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -621,7 +603,7 @@ pub enum PreferenceChange {
     UseDefault,
 }
 
-/// A change to the total download speed limit. Added in protocol 2.3.
+/// A change to the total download speed limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -760,7 +742,6 @@ pub enum CommandResult {
         changed: bool,
     },
     /// The settings were updated, including the destinations offered.
-    /// Added in protocol 0.3.
     SettingsUpdated {
         /// The settings revision after the command; unchanged if they
         /// already said so.
@@ -768,7 +749,7 @@ pub enum CommandResult {
         /// Whether the command changed anything.
         changed: bool,
     },
-    /// Links were collected. Added in protocol 1.1.
+    /// Links were collected.
     LinksCollected {
         /// The batch they were collected as.
         batch: BatchId,
@@ -776,20 +757,18 @@ pub enum CommandResult {
         collected: u32,
         /// Entries kept as invalid.
         invalid: u32,
-        /// Links found more than once in the text, collected once. Added
-        /// in protocol 5.0.
+        /// Links found more than once in the text, collected once.
         #[serde(default, skip_serializing_if = "is_zero")]
         #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
         repeated: u32,
         /// Links in pasted HTML that lead to other web pages, which are not
-        /// collected. Added in protocol 5.0.
+        /// collected.
         #[serde(default, skip_serializing_if = "is_zero")]
         #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
         skipped: u32,
     },
     /// A command on collected links was applied to some of them and
-    /// refused for the rest, which stay as they were. Added in protocol
-    /// 1.1.
+    /// refused for the rest, which stay as they were.
     LinksApplied {
         /// The links it applied to.
         applied: Vec<AppliedLink>,
@@ -797,18 +776,17 @@ pub enum CommandResult {
         refused: Vec<RefusedLink>,
     },
     /// An authorization started, or is still waiting, for
-    /// [`Command::AuthorizeAccount`]: show its code. Added in protocol 1.3.
+    /// [`Command::AuthorizeAccount`]: show its code.
     AuthorizationStarted(Authorization),
     /// An authorization completed: the account added or signed in again.
     /// What a retry of [`Command::AuthorizeAccount`] answers once it has.
-    /// Added in protocol 1.3.
     AccountAuthorized {
         /// The account.
         account: AccountId,
         /// Its revision afterwards.
         revision: Revision,
     },
-    /// An account was enabled, disabled, or removed. Added in protocol 1.3.
+    /// An account was enabled, disabled, or removed.
     AccountUpdated {
         /// The account.
         account: AccountId,
@@ -818,8 +796,7 @@ pub enum CommandResult {
         /// Whether the command changed anything.
         changed: bool,
     },
-    /// A plugin was changed, for [`Command::ChangePlugin`]. Added in
-    /// protocol 4.1.
+    /// A plugin was changed, for [`Command::ChangePlugin`].
     PluginChanged(PluginChanged),
 }
 
@@ -827,7 +804,7 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
-/// A collected link a command applied to. Added in protocol 1.1.
+/// A collected link a command applied to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct AppliedLink {
@@ -844,7 +821,7 @@ pub struct AppliedLink {
     pub revision: Option<Revision>,
 }
 
-/// A collected link a command was refused for. Added in protocol 1.1.
+/// A collected link a command was refused for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct RefusedLink {
@@ -998,9 +975,9 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_change_keeps_its_older_wire_form() {
-        // A 1.x client's command, and its stored fingerprint, are unchanged
-        // by the optional preferences added in 2.0.
+    fn a_settings_change_omits_absent_preferences() {
+        // A command naming only a folder, and its stored fingerprint, carry
+        // nothing for the optional preferences.
         let command = Command::UpdateSettings {
             expected_revision: Revision::from_u64(2).unwrap(),
             default_root: RootId::from_u64(4),
@@ -1103,9 +1080,9 @@ mod tests {
     }
 
     #[test]
-    fn a_start_without_an_account_keeps_its_older_wire_form() {
-        // A 2.1 client's start, and its stored fingerprint, are unchanged by
-        // the optional account added in 2.2.
+    fn a_start_without_an_account_omits_it() {
+        // A start without an account, and its stored fingerprint, carry
+        // nothing for the optional account.
         let links = LinkRefs::try_from(vec![LinkRef {
             link: SourceLinkId::from_u64(3).unwrap(),
             revision: Revision::INITIAL,

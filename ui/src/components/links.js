@@ -146,8 +146,8 @@ export class LinksPage {
     /** Links in the whole list, once read. @type {number | null} */
     this.total = null;
     /**
-     * How many links come before the shown page; `null` from an engine
-     * before protocol 4.3.
+     * How many links come before the shown page; `null` when the engine
+     * did not say.
      * @type {number | null}
      */
     this.before = null;

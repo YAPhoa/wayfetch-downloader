@@ -4,7 +4,7 @@ import type { Revision } from "./Revision.js";
 import type { SourceLinkId } from "./SourceLinkId.js";
 
 /**
- * A collected link a command applied to. Added in protocol 1.1.
+ * A collected link a command applied to.
  */
 export type AppliedLink = { 
 /**

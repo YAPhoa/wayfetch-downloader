@@ -13,7 +13,7 @@ import type { UtcTimestamp } from "./UtcTimestamp.js";
 
 /**
  * A link in the collected list: waiting to be started, or started and
- * kept until removed. Added in protocol 1.1.
+ * kept until removed.
  */
 export type CollectedLink = { 
 /**
@@ -70,39 +70,35 @@ job?: JobId,
  */
 problem?: DiagnosticText, 
 /**
- * For an offline link or one whose check could not tell: why. Added
- * in protocol 5.0.
+ * For an offline link or one whose check could not tell: why.
  */
 reason?: CheckReason, 
 /**
  * What its last check said beyond `reason`, such as the server's
- * status, or that links on a page were left out. Added in protocol
- * 5.0.
+ * status, or that links on a page were left out.
  */
 check_detail?: DiagnosticText, 
 /**
  * The file's size, when its server said. Absent when unknown, which
- * is not zero. Added in protocol 5.0.
+ * is not zero.
  */
 size?: number, 
 /**
  * The page it was found on, without the page link's query or
- * fragment. Added in protocol 5.0.
+ * fragment.
  */
 found_on?: string, 
 /**
  * For a page that was analyzed: links on it collected beside it.
- * Added in protocol 5.0.
  */
 found?: number, 
 /**
  * For a page that was analyzed: links on it that lead to other pages,
- * which are never followed. Added in protocol 5.0.
+ * which are never followed.
  */
 skipped?: number, 
 /**
  * For a link a media service recognized, such as a YouTube video:
- * its title, once checked, and what it will be downloaded as. Added
- * in protocol 4.0.
+ * its title, once checked, and what it will be downloaded as.
  */
 media?: LinkMedia, };

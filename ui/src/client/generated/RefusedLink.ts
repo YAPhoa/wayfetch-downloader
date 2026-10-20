@@ -4,7 +4,7 @@ import type { ErrorCode } from "./ErrorCode.js";
 import type { SourceLinkId } from "./SourceLinkId.js";
 
 /**
- * A collected link a command was refused for. Added in protocol 1.1.
+ * A collected link a command was refused for.
  */
 export type RefusedLink = { 
 /**

@@ -58,7 +58,7 @@ All 7 permissions are independent—none implies another.
 
 ## HTTP & SSE API Reference
 
-All mutations require `"target"` (the `instance` UUID from `GET /v1/capabilities`) and `"idempotency_key"` (a fresh UUID per logical command). Retrying the same key and payload replays the original result; reusing a key with different parameters returns `idempotency_conflict`. Responses and errors use the engine's wire protocol types (`ProtocolVersion` `5.0`).
+All mutations require `"target"` (the `instance` UUID from `GET /v1/capabilities`) and `"idempotency_key"` (a fresh UUID per logical command). Retrying the same key and payload replays the original result; reusing a key with different parameters returns `idempotency_conflict`. Responses and errors use the engine's wire protocol types (`ProtocolVersion` `0.1`; before 1.0 a client must speak the same 0.x version as the engine).
 
 | Route | Required Permission | Purpose & Payload |
 |---|---|---|

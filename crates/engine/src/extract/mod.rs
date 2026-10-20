@@ -1,5 +1,5 @@
 //! Unpacking downloaded archives (architecture brief sections 3.12 and 9,
-//! ADR-18 and ADR-19; protocol 6.0).
+//! ADR-18 and ADR-19).
 //!
 //! The engine owns the workflow: which downloads are archives ([`names`]),
 //! when a set of volumes is ready, one extraction at a time, where its

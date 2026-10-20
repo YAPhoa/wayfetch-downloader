@@ -1,5 +1,5 @@
 //! Media downloads through the public engine API, with an in-process media
-//! service, video host, and converter (protocol 4.0, ADR-27): a collected
+//! service, video host, and converter (ADR-27): a collected
 //! media link is checked in the background and shows its title and
 //! formats; the person's choice is kept and made; the engine downloads
 //! every stream itself, end to end in one staging file, continues it with

@@ -22,7 +22,6 @@ message: DiagnosticText,
 current_revision?: Revision | null, 
 /**
  * When a refused retry may be asked for again, for a job whose
- * failure has a retry deadline still in the future. Added in protocol
- * 1.2.
+ * failure has a retry deadline still in the future.
  */
 retry_at?: UtcTimestamp | null, };

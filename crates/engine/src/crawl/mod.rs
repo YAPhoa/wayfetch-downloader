@@ -1,6 +1,6 @@
 //! Link discovery for the Links list: finding links in collected text,
 //! and checking each collected link in the background (link crawler
-//! stage 1, protocol 5.0).
+//! stage 1).
 //!
 //! * [`extract`] finds links in pasted text or HTML, without the network.
 //! * [`Inspector`] is the seam to the HTTP client: one bounded metadata

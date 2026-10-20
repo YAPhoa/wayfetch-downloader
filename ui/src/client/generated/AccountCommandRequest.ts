@@ -6,7 +6,7 @@ import type { Revision } from "./Revision.js";
 
 /**
  * Enables, disables, or removes an account at the revision the client
- * saw. Added in protocol 1.3.
+ * saw.
  */
 export type AccountCommandRequest = { 
 /**

@@ -1,6 +1,6 @@
 //! Unpacking downloaded archives: which archive downloads wait for their
 //! other volumes, wait for their turn, are being unpacked, and how each
-//! attempt ended (protocol 6.0, architecture brief section 9).
+//! attempt ended (architecture brief section 9).
 //!
 //! Each attempt runs under a new generation; its result is recorded only
 //! while the row is still at that attempt, so a cancelled or replaced

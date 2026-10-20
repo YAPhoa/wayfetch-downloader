@@ -1,5 +1,5 @@
 //! Media services on the coordinator: recognizing media links, and the
-//! plugins they need (protocol 4.0). Their links are checked with every
+//! plugins they need. Their links are checked with every
 //! other link's, in the crawl module; a service whose plugin is missing
 //! fails its links' checks at once, saying so, and checks that failed are
 //! tried again at the next start, when a plugin may have been installed.

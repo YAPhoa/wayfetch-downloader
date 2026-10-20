@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
-import { PROTOCOL, WayfetchError } from '../../src/client/contract.js';
+import { PROTOCOL, WayfetchError, serves } from '../../src/client/contract.js';
 import { JobFeed } from '../../src/client/feed.js';
 
 /**
@@ -395,6 +395,13 @@ test('a refused handshake stops with the reason', async () => {
   const newer = new FakeClient();
   newer.protocol = { major: PROTOCOL.major + 1, minor: 0 };
   assert.equal((await started(newer)).status, 'incompatible');
+});
+
+test('before 1.0 only the same protocol version is served', () => {
+  assert.equal(PROTOCOL.major, 0);
+  assert.ok(serves({ major: 0, minor: PROTOCOL.minor }));
+  assert.ok(!serves({ major: 0, minor: PROTOCOL.minor + 1 }));
+  assert.ok(!serves({ major: 1, minor: 0 }));
 });
 
 test('an unreachable engine is retried until it answers', async () => {

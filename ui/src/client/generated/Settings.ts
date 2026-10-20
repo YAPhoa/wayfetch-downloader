@@ -7,7 +7,7 @@ import type { RootSummary } from "./RootSummary.js";
 import type { SpeedLimitSetting } from "./SpeedLimitSetting.js";
 
 /**
- * The user's settings. Added in protocol 0.3.
+ * The user's settings.
  */
 export type Settings = { 
 /**
@@ -25,22 +25,19 @@ default_root?: RootId | null,
  */
 roots: Array<RootSummary>, 
 /**
- * Most downloads transferring at once, engine-wide. Added in protocol
- * 2.0.
+ * Most downloads transferring at once, engine-wide.
  */
 max_active_downloads: BoundedSetting, 
 /**
- * The combined rate of every download's body, engine-wide. Added in
- * protocol 2.3.
+ * The combined rate of every download's body, engine-wide.
  */
 download_speed_limit: SpeedLimitSetting, 
 /**
  * The helper programs media services run, and whether each can be
- * used. Added in protocol 4.0.
+ * used.
  */
 plugins: Array<PluginSummary>, 
 /**
- * Whether downloaded archives are unpacked as they finish. Added in
- * protocol 6.0.
+ * Whether downloaded archives are unpacked as they finish.
  */
 extract_archives: boolean, };

@@ -33,11 +33,11 @@ name?: string,
 /**
  * For [`Action::Retry`] only: repeat a provider operation whose
  * outcome is unknown, accepting possible duplicate provider work
- * ([`Command::Retry`]). Added in protocol 2.2.
+ * ([`Command::Retry`]).
  */
 repeat_provider_operation?: boolean, 
 /**
  * For [`Action::CancelExtraction`] only, and required there: the
- * unpacking run to stop. Added in protocol 6.0.
+ * unpacking run to stop.
  */
 expected_generation?: Generation, };

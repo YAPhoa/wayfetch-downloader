@@ -3,7 +3,7 @@ import type { SettingSource } from "./SettingSource.js";
 
 /**
  * An engine preference with a whole-number value, as the operator's
- * policy and the user's saved choice resolve it. Added in protocol 2.0.
+ * policy and the user's saved choice resolve it.
  */
 export type BoundedSetting = { 
 /**

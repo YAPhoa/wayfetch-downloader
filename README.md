@@ -6,6 +6,10 @@ A Rust download manager built around one reusable download engine (`wayfetch-eng
 - **`wayfetchd`** ([`apps/wayfetchd/`](apps/wayfetchd/README.md)) — Headless daemon serving an authenticated HTTP/SSE API and a bundled, zero-CDN web UI.
 - **`wayfetch-desktop`** ([`apps/wayfetch-desktop/`](apps/wayfetch-desktop/README.md)) — Native desktop application (Tauri 2) embedding the engine in-process over constrained IPC with no daemon subprocess or listening socket.
 
+## Version
+
+The current release is **0.1.0**, the first one. The workspace crates, the desktop packages, and the release tag (`v0.1.0`) share this version. The engine protocol is `0.1` and the state schema starts from a single migration; before 1.0 every minor release may change both incompatibly, so clients must match the engine's 0.x protocol version, and state directories from development builds before 0.1 are refused rather than upgraded.
+
 ## Core Capabilities
 
 - **Durable, crash-safe transfers**: Locked SQLite state directory (`cap-std` confined roots), 8 MiB durable checkpoints, conditional HTTP resume (`ETag` / `Last-Modified` / `206 Partial Content`), atomic publication into verified destination roots, and generation-checked cancellation.

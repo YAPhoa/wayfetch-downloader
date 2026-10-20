@@ -51,6 +51,10 @@ impl std::fmt::Display for InstanceId {
 /// item, error code, job stage, failure code, or resync reason) needs a new
 /// major version, because an older client cannot decode it. Extending those
 /// vocabularies within a major version needs capability negotiation first.
+///
+/// Before 1.0 the protocol is still settling, so as in Cargo's rules for
+/// `0.x` versions, the minor version is the incompatible one: an engine
+/// serves only clients of exactly its own `0.x`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProtocolVersion {
@@ -62,12 +66,15 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     /// The version this crate implements.
-    pub const CURRENT: Self = Self { major: 6, minor: 0 };
+    pub const CURRENT: Self = Self { major: 0, minor: 1 };
 
     /// Whether an engine speaking `self` can serve a client speaking
     /// `client`: same major version, and the client needs nothing newer than
-    /// the engine provides.
+    /// the engine provides; before 1.0, the same version.
     pub const fn serves(self, client: Self) -> bool {
+        if self.major == 0 {
+            return client.major == 0 && client.minor == self.minor;
+        }
         self.major == client.major && client.minor <= self.minor
     }
 }
@@ -83,10 +90,10 @@ pub struct TransportLimits {
     pub max_submit_items: u16,
     /// Maximum bytes of one input URL.
     pub max_url_bytes: u32,
-    /// Maximum links waiting in the collected list. Added in protocol 1.1.
+    /// Maximum links waiting in the collected list.
     #[serde(default)]
     pub max_collected_links: u32,
-    /// Maximum bytes of text one collect may carry. Added in protocol 5.0.
+    /// Maximum bytes of text one collect may carry.
     #[serde(default)]
     pub max_collect_text_bytes: u32,
 }
@@ -130,6 +137,15 @@ mod tests {
         assert!(!engine.serves(ProtocolVersion { major: 1, minor: 4 }));
         assert!(!engine.serves(ProtocolVersion { major: 2, minor: 0 }));
         assert!(!engine.serves(ProtocolVersion { major: 0, minor: 3 }));
+    }
+
+    #[test]
+    fn before_1_0_only_the_same_version_is_served() {
+        let engine = ProtocolVersion { major: 0, minor: 2 };
+        assert!(engine.serves(ProtocolVersion { major: 0, minor: 2 }));
+        assert!(!engine.serves(ProtocolVersion { major: 0, minor: 1 }));
+        assert!(!engine.serves(ProtocolVersion { major: 0, minor: 3 }));
+        assert!(!engine.serves(ProtocolVersion { major: 1, minor: 2 }));
     }
 
     #[test]
