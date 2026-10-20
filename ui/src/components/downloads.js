@@ -33,6 +33,7 @@ import {
   jobName,
   jobSortValue,
   JOB_SORT_COLUMNS,
+  mayHaveDeleted,
   progress,
   restartNote,
   retryPlan,
@@ -1296,9 +1297,6 @@ export class Downloads {
         event.preventDefault();
         if (sending) return;
         const deleting = erase.checked && mayDelete;
-        const unfinished = deleting
-          ? ' Deletion did not finish; some data may already have been deleted. You can retry or remove the entry only.'
-          : '';
         sending = true;
         save.disabled = cancel.disabled = keep.disabled = erase.disabled = true;
         const close = dialog.querySelector('button.close');
@@ -1306,12 +1304,17 @@ export class Downloads {
         show(message, '');
         /** @type {{ message: string }[]} */
         const refused = [];
+        /** Whether a refused deletion may have deleted some data first. */
+        let partial = false;
         let unconfirmed = 0;
         const sent = left;
         const outcomes = await Promise.all(
           sent.map((job) =>
             this.send(job, deleting ? 'delete_files' : 'remove', {
-              refused: (text) => refused.push({ message: text }),
+              refused: (text, error) => {
+                refused.push({ message: text });
+                partial ||= error !== undefined && mayHaveDeleted(error.code);
+              },
             }).catch(() => {
               unconfirmed += 1;
               return false;
@@ -1339,6 +1342,10 @@ export class Downloads {
           this.schedule();
           return;
         }
+        const unfinished =
+          deleting && partial
+            ? ' Deletion did not finish; some data may already have been deleted. You can retry or remove the entry only.'
+            : '';
         const notConfirmed = deleting
           ? 'Deletion could not be confirmed; some data may already have been deleted. Check the download, then retry or remove the entry only.'
           : 'The removal could not be confirmed. Check the download and try again.';
