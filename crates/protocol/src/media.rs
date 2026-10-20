@@ -128,6 +128,8 @@ pub enum PluginRole {
     MediaResolver,
     /// Joins picture and sound streams and converts audio.
     MediaConverter,
+    /// Unpacks downloaded archives. Added in protocol 6.0.
+    ArchiveExtractor,
 }
 
 /// Whether a plugin can be used.

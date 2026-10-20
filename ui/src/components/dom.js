@@ -123,7 +123,7 @@ export function stripe(row, index) {
  * A column header that sorts its table: a button that sorts by `column`,
  * marked with the order while the table is sorted by it.
  * @template {string} C
- * @param {{ column: C, label: string, sort: import('../client/sort.js').Sort<C>, onSort: (column: C) => void, className?: string }} header
+ * @param {{ column: C, label: string, sort: import('../client/sort.js').Sort<C | null>, onSort: (column: C) => void, className?: string }} header
  */
 export function sortHeader({ column, label, sort, onSort, className }) {
   const active = sort.column === column;
@@ -141,6 +141,22 @@ export function sortHeader({ column, label, sort, onSort, className }) {
       active && icon(sort.descending ? 'down' : 'up'),
     ),
   );
+}
+
+/**
+ * Whether `event` is Ctrl+A (Cmd+A on a Mac) meant for a table's rows
+ * rather than the page's text: pressed in `table`, or with nothing
+ * focused while some rows are `selected`. Fields, menus and dialogs keep
+ * their own Select all.
+ * @param {KeyboardEvent} event
+ * @param {Element} table
+ * @param {boolean} selected
+ */
+export function isSelectAllKey(event, table, selected) {
+  if (event.key.toLowerCase() !== 'a' || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return false;
+  const target = /** @type {Element} */ (event.target);
+  const inTable = table.contains(target) && !(target instanceof HTMLInputElement && target.type !== 'checkbox');
+  return inTable || (target === document.body && selected);
 }
 
 /**

@@ -7,6 +7,7 @@
  * @typedef {import('./contract.js').DisplayState} DisplayState
  * @typedef {import('./contract.js').ProgressSample} ProgressSample
  * @typedef {import('./contract.js').JobCounts} JobCounts
+ * @typedef {import('./contract.js').ExtractionState} ExtractionState
  * @typedef {import('./generated/FailureCode.js').FailureCode} FailureCode
  * @typedef {import('./generated/FailureSummary.js').FailureSummary} FailureSummary
  *
@@ -17,6 +18,11 @@
  * Which group of states a download is in, for its colour. Each state
  * filter is one; anything else is drawn in a neutral colour.
  * @typedef {'active' | 'paused' | 'queued' | 'failed' | 'cancelled' | 'done'} Status
+ *
+ * A column of the downloads table that sorts it. Progress, speed and
+ * time left change during a transfer, so they do not sort: rows would
+ * keep moving.
+ * @typedef {'name' | 'host' | 'state' | 'size'} JobColumn
  */
 
 /**
@@ -71,6 +77,31 @@ export function canRename(job) {
 }
 
 /**
+ * Refusals that come before a data deletion touches anything: the
+ * request was rejected as it arrived, or found the job not removable.
+ */
+const REFUSED_BEFORE_DELETING = new Set([
+  'invalid_request',
+  'permission_denied',
+  'not_found',
+  'revision_conflict',
+  'idempotency_conflict',
+  'wrong_instance',
+  'incompatible_protocol',
+  'incompatible_client',
+]);
+
+/**
+ * Whether a data deletion that failed with `code` may still have deleted
+ * some of it first. Every outcome not known to come before deleting
+ * counts, including a busy folder, shutdown, or a lost answer.
+ * @param {import('./contract.js').WayfetchErrorCode} code
+ */
+export function mayHaveDeleted(code) {
+  return !REFUSED_BEFORE_DELETING.has(code);
+}
+
+/**
  * Whether a job can be removed from the list: only once it has ended
  * (`JobState::check_remove`). Its file stays where it is.
  * @param {JobSummary} job
@@ -98,6 +129,62 @@ const STATES = Object.freeze({
   pausing: ['Pausing…', 'paused'],
   stopping: ['Stopping…', 'cancelled'],
 });
+
+/**
+ * How a finished archive's unpacking reads in place of Done, once it has
+ * any; one never unpacked reads Done.
+ * @type {Readonly<Record<ExtractionState, [string, Status] | null>>}
+ */
+const UNPACKING = Object.freeze({
+  idle: null,
+  waiting: ['Waiting for parts', 'queued'],
+  queued: ['Unpack queued', 'queued'],
+  extracting: ['Unpacking…', 'active'],
+  needs_password: ['Needs password', 'paused'],
+  complete: ['Unpacked', 'done'],
+  failed: ['Unpack failed', 'failed'],
+  cancelled: ['Unpack cancelled', 'cancelled'],
+});
+
+/**
+ * What can be done about unpacking `job`, mirroring the engine's rules
+ * (`store::extractions`): `start` names the command that unpacks it, and
+ * says whether a password is asked for first; `stop` whether unpacking,
+ * or waiting to, can be cancelled. Only a finished archive, or the first
+ * part of a multi-part one, has either.
+ * @param {JobSummary} job
+ * @returns {{ start: { label: string, password: boolean } | null, stop: boolean }}
+ */
+export function unpackActions(job) {
+  const state = job.stage === 'complete' ? job.extraction?.state : undefined;
+  switch (state) {
+    case undefined:
+      return { start: null, stop: false };
+    case 'idle':
+    case 'cancelled':
+      return { start: { label: 'Unpack', password: false }, stop: false };
+    case 'complete':
+    case 'failed':
+      return { start: { label: 'Unpack again', password: false }, stop: false };
+    case 'needs_password':
+      return { start: { label: 'Enter password…', password: true }, stop: true };
+    case 'waiting':
+    case 'queued':
+    case 'extracting':
+      return { start: null, stop: true };
+  }
+}
+
+/**
+ * What a finished archive's unpacking says beyond its state: why it is
+ * waiting, failed, or needs a password.
+ * @param {JobSummary} job
+ */
+export function unpackNote(job) {
+  const extraction = job.extraction;
+  if (!extraction || extraction.state === 'complete') return undefined;
+  return extraction.problem ?? undefined;
+}
 
 /**
  * What each failure means, briefly for a list and as what happened plus
@@ -223,6 +310,8 @@ export function groupCount(group, counts) {
  * @returns {{ label: string, status: Status | null }}
  */
 export function describe(job) {
+  const unpacking = job.display === 'complete' && job.extraction && UNPACKING[job.extraction.state];
+  if (unpacking) return { label: unpacking[0], status: unpacking[1] };
   /** @type {[string, Status | null]} */
   const [name, status] = STATES[job.display] ?? [String(job.display), null];
   const failure = job.failure;
@@ -265,20 +354,60 @@ export function formatBytes(bytes) {
  * @param {ProgressSample | undefined} sample
  */
 export function progress(job, sample) {
-  const done = sample ? Math.max(sample.bytes_received, job.bytes_done) : job.bytes_done;
-  const total = sample?.bytes_total ?? job.bytes_total ?? job.artifact?.size;
-  const ratio = total ? done / total : NaN;
-  const fraction = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : undefined;
+  const { done, total, rate, fraction, seconds } = measure(job, sample);
   const text = total ? `${formatBytes(done)} of ${formatBytes(total)}` : formatBytes(done);
-  const rate = sample?.bytes_per_second;
   return {
     fraction,
     percent: fraction === undefined ? undefined : percent(fraction),
     text,
     size: total === undefined || total === null ? undefined : formatBytes(total),
     rate: rate === undefined ? undefined : `${formatBytes(rate)}/s`,
-    left: rate && total && total > done ? formatDuration((total - done) / rate) : undefined,
+    left: seconds === undefined ? undefined : formatDuration(seconds),
   };
+}
+
+/**
+ * A job's progress as numbers: bytes received and expected, the transfer
+ * rate, the fraction done and the seconds left, where known.
+ * @param {JobSummary} job
+ * @param {ProgressSample | undefined} sample
+ */
+function measure(job, sample) {
+  const done = sample ? Math.max(sample.bytes_received, job.bytes_done) : job.bytes_done;
+  const total = sample?.bytes_total ?? job.bytes_total ?? job.artifact?.size;
+  const ratio = total ? done / total : NaN;
+  const rate = sample?.bytes_per_second;
+  return {
+    done,
+    total,
+    rate,
+    fraction: Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : undefined,
+    seconds: rate && total && total > done ? (total - done) / rate : undefined,
+  };
+}
+
+/** The columns downloads can be sorted by. @type {readonly JobColumn[]} */
+export const JOB_SORT_COLUMNS = ['name', 'host', 'state', 'size'];
+
+/**
+ * What a job's row is sorted by in `column`: text as shown, amounts as
+ * numbers, and nothing where the row shows none.
+ * @param {JobSummary} job
+ * @param {ProgressSample | undefined} sample
+ * @param {JobColumn} column
+ * @returns {string | number | null | undefined}
+ */
+export function jobSortValue(job, sample, column) {
+  switch (column) {
+    case 'name':
+      return jobName(job);
+    case 'host':
+      return job.original_host;
+    case 'state':
+      return describe(job).label;
+    case 'size':
+      return measure(job, sample).total;
+  }
 }
 
 /**

@@ -500,6 +500,17 @@ impl JobState {
         self.commit(*self)
     }
 
+    /// Checks that the job is complete at `expected`, for work on its
+    /// published file that leaves the job's state as it is, such as
+    /// unpacking it.
+    pub fn check_complete(&self, expected: Revision) -> Result<(), JobError> {
+        self.check_revision(expected)?;
+        if self.stage != JobStage::Complete {
+            return Err(self.not_applicable());
+        }
+        Ok(())
+    }
+
     /// Checks that the job can be removed from lists at `expected`: it must
     /// be complete, failed, or cancelled. Removal hides the job; its state
     /// is unchanged.

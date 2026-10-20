@@ -15,10 +15,14 @@ import {
   GROUPS,
   groupCount,
   jobName,
+  jobSortValue,
+  mayHaveDeleted,
   percent,
   progress,
   restartNote,
   retryPlan,
+  unpackActions,
+  unpackNote,
 } from '../../src/client/jobs.js';
 
 /**
@@ -73,6 +77,18 @@ test('retry says whether it continues saved data and why a job started over', ()
     restartNote(job({ restart_reason: 'the file on the server changed since the saved data was downloaded' })),
     'Started over from the beginning: the file on the server changed since the saved data was downloaded.',
   );
+});
+
+test('downloads sort by what their rows show, sizes as numbers', () => {
+  const mib = 1024 * 1024;
+  const running = job({ name: 'b.zip', original_host: 'files.example', bytes_done: 4 * mib, bytes_total: 16 * mib });
+  const sample = { boot_epoch: 1, job: /** @type {const} */ ('job-1'), generation: 1, bytes_received: 8 * mib, bytes_per_second: mib };
+  assert.equal(jobSortValue(running, sample, 'name'), 'b.zip');
+  assert.equal(jobSortValue(running, sample, 'host'), 'files.example');
+  assert.equal(jobSortValue(running, sample, 'state'), describe(running).label);
+  assert.equal(jobSortValue(running, sample, 'size'), 16 * mib);
+  // A row that shows no size sorts as having none.
+  assert.equal(jobSortValue(job({}), undefined, 'size'), undefined);
 });
 
 test('progress uses durable bytes unless a sample is ahead', () => {
@@ -208,4 +224,46 @@ test('links are shown without credentials, query, or fragment', () => {
   assert.deepEqual(displayLink('https://example.com/f.zip'), { text: 'https://example.com/f.zip', hidden: false });
   assert.deepEqual(displayLink('https://example.com/f.zip?'), { text: 'https://example.com/f.zip', hidden: false });
   assert.equal(displayLink('not a link'), null);
+});
+
+test('a finished archive reads as its unpacking, and offers what the engine allows', () => {
+  const archive = (
+    /** @type {import('../../src/client/contract.js').ExtractionState} */ state,
+    /** @type {string | undefined} */ problem = undefined,
+  ) =>
+    job({ stage: 'complete', display: 'complete', extraction: { state, problem } });
+  assert.deepEqual(describe(archive('idle')), { label: 'Done', status: 'done' });
+  assert.deepEqual(describe(archive('extracting')), { label: 'Unpacking…', status: 'active' });
+  assert.deepEqual(describe(archive('needs_password')), { label: 'Needs password', status: 'paused' });
+  assert.deepEqual(describe(archive('failed')), { label: 'Unpack failed', status: 'failed' });
+  assert.deepEqual(unpackActions(archive('idle')), { start: { label: 'Unpack', password: false }, stop: false });
+  assert.deepEqual(unpackActions(archive('complete')), {
+    start: { label: 'Unpack again', password: false },
+    stop: false,
+  });
+  assert.deepEqual(unpackActions(archive('needs_password')), {
+    start: { label: 'Enter password…', password: true },
+    stop: true,
+  });
+  for (const state of /** @type {const} */ (['waiting', 'queued', 'extracting'])) {
+    assert.deepEqual(unpackActions(archive(state)), { start: null, stop: true }, state);
+  }
+  // Not an archive, or not finished: nothing to unpack.
+  assert.deepEqual(unpackActions(job({ stage: 'complete', display: 'complete' })), { start: null, stop: false });
+  assert.deepEqual(unpackActions({ ...archive('idle'), stage: 'queued' }), { start: null, stop: false });
+  assert.equal(unpackNote(archive('waiting', 'Waiting for 2 more parts to download.')), 'Waiting for 2 more parts to download.');
+  assert.equal(unpackNote(archive('complete')), undefined);
+});
+
+test('a failed deletion may have deleted data unless refused before it began', () => {
+  /** @type {import('../../src/client/contract.js').WayfetchErrorCode[]} */
+  const uncertain = ['not_applicable', 'internal', 'busy', 'shutting_down', 'overloaded', 'unavailable'];
+  /** @type {import('../../src/client/contract.js').WayfetchErrorCode[]} */
+  const before = ['permission_denied', 'revision_conflict', 'not_found', 'idempotency_conflict', 'wrong_instance'];
+  for (const code of uncertain) {
+    assert.equal(mayHaveDeleted(code), true, code);
+  }
+  for (const code of before) {
+    assert.equal(mayHaveDeleted(code), false, code);
+  }
 });

@@ -51,7 +51,9 @@
   --note-warn: #fbebd9;
   --note-bad: #fbe4e1;
   --focus: #3b6fd1;
-  /* Download rows: alternate rows shaded; selected beats hovered. */
+  /* Download rows: alternate rows shaded; selected beats hovered. Their
+     rules stay visible against every row shade. */
+  --row-line: #d6dbe3;
   --row-alternate: #f8fafc;
   --row-hover: #f5f7fa;
   --row-selected: #e8eef8;
@@ -102,6 +104,7 @@
   --note-warn: #33261a;
   --note-bad: #3a1f1d;
   --focus: #7da6ee;
+  --row-line: #343d4a;
   --row-alternate: #151b23;
   --row-hover: #1c2430;
   --row-selected: #223047;
@@ -464,15 +467,33 @@ code { font-family: ui-monospace, monospace; }
 .filter[aria-pressed='true'] .count { color: var(--ink); }
 .filter[aria-pressed='true']:hover:not(:disabled) { background: var(--filter-selected); }
 
+/* It may shrink below its rows in a column too (the Links page), so the
+   table scrolls and the pager stays above the status bar. */
 .list {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
 .notice:empty { display: none; }
 .notice { margin: 0; padding: 6px 16px; color: var(--bad); border-bottom: 1px solid var(--line); }
+
+/* Downloads: what is ticked, then the last notice, on one line of a
+   fixed height, so neither moves the rows below. */
+.list-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  min-height: 32px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.list-bar > .selection-summary, .list-bar > .notice { min-height: 0; padding: 0; border: 0; }
+.list-bar > .notice { margin-left: auto; }
 .notice.ok { color: var(--ok); }
 .notice.warn { color: var(--warn); }
 
@@ -503,13 +524,37 @@ table.jobs {
 }
 
 /* A soft rule under the queue tables' header. A collapsed border does
-   not stick with the header, so it is drawn inside the cell. */
-.jobs th {
-  border-bottom-color: transparent;
-  box-shadow: inset 0 -1px 0 var(--header-line);
+   not stick with the header, so it is drawn inside the cell, above a
+   hovered sort button. */
+.jobs th { border-bottom-color: transparent; }
+.jobs th::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: var(--header-line);
+  pointer-events: none;
+}
+
+.jobs td { border-bottom-color: var(--row-line); }
+
+/* A thin rule between the column headers, drawn inside the sticky
+   cell and above its sort button. */
+.jobs th + th:not(.row-actions)::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--row-line);
+  pointer-events: none;
 }
 
 .jobs .num { text-align: right; }
+.jobs th.num button.sort { justify-content: flex-end; }
 .jobs th.progress { width: 200px; }
 
 .jobs td.name {
@@ -574,10 +619,15 @@ table.jobs {
 
 /* The inspector for the selected job. */
 
+/* One height whatever the download, its state, or the tab: about six
+   rows of facts, the most either tab lays out per column. Anything
+   longer, such as a note or a diagnostic, scrolls inside the panel. */
 .inspector {
   flex: none;
+  display: flex;
+  flex-direction: column;
+  height: 17rem;
   max-height: 45%;
-  overflow-y: auto;
   border-top: 1px solid var(--line);
   background: var(--surface);
 }
@@ -585,8 +635,7 @@ table.jobs {
 .inspector .empty { margin: 0; padding: 12px 16px; color: var(--muted); }
 
 .inspector-head {
-  position: sticky;
-  top: 0;
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -620,11 +669,17 @@ table.jobs {
 .inspector .close { min-height: 28px; padding: 0 6px; border: 0; background: transparent; }
 
 .panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  align-content: start;
   gap: 14px 32px;
   padding: 14px 16px 18px;
 }
+
+.transfer { display: flex; flex-direction: column; gap: 14px; }
 
 .big-progress { display: flex; flex-direction: column; gap: 8px; }
 .big-progress .figure { display: flex; align-items: baseline; gap: 8px; }
@@ -669,10 +724,10 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .statusbar .spacer { flex: 1; }
 .statusbar button.link { font-size: 12px; }
 
-.status { display: inline-flex; align-items: center; gap: 6px; }
-.status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--calm); }
-.status[data-status='live']::before { background: var(--ok); }
-.status[data-status='reconnecting']::before, .status[data-status='incompatible']::before { background: var(--warn); }
+.statusbar .status { display: inline-flex; align-items: center; gap: 6px; }
+.statusbar .status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--calm); }
+.statusbar .status[data-status='live']::before { background: var(--ok); }
+.statusbar .status[data-status='reconnecting']::before, .statusbar .status[data-status='incompatible']::before { background: var(--warn); }
 
 .account { display: inline-flex; align-items: center; gap: 12px; }
 .account .message:empty { display: none; }
@@ -903,12 +958,12 @@ dd .link-text { overflow-wrap: anywhere; }
 .selection-summary button.link { padding-top: 0; padding-bottom: 0; }
 .selection-summary .path { color: var(--ink); font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 .selection-summary:empty { display: none; }
-/* Downloads keeps the line's room while rows are shown, even when empty. */
-.selection-summary.reserved:empty { display: flex; }
 
 .notice button.link { margin-left: 8px; }
 
-.jobs .check { width: 1%; padding-right: 0; }
+/* As much room right of the box as left, so a hovered Name header is
+   its own cell rather than flush against it. */
+.jobs .check { width: 1%; }
 .jobs .check input { display: block; }
 
 /* A sortable column's header is a button that looks like the header and
@@ -951,7 +1006,8 @@ th[aria-sort] button.sort { color: var(--ink); }
 .links td.num.unknown { color: var(--muted); }
 
 .links td.link-status { white-space: normal; min-width: 120px; max-width: 320px; }
-.link-status .status-label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+/* A status cell's mark and label: links, plugins. */
+.link-status .status-label, .plugin-status .status-label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .link-status .status-detail { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .links td.link-status.tone-warn .status-detail { color: var(--warn); }
 .links td.link-status.tone-bad .status-detail { color: var(--bad); }
@@ -1192,7 +1248,10 @@ th[aria-sort] button.sort { color: var(--ink); }
 .settings-group .accounts-table td.row-actions { width: 1%; padding-top: 0; padding-bottom: 0; text-align: right; white-space: nowrap; }
 .accounts-table .row-actions button { vertical-align: middle; }
 /* What a plugin is for, and what is wrong with it, wrap so its menu stays in view. */
-.plugins-table td.use, .plugins-table td.status { white-space: normal; }
+.plugins-table td.use, .plugins-table td.plugin-status { white-space: normal; }
+/* Room for the longest status, "Turning off…", so the column keeps its
+   width while a change runs. */
+.plugins-table .plugin-status .status-label { min-width: 7.25em; }
 .plugins-table .status-detail { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .accounts-table .row-actions button:not(.more) { min-height: 28px; padding: 0 10px; margin-right: 4px; }
 .settings-section > .message.notice { margin-bottom: 12px; }
@@ -1285,7 +1344,8 @@ th[aria-sort] button.sort { color: var(--ink); }
   .views { align-self: auto; margin: 0; }
   .view { min-height: 32px; }
   .links-page .table-scroll { overflow-y: visible; }
-  .inspector { max-height: none; }
+  /* Its columns stack, so it is taller; the page scrolls to it. */
+  .inspector { height: 32rem; max-height: none; }
   .settings-body { flex-direction: column; }
   .settings-nav { flex: none; padding: 8px; border-right: 0; border-bottom: 1px solid var(--line); }
   .settings-nav ul { flex-direction: row; flex-wrap: wrap; }

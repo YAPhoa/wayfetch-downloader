@@ -3,6 +3,7 @@ import type { ArtifactSummary } from "./ArtifactSummary.js";
 import type { DesiredState } from "./DesiredState.js";
 import type { DiagnosticText } from "./DiagnosticText.js";
 import type { DisplayState } from "./DisplayState.js";
+import type { ExtractionSummary } from "./ExtractionSummary.js";
 import type { FailureSummary } from "./FailureSummary.js";
 import type { Generation } from "./Generation.js";
 import type { HostName } from "./HostName.js";
@@ -100,4 +101,10 @@ route?: JobRoute,
  * For a download of a media link: its service and what it is made
  * as. Added in protocol 4.0.
  */
-media?: JobMedia, };
+media?: JobMedia, 
+/**
+ * For a complete download of an archive, or of the first part of a
+ * multi-part archive: whether and where it was unpacked. Boxed, as
+ * most jobs have none. Added in protocol 6.0.
+ */
+extraction?: ExtractionSummary, };

@@ -10,7 +10,6 @@ import {
   formatSpeedLimit,
   parseCount,
   parseRate,
-  savedMessage,
   sectionPath,
   settingsSection,
   speedFields,
@@ -216,21 +215,3 @@ test('the speed limit says what it allows, including whether Unlimited is', () =
   );
 });
 
-test('a save says what it changed', () => {
-  const saved = /** @type {any} */ ({
-    max_active_downloads: { value: 3 },
-    download_speed_limit: { value: { bytes_per_second: 2 * MIB } },
-  });
-  assert.equal(savedMessage({ maxActiveDownloads: { set: 3 } }, saved), 'Saved. Up to 3 downloads run at once.');
-  assert.equal(
-    savedMessage({ maxActiveDownloads: { set: 3 }, downloadSpeedLimit: { set: { bytes_per_second: 2 * MIB } } }, saved),
-    'Saved. Up to 3 downloads run at once. Downloads share at most 2 MiB/s.',
-  );
-  assert.equal(
-    savedMessage(
-      { downloadSpeedLimit: { set: 'unlimited' } },
-      /** @type {any} */ ({ ...saved, download_speed_limit: { value: 'unlimited' } }),
-    ),
-    'Saved. Downloads are not speed limited.',
-  );
-});

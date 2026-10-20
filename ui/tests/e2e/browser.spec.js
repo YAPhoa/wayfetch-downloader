@@ -857,7 +857,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   // Emptying the page goes back to the one before it.
   await page.getByRole('checkbox', { name: 'Select all downloads shown' }).check();
   await page.locator('tr[data-job]').first().getByRole('button', { name: /^Actions for / }).click();
-  await (await openMenu(page)).getByRole('menuitem', { name: /^Remove 3 downloads…/ }).click();
+  await (await openMenu(page)).getByRole('menuitem', { name: 'Remove…' }).click();
   await page.getByRole('dialog', { name: 'Remove 3 downloads' }).getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(pager.locator('.page')).toHaveText('Page 1 of 1');
   await expect(pager.locator('.range')).toHaveText('1\u201349 of 49');
@@ -926,6 +926,8 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(linkRow('review-a.bin').locator('td.link-status')).toHaveText('Online');
   await expect(linkRow('review-a.bin').locator('td.host')).toHaveText('127.0.0.1');
   await expect(linkRow('review-a.bin').locator('td.num')).toHaveText('1.0 MiB');
+  // Hovering the name shows just the name.
+  await expect(linkRow('review-a.bin').locator('td.name')).toHaveAttribute('title', 'review-a.bin');
   await expect(linkRow('review-b.bin').locator('td.link-status')).toHaveText('Online');
   expect(fixture.checked.filter((name) => name === 'review-a.bin' || name === 'review-b.bin')).toHaveLength(2);
   await expect(linkRow('ftp://example\\.com/other-scheme\\.bin').locator('td.link-status')).toContainText('Invalid link');
@@ -979,6 +981,25 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(page.locator('.links-page .selection-summary strong')).toHaveText('1 link selected');
   await page.getByRole('checkbox', { name: 'Select all links shown' }).uncheck();
   await page.getByLabel('Filter links').fill('');
+
+  // Ctrl+A (Cmd+A on a Mac) ticks every link shown instead of selecting
+  // the page's text, once links are ticked or the table has focus. In the
+  // filter field it stays the field's own.
+  const summary = page.locator('.links-page .selection-summary strong');
+  await page.keyboard.press('ControlOrMeta+A');
+  await expect(summary).toHaveText('1 link selected');
+  await page.getByLabel('Filter links').blur();
+  await page.keyboard.press('ControlOrMeta+A');
+  await expect(summary).toHaveText('3 links selected');
+  expect(await page.evaluate(() => String(window.getSelection()))).toBe('');
+  const selectAll = page.getByRole('checkbox', { name: 'Select all links shown' });
+  await selectAll.uncheck();
+  await expect(page.locator('.links-page .selection-summary')).not.toContainText('selected');
+  await page.keyboard.press('ControlOrMeta+A');
+  await expect(summary).toHaveText('3 links selected');
+  await selectAll.uncheck();
+  await linkRow('review-a.bin').getByRole('checkbox').check();
+  await expect(summary).toHaveText('1 link selected');
 
   // A new folder for the selected link only: the default stays.
   await page.getByRole('button', { name: 'Save to…' }).click();
@@ -1138,13 +1159,13 @@ test('the download limit and speed limit are server settings every window shares
   // of the change and keeps its draft.
   await b.limit.fill('3');
   await a.save.click();
-  await expect(a.pane.getByText('Saved. Up to 6 downloads run at once.')).toBeVisible();
+  await expect(a.pane.getByText('Saved.', { exact: true })).toBeVisible();
   await expect(a.unsaved).toBeHidden();
   await expect(b.pane.getByText('The settings were changed elsewhere. Your unsaved values are kept.')).toBeVisible();
   await expect(b.pane.getByText('Allowed: 1–64. Saved; the default is 4.')).toBeVisible();
   await expect(b.limit).toHaveValue('3');
   await b.save.click();
-  await expect(b.pane.getByText('Saved. Up to 3 downloads run at once.')).toBeVisible();
+  await expect(b.pane.getByText('Saved.', { exact: true })).toBeVisible();
   // The first window follows, having nothing unsaved.
   await expect(a.limit).toHaveValue('3');
 
@@ -1214,9 +1235,7 @@ test('the download limit and speed limit are server settings every window shares
     await b.count.fill('5');
     await a.count.fill('3');
     await a.save.click();
-    await expect(
-      a.pane.getByText('Saved. Up to 3 downloads run at once. Downloads share at most 1.5 MiB/s.'),
-    ).toBeVisible();
+    await expect(a.pane.getByText('Saved.', { exact: true })).toBeVisible();
     await expect(b.pane.getByText('The settings were changed elsewhere. Your unsaved values are kept.')).toBeVisible();
     await expect(b.count).toHaveValue('5');
     // The other window shows the saved limit, which its draft did not touch.
@@ -1230,7 +1249,7 @@ test('the download limit and speed limit are server settings every window shares
     await a.unlimited.check();
     await expect(a.rate).toBeDisabled();
     await a.save.click();
-    await expect(a.pane.getByText('Saved. Downloads are not speed limited.')).toBeVisible();
+    await expect(a.pane.getByText('Saved.', { exact: true })).toBeVisible();
     await expect(b.unlimited).toBeChecked();
     await expect(a.pane.getByText('Allowed: Unlimited, or 1 KiB/s–1 TiB/s. Saved; the default is Unlimited.')).toBeVisible();
 
@@ -1981,13 +2000,63 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(pager.getByRole('button', { name: 'Previous page' })).toBeDisabled();
     await expect(pager.getByRole('button', { name: 'Next page' })).toBeDisabled();
 
-    // The selection line keeps its room while empty, so ticking moves no row.
+    // A Size, Name, Host or State header sorts the page by it, again
+    // reverses it, and a third click goes back to the engine's order; stripes follow the new order.
+    const names = () => page.locator('tr[data-job] td.name').allTextContents();
+    const sizeHeader = page.locator('.downloads-view th.num', { hasText: 'Size' });
+    await expect(page.locator('.downloads-view th[aria-sort]')).toHaveCount(0);
+    const engineOrder = await names();
+    await sizeHeader.getByRole('button').click();
+    await expect(sizeHeader).toHaveAttribute('aria-sort', 'ascending');
+    expect((await names())[0]).toBe('bulk-c.bin');
+    expect(await page.locator('tr[data-job]').evaluateAll((rows) => rows.map((r) => r.getAttribute('data-stripe')))).toEqual([
+      'base',
+      'alternate',
+      'base',
+    ]);
+    await sizeHeader.getByRole('button').click();
+    await expect(sizeHeader).toHaveAttribute('aria-sort', 'descending');
+    expect((await names())[2]).toBe('bulk-c.bin');
+    await sizeHeader.getByRole('button').click();
+    await expect(page.locator('.downloads-view th[aria-sort]')).toHaveCount(0);
+    expect(await names()).toEqual(engineOrder);
+    // By keyboard too: the redrawn header keeps focus on the same button.
+    const nameSort = page.locator('.downloads-view th.name button.sort');
+    await nameSort.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.downloads-view th.name')).toHaveAttribute('aria-sort', 'ascending');
+    await expect(nameSort).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.downloads-view th.name')).toHaveAttribute('aria-sort', 'descending');
+    await expect(nameSort).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.downloads-view th[aria-sort]')).toHaveCount(0);
+    // Amounts that change during a transfer do not sort, so rows stay put.
+    for (const label of ['Progress', 'Speed', 'Left']) {
+      await expect(page.locator('.downloads-view thead th', { hasText: label }).locator('button')).toHaveCount(0);
+    }
+
+    // The line above the table keeps its room while nothing is ticked, so
+    // ticking moves no row.
     await expect(summary).toBeEmpty();
-    await expect(summary).toBeVisible();
+    await expect(page.locator('.downloads-view .list-bar')).toBeVisible();
     const before = await a.boundingBox();
     await a.getByRole('checkbox').check();
     await expect(summary.locator('strong')).toHaveText('1 download selected');
     expect((await a.boundingBox())?.y).toBe(before?.y);
+
+    // Ctrl+A (Cmd+A on a Mac) ticks every download shown instead of the
+    // page's text; in the filter field it stays the field's own.
+    await page.locator('#filter-names').focus();
+    await page.keyboard.press('ControlOrMeta+A');
+    await expect(summary.locator('strong')).toHaveText('1 download selected');
+    await page.locator('#filter-names').blur();
+    await page.keyboard.press('ControlOrMeta+A');
+    await expect(summary.locator('strong')).toHaveText('3 downloads selected');
+    expect(await page.evaluate(() => String(window.getSelection()))).toBe('');
+    await b.getByRole('checkbox').uncheck();
+    await c.getByRole('checkbox').uncheck();
+    await expect(summary.locator('strong')).toHaveText('1 download selected');
 
     // Ticking two: the toolbar acts on both, not on a download in the details.
     await b.getByRole('checkbox').check();
@@ -2008,7 +2077,7 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await a.click({ button: 'right' });
     let menu = await openMenu(page);
     await expect(menu.getByRole('menuitem', { name: 'Rename…' })).toHaveCount(0);
-    await menu.getByRole('menuitem', { name: 'Cancel 2 downloads' }).click();
+    await menu.getByRole('menuitem', { name: 'Cancel', exact: true }).click();
     await expect(page.getByText('Cancelled 2 downloads.')).toBeVisible();
     await expect(a.locator('td[data-state]')).toHaveText('Cancelled');
     await expect(b.locator('td[data-state]')).toHaveText('Cancelled');
@@ -2038,15 +2107,18 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await page.getByRole('checkbox', { name: 'Select all downloads shown' }).check();
     await b.getByRole('button', { name: 'Actions for bulk-b.bin' }).click();
     menu = await openMenu(page);
-    await menu.getByRole('menuitem', { name: /^Remove 3 downloads…/ }).click();
+    await menu.getByRole('menuitem', { name: 'Remove…' }).click();
     const dialog = page.getByRole('dialog', { name: 'Remove 3 downloads' });
     await expect(dialog.getByRole('radio', { name: 'Remove from list only (keep files)' })).toBeChecked();
-    await dialog.getByRole('button', { name: 'Remove', exact: true }).click();
+    // Deleting all three at once, in one folder, waits for each other
+    // rather than refusing as busy.
+    await dialog.getByRole('radio', { name: 'Delete downloaded files/data and remove from list' }).check();
+    await dialog.getByRole('button', { name: 'Delete files and remove' }).click();
     await expect(dialog).toHaveCount(0);
-    await expect(page.getByText('Removed 3 downloads from the list. Remaining files stay in their folders.')).toBeVisible();
+    await expect(page.getByText('Deleted downloaded data for 3 downloads and removed them from the list.')).toBeVisible();
     await expect(page.locator('tr[data-job]')).toHaveCount(0);
     await expect(summary).toBeEmpty();
-    expect((await own.published('bulk-c.bin')).equals(content(0, MIB))).toBe(true);
+    await expect(own.published('bulk-c.bin')).rejects.toThrow();
   } finally {
     await context.close();
     await own.remove();
@@ -2074,7 +2146,7 @@ test('a transferring download shows live progress, speed, and time left', async 
     await pane.getByRole('spinbutton', { name: 'Total download speed limit' }).fill('512');
     await pane.getByLabel('Speed limit unit').selectOption('KiB');
     await pane.getByRole('button', { name: 'Save' }).click();
-    await expect(pane.getByText('Downloads share at most 512 KiB/s.')).toBeVisible();
+    await expect(pane.getByText('Saved.', { exact: true })).toBeVisible();
 
     await page.goto(own.origin);
     await page.getByRole('button', { name: 'Add links' }).click();

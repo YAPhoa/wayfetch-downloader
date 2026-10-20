@@ -47,7 +47,7 @@ import { accountName, canChooseRoute, routeAccounts } from '../client/routes.js'
 import { Selection } from '../client/selection.js';
 import { saveSort, savedSort, sortedBy, toggleSort } from '../client/sort.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
+import { copyText, focusedKey, h, isSelectAllKey, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
 import { icon } from './icons.js';
 import { pickerButton, rowMenuHandlers } from './menu.js';
 import { loadServices } from './services.js';
@@ -136,17 +136,6 @@ function refused(error, account, automatic = false) {
   }
 }
 
-/**
- * The hover text of a link's name: where a file's name comes from.
- * @param {CollectedLink} link
- * @param {string | null} name
- */
-function nameTitle(link, name) {
-  if (!link.name_hint) return name;
-  if (link.check === 'online') return `${link.name_hint} (as its server names it)`;
-  return `${link.name_hint} (from the link; the server may name the file differently)`;
-}
-
 export class LinksPage {
   /** @param {LinksContext} context */
   constructor(context) {
@@ -188,6 +177,12 @@ export class LinksPage {
     this.readAgain = false;
     /** @type {ReturnType<typeof setInterval> | undefined} */
     this.timer = undefined;
+    // Ctrl+A (Cmd+A) ticks every link shown, as the header box does.
+    this.onKey = (/** @type {KeyboardEvent} */ event) => {
+      if (!isSelectAllKey(event, this.table, this.selected.size > 0)) return;
+      event.preventDefault();
+      this.selectShown(true);
+    };
 
     this.buttons = {
       start: this.tool('start', 'resume', 'Start selected', () => void this.start(this.chosen().filter(startable))),
@@ -280,6 +275,7 @@ export class LinksPage {
     this.render();
     this.refresh();
     this.timer = setInterval(() => this.refresh(), LINKS_REFRESH);
+    document.addEventListener('keydown', this.onKey);
   }
 
   /** Hides the page and stops reading the list. */
@@ -287,6 +283,7 @@ export class LinksPage {
     this.shown = false;
     this.element.hidden = true;
     clearInterval(this.timer);
+    document.removeEventListener('keydown', this.onKey);
   }
 
   /**
@@ -1013,7 +1010,7 @@ export class LinksPage {
         'td',
         {
           class: name ? 'name' : 'name unknown',
-          title: nameTitle(link, name),
+          title: link.name_hint ?? name,
         },
         h('span', { class: 'name-text' }, shownName),
         link.found_on && h('span', { class: 'found-on', title: link.found_on }, `Found on ${link.found_on}`),

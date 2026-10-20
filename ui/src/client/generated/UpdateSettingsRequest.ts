@@ -35,4 +35,9 @@ max_active_downloads?: PreferenceChange,
 /**
  * The total download speed limit. Added in protocol 2.3.
  */
-download_speed_limit?: SpeedLimitChange, };
+download_speed_limit?: SpeedLimitChange, 
+/**
+ * Whether downloaded archives are unpacked as they finish. Added in
+ * protocol 6.0.
+ */
+extract_archives?: boolean, };

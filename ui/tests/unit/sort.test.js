@@ -1,13 +1,22 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { saveSort, savedSort, sortedBy, toggleSort } from '../../src/client/sort.js';
+import { cycleSort, saveSort, savedSort, sortedBy, toggleSort } from '../../src/client/sort.js';
 
 test('a header click sorts by its column, and a second reverses it', () => {
   const byName = toggleSort({ column: 'added', descending: true }, 'name');
   assert.deepEqual(byName, { column: 'name', descending: false });
   assert.deepEqual(toggleSort(byName, 'name'), { column: 'name', descending: true });
   assert.deepEqual(toggleSort(toggleSort(byName, 'name'), 'name'), byName);
+});
+
+test('a third click on a cycling header goes back to the list order', () => {
+  const unsorted = { column: null, descending: false };
+  const ascending = cycleSort(unsorted, 'size');
+  assert.deepEqual(ascending, { column: 'size', descending: false });
+  assert.deepEqual(cycleSort(ascending, 'size'), { column: 'size', descending: true });
+  assert.deepEqual(cycleSort(cycleSort(ascending, 'size'), 'size'), unsorted);
+  assert.deepEqual(cycleSort({ column: 'name', descending: true }, 'size'), ascending);
 });
 
 test('text sorts as people read it, numbers as numbers, ties keep list order', () => {

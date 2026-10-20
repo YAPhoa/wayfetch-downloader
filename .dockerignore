@@ -11,3 +11,5 @@
 !deploy/plugins/
 **/tests/
 **/target/
+# A test target its manifest declares, which cargo needs to find.
+!crates/adapters/tests/confined.rs

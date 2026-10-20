@@ -14,6 +14,7 @@ use bytes::Bytes;
 use tokio::runtime::Handle;
 use wayfetch_engine::accounts::provider::AccountProvider;
 use wayfetch_engine::crawl::Inspector;
+use wayfetch_engine::extract::Extractor;
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::media::{Converter, MediaService, PluginControl};
 use wayfetch_engine::transfer::transport::Transport;
@@ -62,6 +63,8 @@ pub struct Env<S> {
     pub media: Vec<Arc<dyn MediaService>>,
     /// The converter engines start with, if any.
     pub converter: Option<Arc<dyn Converter>>,
+    /// The archive extractor engines start with, if any.
+    pub extractor: Option<Arc<dyn Extractor>>,
     /// What changes plugins, if anything.
     pub plugin_control: Option<Arc<dyn PluginControl>>,
     /// What sends collected links' checks, if anything.
@@ -103,6 +106,7 @@ impl<S> Env<S> {
             providers: Vec::new(),
             media: Vec::new(),
             converter: None,
+            extractor: None,
             plugin_control: None,
             inspector: None,
         }
@@ -138,6 +142,9 @@ impl<S> Env<S> {
         }
         if let Some(converter) = &self.converter {
             builder = builder.converter(converter.clone());
+        }
+        if let Some(extractor) = &self.extractor {
+            builder = builder.extractor(extractor.clone());
         }
         if let Some(control) = &self.plugin_control {
             builder = builder.plugin_control(control.clone());

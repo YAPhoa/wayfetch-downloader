@@ -2,8 +2,8 @@
 //! restriction it documents: a configured non-root UID/GID, a read-only
 //! root filesystem, no capabilities, and separate state, download, and
 //! token mounts. The image serves its bundled web UI and runs its bundled
-//! plugins. A fixture download
-//! survives the container's removal and
+//! plugins, 7-Zip among them, which unpacks a downloaded archive beside
+//! it. A fixture download survives the container's removal and
 //! recreation and resumes from its durable bytes; `docker compose stop`
 //! shuts down gracefully; a second container cannot take a state directory
 //! in use; and a root that was never initialized, or a host path that does
@@ -33,10 +33,11 @@ use std::process::{Command, Output};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use common::{Client, DEADLINE, SETTLED, STALL, release, stalled};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use support::Server;
+use support::{Resource, Server};
 
 const REPO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 /// The identity the stack runs as when the tests run as root: the default
@@ -318,7 +319,7 @@ impl Stack {
 
     /// Checks the restrictions the Compose file promises.
     /// The bundled plugins run under the same restrictions: Settings shows
-    /// yt-dlp and ffmpeg ready, and deno, which yt-dlp runs for YouTube's
+    /// yt-dlp, ffmpeg, and 7-Zip ready, and deno, which yt-dlp runs for YouTube's
     /// player code, runs with its cache in the state directory, where the
     /// engine points it.
     async fn runs_its_plugins(&self, client: &Client) {
@@ -332,7 +333,7 @@ impl Stack {
             .collect();
         assert_eq!(
             plugins,
-            [("yt-dlp", "ready"), ("ffmpeg", "ready")],
+            [("yt-dlp", "ready"), ("ffmpeg", "ready"), ("7zip", "ready")],
             "{settings}"
         );
         let deno = self.ok(&[
@@ -435,7 +436,50 @@ async fn a_recreated_container_resumes_and_publishes() {
         panic!("{ranges:?}")
     };
     assert!((settled..=STALL as u64).contains(&from), "{from}");
+
+    // An archive is unpacked beside itself, owned like the downloads.
+    server.put(
+        "/pack.tar",
+        Resource::new(tar(&[("a.txt", b"hello"), ("b.txt", b"world")])),
+    );
+    let pack = again.submit(&server.url("/pack.tar")).await;
+    let unpacked = again
+        .wait(&pack, |j| j["extraction"]["state"] == "complete")
+        .await;
+    assert_eq!(unpacked["extraction"]["output"], "pack", "{unpacked}");
+    let a = stack.downloads.join("pack/a.txt");
+    assert_eq!(std::fs::read(&a).unwrap(), b"hello");
+    let owner = std::fs::metadata(&a).unwrap();
+    assert_eq!((owner.uid(), owner.gid()), (stack.uid, stack.gid));
+    assert!(stack.downloads.join("pack.tar").is_file());
     stack.stop();
+}
+
+/// A tar archive of `files`, each a regular file in the top folder.
+fn tar(files: &[(&str, &[u8])]) -> Bytes {
+    let mut out = Vec::new();
+    for (name, data) in files {
+        let mut header = [0u8; 512];
+        let mut field =
+            |at: usize, value: &[u8]| header[at..at + value.len()].copy_from_slice(value);
+        field(0, name.as_bytes());
+        field(100, b"0000644\0");
+        field(108, b"0000000\0");
+        field(116, b"0000000\0");
+        field(124, format!("{:011o}\0", data.len()).as_bytes());
+        field(136, b"00000000000\0");
+        field(148, b"        ");
+        field(156, b"0");
+        field(257, b"ustar\0");
+        field(263, b"00");
+        let sum: u32 = header.iter().map(|&b| u32::from(b)).sum();
+        header[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        out.extend_from_slice(&header);
+        out.extend_from_slice(data);
+        out.resize(out.len().next_multiple_of(512), 0);
+    }
+    out.resize(out.len() + 1024, 0);
+    Bytes::from(out)
 }
 
 #[tokio::test(flavor = "multi_thread")]

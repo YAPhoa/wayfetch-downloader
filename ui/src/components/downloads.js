@@ -2,7 +2,9 @@
 // Downloads and Links views, act on the ticked downloads (or else the one
 // in the details), and open Settings; state filters; a table of one page
 // of jobs, each with a box to tick and a menu of what can be done with it
-// (with the ticked ones, when it is one of them); an inspector for the
+// (with the ticked ones, when it is one of them), which the Name, Host,
+// State and Size headers sort, reverse, then return to the engine's order
+// (amounts that change during a transfer do not sort); an inspector for the
 // selected job; and a status bar. It talks to the engine only through a
 // `WayfetchClient`, so any transport can host it.
 //
@@ -29,17 +31,23 @@ import {
   formatBytes,
   groupCount,
   jobName,
+  jobSortValue,
+  JOB_SORT_COLUMNS,
+  mayHaveDeleted,
   progress,
   restartNote,
   retryPlan,
+  unpackActions,
+  unpackNote,
 } from '../client/jobs.js';
 import { count, refusals } from '../client/links.js';
 import { pagePlace } from '../client/pages.js';
 import { routeLabel } from '../client/routes.js';
+import { cycleSort, saveSort, savedSort, sortedBy } from '../client/sort.js';
 import { Selection } from '../client/selection.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, pagerBar, refocus, show, stripe } from './dom.js';
+import { copyText, focusedKey, h, isSelectAllKey, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
 import { icon } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu, rowMenuHandlers } from './menu.js';
@@ -52,6 +60,7 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('../client/contract.js').JobSummary} JobSummary
  * @typedef {import('../client/contract.js').JobId} JobId
  * @typedef {import('../client/contract.js').StateAction} StateAction
+ * @typedef {import('../client/contract.js').JobAction} JobAction
  * @typedef {import('../client/contract.js').ProgressSample} ProgressSample
  * @typedef {import('../client/contract.js').Settings} Settings
  * @typedef {import('../client/contract.js').RootId} RootId
@@ -60,6 +69,7 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('./settings.js').Density} Density
  * @typedef {import('../client/feed.js').FeedStatus} FeedStatus
  * @typedef {import('../client/jobs.js').Status} Status
+ * @typedef {import('../client/jobs.js').JobColumn} JobColumn
  */
 
 /** Jobs per page. */
@@ -94,6 +104,9 @@ const STATUS_LABELS = {
   incompatible: 'Out of date',
   stopped: 'Stopped',
 };
+
+/** Where the chosen order is kept, per browser. */
+const SORT_KEY = 'wayfetch.downloads-sort';
 
 /** Where the row density choice is kept, per browser. */
 const DENSITY_KEY = 'wayfetch.density';
@@ -300,7 +313,14 @@ export class Downloads {
       'aria-label': 'Select all downloads shown',
       onchange: () => this.tick(this.shownJobs, this.selectAll.checked),
     });
-    this.selectionLine = h('p', { class: 'selection-summary reserved', role: 'status' });
+    this.selectionLine = h('p', { class: 'selection-summary', role: 'status' });
+    /**
+     * What is ticked, then the last notice, on one line above the table.
+     * It always keeps its room, empty or not, so ticking a row, a notice
+     * such as "Started 1 download.", or a state with no downloads moves
+     * no row.
+     */
+    this.listBar = h('div', { class: 'list-bar' }, this.selectionLine, this.noticeLine);
     this.actionButtons = STATE_ACTIONS.map((action) =>
       h(
         'button',
@@ -322,6 +342,10 @@ export class Downloads {
     /** @type {HTMLElement[]} */
     this.viewSwitchers = [];
     this.filters = h('nav', { class: 'filters', 'aria-label': 'Filter by status' });
+    /** The column sorting the shown page, or none for the engine's order. */
+    /** @type {import('../client/sort.js').Sort<JobColumn | null>} */
+    this.sort = savedSort(SORT_KEY, JOB_SORT_COLUMNS, { column: null, descending: false });
+    this.tableHead = h('thead');
     this.tableBody = h('tbody');
     this.listStatus = h('p', { class: 'list-status', role: 'status' });
     this.pager = h('nav', { class: 'pager', 'aria-label': 'Pages' });
@@ -356,8 +380,7 @@ export class Downloads {
         h(
           'main',
           { class: 'list' },
-          this.noticeLine,
-          this.selectionLine,
+          this.listBar,
           h('div', { class: 'table-scroll' }, this.buildTable(), this.listStatus),
           this.pager,
           this.inspector,
@@ -437,12 +460,20 @@ export class Downloads {
       this.linksMenu.element,
     );
     this.onPopState = () => this.route();
+    // Ctrl+A (Cmd+A) ticks every download shown, as the header box does.
+    this.onKey = (/** @type {KeyboardEvent} */ event) => {
+      const selected = this.selection.size > 0 || this.feed.watched !== null;
+      if (this.view.hidden || !isSelectAllKey(event, this.tableBody.closest('table') ?? this.tableBody, selected)) return;
+      event.preventDefault();
+      this.tick(this.shownJobs, true);
+    };
   }
 
   /** Starts following the engine and shows the current route. */
   start() {
     this.active = true;
     window.addEventListener('popstate', this.onPopState);
+    document.addEventListener('keydown', this.onKey);
     this.feed.start();
     this.route();
     this.loadSettings();
@@ -482,6 +513,7 @@ export class Downloads {
   stop() {
     this.active = false;
     window.removeEventListener('popstate', this.onPopState);
+    document.removeEventListener('keydown', this.onKey);
     this.feed.stop();
     this.linksPage.close();
   }
@@ -901,15 +933,17 @@ export class Downloads {
    * notice line, or passed to `refused` if given. While the engine has not
    * answered, the job takes no other command from this view, so a second
    * click cannot send a second request.
+   * `extract` unpacks an archive, with `password` if given.
    * @param {JobSummary} job
-   * @param {StateAction | 'rename' | 'remove' | 'delete_files'} action
+   * @param {JobAction | 'extract'} action
    * @param {{
    *   name?: string,
+   *   password?: string,
    *   repeatProviderOperation?: boolean,
    *   refused?: (text: string, error?: WayfetchError) => void,
    * }} [options]
    */
-  async send(job, action, { name, repeatProviderOperation, refused } = {}) {
+  async send(job, action, { name, password, repeatProviderOperation, refused } = {}) {
     const hello = this.feed.hello;
     if (!hello) {
       (refused ?? ((text) => (this.notice = text)))('Not connected yet. Try again in a moment.');
@@ -922,14 +956,13 @@ export class Downloads {
     this.schedule();
     let accepted = false;
     try {
-      await this.client.jobCommand(job.id, {
-        idempotencyKey: idempotencyKey(),
-        target: hello.instance,
-        action,
-        expectedRevision: job.revision,
-        name,
-        repeatProviderOperation,
-      });
+      const request = { idempotencyKey: idempotencyKey(), target: hello.instance, expectedRevision: job.revision };
+      // Unpacking names the run shown, so a late click cannot act on a newer one.
+      const expectedGeneration = job.extraction?.generation;
+      if (action === 'extract') await this.client.extract(job.id, { ...request, expectedGeneration, password });
+      else if (action === 'cancel_extraction')
+        await this.client.jobCommand(job.id, { ...request, action, expectedGeneration });
+      else await this.client.jobCommand(job.id, { ...request, action, name, repeatProviderOperation });
       accepted = true;
     } catch (error) {
       if (!(error instanceof WayfetchError)) throw error;
@@ -1069,7 +1102,8 @@ export class Downloads {
 
   /**
    * What can be done with several downloads at once: the state commands
-   * and removal, each for those it applies to.
+   * and removal, each for those it applies to. Labelled plainly, as for
+   * one: the menu opened on the selection, and the dialog says how many.
    * @param {readonly JobSummary[]} jobs
    * @returns {MenuEntry[]}
    */
@@ -1079,14 +1113,14 @@ export class Downloads {
     /** @type {MenuEntry[]} */
     const entries = STATE_ACTIONS.map((action) => ({
       key: action,
-      label: this.actionLabel(action, jobs),
+      label: ACTION_LABELS[action],
       disabled: this.accepting(jobs, action).length === 0,
       hint: control ? undefined : NO_CONTROL,
       run: () => void this.sendAll(jobs, action),
     }));
     entries.push('separator', {
       key: 'remove',
-      label: removable.length > 1 ? `Remove ${count(removable.length, 'download')}…` : 'Remove…',
+      label: 'Remove…',
       disabled: !control || removable.length === 0,
       danger: true,
       run: () => void this.remove(removable),
@@ -1139,6 +1173,29 @@ export class Downloads {
     });
     if (client.permissions.includes('sources')) {
       entries.push({ key: 'copy-source', label: 'Copy source link', run: () => void this.copySource(job) });
+    }
+    const unpacking = unpackActions(job);
+    if (unpacking.start || unpacking.stop) {
+      entries.push('separator');
+      const start = unpacking.start;
+      if (start) {
+        entries.push({
+          key: 'unpack',
+          label: start.label,
+          disabled: !control || busy,
+          hint: why(undefined),
+          run: () => (start.password ? this.askPassword(job) : void this.unpack(job)),
+        });
+      }
+      if (unpacking.stop) {
+        entries.push({
+          key: 'cancel-unpack',
+          label: 'Cancel unpacking',
+          disabled: !control || busy,
+          hint: why(undefined),
+          run: () => void this.send(job, 'cancel_extraction'),
+        });
+      }
     }
     entries.push('separator');
     const toggle = actions.has('resume') ? 'resume' : 'pause';
@@ -1240,9 +1297,6 @@ export class Downloads {
         event.preventDefault();
         if (sending) return;
         const deleting = erase.checked && mayDelete;
-        const unfinished = deleting
-          ? ' Deletion did not finish; some data may already have been deleted. You can retry or remove the entry only.'
-          : '';
         sending = true;
         save.disabled = cancel.disabled = keep.disabled = erase.disabled = true;
         const close = dialog.querySelector('button.close');
@@ -1250,12 +1304,17 @@ export class Downloads {
         show(message, '');
         /** @type {{ message: string }[]} */
         const refused = [];
+        /** Whether a refused deletion may have deleted some data first. */
+        let partial = false;
         let unconfirmed = 0;
         const sent = left;
         const outcomes = await Promise.all(
           sent.map((job) =>
             this.send(job, deleting ? 'delete_files' : 'remove', {
-              refused: (text) => refused.push({ message: text }),
+              refused: (text, error) => {
+                refused.push({ message: text });
+                partial ||= error !== undefined && mayHaveDeleted(error.code);
+              },
             }).catch(() => {
               unconfirmed += 1;
               return false;
@@ -1283,6 +1342,10 @@ export class Downloads {
           this.schedule();
           return;
         }
+        const unfinished =
+          deleting && partial
+            ? ' Deletion did not finish; some data may already have been deleted. You can retry or remove the entry only.'
+            : '';
         const notConfirmed = deleting
           ? 'Deletion could not be confirmed; some data may already have been deleted. Check the download, then retry or remove the entry only.'
           : 'The removal could not be confirmed. Check the download and try again.';
@@ -1319,6 +1382,81 @@ export class Downloads {
     keep.addEventListener('change', choiceChanged);
     erase.addEventListener('change', choiceChanged);
     keep.focus();
+  }
+
+  /**
+   * Unpacks a finished archive next to it, with `password` if given.
+   * Resolves to whether the engine accepted it.
+   * @param {JobSummary} job
+   * @param {{ password?: string, refused?: (text: string) => void }} [options]
+   */
+  async unpack(job, { password, refused } = {}) {
+    const accepted = await this.send(job, 'extract', { password, refused });
+    if (accepted) {
+      this.done(`Unpacking ${jobName(job)} into a new folder beside it.`);
+      this.schedule();
+    }
+    return accepted;
+  }
+
+  /**
+   * Asks for a protected archive's password, then unpacks it. The
+   * password is sent once and kept by nothing here.
+   * @param {JobSummary} job
+   */
+  askPassword(job) {
+    const name = jobName(job);
+    const message = h('p', { class: 'message', role: 'alert' });
+    const field = h('input', {
+      type: 'password',
+      id: 'archive-password',
+      name: 'password',
+      required: true,
+      autocomplete: 'off',
+      spellcheck: 'false',
+    });
+    const save = h('button', { type: 'submit', class: 'primary' }, 'Unpack');
+    const cancel = h('button', { type: 'button', onclick: () => dialog.close() }, 'Cancel');
+    const form = h(
+      'form',
+      {
+        class: 'rename-form',
+        onsubmit: async (/** @type {SubmitEvent} */ event) => {
+          event.preventDefault();
+          const password = field.value;
+          if (password === '') {
+            show(message, 'Enter the password.');
+            return;
+          }
+          save.disabled = true;
+          show(message, '');
+          const done = await this.unpack(this.heldJob(job.id) ?? job, {
+            password,
+            refused: (text) => show(message, text),
+          });
+          save.disabled = false;
+          if (done) dialog.close();
+          else field.focus();
+        },
+      },
+      h('label', { for: 'archive-password' }, 'Password'),
+      field,
+      message,
+      h('div', { class: 'row' }, save, cancel),
+    );
+    const dialog = openDialog(
+      {
+        title: `Unpack ${name}`,
+        className: 'rename',
+        closeLabel: 'Close without unpacking',
+        restore: () =>
+          /** @type {HTMLElement | null} */ (
+            this.tableBody.querySelector(`[data-key="menu-${job.id}"]`)
+          )?.focus(),
+      },
+      form,
+    );
+    field.focus();
   }
 
   /**
@@ -1435,38 +1573,57 @@ export class Downloads {
   // The table.
 
   buildTable() {
-    const columns = [
-      ['Name', 'name'],
-      ['Host', 'host'],
-      ['State', 'state'],
-      ['Progress', 'progress'],
-      ['Size', 'num'],
-      ['Speed', 'num'],
-      ['Left', 'num'],
-    ];
-    const actions = h('th', { scope: 'col', class: 'row-actions' }, h('span', { class: 'visually-hidden' }, 'Actions'));
-    return h(
-      'table',
-      { class: 'jobs' },
-      h('caption', { class: 'visually-hidden' }, 'Downloads'),
-      h(
-        'thead',
-        null,
-        h(
-          'tr',
-          null,
-          h('th', { scope: 'col', class: 'check' }, this.selectAll),
-          columns.map(([title, kind]) => h('th', { scope: 'col', class: kind }, title)),
-          actions,
-        ),
-      ),
-      this.tableBody,
-    );
+    this.renderHead();
+    return h('table', { class: 'jobs' }, h('caption', { class: 'visually-hidden' }, 'Downloads'), this.tableHead, this.tableBody);
   }
 
-  /** The jobs of the page that the name filter shows. */
+  renderHead() {
+    // Sorting by keyboard redraws the header: keep focus on its button.
+    const focused = focusedKey(this.tableHead);
+    /** @type {[JobColumn | null, string, string][]} */
+    const columns = [
+      ['name', 'Name', 'name'],
+      ['host', 'Host', 'host'],
+      ['state', 'State', 'state'],
+      [null, 'Progress', 'progress'],
+      ['size', 'Size', 'num'],
+      [null, 'Speed', 'num'],
+      [null, 'Left', 'num'],
+    ];
+    show(
+      this.tableHead,
+      h(
+        'tr',
+        null,
+        h('th', { scope: 'col', class: 'check' }, this.selectAll),
+        columns.map(([column, label, className]) =>
+          column === null
+            ? h('th', { scope: 'col', class: className }, label)
+            : sortHeader({ column, label, className, sort: this.sort, onSort: (c) => this.sortBy(c) }),
+        ),
+        h('th', { scope: 'col', class: 'row-actions' }, h('span', { class: 'visually-hidden' }, 'Actions')),
+      ),
+    );
+    refocus(this.tableHead, focused);
+  }
+
+  /**
+   * Sorts the shown page by `column`, reverses it, or goes back to the
+   * engine's order, in turn.
+   * @param {JobColumn} column
+   */
+  sortBy(column) {
+    this.sort = cycleSort(this.sort, column);
+    saveSort(SORT_KEY, this.sort);
+    this.renderHead();
+    this.render();
+  }
+
+  /** The jobs of the page that the name filter shows, in the chosen order. */
   get shownJobs() {
-    return this.feed.jobs.filter((job) => this.query === '' || jobName(job).toLowerCase().includes(this.query));
+    const jobs = this.feed.jobs.filter((job) => this.query === '' || jobName(job).toLowerCase().includes(this.query));
+    const { column, descending } = this.sort;
+    return column === null ? jobs : sortedBy(jobs, (job) => jobSortValue(job, this.feed.sample(job.id), column), descending);
   }
 
   /**
@@ -1481,15 +1638,12 @@ export class Downloads {
 
   /**
    * How many downloads are ticked, with a way to untick them, and how
-   * many of them the name filter hides, which commands leave out. While
-   * downloads are shown the line keeps its room, empty when none is
-   * ticked, so ticking one moves no row.
+   * many of them the name filter hides, which commands leave out.
    * @param {readonly JobSummary[]} shown
    */
   renderSelection(shown) {
     const ticked = this.selection.chosen(shown).length;
     const hidden = this.selection.size - ticked;
-    this.selectionLine.hidden = shown.length === 0 && this.selection.size === 0;
     show(
       this.selectionLine,
       ticked > 0 && h('strong', null, `${count(ticked, 'download')} selected`),
@@ -1572,22 +1726,22 @@ export class Downloads {
       this.goingBack = true;
       void this.page('back').finally(() => (this.goingBack = false));
     }
+    // Shown even with no rows, so picking an empty state moves nothing.
     show(
       this.pager,
-      (feed.jobs.length > 0 || this.earlier.length > 0) &&
-        pagerBar({
-          place: pagePlace({
-            earlier: this.earlier.length,
-            before: feed.before,
-            size: PAGE_SIZE,
-            rows: feed.jobs.length,
-            more,
-            total: counts && group ? groupCount(group, counts) : null,
-          }),
+      pagerBar({
+        place: pagePlace({
+          earlier: this.earlier.length,
+          before: feed.before,
+          size: PAGE_SIZE,
+          rows: feed.jobs.length,
           more,
-          key: 'page',
-          onPage: (direction) => this.page(direction),
+          total: counts && group ? groupCount(group, counts) : null,
         }),
+        more,
+        key: 'page',
+        onPage: (direction) => this.page(direction),
+      }),
     );
 
     const rates = feed.jobs.flatMap((job) => feed.sample(job.id)?.bytes_per_second ?? []);
@@ -1718,12 +1872,14 @@ export class Downloads {
       );
       return;
     }
-    const name = jobName(job);
-    show(
-      this.inspector,
-      this.inspectorHead(name, job),
-      this.tab === 'general' ? this.general(job) : this.engine(job),
-    );
+    // The panel is rebuilt on every update; it keeps its scroll position
+    // while it shows the same download and tab.
+    const shown = `${job.id} ${this.tab}`;
+    const scrolled = this.inspector.dataset.shown === shown ? this.inspector.querySelector('.panel')?.scrollTop ?? 0 : 0;
+    this.inspector.dataset.shown = shown;
+    const panel = this.tab === 'general' ? this.general(job) : this.engine(job);
+    show(this.inspector, this.inspectorHead(jobName(job), job), panel);
+    panel.scrollTop = scrolled;
   }
 
   /**
@@ -1819,27 +1975,42 @@ export class Downloads {
         id: 'inspector-panel',
         'aria-labelledby': 'tab-general',
       },
+      // How it is going on the left, where it goes on the right; the rows
+      // stay put as it runs, so the panel keeps its height.
       h(
         'div',
-        { class: 'big-progress' },
+        { class: 'transfer' },
         h(
           'div',
-          { class: 'figure' },
-          h('span', { class: 'percent' }, shown.percent ?? '—'),
-          h('span', { class: 'saved' }, `${shown.text} saved`),
+          { class: 'big-progress' },
+          h(
+            'div',
+            { class: 'figure' },
+            h('span', { class: 'percent' }, shown.percent ?? '—'),
+            h('span', { class: 'saved' }, `${shown.text} saved`),
+          ),
+          progressBar(shown, state, 'Saved'),
         ),
-        progressBar(shown, state, 'Saved'),
+        this.facts([
+          ['State', h('span', { class: 'state' }, dot(state.status), state.label)],
+          ['Speed', shown.rate ? [shown.rate, shown.left && `, ${shown.left} left`].join('') : '—'],
+          ['Download via', this.via(job)],
+        ]),
       ),
       this.facts([
-        ['State', h('span', { class: 'state' }, dot(state.status), state.label)],
-        ['Speed', shown.rate && [shown.rate, shown.left && `, ${shown.left} left`].join('')],
         ['File', name === undefined ? 'Named when it finishes' : h('span', { class: 'path', title: where.file }, name)],
         ['Type', name && fileKind(name)],
         ['Size', shown.size],
         [job.artifact ? 'Saved in' : 'Saves to', this.folder(job, where.folder)],
-        ['Download via', this.via(job)],
+        ['Unpacked to', job.extraction?.output],
         ...this.source(job),
       ]),
+      unpackNote(job) &&
+        h(
+          'p',
+          { class: `note tone-${job.extraction?.state === 'failed' ? 'bad' : 'warn'}`, 'data-note': 'unpack' },
+          unpackNote(job),
+        ),
       job.failure && h('p', { class: `note tone-${state.status === 'failed' ? 'bad' : 'warn'}` }, explain(job.failure)),
       restartNote(job) && h('p', { class: 'note tone-warn', 'data-note': 'restart' }, restartNote(job)),
     );
@@ -1974,6 +2145,8 @@ export class Downloads {
         ['Package', job.package],
         ['Revision', job.revision],
         ['Generation', job.generation],
+      ]),
+      this.facts([
         ['Root', job.artifact?.root],
         ['Path', job.artifact?.path],
         ['Failure code', job.failure?.code],

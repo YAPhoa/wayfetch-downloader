@@ -58,6 +58,7 @@ impl YtDlp {
                 .map(|dir| ("DENO_DIR", dir.join("deno").into_os_string()))
                 .into_iter()
                 .collect(),
+            confinement: None,
         }
     }
 

@@ -149,6 +149,7 @@ impl Message for Notice {
 }
 
 fn main() -> ExitCode {
+    wayfetch_host::launch_confined_if_asked();
     match Cli::parse().command {
         None => installed::launch(),
         Some(Command::InitRoot(args)) => {
@@ -264,6 +265,7 @@ fn run_on(
             ipc::query,
             ipc::submit,
             ipc::job_command,
+            ipc::extract,
             ipc::collect_links,
             ipc::links_command,
             ipc::update_settings,

@@ -56,6 +56,7 @@
 //! below the root, are reported as unavailable rather than copied (T32 is
 //! later work).
 
+mod extract;
 mod path;
 mod publish;
 mod root;
@@ -64,6 +65,7 @@ mod sys;
 
 use std::io;
 
+pub use extract::{RESERVE_BYTES, Tally, TreeError};
 pub use path::{
     MAX_COMPONENT_BYTES, MAX_DEPTH, MAX_PATH_BYTES, PRIVATE_DIR, PathError, RelativePath,
 };
