@@ -857,7 +857,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   // Emptying the page goes back to the one before it.
   await page.getByRole('checkbox', { name: 'Select all downloads shown' }).check();
   await page.locator('tr[data-job]').first().getByRole('button', { name: /^Actions for / }).click();
-  await (await openMenu(page)).getByRole('menuitem', { name: /^Remove 3 downloads…/ }).click();
+  await (await openMenu(page)).getByRole('menuitem', { name: 'Remove…' }).click();
   await page.getByRole('dialog', { name: 'Remove 3 downloads' }).getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(pager.locator('.page')).toHaveText('Page 1 of 1');
   await expect(pager.locator('.range')).toHaveText('1\u201349 of 49');
@@ -926,6 +926,8 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(linkRow('review-a.bin').locator('td.link-status')).toHaveText('Online');
   await expect(linkRow('review-a.bin').locator('td.host')).toHaveText('127.0.0.1');
   await expect(linkRow('review-a.bin').locator('td.num')).toHaveText('1.0 MiB');
+  // Hovering the name shows just the name.
+  await expect(linkRow('review-a.bin').locator('td.name')).toHaveAttribute('title', 'review-a.bin');
   await expect(linkRow('review-b.bin').locator('td.link-status')).toHaveText('Online');
   expect(fixture.checked.filter((name) => name === 'review-a.bin' || name === 'review-b.bin')).toHaveLength(2);
   await expect(linkRow('ftp://example\\.com/other-scheme\\.bin').locator('td.link-status')).toContainText('Invalid link');
@@ -979,6 +981,25 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(page.locator('.links-page .selection-summary strong')).toHaveText('1 link selected');
   await page.getByRole('checkbox', { name: 'Select all links shown' }).uncheck();
   await page.getByLabel('Filter links').fill('');
+
+  // Ctrl+A (Cmd+A on a Mac) ticks every link shown instead of selecting
+  // the page's text, once links are ticked or the table has focus. In the
+  // filter field it stays the field's own.
+  const summary = page.locator('.links-page .selection-summary strong');
+  await page.keyboard.press('ControlOrMeta+A');
+  await expect(summary).toHaveText('1 link selected');
+  await page.getByLabel('Filter links').blur();
+  await page.keyboard.press('ControlOrMeta+A');
+  await expect(summary).toHaveText('3 links selected');
+  expect(await page.evaluate(() => String(window.getSelection()))).toBe('');
+  const selectAll = page.getByRole('checkbox', { name: 'Select all links shown' });
+  await selectAll.uncheck();
+  await expect(page.locator('.links-page .selection-summary')).not.toContainText('selected');
+  await page.keyboard.press('ControlOrMeta+A');
+  await expect(summary).toHaveText('3 links selected');
+  await selectAll.uncheck();
+  await linkRow('review-a.bin').getByRole('checkbox').check();
+  await expect(summary).toHaveText('1 link selected');
 
   // A new folder for the selected link only: the default stays.
   await page.getByRole('button', { name: 'Save to…' }).click();
@@ -2008,7 +2029,7 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await a.click({ button: 'right' });
     let menu = await openMenu(page);
     await expect(menu.getByRole('menuitem', { name: 'Rename…' })).toHaveCount(0);
-    await menu.getByRole('menuitem', { name: 'Cancel 2 downloads' }).click();
+    await menu.getByRole('menuitem', { name: 'Cancel', exact: true }).click();
     await expect(page.getByText('Cancelled 2 downloads.')).toBeVisible();
     await expect(a.locator('td[data-state]')).toHaveText('Cancelled');
     await expect(b.locator('td[data-state]')).toHaveText('Cancelled');
@@ -2038,7 +2059,7 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await page.getByRole('checkbox', { name: 'Select all downloads shown' }).check();
     await b.getByRole('button', { name: 'Actions for bulk-b.bin' }).click();
     menu = await openMenu(page);
-    await menu.getByRole('menuitem', { name: /^Remove 3 downloads…/ }).click();
+    await menu.getByRole('menuitem', { name: 'Remove…' }).click();
     const dialog = page.getByRole('dialog', { name: 'Remove 3 downloads' });
     await expect(dialog.getByRole('radio', { name: 'Remove from list only (keep files)' })).toBeChecked();
     await dialog.getByRole('button', { name: 'Remove', exact: true }).click();

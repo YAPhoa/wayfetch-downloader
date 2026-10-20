@@ -136,17 +136,6 @@ function refused(error, account, automatic = false) {
   }
 }
 
-/**
- * The hover text of a link's name: where a file's name comes from.
- * @param {CollectedLink} link
- * @param {string | null} name
- */
-function nameTitle(link, name) {
-  if (!link.name_hint) return name;
-  if (link.check === 'online') return `${link.name_hint} (as its server names it)`;
-  return `${link.name_hint} (from the link; the server may name the file differently)`;
-}
-
 export class LinksPage {
   /** @param {LinksContext} context */
   constructor(context) {
@@ -188,6 +177,7 @@ export class LinksPage {
     this.readAgain = false;
     /** @type {ReturnType<typeof setInterval> | undefined} */
     this.timer = undefined;
+    this.onKey = (/** @type {KeyboardEvent} */ event) => this.selectAllKey(event);
 
     this.buttons = {
       start: this.tool('start', 'resume', 'Start selected', () => void this.start(this.chosen().filter(startable))),
@@ -280,6 +270,7 @@ export class LinksPage {
     this.render();
     this.refresh();
     this.timer = setInterval(() => this.refresh(), LINKS_REFRESH);
+    document.addEventListener('keydown', this.onKey);
   }
 
   /** Hides the page and stops reading the list. */
@@ -287,6 +278,23 @@ export class LinksPage {
     this.shown = false;
     this.element.hidden = true;
     clearInterval(this.timer);
+    document.removeEventListener('keydown', this.onKey);
+  }
+
+  /**
+   * Ctrl+A (Cmd+A on a Mac) ticks every link shown, as the header box
+   * does, instead of selecting the page's text: when the table has focus,
+   * or nothing does and some links are already ticked. Fields, menus and
+   * dialogs keep their own Select all.
+   * @param {KeyboardEvent} event
+   */
+  selectAllKey(event) {
+    if (event.key.toLowerCase() !== 'a' || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+    const target = /** @type {Element} */ (event.target);
+    const inTable = this.table.contains(target) && !(target instanceof HTMLInputElement && target.type !== 'checkbox');
+    if (!inTable && !(target === document.body && this.selected.size > 0)) return;
+    event.preventDefault();
+    this.selectShown(true);
   }
 
   /**
@@ -1013,7 +1021,7 @@ export class LinksPage {
         'td',
         {
           class: name ? 'name' : 'name unknown',
-          title: nameTitle(link, name),
+          title: link.name_hint ?? name,
         },
         h('span', { class: 'name-text' }, shownName),
         link.found_on && h('span', { class: 'found-on', title: link.found_on }, `Found on ${link.found_on}`),
