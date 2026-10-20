@@ -44,14 +44,28 @@ The root [`Dockerfile`](../Dockerfile) builds `wayfetchd` with the toolchain pin
 - `cap_drop: [ALL]`, `no-new-privileges:true`, `pids_limit: 128`, and `init: true`
 - `stop_grace_period: 45s` (covering the 5s HTTP API drain plus 30s engine task shutdown before Docker sends `SIGKILL`)
 
-### 1. Build the Image & Prepare Host Directories
+### 1. Choose the Image & Prepare Host Directories
+
+Compose defaults to `ghcr.io/yaphoa/wayfetch-downloader:v0.1.0`. Published images
+currently support **Linux x86-64 (`amd64`)**. Set `WAYFETCH_IMAGE` to choose a
+different version or pin an immutable `ghcr.io/yaphoa/wayfetch-downloader@sha256:…`
+digest. The image includes the web UI; it needs no separate frontend container.
+
+The **Container image** GitHub Actions workflow builds and runs the Compose
+integration tests before publishing. Published stable releases also update
+`latest`; a manual run with `ref: main` publishes `edge`. A manual version-tag
+run publishes that version without updating `latest`. Every published image
+also has a `sha-<full-commit>` tag, source labels, a BuildKit provenance
+attestation, and an SBOM. Prefer a version or digest for deployments: `edge`
+tracks development and can contain incompatible changes.
+
+GHCR packages initially default to private. A private package requires
+`docker login ghcr.io` with an account allowed to read it; public packages
+can be pulled without signing in.
 
 The container writes only to three explicit bind mounts (`/state`, `/downloads`, `/tokens`) with `create_host_path: false`—Compose refuses to start if a host directory is missing, preventing accidental writes to an unmounted dataset or container overlay.
 
 ```sh
-# Build from the repository root
-docker build -t wayfetch:local .
-
 # Prepare the three host directories (change ownership only on these directories,
 # never recursively across an entire media dataset)
 export WAYFETCH_STATE=/srv/wayfetch/state \
@@ -64,6 +78,16 @@ sudo chmod 700 "$WAYFETCH_STATE" "$WAYFETCH_TOKENS"
 
 Save `WAYFETCH_STATE`, `WAYFETCH_TOKENS`, and `WAYFETCH_DOWNLOADS` in a `.env` file beside `deploy/compose.yaml` so you do not need to re-export them.
 
+Pull the prebuilt image after setting the paths:
+
+```sh
+docker compose -f deploy/compose.yaml pull
+```
+
+To build locally instead, set and save `WAYFETCH_IMAGE=wayfetch:local`, then run
+`docker compose -f deploy/compose.yaml build`. Local builds use the same
+Dockerfile as GHCR publishing.
+
 ### 2. Initialize the Download Root & Start
 
 Initializing the download root is an explicit one-time step so an unmounted ZFS/NFS dataset is never mistaken for an empty download directory:
@@ -71,7 +95,7 @@ Initializing the download root is an explicit one-time step so an unmounted ZFS/
 ```sh
 docker compose -f deploy/compose.yaml run --rm wayfetchd \
     init-root --state-dir /state /downloads
-docker compose -f deploy/compose.yaml up -d
+docker compose -f deploy/compose.yaml up -d --no-build
 docker compose -f deploy/compose.yaml ps          # becomes healthy once ready
 ```
 
