@@ -517,9 +517,8 @@ table.jobs {
 
 .jobs td { border-bottom-color: var(--row-line); }
 
-/* A thin rule between the data columns, from the header down. Drawn
-   inside each cell, like the header's, and above a header's sort button. */
-.jobs td:not(.check) + td:not(.row-actions) { box-shadow: inset 1px 0 0 var(--row-line); }
+/* A thin rule between the data columns' headers, drawn inside the
+   sticky cell and above its sort button. */
 .jobs th:not(.check) + th:not(.row-actions)::before {
   content: '';
   position: absolute;
