@@ -28,7 +28,7 @@ use std::time::Duration;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::domain::name::DiagnosticText;
 use wayfetch_engine::extract::{
-    Archive, Entry, EntryKind, ExtractError, Extractor, Layout, MAX_ENTRIES,
+    Archive, Entry, EntryKind, ExtractError, Extractor, Halt, Layout, MAX_ENTRIES,
 };
 use wayfetch_engine::protocol::media::{PluginRole, PluginState, PluginSummary};
 use wayfetch_engine::transfer::writer::BoxFuture;
@@ -250,6 +250,7 @@ fn failure(error: RunError, password: bool) -> ExtractError {
                     .into(),
             );
         }
+        RunError::Stopped => return ExtractError::Stopped,
         RunError::TooMuchOutput(_) => {
             return ExtractError::Unsupported(format!(
                 "The archive holds more than {MAX_ENTRIES} files."
@@ -304,7 +305,11 @@ impl Extractor for SevenZip {
         summary
     }
 
-    fn list<'a>(&'a self, archive: Archive<'a>) -> BoxFuture<'a, Result<Vec<Entry>, ExtractError>> {
+    fn list<'a>(
+        &'a self,
+        archive: Archive<'a>,
+        halt: Halt,
+    ) -> BoxFuture<'a, Result<Vec<Entry>, ExtractError>> {
         Box::pin(async move {
             let limits = Limits {
                 deadline: LIST_DEADLINE,
@@ -319,6 +324,7 @@ impl Extractor for SevenZip {
                     input.as_ref().map(Secret::expose),
                     Some(&reading(&archive)),
                     limits,
+                    halt,
                 )
                 .await
                 .map_err(|e| failure(e, archive.password.is_some()))?;
@@ -331,6 +337,7 @@ impl Extractor for SevenZip {
         archive: Archive<'a>,
         output: &'a Path,
         budget: u64,
+        halt: Halt,
     ) -> BoxFuture<'a, Result<(), ExtractError>> {
         Box::pin(async move {
             let limits = Limits {
@@ -348,6 +355,7 @@ impl Extractor for SevenZip {
                             input.as_ref().map(Secret::expose),
                             Some(&confinement),
                             limits,
+                            halt,
                         )
                         .await
                 }
@@ -358,6 +366,7 @@ impl Extractor for SevenZip {
                             (decompress, Some(&reading(&archive))),
                             (unpack, Some(&writing)),
                             limits,
+                            halt,
                         )
                         .await
                 }

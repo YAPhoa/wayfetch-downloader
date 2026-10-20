@@ -17,7 +17,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use support::{ALL, envelope, job, shutdown, wait_for};
 use wayfetch_engine::EngineOwner;
-use wayfetch_engine::extract::{Archive, Entry, EntryKind, ExtractError, Extractor};
+use wayfetch_engine::extract::{Archive, Entry, EntryKind, ExtractError, Extractor, Halt};
 use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, TransportError};
@@ -167,7 +167,11 @@ impl Extractor for Fake {
         }
     }
 
-    fn list<'a>(&'a self, archive: Archive<'a>) -> BoxFuture<'a, Result<Vec<Entry>, ExtractError>> {
+    fn list<'a>(
+        &'a self,
+        archive: Archive<'a>,
+        _halt: Halt,
+    ) -> BoxFuture<'a, Result<Vec<Entry>, ExtractError>> {
         Box::pin(async move {
             self.listings.fetch_add(1, Ordering::SeqCst);
             Ok(match name(&archive).as_str() {
@@ -192,8 +196,9 @@ impl Extractor for Fake {
         archive: Archive<'a>,
         output: &'a Path,
         _budget: u64,
+        halt: Halt,
     ) -> BoxFuture<'a, Result<(), ExtractError>> {
-        Box::pin(async move {
+        let unpack = async move {
             let name = name(&archive);
             self.started.lock().unwrap().push(name.clone());
             self.volumes.lock().unwrap().push(
@@ -243,6 +248,12 @@ impl Extractor for Fake {
                 }
             }
             Ok(())
+        };
+        Box::pin(async move {
+            tokio::select! {
+                done = unpack => done,
+                () = halt => Err(ExtractError::Stopped),
+            }
         })
     }
 }
@@ -637,7 +648,8 @@ async fn cancelling_and_restarting_keep_the_archive_and_try_again() {
         expected_revision: running.revision,
         expected_generation: running.extraction.as_ref().unwrap().generation.unwrap(),
     };
-    command(&owner, cancel.clone()).await.unwrap();
+    let sent = envelope(&owner, cancel.clone());
+    owner.handle().execute(sent.clone(), ALL).await.unwrap();
     let cancelled = unpacking(&owner, ids[0], ExtractionState::Cancelled).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while private_folders(&env.root) > 0 {
@@ -652,6 +664,9 @@ async fn cancelling_and_restarting_keep_the_archive_and_try_again() {
     let again = unpacking(&owner, ids[0], ExtractionState::Extracting).await;
     let late = command(&owner, cancel).await.unwrap_err();
     assert_eq!(late.code, ErrorCode::RevisionConflict);
+    // The very same request, sent again, is answered as before but stops
+    // nothing.
+    owner.handle().execute(sent, ALL).await.unwrap();
     let stale = ExtractRequest {
         idempotency_key: IdempotencyKey::generate(),
         target: owner.identity().instance,

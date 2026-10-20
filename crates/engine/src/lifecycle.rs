@@ -1398,7 +1398,11 @@ impl Coordinator {
             _ => None,
         };
         let stop_extraction = match envelope.command {
-            Command::CancelExtraction { job, .. } => Some(job),
+            Command::CancelExtraction {
+                job,
+                expected_generation,
+                ..
+            } => Some((job, expected_generation)),
             _ => None,
         };
         let (result, interrupt, current) = self
@@ -1444,8 +1448,10 @@ impl Coordinator {
             self.bandwidth.set(self.download_speed_limit().value);
             self.extractions.automatic = saved.extract_archives;
         }
-        if let (Some(job), Ok(_)) = (stop_extraction, &result) {
-            self.extractions.stop(job);
+        // Only the run the request named stops, even when an exact replay
+        // answers with the first request's result after a later run began.
+        if let (Some((job, generation)), Ok(_)) = (stop_extraction, &result) {
+            self.extractions.stop(job, generation);
         }
         if let Some(root) = gone {
             self.destinations.remove(root);

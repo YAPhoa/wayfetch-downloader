@@ -18,7 +18,7 @@ use wayfetch_adapters::confine::{self, Confinement};
 use wayfetch_adapters::plugin::{Check, Describe, Limits, Program, RunError};
 use wayfetch_adapters::sevenzip::{MEMORY_BYTES, SevenZip};
 use wayfetch_engine::accounts::Secret;
-use wayfetch_engine::extract::{Archive, EntryKind, ExtractError, Extractor, Layout};
+use wayfetch_engine::extract::{Archive, EntryKind, ExtractError, Extractor, Halt, Layout};
 use wayfetch_engine::protocol::media::PluginRole;
 
 type Test = fn() -> Pin<Box<dyn Future<Output = ()>>>;
@@ -31,6 +31,9 @@ fn main() -> ExitCode {
         }),
         ("a_run_has_no_network_and_bounded_memory", || {
             Box::pin(a_run_has_no_network_and_bounded_memory())
+        }),
+        ("nothing_a_run_starts_outlives_it", || {
+            Box::pin(nothing_a_run_starts_outlives_it())
         }),
         ("seven_zip_unpacks_confined", || {
             Box::pin(seven_zip_unpacks_confined())
@@ -95,8 +98,18 @@ async fn run(
     args: &[&Path],
     confinement: &Confinement,
 ) -> Result<String, String> {
+    run_until(program, args, confinement, std::future::pending()).await
+}
+
+/// The same, stopped when `stop` resolves.
+async fn run_until(
+    program: &Program,
+    args: &[&Path],
+    confinement: &Confinement,
+    stop: impl Future<Output = ()>,
+) -> Result<String, String> {
     match program
-        .run_with(args, None, Some(confinement), LIMITS)
+        .run_with(args, None, Some(confinement), LIMITS, stop)
         .await
     {
         Ok(out) => Ok(String::from_utf8(out.stdout).unwrap()),
@@ -115,6 +128,8 @@ async fn a_run_reaches_only_what_it_is_given() {
     );
     std::fs::write(&given, "given").unwrap();
     std::fs::write(&secret, "secret").unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let modified = std::fs::metadata(&given).unwrap().modified().unwrap();
     std::fs::create_dir(&output).unwrap();
     std::fs::create_dir(&elsewhere).unwrap();
     let helper = script(
@@ -124,6 +139,9 @@ async fn a_run_reaches_only_what_it_is_given() {
   write) printf x > "$2/made" && mkdir "$2/d" && printf y > "$2/d/f" && printf ok ;;
   truncate) : > "$2" ;;
   link) ln -s /etc/passwd "$2/link" ;;
+  chmod) chmod 777 "$2" ;;
+  chown) chown "$(id -u)" "$2" ;;
+  touch) touch -d 2000-01-01 "$2" ;;
   env) printf '%s|%s' "${HOME-unset}" "$LC_ALL" ;;
   *) printf '%s' "$(pwd)" ;;
 esac"#,
@@ -155,13 +173,20 @@ esac"#,
         run(&helper, &[&arg("env")], &confinement).await.unwrap(),
         "unset|C.UTF-8"
     );
-    // Everything else is refused.
+    // Everything else is refused, and no file's permissions, owner, or
+    // times change, not even in its own folder.
+    let made = output.join("made");
     for (what, target) in [
         ("read", &secret),
         ("write", &elsewhere),
         ("truncate", &given),
         ("link", &output),
         ("read", &PathBuf::from("/etc/passwd")),
+        ("chmod", &secret),
+        ("chmod", &made),
+        ("chown", &secret),
+        ("touch", &given),
+        ("touch", &made),
     ] {
         let refused = run(&helper, &[&arg(what), target], &confinement).await;
         assert!(
@@ -174,6 +199,68 @@ esac"#,
     }
     assert_eq!(std::fs::read(&given).unwrap(), b"given");
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode(&secret), 0o600);
+    assert_eq!(
+        std::fs::metadata(&given).unwrap().modified().unwrap(),
+        modified
+    );
+}
+
+async fn nothing_a_run_starts_outlives_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("out");
+    std::fs::create_dir(&output).unwrap();
+    let helper = script(
+        dir.path(),
+        r#"case "$1" in
+  spawn)
+    ( while :; do printf x >> "$2/grew"; sleep 0.01; done ) </dev/null >/dev/null 2>&1 &
+    [ "$3" = stay ] && sleep 60
+    printf ok ;;
+  escape) setsid sh -c 'printf x > "$1/escaped"' sh "$2" ;;
+esac"#,
+    )
+    .await;
+    let confinement = Confinement::new(MEMORY_BYTES).write(&output, 1 << 20);
+    let grew = output.join("grew");
+    // Whether the file it grows still grows.
+    let growing = || async {
+        let before = std::fs::metadata(&grew).map(|m| m.len()).unwrap_or(0);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::fs::metadata(&grew).map(|m| m.len()).unwrap_or(0) != before
+    };
+    let path = |a: &str| PathBuf::from(a);
+
+    // Stopped, it returns once neither it nor what it started runs.
+    let stopped = run_until(
+        &helper,
+        &[&path("spawn"), &output, &path("stay")],
+        &confinement,
+        tokio::time::sleep(Duration::from_millis(300)),
+    )
+    .await;
+    assert_eq!(stopped, Err(RunError::Stopped.to_string()));
+    assert!(std::fs::metadata(&grew).unwrap().len() > 0);
+    assert!(!growing().await);
+
+    // Finished, what it left running is stopped too.
+    std::fs::remove_file(&grew).unwrap();
+    let finished = run(&helper, &[&path("spawn"), &output], &confinement).await;
+    assert_eq!(finished.as_deref(), Ok("ok"));
+    assert!(!growing().await);
+
+    // And nothing it starts can leave its process group.
+    if Path::new("/usr/bin/setsid").is_file() {
+        let escaped = run(&helper, &[&path("escape"), &output], &confinement).await;
+        assert!(
+            escaped
+                .as_ref()
+                .is_err_and(|e| e.contains("Permission denied")),
+            "{escaped:?}"
+        );
+        assert!(!output.join("escaped").exists());
+    }
 }
 
 async fn a_run_has_no_network_and_bounded_memory() {
@@ -246,6 +333,11 @@ async fn seven_zip() -> Option<SevenZip> {
     Some(zip)
 }
 
+/// A halt that never comes.
+fn never() -> Halt {
+    Box::pin(std::future::pending())
+}
+
 /// Runs 7-Zip with `args` in `dir`, unconfined, to make test archives.
 fn make(dir: &Path, args: &[&str]) {
     let path = std::env::var_os("WAYFETCH_TEST_7ZIP").unwrap();
@@ -290,7 +382,10 @@ async fn seven_zip_unpacks_confined() {
         .collect();
     assert!(volumes.len() >= 2, "{volumes:?}");
 
-    let entries = zip.list(archive_at(&first, &volumes, None)).await.unwrap();
+    let entries = zip
+        .list(archive_at(&first, &volumes, None), never())
+        .await
+        .unwrap();
     let mut names: Vec<_> = entries.iter().map(|e| (e.path.as_str(), e.kind)).collect();
     names.sort_unstable_by_key(|(path, _)| *path);
     assert_eq!(
@@ -303,7 +398,7 @@ async fn seven_zip_unpacks_confined() {
     );
     let out = dir.path().join("out");
     std::fs::create_dir(&out).unwrap();
-    zip.extract(archive_at(&first, &volumes, None), &out, 1 << 30)
+    zip.extract(archive_at(&first, &volumes, None), &out, 1 << 30, never())
         .await
         .unwrap();
     assert_eq!(std::fs::read(out.join("d/noise.bin")).unwrap(), noise);
@@ -314,7 +409,12 @@ async fn seven_zip_unpacks_confined() {
     let partial = dir.path().join("partial");
     std::fs::create_dir(&partial).unwrap();
     let refused = zip
-        .extract(archive_at(&first, &volumes, None), &partial, 1 << 30)
+        .extract(
+            archive_at(&first, &volumes, None),
+            &partial,
+            1 << 30,
+            never(),
+        )
         .await;
     assert!(refused.is_err(), "{refused:?}");
 
@@ -323,7 +423,7 @@ async fn seven_zip_unpacks_confined() {
     std::fs::create_dir(&small).unwrap();
     volumes.push(last);
     let stopped = zip
-        .extract(archive_at(&first, &volumes, None), &small, 100_000)
+        .extract(archive_at(&first, &volumes, None), &small, 100_000, never())
         .await;
     assert!(
         matches!(stopped, Err(ExtractError::Failed(_))),
@@ -344,17 +444,18 @@ async fn a_protected_archive_needs_its_password() {
     );
     let path = dir.path().join("p.7z");
     assert_eq!(
-        zip.list(archive_at(&path, &[], None)).await,
+        zip.list(archive_at(&path, &[], None), never()).await,
         Err(ExtractError::NeedsPassword)
     );
     let wrong = Secret::from_text("nope");
     assert_eq!(
-        zip.list(archive_at(&path, &[], Some(&wrong))).await,
+        zip.list(archive_at(&path, &[], Some(&wrong)), never())
+            .await,
         Err(ExtractError::WrongPassword)
     );
     let right = Secret::from_text("secret word");
     let entries = zip
-        .list(archive_at(&path, &[], Some(&right)))
+        .list(archive_at(&path, &[], Some(&right)), never())
         .await
         .unwrap();
     let mut names: Vec<_> = entries.iter().map(|e| e.path.as_str()).collect();
@@ -362,7 +463,7 @@ async fn a_protected_archive_needs_its_password() {
     assert_eq!(names, ["a.txt", "d", "d/b.txt"]);
     let out = dir.path().join("out");
     std::fs::create_dir(&out).unwrap();
-    zip.extract(archive_at(&path, &[], Some(&right)), &out, 1 << 20)
+    zip.extract(archive_at(&path, &[], Some(&right)), &out, 1 << 20, never())
         .await
         .unwrap();
     assert_eq!(
@@ -387,7 +488,7 @@ async fn a_compressed_tar_unpacks_through_a_pipe() {
         layout: Layout::CompressedTar,
         password: None,
     };
-    zip.extract(tar, &out, 1 << 20).await.unwrap();
+    zip.extract(tar, &out, 1 << 20, never()).await.unwrap();
     assert_eq!(std::fs::read_to_string(out.join("a.txt")).unwrap(), "hello");
     // A damaged stream is reported, not unpacked.
     std::fs::write(dir.path().join("bad.tar.gz"), b"\x1f\x8b\x08\x00junk").unwrap();
@@ -397,5 +498,5 @@ async fn a_compressed_tar_unpacks_through_a_pipe() {
     };
     let empty = dir.path().join("empty");
     std::fs::create_dir(&empty).unwrap();
-    assert!(zip.extract(bad, &empty, 1 << 20).await.is_err());
+    assert!(zip.extract(bad, &empty, 1 << 20, never()).await.is_err());
 }

@@ -3,11 +3,14 @@
 //!
 //! A confined run sees only what it is given: the files it may read, one
 //! folder it may write in, and the system's program files. It cannot open
-//! a socket, gets an empty environment, and runs under memory, file size,
-//! and core dump limits. On Linux, Landlock confines its files (ABI 3,
-//! Linux 6.2, so it cannot truncate files it may only read), seccomp
-//! refuses sockets, and resource limits bound it; the restrictions bind
-//! the program and anything it starts. It inherits no open file but its
+//! a socket, change any file's permissions, owner, times, or extended
+//! attributes, or leave its process group; it gets an empty environment,
+//! runs under memory, file size, and core dump limits, and is killed if
+//! Wayfetch exits. On Linux, Landlock confines its files (ABI 3, Linux
+//! 6.2, so it cannot truncate files it may only read) and, from Linux
+//! 6.12, signals to other processes; seccomp refuses the rest, and
+//! resource limits bound it. The restrictions bind the program and
+//! anything it starts. It inherits no open file but its
 //! standard input and output, since every file Wayfetch opens is closed
 //! when a program starts.
 //!
@@ -184,10 +187,13 @@ mod imp {
 
     use landlock::{
         ABI, Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-        RulesetAttr, RulesetCreatedAttr,
+        RulesetAttr, RulesetCreatedAttr, Scope,
     };
-    use rustix::process::{Resource, Rlimit, setrlimit};
-    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
+    use rustix::process::{Resource, Rlimit, Signal, set_parent_process_death_signal, setrlimit};
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule, TargetArch,
+    };
 
     use super::Confinement;
 
@@ -200,18 +206,70 @@ mod imp {
     /// through a shell script, still starts.
     const SYSTEM: &[&str] = &["/usr", "/lib", "/lib64", "/lib32", "/bin", "/sbin"];
 
-    /// System calls a confined run may not make: no sockets, so no
-    /// network, and no io_uring, which could open them indirectly.
+    /// System calls a confined run may not make:
+    /// - sockets, so no network, and io_uring, which could open them
+    ///   indirectly;
+    /// - changes to a file's permissions, owner, times, or extended
+    ///   attributes, which Landlock does not confine, so no file outside
+    ///   the run's folder can be changed that way (7-Zip sets a file's
+    ///   permissions as it creates it, so it loses only stored times);
+    /// - leaving its process group, so stopping the group stops every
+    ///   process the run started.
     const REFUSED: &[i64] = &[
         libc::SYS_socket,
         libc::SYS_io_uring_setup,
         libc::SYS_io_uring_enter,
         libc::SYS_io_uring_register,
+        libc::SYS_fchmod,
+        libc::SYS_fchmodat,
+        SYS_FCHMODAT2,
+        libc::SYS_fchown,
+        libc::SYS_fchownat,
+        libc::SYS_utimensat,
+        libc::SYS_setxattr,
+        libc::SYS_lsetxattr,
+        libc::SYS_fsetxattr,
+        SYS_SETXATTRAT,
+        libc::SYS_removexattr,
+        libc::SYS_lremovexattr,
+        libc::SYS_fremovexattr,
+        SYS_REMOVEXATTRAT,
+        libc::SYS_setsid,
+        libc::SYS_setpgid,
     ];
+
+    /// The same, by their older names that only some architectures have.
+    #[cfg(target_arch = "x86_64")]
+    const REFUSED_LEGACY: &[i64] = &[
+        libc::SYS_chmod,
+        libc::SYS_chown,
+        libc::SYS_lchown,
+        libc::SYS_utime,
+        libc::SYS_utimes,
+        libc::SYS_futimesat,
+    ];
+    #[cfg(not(target_arch = "x86_64"))]
+    const REFUSED_LEGACY: &[i64] = &[];
+
+    // System calls added since Linux 5.1 share one number on every
+    // architecture; these are not yet in `libc` for all of them.
+    const SYS_FCHMODAT2: i64 = 452;
+    const SYS_SETXATTRAT: i64 = 463;
+    const SYS_REMOVEXATTRAT: i64 = 466;
+
+    /// `ioctl` requests a confined run may not make: changing a file's
+    /// attribute flags (`chattr`), `FS_IOC_SETFLAGS` in both widths and
+    /// `FS_IOC_FSSETXATTR`.
+    const REFUSED_IOCTLS: &[u64] = &[0x4008_6602, 0x4004_6602, 0x401c_5820];
 
     /// Restricts this process, which runs only the launcher, as
     /// `confinement` says, before it starts `program`.
     pub(super) fn restrict(confinement: &Confinement, program: &Path) -> Result<(), String> {
+        // Stopped if Wayfetch is, rather than left writing to a folder the
+        // next start removes. The signal follows the thread that started
+        // the run, which in an async runtime lives as long as it does.
+        set_parent_process_death_signal(Some(Signal::KILL))
+            .map_err(|e| format!("a run cannot be tied to Wayfetch: {e}"))?;
         let ruleset = ruleset(confinement, program)
             .map_err(|e| format!("Landlock cannot confine helper programs here: {e}"))?;
         let filter =
@@ -254,7 +312,12 @@ mod imp {
         let mut ruleset = Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
             .handle_access(AccessFs::from_all(abi))?
-            .create()?;
+            // No signals to processes outside the run, where the kernel
+            // can refuse them (Linux 6.12).
+            .set_compatibility(CompatLevel::BestEffort)
+            .scope(Scope::Signal)?
+            .create()?
+            .set_compatibility(CompatLevel::HardRequirement);
         for dir in SYSTEM.iter().map(Path::new).filter(|d| d.is_dir()) {
             ruleset = ruleset.add_rule(PathBeneath::new(PathFd::new(dir)?, run))?;
         }
@@ -293,12 +356,23 @@ mod imp {
         Ok(ruleset)
     }
 
-    /// The seccomp filter refusing [`REFUSED`] with `EACCES`.
+    /// The seccomp filter refusing [`REFUSED`] and [`REFUSED_IOCTLS`]
+    /// with `EACCES`.
     fn filter() -> Result<BpfProgram, seccompiler::BackendError> {
-        let rules = REFUSED
+        let mut rules = REFUSED
             .iter()
+            .chain(REFUSED_LEGACY)
             .map(|&call| (call, Vec::new()))
             .collect::<BTreeMap<_, _>>();
+        let ioctls = REFUSED_IOCTLS
+            .iter()
+            .map(|&request| {
+                let condition =
+                    SeccompCondition::new(1, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, request)?;
+                SeccompRule::new(vec![condition])
+            })
+            .collect::<Result<_, _>>()?;
+        rules.insert(libc::SYS_ioctl, ioctls);
         SeccompFilter::new(
             rules,
             SeccompAction::Allow,

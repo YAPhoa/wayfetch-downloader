@@ -82,6 +82,9 @@ pub enum ExtractError {
     /// The extractor failed some other way.
     #[error("{0}")]
     Failed(String),
+    /// It was halted, and nothing it started still runs.
+    #[error("unpacking was stopped")]
+    Stopped,
 }
 
 /// An archive to list or unpack.
@@ -98,6 +101,12 @@ pub struct Archive<'a> {
     pub password: Option<&'a Secret>,
 }
 
+/// Resolves when an extractor's run must stop. The run then stops all it
+/// started and returns [`ExtractError::Stopped`] only once none of it can
+/// still write, so its output folder can be removed. Dropping a run's
+/// future instead stops it without that wait.
+pub type Halt = BoxFuture<'static, ()>;
+
 /// Lists and unpacks archives.
 pub trait Extractor: Send + Sync + 'static {
     /// The plugin, and whether it can be used.
@@ -109,16 +118,22 @@ pub trait Extractor: Send + Sync + 'static {
     }
 
     /// The entries of `archive`, at most [`MAX_ENTRIES`]; more is an
-    /// error. Dropping the future stops it.
-    fn list<'a>(&'a self, archive: Archive<'a>) -> BoxFuture<'a, Result<Vec<Entry>, ExtractError>>;
+    /// error. Stops when `halt` resolves (see [`Halt`]).
+    fn list<'a>(
+        &'a self,
+        archive: Archive<'a>,
+        halt: Halt,
+    ) -> BoxFuture<'a, Result<Vec<Entry>, ExtractError>>;
 
     /// Unpacks `archive` into the empty folder `output`, writing no file
-    /// larger than `budget` bytes. Dropping the future stops it at once.
+    /// larger than `budget` bytes. Stops when `halt` resolves (see
+    /// [`Halt`]).
     fn extract<'a>(
         &'a self,
         archive: Archive<'a>,
         output: &'a Path,
         budget: u64,
+        halt: Halt,
     ) -> BoxFuture<'a, Result<(), ExtractError>>;
 }
 

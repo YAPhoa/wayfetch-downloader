@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use wayfetch_domain::id::JobId;
+use wayfetch_domain::version::Generation;
 use wayfetch_protocol::media::PluginSummary;
 use wayfetch_protocol::{Command, CommandEnvelope, CommandResult, ErrorCode, ProtocolError};
 
@@ -30,8 +31,8 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Default)]
 pub(super) struct Extractions {
     extractor: Option<Arc<dyn Extractor>>,
-    /// The attempt running, and what stops it.
-    running: Option<(JobId, CancellationToken)>,
+    /// The attempt running, its generation, and what stops it.
+    running: Option<(JobId, Generation, CancellationToken)>,
     /// Whether archives are queued as their downloads complete.
     pub(super) automatic: bool,
     /// Passwords given for archives' next attempts, until they expire.
@@ -74,10 +75,11 @@ impl Extractions {
         self.passwords.insert(job, (password, Instant::now()))
     }
 
-    /// Stops `job`'s attempt, if it is running.
-    pub(super) fn stop(&self, job: JobId) {
-        if let Some((running, cancel)) = &self.running
-            && *running == job
+    /// Stops `job`'s attempt of `generation`, if it is running: a
+    /// replayed stop of an earlier attempt leaves a later one running.
+    pub(super) fn stop(&self, job: JobId, generation: Generation) {
+        if let Some((running, run, cancel)) = &self.running
+            && (*running, *run) == (job, generation)
         {
             cancel.cancel();
         }
@@ -112,7 +114,7 @@ impl Coordinator {
             .filter(|(_, at)| at.elapsed() < PASSWORD_TTL)
             .map(|(password, _)| password);
         let cancel = self.supervisor.cancel.child_token();
-        self.extractions.running = Some((start.job, cancel.clone()));
+        self.extractions.running = Some((start.job, start.generation, cancel.clone()));
         let attempt = Attempt {
             store: self.client.clone(),
             fs: Probes::new(self.supervisor.guard()),
@@ -138,7 +140,7 @@ impl Coordinator {
             .extractions
             .running
             .as_ref()
-            .is_some_and(|(running, _)| *running == job)
+            .is_some_and(|(running, _, _)| *running == job)
         {
             self.extractions.running = None;
         }
@@ -272,6 +274,7 @@ fn extractor_problem(e: ExtractError) -> ExtractionEnd {
         ExtractError::Unsupported(why) | ExtractError::Damaged(why) | ExtractError::Failed(why) => {
             ExtractionEnd::Failed(why)
         }
+        ExtractError::Stopped => ExtractionEnd::Failed("Unpacking was stopped.".into()),
     }
 }
 
@@ -390,9 +393,10 @@ impl Attempt {
         // it is written instead.
         let declared = if self.start.layout == Layout::Direct {
             let entries = self
-                .cancellable(self.extractor.list(archive))
-                .await?
-                .map_err(|e| Stop::End(extractor_problem(e)))?;
+                .extractor
+                .list(archive, halt(&self.cancel))
+                .await
+                .map_err(ended)?;
             if self.password.is_none() && entries.iter().any(|e| e.encrypted) {
                 return Err(ExtractionEnd::NeedsPassword(None).into());
             }
@@ -401,39 +405,33 @@ impl Attempt {
             None
         };
         let budget = extract::budget(declared, self.start.archive.size);
-        let unpacking = self.extractor.extract(archive, output, budget);
+        // Halted when the attempt is cancelled or the watch refuses what
+        // it writes; either way it returns once nothing it started runs.
+        let halting = self.cancel.child_token();
+        let unpacking = self
+            .extractor
+            .extract(archive, output, budget, halt(&halting));
         tokio::pin!(unpacking);
         let mut watch = tokio::time::interval(WATCH_INTERVAL);
-        loop {
+        let mut refused = None;
+        let done = loop {
             tokio::select! {
-                () = self.cancel.cancelled() => return Err(Stop::Cancelled),
-                done = &mut unpacking => {
-                    done.map_err(|e| Stop::End(extractor_problem(e)))?;
-                    break;
-                }
-                _ = watch.tick() => {
-                    let staging = self.start.staging.clone();
-                    let (tally, free) = self
-                        .on_root(root, move |root| root.tally_extraction(&staging, budget))
-                        .await?
-                        .map_err(|e| Stop::End(folder_problem(&e)))?;
-                    if tally.bytes > budget || tally.entries > extract::MAX_ENTRIES {
-                        return Err(ExtractionEnd::Failed(
-                            "The archive unpacks to far more than it should; it may be a \
-                             decompression bomb."
-                                .into(),
-                        )
-                        .into());
-                    }
-                    if free.is_some_and(|free| free < RESERVE_BYTES) {
-                        return Err(ExtractionEnd::Failed(
-                            "The download folder's drive is almost full.".into(),
-                        )
-                        .into());
+                done = &mut unpacking => break done,
+                _ = watch.tick(), if refused.is_none() => {
+                    if let Err(stop) = self.measure(root, budget).await {
+                        refused = Some(stop);
+                        halting.cancel();
                     }
                 }
             }
+        };
+        if let Some(stop) = refused {
+            return Err(stop);
         }
+        if self.cancel.is_cancelled() {
+            return Err(Stop::Cancelled);
+        }
+        done.map_err(ended)?;
         let (staging, parent, stem) = (
             self.start.staging.clone(),
             self.start.archive.path.split_last().0.map(str::to_owned),
@@ -451,11 +449,41 @@ impl Attempt {
         })
     }
 
-    /// `work`, unless the attempt is cancelled first.
-    async fn cancellable<T>(&self, work: impl Future<Output = T>) -> Result<T, Stop> {
-        tokio::select! {
-            () = self.cancel.cancelled() => Err(Stop::Cancelled),
-            done = work => Ok(done),
+    /// Measures what the attempt has written so far, refusing more than
+    /// `budget` or a drive nearly full.
+    async fn measure(&self, root: &Arc<Root>, budget: u64) -> Result<(), Stop> {
+        let staging = self.start.staging.clone();
+        let (tally, free) = self
+            .on_root(root, move |root| root.tally_extraction(&staging, budget))
+            .await?
+            .map_err(|e| Stop::End(folder_problem(&e)))?;
+        if tally.bytes > budget || tally.entries > extract::MAX_ENTRIES {
+            return Err(ExtractionEnd::Failed(
+                "The archive unpacks to far more than it should; it may be a \
+                 decompression bomb."
+                    .into(),
+            )
+            .into());
         }
+        if free.is_some_and(|free| free < RESERVE_BYTES) {
+            return Err(ExtractionEnd::Failed(
+                "The download folder's drive is almost full.".into(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+}
+
+/// What halts an extractor's run: `token` cancelled.
+fn halt(token: &CancellationToken) -> extract::Halt {
+    Box::pin(token.clone().cancelled_owned())
+}
+
+/// How an extractor's failure ends the attempt: halted, it was cancelled.
+fn ended(e: ExtractError) -> Stop {
+    match e {
+        ExtractError::Stopped => Stop::Cancelled,
+        e => Stop::End(extractor_problem(e)),
     }
 }
