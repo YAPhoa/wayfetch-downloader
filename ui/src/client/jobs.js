@@ -19,8 +19,10 @@
  * filter is one; anything else is drawn in a neutral colour.
  * @typedef {'active' | 'paused' | 'queued' | 'failed' | 'cancelled' | 'done'} Status
  *
- * A column of the downloads table that sorts it.
- * @typedef {'name' | 'host' | 'state' | 'progress' | 'size' | 'speed' | 'left'} JobColumn
+ * A column of the downloads table that sorts it. Progress, speed and
+ * time left change during a transfer, so they do not sort: rows would
+ * keep moving.
+ * @typedef {'name' | 'host' | 'state' | 'size'} JobColumn
  */
 
 /**
@@ -360,7 +362,7 @@ function measure(job, sample) {
 }
 
 /** The columns downloads can be sorted by. @type {readonly JobColumn[]} */
-export const JOB_SORT_COLUMNS = ['name', 'host', 'state', 'progress', 'size', 'speed', 'left'];
+export const JOB_SORT_COLUMNS = ['name', 'host', 'state', 'size'];
 
 /**
  * What a job's row is sorted by in `column`: text as shown, amounts as
@@ -378,14 +380,8 @@ export function jobSortValue(job, sample, column) {
       return job.original_host;
     case 'state':
       return describe(job).label;
-    case 'progress':
-      return measure(job, sample).fraction;
     case 'size':
       return measure(job, sample).total;
-    case 'speed':
-      return measure(job, sample).rate;
-    case 'left':
-      return measure(job, sample).seconds;
   }
 }
 

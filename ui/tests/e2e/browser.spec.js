@@ -2002,8 +2002,8 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(pager.getByRole('button', { name: 'Previous page' })).toBeDisabled();
     await expect(pager.getByRole('button', { name: 'Next page' })).toBeDisabled();
 
-    // A column header sorts the page by it, again reverses it, and a third
-    // click goes back to the engine's order; stripes follow the new order.
+    // A Size, Name, Host or State header sorts the page by it, again
+    // reverses it, and a third click goes back to the engine's order; stripes follow the new order.
     const names = () => page.locator('tr[data-job] td.name').allTextContents();
     const sizeHeader = page.locator('.downloads-view th.num', { hasText: 'Size' });
     await expect(page.locator('.downloads-view th[aria-sort]')).toHaveCount(0);
@@ -2022,6 +2022,21 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await sizeHeader.getByRole('button').click();
     await expect(page.locator('.downloads-view th[aria-sort]')).toHaveCount(0);
     expect(await names()).toEqual(engineOrder);
+    // By keyboard too: the redrawn header keeps focus on the same button.
+    const nameSort = page.locator('.downloads-view th.name button.sort');
+    await nameSort.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.downloads-view th.name')).toHaveAttribute('aria-sort', 'ascending');
+    await expect(nameSort).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.downloads-view th.name')).toHaveAttribute('aria-sort', 'descending');
+    await expect(nameSort).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.downloads-view th[aria-sort]')).toHaveCount(0);
+    // Amounts that change during a transfer do not sort, so rows stay put.
+    for (const label of ['Progress', 'Speed', 'Left']) {
+      await expect(page.locator('.downloads-view thead th', { hasText: label }).locator('button')).toHaveCount(0);
+    }
 
     // The selection line keeps its room while empty, so ticking moves no row.
     await expect(summary).toBeEmpty();

@@ -2,8 +2,9 @@
 // Downloads and Links views, act on the ticked downloads (or else the one
 // in the details), and open Settings; state filters; a table of one page
 // of jobs, each with a box to tick and a menu of what can be done with it
-// (with the ticked ones, when it is one of them), which a column's header
-// sorts, reverses, then returns to the engine's order; an inspector for the
+// (with the ticked ones, when it is one of them), which the Name, Host,
+// State and Size headers sort, reverse, then return to the engine's order
+// (amounts that change during a transfer do not sort); an inspector for the
 // selected job; and a status bar. It talks to the engine only through a
 // `WayfetchClient`, so any transport can host it.
 //
@@ -1555,15 +1556,17 @@ export class Downloads {
   }
 
   renderHead() {
-    /** @type {[JobColumn, string, string][]} */
+    // Sorting by keyboard redraws the header: keep focus on its button.
+    const focused = focusedKey(this.tableHead);
+    /** @type {[JobColumn | null, string, string][]} */
     const columns = [
       ['name', 'Name', 'name'],
       ['host', 'Host', 'host'],
       ['state', 'State', 'state'],
-      ['progress', 'Progress', 'progress'],
+      [null, 'Progress', 'progress'],
       ['size', 'Size', 'num'],
-      ['speed', 'Speed', 'num'],
-      ['left', 'Left', 'num'],
+      [null, 'Speed', 'num'],
+      [null, 'Left', 'num'],
     ];
     show(
       this.tableHead,
@@ -1572,11 +1575,14 @@ export class Downloads {
         null,
         h('th', { scope: 'col', class: 'check' }, this.selectAll),
         columns.map(([column, label, className]) =>
-          sortHeader({ column, label, className, sort: this.sort, onSort: (c) => this.sortBy(c) }),
+          column === null
+            ? h('th', { scope: 'col', class: className }, label)
+            : sortHeader({ column, label, className, sort: this.sort, onSort: (c) => this.sortBy(c) }),
         ),
         h('th', { scope: 'col', class: 'row-actions' }, h('span', { class: 'visually-hidden' }, 'Actions')),
       ),
     );
+    refocus(this.tableHead, focused);
   }
 
   /**
