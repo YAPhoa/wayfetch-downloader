@@ -1,5 +1,5 @@
 # wayfetchd with least privilege (architecture brief section 11.4). Setup,
-# permissions, and networking are in the README, "Running in a container".
+# permissions, and networking are in deploy/README.md.
 #
 # Every host path is required: nothing falls back to a directory inside
 # the container, and Compose refuses to start if a path does not exist.
@@ -33,7 +33,7 @@ services:
         target: /tokens
         bind: {create_host_path: false}
     # Loopback of the host only. The API has no TLS of its own; see the
-    # README before publishing it anywhere else.
+    # deploy/README.md before publishing it anywhere else.
     ports:
       - "${WAYFETCH_PUBLISH:-127.0.0.1:7878}:7878"
     # On SIGTERM wayfetchd drains the API for up to 5 s, then gives engine

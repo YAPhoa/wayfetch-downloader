@@ -73,16 +73,15 @@ pub enum Action {
     Resume,
     /// [`Command::Cancel`].
     Cancel,
-    /// [`Command::Rename`], with the request's `name`. Added in protocol
-    /// 1.0.
+    /// [`Command::Rename`], with the request's `name`.
     Rename,
-    /// [`Command::Remove`]. Added in protocol 1.0.
+    /// [`Command::Remove`].
     Remove,
-    /// [`Command::DeleteFiles`]. Added in protocol 2.4.
+    /// [`Command::DeleteFiles`].
     DeleteFiles,
-    /// [`Command::Retry`]. Added in protocol 1.2.
+    /// [`Command::Retry`].
     Retry,
-    /// [`Command::CancelExtraction`]. Added in protocol 6.0.
+    /// [`Command::CancelExtraction`].
     CancelExtraction,
 }
 
@@ -106,12 +105,12 @@ pub struct JobCommandRequest {
     pub name: Option<String>,
     /// For [`Action::Retry`] only: repeat a provider operation whose
     /// outcome is unknown, accepting possible duplicate provider work
-    /// ([`Command::Retry`]). Added in protocol 2.2.
+    /// ([`Command::Retry`]).
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub repeat_provider_operation: Option<bool>,
     /// For [`Action::CancelExtraction`] only, and required there: the
-    /// unpacking run to stop. Added in protocol 6.0.
+    /// unpacking run to stop.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub expected_generation: Option<Generation>,
@@ -214,21 +213,19 @@ pub struct UpdateSettingsRequest {
     pub target: InstanceId,
     /// The settings revision the client last saw.
     pub expected_revision: Revision,
-    /// Where jobs submitted from now on are saved. Optional since protocol
-    /// 2.0.
+    /// Where jobs submitted from now on are saved.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub default_root: Option<RootId>,
-    /// Most downloads transferring at once. Added in protocol 2.0.
+    /// Most downloads transferring at once.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub max_active_downloads: Option<PreferenceChange>,
-    /// The total download speed limit. Added in protocol 2.3.
+    /// The total download speed limit.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub download_speed_limit: Option<SpeedLimitChange>,
-    /// Whether downloaded archives are unpacked as they finish. Added in
-    /// protocol 6.0.
+    /// Whether downloaded archives are unpacked as they finish.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub extract_archives: Option<bool>,
@@ -251,8 +248,7 @@ impl UpdateSettingsRequest {
     }
 }
 
-/// Unpacks a downloaded archive, with its password if it needs one. Added
-/// in protocol 6.0.
+/// Unpacks a downloaded archive, with its password if it needs one.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -365,7 +361,7 @@ impl RemoveRootRequest {
     }
 }
 
-/// Changes a plugin. Added in protocol 4.1.
+/// Changes a plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -394,8 +390,7 @@ impl ChangePluginRequest {
     }
 }
 
-/// Collects links for review without starting them. Added in protocol
-/// 1.1.
+/// Collects links for review without starting them.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -404,16 +399,13 @@ pub struct CollectRequest {
     pub idempotency_key: IdempotencyKey,
     /// The instance the client believes it is talking to.
     pub target: InstanceId,
-    /// Pasted text or HTML holding the links. Replaced the list of entries
-    /// in protocol 5.0.
+    /// Pasted text or HTML holding the links.
     pub text: String,
-    /// The page the text came from, for relative links in HTML. Added in
-    /// protocol 5.0.
+    /// The page the text came from, for relative links in HTML.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub base_url: Option<String>,
-    /// How far to look into the links; analyze if absent. Added in
-    /// protocol 5.0.
+    /// How far to look into the links; analyze if absent.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub mode: Option<CollectMode>,
@@ -445,7 +437,7 @@ fn page_address(raw: &str) -> Result<InputUrl, ProtocolError> {
         .map_err(|e| ProtocolError::new(e.code, &format!("page address: {}", e.message.as_str())))
 }
 
-/// What to do with collected links. Added in protocol 1.1.
+/// What to do with collected links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -456,17 +448,16 @@ pub enum LinksAction {
     Remove,
     /// [`Command::MoveLinks`], with the request's `destination`.
     Move,
-    /// [`Command::ChooseLinkMedia`], with the request's `media`. Added in
-    /// protocol 4.0.
+    /// [`Command::ChooseLinkMedia`], with the request's `media`.
     ChooseMedia,
-    /// [`Command::CheckLinks`]. Added in protocol 5.0.
+    /// [`Command::CheckLinks`].
     Check,
-    /// [`Command::AnalyzeLinks`]. Added in protocol 5.0.
+    /// [`Command::AnalyzeLinks`].
     Analyze,
 }
 
 /// Starts, removes, or moves collected links at the revisions the client
-/// saw. Added in protocol 1.1.
+/// saw.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -485,17 +476,17 @@ pub struct LinksCommandRequest {
     pub destination: Option<RootId>,
     /// For [`LinksAction::Start`] only: the provider account to download
     /// through; automatic selection if absent unless routing requests
-    /// Direct. Account override added in protocol 2.2.
+    /// Direct.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub account: Option<AccountId>,
     /// Explicit route intent for a start. Absent uses
-    /// automatic selection; cannot be combined with an account. Added in 3.0.
+    /// automatic selection; cannot be combined with an account.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub routing: Option<StartRouting>,
     /// What to download media links as, for [`LinksAction::ChooseMedia`]
-    /// only. Added in protocol 4.0.
+    /// only.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub media: Option<MediaChoice>,
@@ -572,7 +563,7 @@ pub struct AddRootRequest {
 
 /// Signs in to a provider: adds an account, or replaces an account's
 /// credentials. Carries no credentials; the person approves Wayfetch on
-/// the provider's site. Added in protocol 1.3.
+/// the provider's site.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -619,7 +610,7 @@ impl AuthorizeAccountRequest {
     }
 }
 
-/// What to do with an account. Added in protocol 1.3.
+/// What to do with an account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -633,7 +624,7 @@ pub enum AccountAction {
 }
 
 /// Enables, disables, or removes an account at the revision the client
-/// saw. Added in protocol 1.3.
+/// saw.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]

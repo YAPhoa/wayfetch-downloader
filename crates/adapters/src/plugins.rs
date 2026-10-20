@@ -1,6 +1,6 @@
 //! The plugins as Settings changes them: turned on or off, updated from
 //! their official signed releases, and copies Wayfetch installed removed
-//! ([`PluginControl`], protocol 4.1).
+//! ([`PluginControl`]).
 //!
 //! Choices are kept in `plugins.json` in the plugins directory of the
 //! engine's state directory, replaced atomically on each change, and

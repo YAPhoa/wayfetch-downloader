@@ -24,20 +24,18 @@ target: InstanceId,
  */
 expected_revision: Revision, 
 /**
- * Where jobs submitted from now on are saved. Optional since protocol
- * 2.0.
+ * Where jobs submitted from now on are saved.
  */
 default_root?: RootId, 
 /**
- * Most downloads transferring at once. Added in protocol 2.0.
+ * Most downloads transferring at once.
  */
 max_active_downloads?: PreferenceChange, 
 /**
- * The total download speed limit. Added in protocol 2.3.
+ * The total download speed limit.
  */
 download_speed_limit?: SpeedLimitChange, 
 /**
- * Whether downloaded archives are unpacked as they finish. Added in
- * protocol 6.0.
+ * Whether downloaded archives are unpacked as they finish.
  */
 extract_archives?: boolean, };

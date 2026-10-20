@@ -1,5 +1,5 @@
-//! The frontier of link checks, and what they found (link crawler stage 1,
-//! protocol 5.0).
+//! The frontier of link checks, and what they found (link crawler
+//! stage 1).
 //!
 //! A check is a `crawl_tasks` row, one per link at most: pending until the
 //! coordinator takes it, running while it is sent, deleted when its result

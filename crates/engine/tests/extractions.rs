@@ -1,5 +1,5 @@
 //! Unpacking downloaded archives through the public engine API, with an
-//! in-process extractor (protocol 6.0, ADR-18, ADR-19): a finished archive
+//! in-process extractor (ADR-18, ADR-19): a finished archive
 //! is unpacked into a new folder beside it and kept; a multi-part set
 //! waits for its last part; a protected archive asks for its password;
 //! hostile listings and output are refused and leave nothing behind; and

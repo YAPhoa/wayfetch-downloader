@@ -63,20 +63,19 @@ pub enum EventKind {
         job: Box<JobSummary>,
     },
     /// A job was removed from lists and counts. The client drops its copy.
-    /// Added in protocol 1.0.
     JobRemoved {
         /// The job.
         job: JobId,
     },
     /// The settings changed: a client reads them again, unless it holds
-    /// unsaved changes, which would now conflict. Added in protocol 2.0.
+    /// unsaved changes, which would now conflict.
     SettingsChanged {
         /// The settings revision after the change.
         revision: Revision,
     },
-    /// What is known about collected links changed without a command,
-    /// such as a media link's title arriving: a client reads the Links list
-    /// again. Added in protocol 4.0.
+    /// What is known about collected links changed without a command, such
+    /// as a media link's title arriving: a client reads the Links list
+    /// again.
     LinksChanged,
 }
 

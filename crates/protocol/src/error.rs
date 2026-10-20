@@ -30,7 +30,7 @@ pub enum ErrorCode {
     /// Retry the same request later.
     Busy,
     /// The name is taken: another file has it, or another job reserved it.
-    /// Nothing was replaced. Added in protocol 1.0.
+    /// Nothing was replaced.
     AlreadyExists,
     /// The idempotency key was already used for a different command.
     IdempotencyConflict,
@@ -66,8 +66,7 @@ pub struct ProtocolError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_revision: Option<Revision>,
     /// When a refused retry may be asked for again, for a job whose
-    /// failure has a retry deadline still in the future. Added in protocol
-    /// 1.2.
+    /// failure has a retry deadline still in the future.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_at: Option<UtcTimestamp>,
 }

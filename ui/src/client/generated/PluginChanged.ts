@@ -2,7 +2,7 @@
 import type { PluginId } from "./PluginId.js";
 
 /**
- * What a [`PluginChange`] did. Added in protocol 4.1.
+ * What a [`PluginChange`] did.
  */
 export type PluginChanged = { 
 /**

@@ -1,6 +1,5 @@
 //! Provider accounts and their authorization, as clients see them
-//! (architecture brief sections 6.1, 7.3, 8.3 to 8.5, ADR-24). Added in
-//! protocol 1.3.
+//! (architecture brief sections 6.1, 7.3, 8.3 to 8.5, ADR-24).
 //!
 //! An account's credentials never cross this boundary in either direction:
 //! a client starts an authorization with the provider, the person approves

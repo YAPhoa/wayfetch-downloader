@@ -9,6 +9,10 @@
  * item, error code, job stage, failure code, or resync reason) needs a new
  * major version, because an older client cannot decode it. Extending those
  * vocabularies within a major version needs capability negotiation first.
+ *
+ * Before 1.0 the protocol is still settling, so as in Cargo's rules for
+ * `0.x` versions, the minor version is the incompatible one: an engine
+ * serves only clients of exactly its own `0.x`.
  */
 export type ProtocolVersion = { 
 /**

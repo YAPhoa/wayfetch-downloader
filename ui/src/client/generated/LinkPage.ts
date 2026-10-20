@@ -4,7 +4,7 @@ import type { EventCursor } from "./EventCursor.js";
 import type { SourceLinkId } from "./SourceLinkId.js";
 
 /**
- * One page of collected links. Added in protocol 1.1.
+ * One page of collected links.
  */
 export type LinkPage = { 
 /**
@@ -20,13 +20,11 @@ next_after?: SourceLinkId,
  */
 total: number, 
 /**
- * How many collected links come before this page. Added in protocol
- * 4.3; an older engine omits it.
+ * How many collected links come before this page.
  */
 before?: number, 
 /**
- * How many of them are waiting for, or in, a check. Added in
- * protocol 5.0.
+ * How many of them are waiting for, or in, a check.
  */
 checking: number, 
 /**

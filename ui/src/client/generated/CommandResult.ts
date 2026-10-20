@@ -56,13 +56,12 @@ collected: number,
  */
 invalid: number, 
 /**
- * Links found more than once in the text, collected once. Added
- * in protocol 5.0.
+ * Links found more than once in the text, collected once.
  */
 repeated?: number, 
 /**
  * Links in pasted HTML that lead to other web pages, which are not
- * collected. Added in protocol 5.0.
+ * collected.
  */
 skipped?: number, } | { "type": "links_applied", 
 /**

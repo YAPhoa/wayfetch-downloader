@@ -1,6 +1,6 @@
 //! Media links: links to a video page that a media service resolves into
 //! streams, such as a YouTube watch page, and the helper programs
-//! (plugins) that service needs. Added in protocol 4.0.
+//! (plugins) that service needs.
 //!
 //! A collected media link is checked once in the background: the engine
 //! asks its media service for the title and the formats, and announces the
@@ -8,7 +8,7 @@
 //! video quality or an audio-only format; the choice is kept with the
 //! link, then with its download.
 //!
-//! Protocol 4.1 lets Settings turn a plugin off and on, update one that
+//! Settings can turn a plugin off and on, update one that
 //! Wayfetch can update from its official signed releases, and remove the
 //! copy Wayfetch installed ([`crate::Command::ChangePlugin`]).
 
@@ -128,7 +128,7 @@ pub enum PluginRole {
     MediaResolver,
     /// Joins picture and sound streams and converts audio.
     MediaConverter,
-    /// Unpacks downloaded archives. Added in protocol 6.0.
+    /// Unpacks downloaded archives.
     ArchiveExtractor,
 }
 
@@ -168,20 +168,19 @@ pub struct PluginSummary {
     #[cfg_attr(feature = "ts", ts(optional))]
     pub problem: Option<DiagnosticText>,
     /// Whether its services use it; a plugin turned off is still checked
-    /// and listed. Added in protocol 4.1; true when absent.
+    /// and listed; true when absent.
     #[serde(default = "on")]
     pub enabled: bool,
-    /// Whether Settings can install a newer official release of it. Added
-    /// in protocol 4.1.
+    /// Whether Settings can install a newer official release of it.
     #[serde(default)]
     pub updatable: bool,
     /// Whether the copy in use is one Wayfetch installed, which
-    /// [`PluginChange::Remove`] deletes. Added in protocol 4.1.
+    /// [`PluginChange::Remove`] deletes.
     #[serde(default)]
     pub installed: bool,
     /// While an installed copy is in use: the version of the copy found
     /// without it, used again once it is removed; absent if none was
-    /// found or its version is unknown. Added in protocol 4.1.
+    /// found or its version is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub fallback_version: Option<String>,
@@ -198,7 +197,7 @@ impl PluginSummary {
     }
 }
 
-/// A change to a plugin. Added in protocol 4.1.
+/// A change to a plugin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -216,7 +215,7 @@ pub enum PluginChange {
     Remove,
 }
 
-/// What a [`PluginChange`] did. Added in protocol 4.1.
+/// What a [`PluginChange`] did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct PluginChanged {

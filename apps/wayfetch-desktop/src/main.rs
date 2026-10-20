@@ -15,6 +15,7 @@
 //! `SIGTERM` closes the window the same way.
 
 mod assets;
+mod installed;
 mod ipc;
 mod picker;
 mod subscriptions;
@@ -42,8 +43,10 @@ const NOTICE_QUEUE: usize = 64;
 #[derive(Debug, Parser)]
 #[command(name = "wayfetch-desktop", version)]
 struct Cli {
+    /// Without one, the window opens on the platform's folders, as when
+    /// started from the app menu.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -148,7 +151,8 @@ impl Message for Notice {
 fn main() -> ExitCode {
     wayfetch_host::launch_confined_if_asked();
     match Cli::parse().command {
-        Command::InitRoot(args) => {
+        None => installed::launch(),
+        Some(Command::InitRoot(args)) => {
             let terminal = Terminal::start();
             let code = match wayfetch_host::init_root(&args) {
                 Ok(root) => {
@@ -163,13 +167,14 @@ fn main() -> ExitCode {
             terminal.finish(wayfetch_host::DRAIN);
             code
         }
-        Command::Run(mut args) => run(&mut args),
+        Some(Command::Run(mut args)) => run(&mut args).unwrap_or(ExitCode::FAILURE),
     }
 }
 
 /// Runs the engine and the window until the window closes or a signal
-/// arrives, then stops the engine.
-fn run(args: &mut RunArgs) -> ExitCode {
+/// arrives, then stops the engine. A failure to run is printed, and
+/// returned for a host that shows it some other way too.
+fn run(args: &mut RunArgs) -> Result<ExitCode, String> {
     // The window's threads report through a queue to one thread that owns
     // the terminal; `None` ends it.
     let (notices, queued) = sync_channel::<Option<Notice>>(NOTICE_QUEUE);
@@ -183,6 +188,7 @@ fn run(args: &mut RunArgs) -> ExitCode {
         }
         terminal.finish(wayfetch_host::DRAIN);
     });
+    args.engine.bundled_plugins = installed::plugins_dir();
     let result = args.engine.default_credential_key();
     let result = result
         .and_then(|()| wayfetch_host::runtime())
@@ -191,14 +197,18 @@ fn run(args: &mut RunArgs) -> ExitCode {
             wayfetch_host::release(runtime);
             result
         });
-    let code = result.unwrap_or_else(|message| {
-        notify(&notices, Notice::Failed { message });
-        ExitCode::FAILURE
-    });
+    if let Err(message) = &result {
+        notify(
+            &notices,
+            Notice::Failed {
+                message: message.clone(),
+            },
+        );
+    }
     // The printer is draining, so this waits only for room.
     let _ = notices.send(None);
     let _ = output.join();
-    code
+    result
 }
 
 /// Queues a notice; drops it if the printer is behind.

@@ -120,25 +120,23 @@ pub enum Query {
         #[cfg_attr(feature = "ts", ts(as = "Option<u16>", optional))]
         page_size: PageSize,
     },
-    /// How many jobs are in each stage. Added in protocol 0.2.
+    /// How many jobs are in each stage.
     CountJobs {
         /// Which jobs.
         #[serde(default)]
         #[cfg_attr(feature = "ts", ts(as = "Option<JobFilter>", optional))]
         filter: JobFilter,
     },
-    /// The user's settings and the destinations they may choose. Added in
-    /// protocol 0.3.
+    /// The user's settings and the destinations they may choose.
     Settings {},
     /// The link a job was submitted with. Needs
     /// [`Permission::Sources`], since a link can carry a signed token.
-    /// Added in protocol 1.0.
     JobSource {
         /// The job.
         job: JobId,
     },
     /// A page of collected links in ascending ID order, which keeps each
-    /// batch's links together. Added in protocol 1.1.
+    /// batch's links together.
     ListLinks {
         /// Continue after this link (from the previous page's
         /// `next_after`).
@@ -151,19 +149,18 @@ pub enum Query {
         page_size: PageSize,
     },
     /// A collected link exactly as it was entered. Needs
-    /// [`Permission::Sources`]. Added in protocol 1.1.
+    /// [`Permission::Sources`].
     LinkSource {
         /// The link.
         link: SourceLinkId,
     },
     /// The accounts the user added, redacted, and the services accounts
     /// can be added for. Needs [`Permission::Accounts`]. Never contacts a
-    /// provider. Added in protocol 1.3.
+    /// provider.
     Accounts {},
     /// Where an authorization started by
     /// [`crate::Command::AuthorizeAccount`] is. Needs
-    /// [`Permission::Accounts`]. Never contacts a provider. Added in
-    /// protocol 1.3.
+    /// [`Permission::Accounts`]. Never contacts a provider.
     Authorization {
         /// The authorization.
         id: AuthorizationId,
@@ -209,9 +206,9 @@ pub struct JobSummary {
     /// Its package.
     pub package: PackageId,
     /// A safe file-name hint from the source path or accepted provider/response
-    /// metadata. Absent for opaque links without a meaningful file name.
-    /// The published artifact's path takes precedence. Boxed to keep event
-    /// summaries small. Added in protocol 3.0.
+    /// metadata. Absent for opaque links without a meaningful file name. The
+    /// published artifact's path takes precedence. Boxed to keep event
+    /// summaries small.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<Box<str>>,
     /// Observed stage.
@@ -237,41 +234,40 @@ pub struct JobSummary {
     pub artifact: Option<ArtifactSummary>,
     /// Host of the submitted link, which may differ from the provider that
     /// serves it. Never the whole link, which can carry a signed token.
-    /// Added in protocol 0.2; absent from events recorded before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_host: Option<HostName>,
     /// The root the job saves its file in, fixed when it was submitted or,
     /// for a job submitted before it could be, when it first started.
-    /// Absent until then. Added in protocol 0.3.
+    /// Absent until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<RootId>,
     /// Why the job's latest attempt discarded its saved data and started
     /// from zero, such as a file that changed on the server. Kept until the
-    /// job is retried again. Added in protocol 1.2.
+    /// job is retried again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_reason: Option<DiagnosticText>,
     /// The provider account the job downloads through, chosen when it was
     /// started; absent for a direct download. Names the account only by
     /// its ID: its alias and username are for clients that may see
     /// accounts. Boxed, as most jobs have none, to keep summaries and the
-    /// events carrying them small. Added in protocol 2.2.
+    /// events carrying them small.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub route: Option<Box<JobRoute>>,
     /// For a download of a media link: its service and what it is made
-    /// as. Added in protocol 4.0.
+    /// as.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub media: Option<Box<JobMedia>>,
     /// For a complete download of an archive, or of the first part of a
     /// multi-part archive: whether and where it was unpacked. Boxed, as
-    /// most jobs have none. Added in protocol 6.0.
+    /// most jobs have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub extraction: Option<Box<ExtractionSummary>>,
 }
 
-/// Where unpacking a downloaded archive stands. Added in protocol 6.0.
+/// Where unpacking a downloaded archive stands.
 #[derive(
     Debug,
     Clone,
@@ -306,7 +302,7 @@ pub enum ExtractionState {
 }
 
 /// Unpacking a downloaded archive into a new folder next to it. The
-/// archive itself is never changed or removed. Added in protocol 6.0.
+/// archive itself is never changed or removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ExtractionSummary {
@@ -329,8 +325,7 @@ pub struct ExtractionSummary {
     pub problem: Option<DiagnosticText>,
 }
 
-/// How a job is downloaded, when it is not directly from its host. Added
-/// in protocol 2.2.
+/// How a job is downloaded, when it is not directly from its host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct JobRoute {
@@ -363,8 +358,7 @@ pub struct Page<T> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_after: Option<JobId>,
     /// How many items that match the query come before this page, so a
-    /// client can say where the page sits. Added in protocol 4.3; an
-    /// older engine omits it.
+    /// client can say where the page sits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub before: Option<u64>,
@@ -399,9 +393,7 @@ pub struct RootSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<DiagnosticText>,
     /// Whether the user added it, rather than the operator's configuration.
-    /// Added in protocol 1.1, when only such a folder could be removed;
-    /// since 4.2 [`crate::Command::RemoveRoot`] removes any folder but the
-    /// default.
+    /// [`crate::Command::RemoveRoot`] removes any folder but the default.
     #[serde(default)]
     pub added: bool,
 }
@@ -428,7 +420,7 @@ pub struct FolderListing {
     pub truncated: bool,
 }
 
-/// The user's settings. Added in protocol 0.3.
+/// The user's settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Settings {
@@ -441,23 +433,20 @@ pub struct Settings {
     pub default_root: Option<RootId>,
     /// The destinations a client may choose, in ID order.
     pub roots: Vec<RootSummary>,
-    /// Most downloads transferring at once, engine-wide. Added in protocol
-    /// 2.0.
+    /// Most downloads transferring at once, engine-wide.
     pub max_active_downloads: BoundedSetting,
-    /// The combined rate of every download's body, engine-wide. Added in
-    /// protocol 2.3.
+    /// The combined rate of every download's body, engine-wide.
     pub download_speed_limit: SpeedLimitSetting,
     /// The helper programs media services run, and whether each can be
-    /// used. Added in protocol 4.0.
+    /// used.
     #[serde(default)]
     pub plugins: Vec<PluginSummary>,
-    /// Whether downloaded archives are unpacked as they finish. Added in
-    /// protocol 6.0.
+    /// Whether downloaded archives are unpacked as they finish.
     pub extract_archives: bool,
 }
 
 /// An engine preference with a whole-number value, as the operator's
-/// policy and the user's saved choice resolve it. Added in protocol 2.0.
+/// policy and the user's saved choice resolve it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct BoundedSetting {
@@ -487,7 +476,7 @@ pub struct BoundedSetting {
     pub conflict: bool,
 }
 
-/// Where an engine preference's value comes from. Added in protocol 2.0.
+/// Where an engine preference's value comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -501,7 +490,6 @@ pub enum SettingSource {
 }
 
 /// A cap on the combined rate of download bodies, in bytes per second.
-/// Added in protocol 2.3.
 ///
 /// On the wire, `"unlimited"` or `{"bytes_per_second": n}`. No number
 /// stands for Unlimited: zero is refused like any value below the
@@ -518,7 +506,7 @@ pub enum SpeedLimit {
 }
 
 /// The total download speed limit, as the operator's policy and the
-/// user's saved choice resolve it. Added in protocol 2.3.
+/// user's saved choice resolve it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SpeedLimitSetting {
@@ -549,8 +537,7 @@ pub struct SpeedLimitSetting {
     pub conflict: bool,
 }
 
-/// What is known about a collected link. Added in protocol 1.1; checks
-/// since protocol 5.0.
+/// What is known about a collected link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -575,8 +562,7 @@ pub enum LinkCheck {
     Invalid,
 }
 
-/// Why a check found a link offline or could not tell. Added in protocol
-/// 5.0.
+/// Why a check found a link offline or could not tell.
 #[derive(
     Debug,
     Clone,
@@ -613,7 +599,7 @@ pub enum CheckReason {
 }
 
 /// A link in the collected list: waiting to be started, or started and
-/// kept until removed. Added in protocol 1.1.
+/// kept until removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct CollectedLink {
@@ -660,52 +646,48 @@ pub struct CollectedLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub problem: Option<DiagnosticText>,
-    /// For an offline link or one whose check could not tell: why. Added
-    /// in protocol 5.0.
+    /// For an offline link or one whose check could not tell: why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub reason: Option<CheckReason>,
     /// What its last check said beyond `reason`, such as the server's
-    /// status, or that links on a page were left out. Added in protocol
-    /// 5.0.
+    /// status, or that links on a page were left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub check_detail: Option<DiagnosticText>,
     /// The file's size, when its server said. Absent when unknown, which
-    /// is not zero. Added in protocol 5.0.
+    /// is not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub size: Option<u64>,
     /// The page it was found on, without the page link's query or
-    /// fragment. Added in protocol 5.0.
+    /// fragment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub found_on: Option<String>,
     /// For a page that was analyzed: links on it collected beside it.
-    /// Added in protocol 5.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub found: Option<u32>,
     /// For a page that was analyzed: links on it that lead to other pages,
-    /// which are never followed. Added in protocol 5.0.
+    /// which are never followed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub skipped: Option<u32>,
     /// The service whose provider answered the last check, for a link an
     /// enabled account would download; absent when the link's own server
-    /// did. Added in protocol 6.1.
+    /// did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub checked_via: Option<ProviderId>,
     /// For a link a media service recognized, such as a YouTube video:
-    /// its title, once checked, and what it will be downloaded as. Added
-    /// in protocol 4.0.
+    /// its title, once checked, and what it will be downloaded as.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub media: Option<Box<LinkMedia>>,
 }
 
-/// One page of collected links. Added in protocol 1.1.
+/// One page of collected links.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct LinkPage {
@@ -717,13 +699,11 @@ pub struct LinkPage {
     pub next_after: Option<SourceLinkId>,
     /// How many links are collected in all.
     pub total: u64,
-    /// How many collected links come before this page. Added in protocol
-    /// 4.3; an older engine omits it.
+    /// How many collected links come before this page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub before: Option<u64>,
-    /// How many of them are waiting for, or in, a check. Added in
-    /// protocol 5.0.
+    /// How many of them are waiting for, or in, a check.
     #[serde(default)]
     pub checking: u64,
     /// The page reflects every durable event up to and including this
@@ -756,9 +736,9 @@ pub enum QueryResult {
         /// The link exactly as it was submitted.
         url: String,
     },
-    /// Answer to [`Query::ListLinks`]. Added in protocol 1.1.
+    /// Answer to [`Query::ListLinks`].
     Links(LinkPage),
-    /// Answer to [`Query::LinkSource`]. Added in protocol 1.1.
+    /// Answer to [`Query::LinkSource`].
     LinkSource {
         /// The link.
         link: SourceLinkId,
@@ -766,9 +746,9 @@ pub enum QueryResult {
         /// any credentials it held.
         url: String,
     },
-    /// Answer to [`Query::Accounts`]. Added in protocol 1.3.
+    /// Answer to [`Query::Accounts`].
     Accounts(Accounts),
-    /// Answer to [`Query::Authorization`]. Added in protocol 1.3.
+    /// Answer to [`Query::Authorization`].
     Authorization(Authorization),
 }
 

@@ -5,7 +5,7 @@ import type { Generation } from "./Generation.js";
 
 /**
  * Unpacking a downloaded archive into a new folder next to it. The
- * archive itself is never changed or removed. Added in protocol 6.0.
+ * archive itself is never changed or removed.
  */
 export type ExtractionSummary = { 
 /**

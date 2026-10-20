@@ -16,8 +16,7 @@ items: Array<T>,
 next_after?: JobId | null, 
 /**
  * How many items that match the query come before this page, so a
- * client can say where the page sits. Added in protocol 4.3; an
- * older engine omits it.
+ * client can say where the page sits.
  */
 before?: number, 
 /**
