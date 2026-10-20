@@ -47,7 +47,7 @@ import { accountName, canChooseRoute, routeAccounts } from '../client/routes.js'
 import { Selection } from '../client/selection.js';
 import { saveSort, savedSort, sortedBy, toggleSort } from '../client/sort.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
+import { copyText, focusedKey, h, isSelectAllKey, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
 import { icon } from './icons.js';
 import { pickerButton, rowMenuHandlers } from './menu.js';
 import { loadServices } from './services.js';
@@ -177,7 +177,12 @@ export class LinksPage {
     this.readAgain = false;
     /** @type {ReturnType<typeof setInterval> | undefined} */
     this.timer = undefined;
-    this.onKey = (/** @type {KeyboardEvent} */ event) => this.selectAllKey(event);
+    // Ctrl+A (Cmd+A) ticks every link shown, as the header box does.
+    this.onKey = (/** @type {KeyboardEvent} */ event) => {
+      if (!isSelectAllKey(event, this.table, this.selected.size > 0)) return;
+      event.preventDefault();
+      this.selectShown(true);
+    };
 
     this.buttons = {
       start: this.tool('start', 'resume', 'Start selected', () => void this.start(this.chosen().filter(startable))),
@@ -279,22 +284,6 @@ export class LinksPage {
     this.element.hidden = true;
     clearInterval(this.timer);
     document.removeEventListener('keydown', this.onKey);
-  }
-
-  /**
-   * Ctrl+A (Cmd+A on a Mac) ticks every link shown, as the header box
-   * does, instead of selecting the page's text: when the table has focus,
-   * or nothing does and some links are already ticked. Fields, menus and
-   * dialogs keep their own Select all.
-   * @param {KeyboardEvent} event
-   */
-  selectAllKey(event) {
-    if (event.key.toLowerCase() !== 'a' || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
-    const target = /** @type {Element} */ (event.target);
-    const inTable = this.table.contains(target) && !(target instanceof HTMLInputElement && target.type !== 'checkbox');
-    if (!inTable && !(target === document.body && this.selected.size > 0)) return;
-    event.preventDefault();
-    this.selectShown(true);
   }
 
   /**

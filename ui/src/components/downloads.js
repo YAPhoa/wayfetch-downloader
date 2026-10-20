@@ -46,7 +46,7 @@ import { cycleSort, saveSort, savedSort, sortedBy } from '../client/sort.js';
 import { Selection } from '../client/selection.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
+import { copyText, focusedKey, h, isSelectAllKey, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
 import { icon } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu, rowMenuHandlers } from './menu.js';
@@ -453,12 +453,20 @@ export class Downloads {
       this.linksMenu.element,
     );
     this.onPopState = () => this.route();
+    // Ctrl+A (Cmd+A) ticks every download shown, as the header box does.
+    this.onKey = (/** @type {KeyboardEvent} */ event) => {
+      const selected = this.selection.size > 0 || this.feed.watched !== null;
+      if (this.view.hidden || !isSelectAllKey(event, this.tableBody.closest('table') ?? this.tableBody, selected)) return;
+      event.preventDefault();
+      this.tick(this.shownJobs, true);
+    };
   }
 
   /** Starts following the engine and shows the current route. */
   start() {
     this.active = true;
     window.addEventListener('popstate', this.onPopState);
+    document.addEventListener('keydown', this.onKey);
     this.feed.start();
     this.route();
     this.loadSettings();
@@ -498,6 +506,7 @@ export class Downloads {
   stop() {
     this.active = false;
     window.removeEventListener('popstate', this.onPopState);
+    document.removeEventListener('keydown', this.onKey);
     this.feed.stop();
     this.linksPage.close();
   }

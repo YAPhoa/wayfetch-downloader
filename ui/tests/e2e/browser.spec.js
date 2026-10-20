@@ -2044,6 +2044,19 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(summary.locator('strong')).toHaveText('1 download selected');
     expect((await a.boundingBox())?.y).toBe(before?.y);
 
+    // Ctrl+A (Cmd+A on a Mac) ticks every download shown instead of the
+    // page's text; in the filter field it stays the field's own.
+    await page.locator('#filter-names').focus();
+    await page.keyboard.press('ControlOrMeta+A');
+    await expect(summary.locator('strong')).toHaveText('1 download selected');
+    await page.locator('#filter-names').blur();
+    await page.keyboard.press('ControlOrMeta+A');
+    await expect(summary.locator('strong')).toHaveText('3 downloads selected');
+    expect(await page.evaluate(() => String(window.getSelection()))).toBe('');
+    await b.getByRole('checkbox').uncheck();
+    await c.getByRole('checkbox').uncheck();
+    await expect(summary.locator('strong')).toHaveText('1 download selected');
+
     // Ticking two: the toolbar acts on both, not on a download in the details.
     await b.getByRole('checkbox').check();
     await expect(summary.locator('strong')).toHaveText('2 downloads selected');
