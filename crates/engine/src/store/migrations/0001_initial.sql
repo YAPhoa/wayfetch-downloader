@@ -106,6 +106,13 @@ CREATE TABLE source_links (
     -- pages left alone. NULL until it is read.
     found INTEGER CHECK (found >= 0),
     skipped INTEGER CHECK (skipped >= 0),
+    -- The service whose provider answered the link's last check, for a link
+    -- an enabled account would download; NULL when its own server did.
+    checked_via TEXT CHECK (checked_via IS NULL OR length(checked_via) BETWEEN 1 AND 64),
+    -- 1 if the link's own server last answered with a web page, kept apart
+    -- from a provider's answer shown instead: starting it directly
+    -- downloads the page, and is refused.
+    origin_page INTEGER NOT NULL DEFAULT 0 CHECK (origin_page IN (0, 1)),
     UNIQUE (batch_id, ordinal)
 ) STRICT;
 
