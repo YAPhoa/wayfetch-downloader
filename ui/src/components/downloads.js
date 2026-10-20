@@ -1856,12 +1856,14 @@ export class Downloads {
       );
       return;
     }
-    const name = jobName(job);
-    show(
-      this.inspector,
-      this.inspectorHead(name, job),
-      this.tab === 'general' ? this.general(job) : this.engine(job),
-    );
+    // The panel is rebuilt on every update; it keeps its scroll position
+    // while it shows the same download and tab.
+    const shown = `${job.id} ${this.tab}`;
+    const scrolled = this.inspector.dataset.shown === shown ? this.inspector.querySelector('.panel')?.scrollTop ?? 0 : 0;
+    this.inspector.dataset.shown = shown;
+    const panel = this.tab === 'general' ? this.general(job) : this.engine(job);
+    show(this.inspector, this.inspectorHead(jobName(job), job), panel);
+    panel.scrollTop = scrolled;
   }
 
   /**

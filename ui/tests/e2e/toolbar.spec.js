@@ -146,6 +146,21 @@ test('the details panel and the rows keep their place as downloads start, run, a
       const panel = page.locator('.inspector .panel');
       expect(await panel.evaluate((element) => element.scrollHeight <= element.clientHeight), tab).toBe(true);
     }
+
+    // In a short window the panel scrolls, and updates keep its place.
+    await page.setViewportSize({ width: 800, height: 500 });
+    await page.getByRole('tab', { name: 'General' }).click();
+    const panel = page.locator('.inspector .panel');
+    await panel.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    const scrolled = await panel.evaluate((element) => element.scrollTop);
+    expect(scrolled).toBeGreaterThan(0);
+    await page.locator('tr[data-job]', { hasText: 'second.bin' }).getByRole('checkbox').check();
+    await expect(page.locator('.downloads-view .selection-summary strong')).toHaveText('1 download selected');
+    expect(await panel.evaluate((element) => element.scrollTop)).toBe(scrolled);
+    await page.getByRole('tab', { name: 'Engine details' }).click();
+    expect(await panel.evaluate((element) => element.scrollTop)).toBe(0);
   } finally {
     await daemon.remove();
     await fixture.stop();
