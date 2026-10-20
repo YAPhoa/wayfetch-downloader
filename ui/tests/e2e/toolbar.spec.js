@@ -140,6 +140,13 @@ test('the details panel and the rows keep their place as downloads start, run, a
     await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
     await expect(page.locator('dd[data-fact="speed"]')).toHaveText('—');
     expect(await boxes()).toEqual(expected);
+    // A state with no downloads keeps the table where it was.
+    const failed = page.locator('.filters button', { hasText: 'Failed' });
+    await failed.click();
+    await expect(page.getByText('No downloads in this state.')).toBeVisible();
+    expect(await boxes()).toEqual(expected);
+    await page.locator('.filters button', { hasText: 'All' }).click();
+    await expect(page.locator('tr[data-job]')).toHaveCount(2);
     // Everything in the panel fits its room at this size.
     for (const tab of ['General', 'Engine details']) {
       await page.getByRole('tab', { name: tab }).click();

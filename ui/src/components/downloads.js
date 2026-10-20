@@ -315,8 +315,9 @@ export class Downloads {
     this.selectionLine = h('p', { class: 'selection-summary', role: 'status' });
     /**
      * What is ticked, then the last notice, on one line above the table.
-     * While downloads are shown it keeps its room, empty or not, so
-     * ticking a row or a notice such as "Started 1 download." moves no row.
+     * It always keeps its room, empty or not, so ticking a row, a notice
+     * such as "Started 1 download.", or a state with no downloads moves
+     * no row.
      */
     this.listBar = h('div', { class: 'list-bar' }, this.selectionLine, this.noticeLine);
     this.actionButtons = STATE_ACTIONS.map((action) =>
@@ -1627,7 +1628,6 @@ export class Downloads {
   renderSelection(shown) {
     const ticked = this.selection.chosen(shown).length;
     const hidden = this.selection.size - ticked;
-    this.listBar.hidden = shown.length === 0 && this.selection.size === 0 && this.notice === '';
     show(
       this.selectionLine,
       ticked > 0 && h('strong', null, `${count(ticked, 'download')} selected`),
@@ -1710,22 +1710,22 @@ export class Downloads {
       this.goingBack = true;
       void this.page('back').finally(() => (this.goingBack = false));
     }
+    // Shown even with no rows, so picking an empty state moves nothing.
     show(
       this.pager,
-      (feed.jobs.length > 0 || this.earlier.length > 0) &&
-        pagerBar({
-          place: pagePlace({
-            earlier: this.earlier.length,
-            before: feed.before,
-            size: PAGE_SIZE,
-            rows: feed.jobs.length,
-            more,
-            total: counts && group ? groupCount(group, counts) : null,
-          }),
+      pagerBar({
+        place: pagePlace({
+          earlier: this.earlier.length,
+          before: feed.before,
+          size: PAGE_SIZE,
+          rows: feed.jobs.length,
           more,
-          key: 'page',
-          onPage: (direction) => this.page(direction),
+          total: counts && group ? groupCount(group, counts) : null,
         }),
+        more,
+        key: 'page',
+        onPage: (direction) => this.page(direction),
+      }),
     );
 
     const rates = feed.jobs.flatMap((job) => feed.sample(job.id)?.bytes_per_second ?? []);
