@@ -34,7 +34,7 @@ const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.gener
                ORDER BY p.generation DESC LIMIT 1), 0), \
      a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id, j.removed_at IS NOT NULL, \
      j.restart_reason, j.route_service, j.route_account, j.suggested_name, \
-     j.media_service, j.media_choice, x.state, x.output, x.problem";
+     j.media_service, j.media_choice, x.state, x.output, x.problem, x.generation";
 
 /// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
 /// has exactly one source link.
@@ -126,6 +126,7 @@ impl StoredJob {
         } else if self.extraction.is_none() {
             self.extraction = Some(ExtractionSummary {
                 state: ExtractionState::Idle,
+                generation: None,
                 output: None,
                 problem: None,
             });
@@ -185,7 +186,7 @@ struct RawJob {
     route: (Option<String>, Option<i64>),
     name: Option<String>,
     media: (Option<String>, Option<String>),
-    extraction: (Option<String>, Option<String>, Option<String>),
+    extraction: (Option<String>, Option<String>, Option<String>, Option<i64>),
 }
 
 impl RawJob {
@@ -213,7 +214,7 @@ impl RawJob {
             route: (row.get(18)?, row.get(19)?),
             name: row.get(20)?,
             media: (row.get(21)?, row.get(22)?),
-            extraction: (row.get(23)?, row.get(24)?, row.get(25)?),
+            extraction: (row.get(23)?, row.get(24)?, row.get(25)?, row.get(26)?),
         })
     }
 

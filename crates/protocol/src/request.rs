@@ -9,7 +9,7 @@
 use serde::Deserialize;
 use wayfetch_domain::id::{AccountId, JobId, PackageId, RootId};
 use wayfetch_domain::name::{PluginId, ProviderId};
-use wayfetch_domain::version::Revision;
+use wayfetch_domain::version::{Generation, Revision};
 
 use crate::account::{AccountAlias, AccountRef};
 use crate::command::{
@@ -110,6 +110,11 @@ pub struct JobCommandRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub repeat_provider_operation: Option<bool>,
+    /// For [`Action::CancelExtraction`] only, and required there: the
+    /// unpacking run to stop. Added in protocol 6.0.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub expected_generation: Option<Generation>,
 }
 
 impl JobCommandRequest {
@@ -123,6 +128,13 @@ impl JobCommandRequest {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidRequest,
                 "only a retry repeats a provider operation",
+            ));
+        }
+        let expected_generation = self.expected_generation;
+        if expected_generation.is_some() && self.action != Action::CancelExtraction {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "only stopping unpacking names a run",
             ));
         }
         let command = match (self.action, self.name) {
@@ -168,9 +180,18 @@ impl JobCommandRequest {
                 expected_revision,
                 repeat_provider_operation,
             },
-            (Action::CancelExtraction, None) => Command::CancelExtraction {
-                job,
-                expected_revision,
+            (Action::CancelExtraction, None) => match expected_generation {
+                Some(expected_generation) => Command::CancelExtraction {
+                    job,
+                    expected_revision,
+                    expected_generation,
+                },
+                None => {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidRequest,
+                        "stopping unpacking needs the run to stop",
+                    ));
+                }
             },
         };
         Ok(CommandEnvelope {
@@ -242,6 +263,10 @@ pub struct ExtractRequest {
     pub target: InstanceId,
     /// The job revision the client last saw.
     pub expected_revision: Revision,
+    /// The unpacking run the client last saw, if the archive has one.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub expected_generation: Option<Generation>,
     /// The archive's password. It is kept in memory for this archive's
     /// next attempt only: never stored, logged, or part of the command.
     #[serde(default)]
@@ -255,6 +280,7 @@ impl std::fmt::Debug for ExtractRequest {
             .field("idempotency_key", &self.idempotency_key)
             .field("target", &self.target)
             .field("expected_revision", &self.expected_revision)
+            .field("expected_generation", &self.expected_generation)
             .field("password", &self.password.as_ref().map(|_| "[redacted]"))
             .finish()
     }
@@ -300,6 +326,7 @@ impl ExtractRequest {
             command: Command::Extract {
                 job,
                 expected_revision: self.expected_revision,
+                expected_generation: self.expected_generation,
             },
         };
         Ok((envelope, self.password))
@@ -693,6 +720,32 @@ mod tests {
                 expected_revision: Revision::from_u64(3).unwrap()
             }
         );
+    }
+
+    #[test]
+    fn stopping_unpacking_names_the_run_to_stop() {
+        let request = |action: &str, generation: Option<u64>| {
+            serde_json::from_value::<JobCommandRequest>(json!({
+                "idempotency_key": IdempotencyKey::generate(),
+                "target": InstanceId::generate(),
+                "action": action,
+                "expected_revision": 2,
+                "expected_generation": generation,
+            }))
+            .unwrap()
+            .into_envelope(JobId::from_u64(1).unwrap())
+        };
+        assert!(matches!(
+            request("cancel_extraction", Some(3)).unwrap().command,
+            Command::CancelExtraction { expected_generation, .. }
+                if expected_generation == Generation::from_u64(3).unwrap()
+        ));
+        for (action, generation) in [("cancel_extraction", None), ("cancel", Some(3))] {
+            assert_eq!(
+                request(action, generation).unwrap_err().code,
+                ErrorCode::InvalidRequest
+            );
+        }
     }
 
     #[test]
@@ -1097,7 +1150,8 @@ mod tests {
             envelope.command,
             Command::Extract {
                 job,
-                expected_revision: Revision::from_u64(4).unwrap()
+                expected_revision: Revision::from_u64(4).unwrap(),
+                expected_generation: None,
             }
         );
         assert!(

@@ -36,6 +36,9 @@ use wayfetch_net::{CertificateDer, HttpConfig, HttpTransport};
 pub use config::{Loaded, NoServer};
 pub use signals::Signals;
 pub use terminal::{Closed, DRAIN, Message, Printer, Terminal};
+/// Called first thing in each host's `main`: a host is also the launcher
+/// of confined helper runs, such as 7-Zip's ([`wayfetch_adapters::confine`]).
+pub use wayfetch_adapters::confine::enter_if_asked as launch_confined_if_asked;
 
 /// How long a host waits, after its work is done, for blocking threads it
 /// no longer needs before it exits anyway.

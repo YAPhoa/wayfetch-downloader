@@ -7,7 +7,9 @@
 //! without a shell, with no standard input unless the run gives it some
 //! (a password, which so never appears on a command line), with its
 //! output bounded and a deadline; dropping a run stops the process. A
-//! helper the program starts itself is not tracked.
+//! helper the program starts itself is not tracked. A program that reads
+//! untrusted input runs confined ([`Confinement`]), its version check
+//! included, so a system that cannot confine it reports it not working.
 //!
 //! A [`Plugin`] is the program as Settings changes it: turned on or off,
 //! and either the copy found that way or one Wayfetch installed in its
@@ -21,6 +23,8 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+
+pub use crate::confine::Confinement;
 use wayfetch_engine::domain::name::{DiagnosticText, ProviderId};
 use wayfetch_engine::protocol::media::{PluginRole, PluginState, PluginSummary};
 
@@ -65,6 +69,8 @@ pub struct Check {
     /// Variables set for every run, unless the host's own environment
     /// sets them.
     pub env: Vec<(&'static str, OsString)>,
+    /// How the check runs confined, if the program's runs are.
+    pub confinement: Option<Confinement>,
 }
 
 /// A helper program and what its version check found.
@@ -107,7 +113,10 @@ impl Program {
             deadline: VERSION_DEADLINE,
             stdout_bytes: 64 * 1024,
         };
-        match program.run(check.args, limits).await {
+        match program
+            .run_with(check.args, None, check.confinement.as_ref(), limits)
+            .await
+        {
             Ok(output) => {
                 program.state = PluginState::Ready;
                 program.version = (check.version)(&String::from_utf8_lossy(&output.stdout));
@@ -155,24 +164,25 @@ impl Program {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.run_with(args, None, limits).await
+        self.run_with(args, None, None, limits).await
     }
 
     /// Runs it with `args`, writing `input` to its standard input, which
-    /// is otherwise empty, and returns its output if it succeeded. The
-    /// input is not passed on a command line, so other processes cannot
-    /// read it there.
+    /// is otherwise empty, under `confinement` if given, and returns its
+    /// output if it succeeded. The input is not passed on a command line,
+    /// so other processes cannot read it there.
     pub async fn run_with<I, S>(
         &self,
         args: I,
         input: Option<&[u8]>,
+        confinement: Option<&Confinement>,
         limits: Limits,
     ) -> Result<Output, RunError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = self.command(args)?;
+        let mut command = self.command(args, confinement)?;
         if input.is_some() {
             command.stdin(Stdio::piped());
         }
@@ -200,13 +210,14 @@ impl Program {
     }
 
     /// Runs it twice at once, with `from`'s standard output as `into`'s
-    /// standard input, and returns `into`'s output if both succeeded.
-    /// Neither has other input. A failure is the first one's, if it
-    /// failed, since the second then usually fails for want of input.
+    /// standard input, each under its confinement if given, and returns
+    /// `into`'s output if both succeeded. Neither has other input. A
+    /// failure is the first one's, if it failed, since the second then
+    /// usually fails for want of input.
     pub async fn pipe<I, J, S, T>(
         &self,
-        from: I,
-        into: J,
+        (from, from_confinement): (I, Option<&Confinement>),
+        (into, into_confinement): (J, Option<&Confinement>),
         limits: Limits,
     ) -> Result<Output, RunError>
     where
@@ -215,14 +226,14 @@ impl Program {
         S: AsRef<OsStr>,
         T: AsRef<OsStr>,
     {
-        let mut first = spawn(&mut self.command(from)?).await?;
+        let mut first = spawn(&mut self.command(from, from_confinement)?).await?;
         let between: Stdio = first
             .stdout
             .take()
             .ok_or(RunError::Missing)?
             .try_into()
             .map_err(|e: std::io::Error| RunError::Spawn(e.to_string()))?;
-        let mut command = self.command(into)?;
+        let mut command = self.command(into, into_confinement)?;
         command.stdin(between);
         let mut second = spawn(&mut command).await?;
         let (first_err, stdout, second_err) = (
@@ -248,24 +259,36 @@ impl Program {
         finished(second_status, stdout, second_err)
     }
 
-    /// The program as a command with `args` and its environment, without
-    /// input, its output piped, and stopped when dropped.
-    fn command<I, S>(&self, args: I) -> Result<tokio::process::Command, RunError>
+    /// The program as a command with `args` and its environment, or
+    /// confined by `confinement`, without input, its output piped, and
+    /// stopped when dropped.
+    fn command<I, S>(
+        &self,
+        args: I,
+        confinement: Option<&Confinement>,
+    ) -> Result<tokio::process::Command, RunError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         let path = self.path.as_ref().ok_or(RunError::Missing)?;
-        let mut command = tokio::process::Command::new(path);
+        let mut command = match confinement {
+            Some(confinement) => confinement.command(path).map_err(RunError::Unconfined)?,
+            None => {
+                let mut command = tokio::process::Command::new(path);
+                command
+                    // A Python program writes UTF-8 whatever the host's locale.
+                    .env("PYTHONIOENCODING", "utf-8")
+                    .envs(self.env.iter().map(|(k, v)| (k, v)));
+                command
+            }
+        };
         command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            // A Python program writes UTF-8 whatever the host's locale.
-            .env("PYTHONIOENCODING", "utf-8")
-            .envs(self.env.iter().map(|(k, v)| (k, v)));
+            .kill_on_drop(true);
         #[cfg(windows)]
         // No console window opens for it on the desktop.
         command.creation_flags(0x0800_0000);
@@ -486,6 +509,9 @@ pub enum RunError {
     /// It could not be started or read.
     #[error("it could not be started: {0}")]
     Spawn(String),
+    /// It must run confined, and this system cannot confine it.
+    #[error("{0}, so it is not used")]
+    Unconfined(String),
     /// It ran past its deadline and was stopped.
     #[error("it took longer than {0:?} and was stopped")]
     TimedOut(Duration),
@@ -542,6 +568,7 @@ pub(crate) mod tests {
             args: &["--version"],
             version: first_line,
             env: Vec::new(),
+            confinement: None,
         }
     }
 

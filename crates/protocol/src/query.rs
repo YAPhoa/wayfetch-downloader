@@ -312,6 +312,12 @@ pub enum ExtractionState {
 pub struct ExtractionSummary {
     /// Where it stands.
     pub state: ExtractionState,
+    /// The unpacking run, absent until the archive is first queued. Each
+    /// request to unpack starts a new one; stopping or unpacking again
+    /// names the run the client saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub generation: Option<Generation>,
     /// Once complete, what was made, in the archive's root: a new folder,
     /// or the archive's only entry if it held just one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -15,31 +15,33 @@ const PASSWORD = 'correct horse battery staple';
 const ARCHIVE_PASSWORD = 'open sesame';
 
 /**
- * A stand-in for 7-Zip in `dir`. `secret.zip` is protected by
- * `ARCHIVE_PASSWORD`; any other archive holds `a.txt` and `b.txt`.
+ * A stand-in for 7-Zip in `dir`: a shell script, since helpers run
+ * confined, where only the system's programs can be run. `secret.zip` is
+ * protected by `ARCHIVE_PASSWORD`; any other archive holds `a.txt` and
+ * `b.txt`.
  * @param {string} dir
  */
 async function fakeSevenZip(dir) {
   const path = join(dir, '7zz');
   await writeFile(
     path,
-    `#!${process.execPath}\n` +
-      `const { readFileSync, writeFileSync } = require('node:fs');\n` +
-      `const { basename, join } = require('node:path');\n` +
-      `const args = process.argv.slice(2);\n` +
-      `if (args.length === 0) { console.log('\\n7-Zip (z) 26.04 (x64) : Copyright (c) 1999-2026 Igor Pavlov'); process.exit(0); }\n` +
-      `const secret = basename(args.at(-1)) === 'secret.zip';\n` +
-      `const files = secret ? { 'plans.txt': 'secret' } : { 'a.txt': 'hello', 'b.txt': 'world' };\n` +
-      `if (args[0] === 'l') {\n` +
-      `  for (const [name, text] of Object.entries(files)) console.log(\`Path = \${name}\\nFolder = -\\nSize = \${text.length}\\nAttributes =  -rw-r--r--\\nEncrypted = \${secret ? '+' : '-'}\\n\`);\n` +
-      `  process.exit(0);\n` +
-      `}\n` +
-      `const out = args.find((a) => a.startsWith('-o')).slice(2);\n` +
-      `if (secret && (args.includes('-p') || readFileSync(0, 'utf8').split('\\n')[0] !== ${JSON.stringify(ARCHIVE_PASSWORD)})) {\n` +
-      `  process.stderr.write('ERROR: Wrong password : plans.txt\\n');\n` +
-      `  process.exit(2);\n` +
-      `}\n` +
-      `for (const [name, text] of Object.entries(files)) writeFileSync(join(out, name), text);\n`,
+    String.raw`#!/bin/sh
+if [ $# -eq 0 ]; then printf '\n7-Zip (z) 26.04 (x64) : Copyright (c) 1999-2026 Igor Pavlov\n'; exit 0; fi
+for arg in "$@"; do last=$arg; done
+case "$(basename "$last")" in secret.zip) secret=1 ;; *) secret= ;; esac
+entry() { printf 'Path = %s\nFolder = -\nSize = %s\nAttributes =  -rw-r--r--\nEncrypted = %s\n\n' "$@"; }
+if [ "$1" = l ]; then
+  if [ -n "$secret" ]; then entry plans.txt 6 +; else entry a.txt 5 -; entry b.txt 5 -; fi
+  exit 0
+fi
+out= none=
+for arg in "$@"; do case "$arg" in -o*) out=$(expr "x$arg" : 'x-o\(.*\)') ;; -p) none=1 ;; esac; done
+if [ -z "$secret" ]; then printf hello > "$out/a.txt"; printf world > "$out/b.txt"; exit 0; fi
+line=
+[ -n "$none" ] || IFS= read -r line
+if [ "$line" != '${ARCHIVE_PASSWORD}' ]; then echo 'ERROR: Wrong password : plans.txt' >&2; exit 2; fi
+printf secret > "$out/plans.txt"
+`,
   );
   await chmod(path, 0o755);
   return path;

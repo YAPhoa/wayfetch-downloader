@@ -138,11 +138,13 @@ impl Store {
             Command::Extract {
                 job,
                 expected_revision,
-            } => extractions::extract(&tx, *job, *expected_revision, now)?,
+                expected_generation,
+            } => extractions::extract(&tx, *job, *expected_revision, *expected_generation, now)?,
             Command::CancelExtraction {
                 job,
                 expected_revision,
-            } => extractions::cancel(&tx, *job, *expected_revision, now)?,
+                expected_generation,
+            } => extractions::cancel(&tx, *job, *expected_revision, *expected_generation, now)?,
             Command::Remove {
                 job,
                 expected_revision,

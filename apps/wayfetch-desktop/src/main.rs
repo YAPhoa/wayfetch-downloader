@@ -146,6 +146,7 @@ impl Message for Notice {
 }
 
 fn main() -> ExitCode {
+    wayfetch_host::launch_confined_if_asked();
     match Cli::parse().command {
         Command::InitRoot(args) => {
             let terminal = Terminal::start();

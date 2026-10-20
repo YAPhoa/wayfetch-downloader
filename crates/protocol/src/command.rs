@@ -22,7 +22,7 @@ use url::Url;
 use uuid::Uuid;
 use wayfetch_domain::id::{AccountId, BatchId, JobId, PackageId, RootId, SourceLinkId};
 use wayfetch_domain::name::{DiagnosticText, PluginId, ProviderId};
-use wayfetch_domain::version::Revision;
+use wayfetch_domain::version::{Generation, Revision};
 
 use crate::account::{AccountAlias, AccountRef, Authorization};
 use crate::error::{ErrorCode, ProtocolError};
@@ -580,6 +580,11 @@ pub enum Command {
         job: JobId,
         /// The job revision the client last saw.
         expected_revision: Revision,
+        /// The unpacking run the client last saw, if any: unpacking starts
+        /// a new run only from that one, so a repeated or late request
+        /// cannot start another.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_generation: Option<Generation>,
     },
     /// Stop unpacking an archive, or waiting to. The archive is kept, and
     /// nothing unpacked so far is. Added in protocol 6.0.
@@ -588,6 +593,8 @@ pub enum Command {
         job: JobId,
         /// The job revision the client last saw.
         expected_revision: Revision,
+        /// The unpacking run to stop. A later run is never stopped.
+        expected_generation: Generation,
     },
     /// Turn a plugin on or off, update it, or remove the copy Wayfetch
     /// installed. Running work keeps the copy it started with. Added in

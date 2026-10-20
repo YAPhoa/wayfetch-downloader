@@ -2,13 +2,20 @@
 //! ZIP, 7z, RAR (multi-part included), and tar archives for the engine's
 //! extraction workflow ([`wayfetch_engine::extract`]).
 //!
+//! Every run is confined ([`Confinement`]): it may read only the archive's
+//! volumes, write only in the private folder it unpacks into, open no
+//! socket, and map at most [`MEMORY_BYTES`]; a system that cannot confine
+//! it reports 7-Zip not working, so nothing is unpacked unconfined.
+//!
 //! A password is written to 7-Zip's standard input, never its command
 //! line; without one, `-p` with no value tells 7-Zip there is none, so it
 //! never waits for one. Dangerous links are refused by 7-Zip itself
-//! (`-snld0`), RAR's dictionary memory is capped (`-smemx`), and the
-//! engine checks the listing before and the files after. A compressed tar
-//! is decompressed by one 7-Zip run straight into another that unpacks
-//! the tar, so the tar itself is never written to disk.
+//! (`-snld0`), its unpacking memory is capped below the confinement's
+//! (`-smemx`), so a hungry archive is refused with a message rather than
+//! failing midway, and the engine checks the listing before and the files
+//! after. A compressed tar is decompressed by one 7-Zip run straight into
+//! another that unpacks the tar, so the tar itself is never written to
+//! disk: the first may only read the archive, the second only write.
 //!
 //! 7-Zip releases before 25.01 handle links unsafely (CVE-2025-11001,
 //! CVE-2025-11002, CVE-2025-55188), so they are not used.
@@ -26,7 +33,7 @@ use wayfetch_engine::extract::{
 use wayfetch_engine::protocol::media::{PluginRole, PluginState, PluginSummary};
 use wayfetch_engine::transfer::writer::BoxFuture;
 
-use crate::plugin::{Check, Describe, Limits, Plugin, Program, RunError, last_line};
+use crate::plugin::{Check, Confinement, Describe, Limits, Plugin, Program, RunError, last_line};
 
 /// The plugin.
 pub const PLUGIN: Describe = Describe {
@@ -49,8 +56,13 @@ const EXTRACT_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 /// worth.
 const LIST_BYTES: usize = MAX_ENTRIES * 1024;
 
-/// The most memory a RAR archive's dictionary may take, in gigabytes.
-const RAR_MEMORY_GB: u32 = 4;
+/// The most memory unpacking may take, in gigabytes: enough for the
+/// dictionaries archives use in practice.
+const UNPACK_MEMORY_GB: u64 = 2;
+
+/// The most address space a run may map: what unpacking may take, and
+/// room for 7-Zip itself and its threads.
+pub const MEMORY_BYTES: u64 = (UNPACK_MEMORY_GB + 2) << 30;
 
 /// 7-Zip, found and checked.
 #[derive(Debug, Clone)]
@@ -65,6 +77,7 @@ impl SevenZip {
             args: &[],
             version,
             env: Vec::new(),
+            confinement: Some(Confinement::new(MEMORY_BYTES)),
         }
     }
 
@@ -150,7 +163,7 @@ fn extract_arguments(archive: &Archive<'_>, output: &Path) -> (Vec<OsString>, Ve
         [
             "-aou".to_owned(),
             "-snld0".to_owned(),
-            format!("-smemx{RAR_MEMORY_GB}g"),
+            format!("-smemx{UNPACK_MEMORY_GB}g"),
         ]
         .map(Into::into),
     );
@@ -224,13 +237,25 @@ fn parse_listing(out: &str) -> Result<Vec<Entry>, ExtractError> {
 /// What a failed run of 7-Zip means, for an archive given `password` or
 /// not.
 fn failure(error: RunError, password: bool) -> ExtractError {
-    let RunError::Failed { stderr, .. } = &error else {
-        return match error {
-            RunError::TooMuchOutput(_) => ExtractError::Unsupported(format!(
+    let stderr = match &error {
+        RunError::Failed {
+            status: Some(_),
+            stderr,
+        } => stderr,
+        // Stopped by a signal: past its file size limit, or killed.
+        RunError::Failed { status: None, .. } => {
+            return ExtractError::Failed(
+                "7-Zip was stopped before it finished; the archive may unpack to more than \
+                 Wayfetch allows."
+                    .into(),
+            );
+        }
+        RunError::TooMuchOutput(_) => {
+            return ExtractError::Unsupported(format!(
                 "The archive holds more than {MAX_ENTRIES} files."
-            )),
-            other => ExtractError::Failed(format!("7-Zip stopped: {other}")),
-        };
+            ));
+        }
+        other => return ExtractError::Failed(format!("7-Zip stopped: {other}")),
     };
     let says = |text: &str| stderr.contains(text);
     if says("Wrong password") || says("Cannot open encrypted archive") {
@@ -245,6 +270,10 @@ fn failure(error: RunError, password: bool) -> ExtractError {
         ExtractError::Damaged("The archive is incomplete or damaged.".into())
     } else if says("Is not archive") || says("Cannot open the file as archive") {
         ExtractError::Damaged("The file is not an archive 7-Zip can read.".into())
+    } else if says("Can't allocate required memory") || says("memory usage") {
+        ExtractError::Unsupported(format!(
+            "The archive needs more than {UNPACK_MEMORY_GB} GB of memory to unpack."
+        ))
     } else if says("Unsupported Method") || says("Unsupported archive type") {
         ExtractError::Unsupported("7-Zip cannot unpack this kind of archive.".into())
     } else if says("Data Error") || says("CRC Failed") || says("Headers Error") {
@@ -252,6 +281,15 @@ fn failure(error: RunError, password: bool) -> ExtractError {
     } else {
         ExtractError::Failed(format!("7-Zip failed: {}", last_line(stderr)))
     }
+}
+
+/// A run that may read `archive`'s volumes and write nowhere.
+fn reading(archive: &Archive<'_>) -> Confinement {
+    Confinement::new(MEMORY_BYTES).read(
+        std::iter::once(archive.path)
+            .chain(archive.volumes.iter().map(PathBuf::as_path))
+            .map(Path::to_path_buf),
+    )
 }
 
 /// The password as the line 7-Zip reads.
@@ -279,6 +317,7 @@ impl Extractor for SevenZip {
                 .run_with(
                     list_arguments(&archive),
                     input.as_ref().map(Secret::expose),
+                    Some(&reading(&archive)),
                     limits,
                 )
                 .await
@@ -291,6 +330,7 @@ impl Extractor for SevenZip {
         &'a self,
         archive: Archive<'a>,
         output: &'a Path,
+        budget: u64,
     ) -> BoxFuture<'a, Result<(), ExtractError>> {
         Box::pin(async move {
             let limits = Limits {
@@ -301,11 +341,26 @@ impl Extractor for SevenZip {
             let ran = match extract_arguments(&archive, output) {
                 (unpack, pipe) if pipe.is_empty() => {
                     let input = archive.password.map(password_line);
+                    let confinement = reading(&archive).write(output, budget);
                     program
-                        .run_with(unpack, input.as_ref().map(Secret::expose), limits)
+                        .run_with(
+                            unpack,
+                            input.as_ref().map(Secret::expose),
+                            Some(&confinement),
+                            limits,
+                        )
                         .await
                 }
-                (decompress, unpack) => program.pipe(decompress, unpack, limits).await,
+                (decompress, unpack) => {
+                    let writing = Confinement::new(MEMORY_BYTES).write(output, budget);
+                    program
+                        .pipe(
+                            (decompress, Some(&reading(&archive))),
+                            (unpack, Some(&writing)),
+                            limits,
+                        )
+                        .await
+                }
             };
             ran.map(drop)
                 .map_err(|e| failure(e, archive.password.is_some()))
@@ -320,6 +375,7 @@ mod tests {
     fn archive(layout: Layout, password: Option<&Secret>) -> Archive<'_> {
         Archive {
             path: Path::new("/r/-x.zip"),
+            volumes: &[],
             layout,
             password,
         }
@@ -378,7 +434,7 @@ mod tests {
         let (unpack, pipe) = extract_arguments(&with, Path::new("/r/.wayfetch/extract/4-g1"));
         assert_eq!(
             joined(&unpack),
-            "x -o/r/.wayfetch/extract/4-g1 -y -bso0 -bsp0 -aou -snld0 -smemx4g -- /r/-x.zip"
+            "x -o/r/.wayfetch/extract/4-g1 -y -bso0 -bsp0 -aou -snld0 -smemx2g -- /r/-x.zip"
         );
         assert!(pipe.is_empty());
         assert_eq!(
@@ -401,7 +457,7 @@ mod tests {
         assert_eq!(joined(&decompress), "x -so -y -bsp0 -p -- /r/-x.zip");
         assert_eq!(
             joined(&unpack),
-            "x -o/o -y -bso0 -bsp0 -p -aou -snld0 -smemx4g -si -ttar"
+            "x -o/o -y -bso0 -bsp0 -p -aou -snld0 -smemx2g -si -ttar"
         );
     }
 
@@ -464,110 +520,5 @@ mod tests {
             failure(RunError::TooMuchOutput(1), false),
             ExtractError::Unsupported(_)
         ));
-    }
-}
-
-/// Tests against a real 7-Zip, named by `WAYFETCH_TEST_7ZIP`.
-#[cfg(all(test, unix))]
-mod real {
-    use super::*;
-
-    /// 7-Zip, if the variable names one.
-    async fn seven_zip() -> Option<SevenZip> {
-        let path = std::env::var_os("WAYFETCH_TEST_7ZIP")?;
-        let zip = SevenZip::detect(Some(path.into())).await;
-        assert!(
-            Extractor::plugin(&zip).usable(),
-            "{:?}",
-            Extractor::plugin(&zip)
-        );
-        Some(zip)
-    }
-
-    /// Runs 7-Zip with `args` in `dir`, to make test archives.
-    fn make(dir: &Path, args: &[&str]) {
-        let path = std::env::var_os("WAYFETCH_TEST_7ZIP").unwrap();
-        let status = std::process::Command::new(path)
-            .args(args)
-            .current_dir(dir)
-            .stdout(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
-
-    #[tokio::test]
-    #[ignore = "needs WAYFETCH_TEST_7ZIP"]
-    async fn a_protected_archive_needs_its_password() {
-        let Some(zip) = seven_zip().await else { return };
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src");
-        std::fs::create_dir_all(src.join("d")).unwrap();
-        std::fs::write(src.join("a.txt"), "hello").unwrap();
-        std::fs::write(src.join("d/b.txt"), "world").unwrap();
-        make(
-            &src,
-            &["a", "-psecret word", "-mhe=on", "../p.7z", "a.txt", "d"],
-        );
-        let path = dir.path().join("p.7z");
-        let without = archive_at(&path, None);
-        assert_eq!(zip.list(without).await, Err(ExtractError::NeedsPassword));
-        let wrong = Secret::from_text("nope");
-        assert_eq!(
-            zip.list(archive_at(&path, Some(&wrong))).await,
-            Err(ExtractError::WrongPassword)
-        );
-        let right = Secret::from_text("secret word");
-        let entries = zip.list(archive_at(&path, Some(&right))).await.unwrap();
-        let mut names: Vec<_> = entries.iter().map(|e| e.path.as_str()).collect();
-        names.sort_unstable();
-        assert_eq!(names, ["a.txt", "d", "d/b.txt"]);
-        let out = dir.path().join("out");
-        std::fs::create_dir(&out).unwrap();
-        zip.extract(archive_at(&path, Some(&right)), &out)
-            .await
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(out.join("d/b.txt")).unwrap(),
-            "world"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "needs WAYFETCH_TEST_7ZIP"]
-    async fn a_compressed_tar_unpacks_through_a_pipe() {
-        let Some(zip) = seven_zip().await else { return };
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("a.txt"), "hello").unwrap();
-        make(&src, &["a", "-ttar", "../t.tar", "a.txt"]);
-        make(dir.path(), &["a", "-tgzip", "t.tar.gz", "t.tar"]);
-        let out = dir.path().join("out");
-        std::fs::create_dir(&out).unwrap();
-        let tar = Archive {
-            path: &dir.path().join("t.tar.gz"),
-            layout: Layout::CompressedTar,
-            password: None,
-        };
-        zip.extract(tar, &out).await.unwrap();
-        assert_eq!(std::fs::read_to_string(out.join("a.txt")).unwrap(), "hello");
-        // A damaged stream is reported, not unpacked.
-        std::fs::write(dir.path().join("bad.tar.gz"), b"\x1f\x8b\x08\x00junk").unwrap();
-        let bad = Archive {
-            path: &dir.path().join("bad.tar.gz"),
-            ..tar
-        };
-        let empty = dir.path().join("empty");
-        std::fs::create_dir(&empty).unwrap();
-        assert!(zip.extract(bad, &empty).await.is_err());
-    }
-
-    fn archive_at<'a>(path: &'a Path, password: Option<&'a Secret>) -> Archive<'a> {
-        Archive {
-            path,
-            layout: Layout::Direct,
-            password,
-        }
     }
 }

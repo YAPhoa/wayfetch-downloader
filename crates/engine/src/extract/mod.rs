@@ -15,15 +15,16 @@
 //! free name. A failed, cancelled, or interrupted extraction leaves
 //! nothing but its private folder, which is removed.
 //!
-//! The extractor runs as a plain child process: a lifecycle boundary, not
-//! a sandbox. Hostile names are refused from the listing, the output is
-//! checked again after unpacking, and its size is watched while it is
-//! written, but the extractor's own code is trusted not to write outside
-//! the folder it is given (section 4.1).
+//! Hostile names are refused from the listing, the output is checked
+//! again after unpacking, and its size is watched while it is written. The
+//! extractor itself must also be confined to the archive's volumes and the
+//! private folder (section 9.3), as the 7-Zip plugin is: the engine cannot
+//! confine it, so an extractor that cannot be confined reports itself not
+//! ready, and nothing is unpacked.
 
 pub mod names;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use wayfetch_protocol::media::PluginSummary;
 
@@ -86,8 +87,11 @@ pub enum ExtractError {
 /// An archive to list or unpack.
 #[derive(Debug, Clone, Copy)]
 pub struct Archive<'a> {
-    /// Its first volume; any others are next to it.
+    /// Its first volume.
     pub path: &'a Path,
+    /// Its other volumes, next to it: all that the extractor may read
+    /// besides the first.
+    pub volumes: &'a [PathBuf],
     /// How it is unpacked.
     pub layout: Layout,
     /// Its password, if one was given.
@@ -108,12 +112,13 @@ pub trait Extractor: Send + Sync + 'static {
     /// error. Dropping the future stops it.
     fn list<'a>(&'a self, archive: Archive<'a>) -> BoxFuture<'a, Result<Vec<Entry>, ExtractError>>;
 
-    /// Unpacks `archive` into the empty folder `output`. Dropping the
-    /// future stops it at once.
+    /// Unpacks `archive` into the empty folder `output`, writing no file
+    /// larger than `budget` bytes. Dropping the future stops it at once.
     fn extract<'a>(
         &'a self,
         archive: Archive<'a>,
         output: &'a Path,
+        budget: u64,
     ) -> BoxFuture<'a, Result<(), ExtractError>>;
 }
 

@@ -928,7 +928,11 @@ export class Downloads {
     let accepted = false;
     try {
       const request = { idempotencyKey: idempotencyKey(), target: hello.instance, expectedRevision: job.revision };
-      if (action === 'extract') await this.client.extract(job.id, { ...request, password });
+      // Unpacking names the run shown, so a late click cannot act on a newer one.
+      const expectedGeneration = job.extraction?.generation;
+      if (action === 'extract') await this.client.extract(job.id, { ...request, expectedGeneration, password });
+      else if (action === 'cancel_extraction')
+        await this.client.jobCommand(job.id, { ...request, action, expectedGeneration });
       else await this.client.jobCommand(job.id, { ...request, action, name, repeatProviderOperation });
       accepted = true;
     } catch (error) {

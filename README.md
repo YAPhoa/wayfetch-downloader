@@ -183,8 +183,8 @@ is never printed.
 | `GET /v1/jobs` | A page of jobs: `after`, `page_size`, `stage=a,b`, `package` |
 | `GET /v1/jobs/{id}` | One job |
 | `GET /v1/job-counts` | Jobs per stage, as `{"stages": {"queued": 3, ...}, "as_of"}`: `stage=a,b`, `package` |
-| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"delete_files"\|"rename"\|"cancel_extraction", "expected_revision"}`, plus `"name"` for a rename, and `"repeat_provider_operation": true` to retry a provider request whose answer was lost (needs `provider_downloads`) |
-| `POST /v1/jobs/{id}/extract` | `{"idempotency_key", "target", "expected_revision", "password"?}`: unpacks a finished archive beside it (needs `control`). The password is kept in memory for that archive's next attempt only, never stored or logged |
+| `POST /v1/jobs/{id}/commands` | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"delete_files"\|"rename"\|"cancel_extraction", "expected_revision"}`, plus `"name"` for a rename, `"expected_generation"` (the job's `extraction.generation`) to stop unpacking, and `"repeat_provider_operation": true` to retry a provider request whose answer was lost (needs `provider_downloads`) |
+| `POST /v1/jobs/{id}/extract` | `{"idempotency_key", "target", "expected_revision", "expected_generation"?, "password"?}`: unpacks a finished archive beside it (needs `control`), as a new run after the one `expected_generation` names (the job's `extraction.generation`, absent if it has none). The password is kept in memory for that archive's next attempt only, never stored or logged |
 | `GET /v1/jobs/{id}/source` | The link the job was submitted with (needs `sources`) |
 | `POST /v1/staging/links` | Collect links for review without downloading them: `{"idempotency_key", "target", "text", "base_url"?, "mode"?: "analyze"\|"supported_only", "destination"?: "root-N"}`, where `text` is pasted text or a page's HTML (at most 512 KiB) and `base_url` the page it came from |
 | `GET /v1/staging/links` | A page of collected links: `after`, `page_size` |
@@ -563,8 +563,13 @@ asks for it; the password goes to 7-Zip on its standard input and is never
 stored or logged. Archives whose listing names files outside their folder,
 links, or devices, and output larger than the listing says or that would
 nearly fill the drive, are refused, and only Wayfetch's private folder is
-removed. 7-Zip runs as a separate process that cancelling stops; it is not
-sandboxed beyond that.
+removed. While an archive is unpacked, neither it nor any other part of its
+set can be renamed or deleted. 7-Zip runs confined: it may read only the
+archive's parts and write only in Wayfetch's private folder, cannot open
+network connections, and may use at most 4 GiB of memory (Landlock, which
+needs Linux 6.2 or newer, seccomp, and resource limits). Where that cannot be
+enforced, such as on an older kernel, Settings > Plugins shows 7-Zip as not
+working and nothing is unpacked.
 
 The UI adds direct links (one per line), lists jobs a page of 50 at a time in
 the order they were added, shows one job at `/jobs/job-N`, and pauses,

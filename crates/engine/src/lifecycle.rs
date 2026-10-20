@@ -1286,15 +1286,7 @@ impl Coordinator {
             Request::Query(Query::Authorization { id }, reply) => self.authorization(id, reply),
             Request::RefreshAccount(account, reply) => self.refresh_account(account, reply).await,
             Request::Extract(envelope, password, reply) => {
-                if let (Some(password), Command::Extract { job, .. }) =
-                    (password, &envelope.command)
-                    && let Err(e) = self.give_password(*job, password)
-                {
-                    let _ = reply.send(Err(e));
-                    return;
-                }
-                self.execute_command(envelope, reply, Default::default())
-                    .await;
+                self.extract(envelope, password, reply).await;
             }
             Request::CancelAuthorization(id, reply) => self.cancel_authorization(id, reply),
             Request::Query(query, reply) => {

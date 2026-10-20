@@ -110,6 +110,8 @@ struct Fake {
     off: AtomicBool,
     /// Listings asked for.
     listings: AtomicUsize,
+    /// The other volumes each attempt was given, by file name.
+    volumes: Mutex<Vec<Vec<String>>>,
 }
 
 const PASSWORD: &str = "open sesame";
@@ -189,10 +191,18 @@ impl Extractor for Fake {
         &'a self,
         archive: Archive<'a>,
         output: &'a Path,
+        _budget: u64,
     ) -> BoxFuture<'a, Result<(), ExtractError>> {
         Box::pin(async move {
             let name = name(&archive);
             self.started.lock().unwrap().push(name.clone());
+            self.volumes.lock().unwrap().push(
+                archive
+                    .volumes
+                    .iter()
+                    .map(|v| v.file_name().unwrap().to_string_lossy().into_owned())
+                    .collect(),
+            );
             let write = |path: &str, data: &[u8]| {
                 let path = output.join(path);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -218,7 +228,7 @@ impl Extractor for Fake {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 }
-                "slow.zip" => {
+                slow if slow.starts_with("slow.") => {
                     while !self.release.load(Ordering::SeqCst) {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
@@ -285,6 +295,7 @@ async fn extract(
         idempotency_key: IdempotencyKey::generate(),
         target: owner.identity().instance,
         expected_revision: current.revision,
+        expected_generation: current.extraction.and_then(|x| x.generation),
         password: password.map(str::to_owned),
     };
     owner.handle().extract(id, request, ALL).await
@@ -443,6 +454,63 @@ async fn a_multi_part_archive_waits_for_its_last_part() {
     let done = unpacking(&owner, ids[0], ExtractionState::Complete).await;
     assert_eq!(output(&done), Some("Set"));
     assert_eq!(*fake.started.lock().unwrap(), ["Set.part1.rar"]);
+    // The extractor is given the other part, and nothing else.
+    assert_eq!(*fake.volumes.lock().unwrap(), [["Set.part2.rar"]]);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_part_of_an_archive_is_kept_while_it_unpacks() {
+    let (env, fake) = env();
+    let owner = env.start().await;
+    let ids = submit(
+        &owner,
+        &["slow.part1.rar", "slow.part2.rar", "other.part2.rar"],
+    )
+    .await;
+    unpacking(&owner, ids[0], ExtractionState::Extracting).await;
+    let part = support::complete(&owner, ids[1]).await;
+    for change in [
+        Command::DeleteFiles {
+            job: ids[1],
+            expected_revision: part.revision,
+        },
+        Command::Rename {
+            job: ids[1],
+            expected_revision: part.revision,
+            name: "renamed.part2.rar".into(),
+        },
+    ] {
+        let busy = command(&owner, change).await.unwrap_err();
+        assert_eq!(busy.code, ErrorCode::Busy, "{busy:?}");
+    }
+    // A part of another archive is not held.
+    let other = support::complete(&owner, ids[2]).await;
+    command(
+        &owner,
+        Command::Rename {
+            job: ids[2],
+            expected_revision: other.revision,
+            name: "another.part2.rar".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    fake.release.store(true, Ordering::SeqCst);
+    unpacking(&owner, ids[0], ExtractionState::Complete).await;
+    assert_eq!(*fake.volumes.lock().unwrap(), [["slow.part2.rar"]]);
+    command(
+        &owner,
+        Command::DeleteFiles {
+            job: ids[1],
+            expected_revision: part.revision,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!env.root.join("slow.part2.rar").exists());
+    assert!(env.root.join("slow.part1.rar").is_file());
     shutdown(owner).await;
 }
 
@@ -564,16 +632,13 @@ async fn cancelling_and_restarting_keep_the_archive_and_try_again() {
     .unwrap_err();
     assert_eq!(busy.code, ErrorCode::Busy);
 
-    command(
-        &owner,
-        Command::CancelExtraction {
-            job: ids[0],
-            expected_revision: running.revision,
-        },
-    )
-    .await
-    .unwrap();
-    unpacking(&owner, ids[0], ExtractionState::Cancelled).await;
+    let cancel = Command::CancelExtraction {
+        job: ids[0],
+        expected_revision: running.revision,
+        expected_generation: running.extraction.as_ref().unwrap().generation.unwrap(),
+    };
+    command(&owner, cancel.clone()).await.unwrap();
+    let cancelled = unpacking(&owner, ids[0], ExtractionState::Cancelled).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while private_folders(&env.root) > 0 {
         assert!(tokio::time::Instant::now() < deadline);
@@ -581,10 +646,32 @@ async fn cancelling_and_restarting_keep_the_archive_and_try_again() {
     }
     assert_eq!(listing(&env.root), ["slow.zip"]);
 
-    // Started again and interrupted by a shutdown, it is unpacked again
-    // at the next start.
+    // Started again, it is a new run: the earlier stop, sent again, does
+    // not stop it, and neither request can start yet another run.
     extract(&owner, ids[0], None).await.unwrap();
-    unpacking(&owner, ids[0], ExtractionState::Extracting).await;
+    let again = unpacking(&owner, ids[0], ExtractionState::Extracting).await;
+    let late = command(&owner, cancel).await.unwrap_err();
+    assert_eq!(late.code, ErrorCode::RevisionConflict);
+    let stale = ExtractRequest {
+        idempotency_key: IdempotencyKey::generate(),
+        target: owner.identity().instance,
+        expected_revision: cancelled.revision,
+        expected_generation: cancelled.extraction.and_then(|x| x.generation),
+        password: Some(PASSWORD.into()),
+    };
+    let stale = owner
+        .handle()
+        .extract(ids[0], stale, ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(stale.code, ErrorCode::RevisionConflict);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let still = job(&owner, ids[0]).await;
+    assert_eq!(state(&still), Some(ExtractionState::Extracting));
+    assert_eq!(still.extraction, again.extraction);
+    assert_eq!(fake.started.lock().unwrap().len(), 2);
+
+    // Interrupted by a shutdown, it is unpacked again at the next start.
     shutdown(owner).await;
     assert_eq!(private_folders(&env.root), 1);
     fake.release.store(true, Ordering::SeqCst);

@@ -24,7 +24,12 @@ use crate::fs::{PublishedFile, RelativePath};
 
 /// A job's stored extraction, from the job query's columns.
 pub(super) fn decode(
-    (state, output, problem): (Option<String>, Option<String>, Option<String>),
+    (state, output, problem, generation): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    ),
 ) -> Result<Option<ExtractionSummary>, StoreError> {
     let Some(state) = state else {
         return Ok(None);
@@ -32,6 +37,7 @@ pub(super) fn decode(
     Ok(Some(ExtractionSummary {
         state: ExtractionState::from_str(&state)
             .map_err(|_| StoreError::Corrupt("extraction state"))?,
+        generation: generation.map(key).transpose()?,
         output,
         problem: problem.as_deref().map(DiagnosticText::new),
     }))
@@ -48,6 +54,8 @@ pub struct ExtractionStart {
     pub root: RootId,
     /// The archive's first volume as published.
     pub archive: PublishedFile,
+    /// Its other volumes downloaded so far, beside it.
+    pub volumes: Vec<PublishedFile>,
     /// How it is unpacked.
     pub layout: Layout,
     /// What a folder of several entries is named.
@@ -105,6 +113,71 @@ fn set(
         params![sql(job)?, state, problem, now.unix_millis()],
     )?;
     jobs::announce(tx, job, now)
+}
+
+/// Starts a new run of `job`'s extraction: a generation no earlier
+/// request names, so a late or repeated stop or unpack cannot act on it.
+fn begin(tx: &Transaction<'_>, job: JobId, now: UtcTimestamp) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT INTO extractions (job_id, generation, state, updated_at) \
+         VALUES (?1, 1, 'queued', ?2) \
+         ON CONFLICT (job_id) DO UPDATE SET generation = generation + 1",
+        params![sql(job)?, now.unix_millis()],
+    )?;
+    queue(tx, job, now)
+}
+
+/// Refuses a request naming `expected` as `job`'s unpacking run unless
+/// that is the current one.
+fn check_run(
+    current: Option<(ExtractionState, i64)>,
+    expected: Option<Generation>,
+) -> Result<(), ProtocolError> {
+    let expected = expected.map(sql).transpose()?;
+    if current.map(|(_, generation)| generation) != expected {
+        return Err(ProtocolError::new(
+            ErrorCode::RevisionConflict,
+            "the archive's unpacking changed since it was shown",
+        ));
+    }
+    Ok(())
+}
+
+/// The other volumes of `archive`, the first volume `job` published at
+/// `file` in `root`, that finished downloading beside it.
+fn volumes(
+    tx: &Transaction<'_>,
+    job: JobId,
+    root: RootId,
+    archive: &ArchiveName,
+    file: &PublishedFile,
+) -> Result<Vec<PublishedFile>, StoreError> {
+    let folder = file.path.split_last().0;
+    let ids: Vec<(i64, String)> = tx
+        .prepare(
+            "SELECT a.job_id, a.target_path FROM publications a JOIN jobs j ON j.id = a.job_id \
+             WHERE a.state = 'published' AND a.root_id = ?2 AND a.job_id != ?1 \
+             AND j.removed_at IS NULL AND j.stage = 'complete'",
+        )?
+        .query_map(params![sql(job)?, sql(root)?], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut volumes = Vec::new();
+    for (id, path) in ids {
+        let (parent, name) = match path.rsplit_once('/') {
+            Some((parent, name)) => (Some(parent), name),
+            None => (None, path.as_str()),
+        };
+        if parent != folder || !ArchiveName::parse(name).is_some_and(|name| name.same_set(archive))
+        {
+            continue;
+        }
+        if let Some((_, _, file)) = renames::published(tx, key(id)?)? {
+            volumes.push(file);
+        }
+    }
+    Ok(volumes)
 }
 
 /// The names of `archive`'s other volumes that have not finished
@@ -174,7 +247,7 @@ impl Store {
             && job.archive().is_some_and(|a| a.first)
             && row(&tx, finished)?.is_none()
         {
-            queue(&tx, finished, now)?;
+            begin(&tx, finished, now)?;
             changed = true;
         }
         let waiting: Vec<i64> = tx
@@ -193,9 +266,10 @@ impl Store {
         Ok(changed)
     }
 
-    /// Takes the next queued archive to unpack, oldest first, under a new
-    /// generation. An archive whose download was removed from the list or
-    /// whose file is gone from the records fails instead.
+    /// Takes the next queued archive to unpack, oldest first, under its
+    /// run's generation, with the volumes beside it. An archive whose
+    /// download was removed from the list or whose file is gone from the
+    /// records fails instead.
     pub(crate) fn next_extraction(
         &mut self,
         now: UtcTimestamp,
@@ -229,14 +303,13 @@ impl Store {
                 )?;
                 continue;
             };
-            let generation: Generation = key::<Generation>(generation)?
-                .next()
-                .map_err(|_| StoreError::Corrupt("extraction generation"))?;
+            let generation: Generation = key(generation)?;
+            let volumes = volumes(&tx, job, root, &archive, &file)?;
             let staging = format!("{}-g{}", job.get(), generation.get());
             tx.execute(
-                "UPDATE extractions SET state = 'extracting', generation = ?2, staging = ?3, \
-                 output = NULL, problem = NULL, updated_at = ?4 WHERE job_id = ?1",
-                params![id, sql(generation)?, staging, now.unix_millis()],
+                "UPDATE extractions SET state = 'extracting', staging = ?2, \
+                 output = NULL, problem = NULL, updated_at = ?3 WHERE job_id = ?1",
+                params![id, staging, now.unix_millis()],
             )?;
             jobs::announce(&tx, job, now)?;
             tx.commit()?;
@@ -245,6 +318,7 @@ impl Store {
                 generation,
                 root,
                 archive: file,
+                volumes,
                 layout: archive.layout,
                 stem: archive.stem,
                 staging,
@@ -356,23 +430,46 @@ impl Store {
     }
 }
 
-/// Refuses a change to `job`'s file while its archive is being unpacked.
+/// Refuses a change to `job`'s file while it is unpacked, as an archive
+/// or one of the volumes of one.
 pub(super) fn check_idle(tx: &Transaction<'_>, job: JobId) -> Result<(), StoreError> {
-    if row(tx, job)?.is_some_and(|(state, _)| state == ExtractionState::Extracting) {
-        return Err(StoreError::Busy(
-            "the archive is being unpacked; try again once that finishes",
-        ));
+    let unpacking: Vec<i64> = tx
+        .prepare("SELECT job_id FROM extractions WHERE state = 'extracting'")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let own = renames::published(tx, job)?;
+    for id in unpacking {
+        let id: JobId = key(id)?;
+        let mut busy = id == job;
+        if let (false, Some((_, own_root, own)), Some(archive), Some((_, root, file))) = (
+            busy,
+            &own,
+            jobs::load(tx, id)?.archive(),
+            renames::published(tx, id)?,
+        ) {
+            busy = *own_root == root
+                && volumes(tx, id, root, &archive, &file)?
+                    .iter()
+                    .any(|volume| volume.path == own.path);
+        }
+        if busy {
+            return Err(StoreError::Busy(
+                "the archive is being unpacked; try again once that finishes",
+            ));
+        }
     }
     Ok(())
 }
 
 /// [`wayfetch_protocol::Command::Extract`]: queues a complete archive
-/// download to be unpacked, again if it was before. One already queued or
-/// being unpacked is left as it is.
+/// download to be unpacked under a new run, again if it was before, if
+/// `run` is the run the client saw. One already queued or being unpacked
+/// is left as it is.
 pub(super) fn extract(
     tx: &Transaction<'_>,
     id: JobId,
     expected: Revision,
+    run: Option<Generation>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let job = jobs::load_listed(tx, id)?;
@@ -385,11 +482,13 @@ pub(super) fn extract(
             "the download is not an archive, or not its first part",
         ));
     }
-    let running = row(tx, id)?.is_some_and(|(state, _)| {
+    let current = row(tx, id)?;
+    check_run(current, run)?;
+    let running = current.is_some_and(|(state, _)| {
         matches!(state, ExtractionState::Queued | ExtractionState::Extracting)
     });
     if !running {
-        queue(tx, id, now)?;
+        begin(tx, id, now)?;
     }
     Ok(CommandResult::JobUpdated {
         job: id,
@@ -398,19 +497,23 @@ pub(super) fn extract(
     })
 }
 
-/// [`wayfetch_protocol::Command::CancelExtraction`]: stops unpacking an
-/// archive, or waiting to. The coordinator stops a running attempt.
+/// [`wayfetch_protocol::Command::CancelExtraction`]: stops run `run` of
+/// unpacking an archive, or waiting to, and never a later one. The
+/// coordinator stops a running attempt.
 pub(super) fn cancel(
     tx: &Transaction<'_>,
     id: JobId,
     expected: Revision,
+    run: Generation,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let job = jobs::load_listed(tx, id)?;
     job.state
         .check_complete(expected)
         .map_err(StoreError::from)?;
-    let active = row(tx, id)?.is_some_and(|(state, _)| {
+    let current = row(tx, id)?;
+    check_run(current, Some(run))?;
+    let active = current.is_some_and(|(state, _)| {
         matches!(
             state,
             ExtractionState::Waiting

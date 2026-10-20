@@ -62,14 +62,12 @@ impl ArchiveName {
         }
         // `name.r00` after `name.rar`, and `name.z01` before `name.zip`.
         if let Some((stem, ext)) = lower.rsplit_once('.')
-            && ext.len() == 3
-            && number_of(&ext[1..]).is_some()
+            && let [kind @ (b'r' | b'z'), digits @ ..] = ext.as_bytes()
+            && digits.len() == 2
+            && digits.iter().all(u8::is_ascii_digit)
         {
-            match &ext[..1] {
-                "r" => return make("rar-old", stem.len(), false, Layout::Direct),
-                "z" => return make("zip", stem.len(), false, Layout::Direct),
-                _ => {}
-            }
+            let family = if *kind == b'r' { "rar-old" } else { "zip" };
+            return make(family, stem.len(), false, Layout::Direct);
         }
         for (suffix, family, layout) in [
             (".rar", "rar-old", Layout::Direct),
@@ -172,5 +170,31 @@ mod tests {
         assert_eq!(split.stem, "Disk");
         // A split archive is not the unsplit one of the same name.
         assert!(!split.same_set(&ArchiveName::parse("Disk.7z").unwrap()));
+    }
+
+    #[test]
+    fn names_in_any_script_are_classified_without_panicking() {
+        // Three-byte extensions that are one character, or end mid-way
+        // through one, are not volume numbers.
+        for name in [
+            "notes.中",
+            "notes.r中",
+            "notes.zé",
+            "x.中文",
+            "a.é",
+            "файл.ř",
+        ] {
+            assert_eq!(parsed(name), None, "{name}");
+        }
+        assert_eq!(
+            parsed("写真.zip"),
+            Some((true, "写真".into(), Layout::Direct))
+        );
+        let first = ArchiveName::parse("Ärger.part1.rar").unwrap();
+        assert!(first.first && first.same_set(&ArchiveName::parse("ärger.part2.rar").unwrap()));
+        assert_eq!(
+            parsed("Ölfass.r01"),
+            Some((false, "Ölfass".into(), Layout::Direct))
+        );
     }
 }

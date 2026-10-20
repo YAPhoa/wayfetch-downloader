@@ -7,10 +7,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use wayfetch_domain::id::JobId;
 use wayfetch_protocol::media::PluginSummary;
-use wayfetch_protocol::{ErrorCode, ProtocolError};
+use wayfetch_protocol::{Command, CommandEnvelope, CommandResult, ErrorCode, ProtocolError};
 
 use super::{Coordinator, Internal, StoreClient, now};
 use crate::accounts::Secret;
@@ -65,11 +66,12 @@ impl Extractions {
         Some(ProtocolError::new(ErrorCode::NotApplicable, &why))
     }
 
-    /// Keeps `password` for `job`'s next attempt.
-    pub(super) fn give_password(&mut self, job: JobId, password: Secret) {
+    /// Keeps `password` for `job`'s next attempt, and answers the one it
+    /// replaces, if any.
+    fn give_password(&mut self, job: JobId, password: Secret) -> Option<(Secret, Instant)> {
         self.passwords
             .retain(|_, (_, at)| at.elapsed() < PASSWORD_TTL);
-        self.passwords.insert(job, (password, Instant::now()));
+        self.passwords.insert(job, (password, Instant::now()))
     }
 
     /// Stops `job`'s attempt, if it is running.
@@ -170,19 +172,44 @@ impl Coordinator {
         }
     }
 
-    /// Keeps `password` for `job`'s next attempt, from a request to unpack
-    /// it.
-    pub(super) fn give_password(
+    /// Runs a request to unpack an archive, keeping its password, if it
+    /// has one, for the attempt the request starts. A refused request
+    /// leaves the password kept before, if any.
+    pub(super) async fn extract(
         &mut self,
-        job: JobId,
-        password: String,
-    ) -> Result<(), ProtocolError> {
+        envelope: Box<CommandEnvelope>,
+        password: Option<String>,
+        reply: oneshot::Sender<Result<CommandResult, ProtocolError>>,
+    ) {
+        let (Some(password), Command::Extract { job, .. }) = (password, &envelope.command) else {
+            self.execute_command(envelope, reply, Default::default())
+                .await;
+            return;
+        };
+        let job = *job;
         if let Some(why) = self.extractions.unavailable() {
-            return Err(why);
+            let _ = reply.send(Err(why));
+            return;
         }
-        self.extractions
+        let earlier = self
+            .extractions
             .give_password(job, Secret::from_text(&password));
-        Ok(())
+        let (sent, result) = oneshot::channel();
+        self.execute_command(envelope, sent, Default::default())
+            .await;
+        let result = result.await.unwrap_or_else(|_| {
+            Err(ProtocolError::new(
+                ErrorCode::Internal,
+                "the request was not answered",
+            ))
+        });
+        if result.is_err() {
+            match earlier {
+                Some(earlier) => self.extractions.passwords.insert(job, earlier),
+                None => self.extractions.passwords.remove(&job),
+            };
+        }
+        let _ = reply.send(result);
     }
 }
 
@@ -339,13 +366,23 @@ impl Attempt {
         root: &Arc<Root>,
         output: &std::path::Path,
     ) -> Result<crate::fs::RelativePath, Stop> {
-        let file = self.start.archive.clone();
-        let path = self
-            .on_root(root, move |root| root.published_path(&file))
+        let files = std::iter::once(&self.start.archive)
+            .chain(&self.start.volumes)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut paths = self
+            .on_root(root, move |root| {
+                files
+                    .iter()
+                    .map(|file| root.published_path(file))
+                    .collect::<Result<Vec<_>, _>>()
+            })
             .await?
             .map_err(|e| Stop::End(folder_problem(&e)))?;
+        let path = paths.remove(0);
         let archive = Archive {
             path: &path,
+            volumes: &paths,
             layout: self.start.layout,
             password: self.password.as_ref(),
         };
@@ -364,7 +401,7 @@ impl Attempt {
             None
         };
         let budget = extract::budget(declared, self.start.archive.size);
-        let unpacking = self.extractor.extract(archive, output);
+        let unpacking = self.extractor.extract(archive, output, budget);
         tokio::pin!(unpacking);
         let mut watch = tokio::time::interval(WATCH_INTERVAL);
         loop {
