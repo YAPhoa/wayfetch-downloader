@@ -9,7 +9,7 @@
 use serde::Deserialize;
 use wayfetch_domain::id::{AccountId, JobId, PackageId, RootId};
 use wayfetch_domain::name::{PluginId, ProviderId};
-use wayfetch_domain::version::Revision;
+use wayfetch_domain::version::{Generation, Revision};
 
 use crate::account::{AccountAlias, AccountRef};
 use crate::command::{
@@ -82,6 +82,8 @@ pub enum Action {
     DeleteFiles,
     /// [`Command::Retry`]. Added in protocol 1.2.
     Retry,
+    /// [`Command::CancelExtraction`]. Added in protocol 6.0.
+    CancelExtraction,
 }
 
 /// Pauses, resumes, cancels, retries, renames, or removes a job at the
@@ -108,6 +110,11 @@ pub struct JobCommandRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub repeat_provider_operation: Option<bool>,
+    /// For [`Action::CancelExtraction`] only, and required there: the
+    /// unpacking run to stop. Added in protocol 6.0.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub expected_generation: Option<Generation>,
 }
 
 impl JobCommandRequest {
@@ -121,6 +128,13 @@ impl JobCommandRequest {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidRequest,
                 "only a retry repeats a provider operation",
+            ));
+        }
+        let expected_generation = self.expected_generation;
+        if expected_generation.is_some() && self.action != Action::CancelExtraction {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "only stopping unpacking names a run",
             ));
         }
         let command = match (self.action, self.name) {
@@ -166,6 +180,19 @@ impl JobCommandRequest {
                 expected_revision,
                 repeat_provider_operation,
             },
+            (Action::CancelExtraction, None) => match expected_generation {
+                Some(expected_generation) => Command::CancelExtraction {
+                    job,
+                    expected_revision,
+                    expected_generation,
+                },
+                None => {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidRequest,
+                        "stopping unpacking needs the run to stop",
+                    ));
+                }
+            },
         };
         Ok(CommandEnvelope {
             idempotency_key: self.idempotency_key,
@@ -200,6 +227,11 @@ pub struct UpdateSettingsRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub download_speed_limit: Option<SpeedLimitChange>,
+    /// Whether downloaded archives are unpacked as they finish. Added in
+    /// protocol 6.0.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub extract_archives: Option<bool>,
 }
 
 impl UpdateSettingsRequest {
@@ -213,10 +245,96 @@ impl UpdateSettingsRequest {
                 default_root: self.default_root,
                 max_active_downloads: self.max_active_downloads,
                 download_speed_limit: self.download_speed_limit,
+                extract_archives: self.extract_archives,
             },
         }
     }
 }
+
+/// Unpacks a downloaded archive, with its password if it needs one. Added
+/// in protocol 6.0.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ExtractRequest {
+    /// Identifies the command across retries.
+    pub idempotency_key: IdempotencyKey,
+    /// The instance the client believes it is talking to.
+    pub target: InstanceId,
+    /// The job revision the client last saw.
+    pub expected_revision: Revision,
+    /// The unpacking run the client last saw, if the archive has one.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub expected_generation: Option<Generation>,
+    /// The archive's password. It is kept in memory for this archive's
+    /// next attempt only: never stored, logged, or part of the command.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ExtractRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtractRequest")
+            .field("idempotency_key", &self.idempotency_key)
+            .field("target", &self.target)
+            .field("expected_revision", &self.expected_revision)
+            .field("expected_generation", &self.expected_generation)
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+impl ExtractRequest {
+    /// The command envelope for `job`, and the password apart from it. An
+    /// empty password is refused.
+    pub fn into_parts(
+        self,
+        job: JobId,
+    ) -> Result<(CommandEnvelope, Option<String>), ProtocolError> {
+        if self.password.as_deref().is_some_and(str::is_empty) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "the password is empty",
+            ));
+        }
+        // It is handed to the extractor as one line.
+        if self
+            .password
+            .as_deref()
+            .is_some_and(|p| p.contains(['\n', '\r', '\0']))
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidRequest,
+                "the password holds a line break",
+            ));
+        }
+        if self
+            .password
+            .as_ref()
+            .is_some_and(|p| p.len() > MAX_PASSWORD_BYTES)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::LimitExceeded,
+                "the password is too long",
+            ));
+        }
+        let envelope = CommandEnvelope {
+            idempotency_key: self.idempotency_key,
+            target: self.target,
+            command: Command::Extract {
+                job,
+                expected_revision: self.expected_revision,
+                expected_generation: self.expected_generation,
+            },
+        };
+        Ok((envelope, self.password))
+    }
+}
+
+/// Longest archive password accepted, in bytes.
+pub const MAX_PASSWORD_BYTES: usize = 1024;
 
 /// Stops offering a folder as a destination.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -605,6 +723,32 @@ mod tests {
     }
 
     #[test]
+    fn stopping_unpacking_names_the_run_to_stop() {
+        let request = |action: &str, generation: Option<u64>| {
+            serde_json::from_value::<JobCommandRequest>(json!({
+                "idempotency_key": IdempotencyKey::generate(),
+                "target": InstanceId::generate(),
+                "action": action,
+                "expected_revision": 2,
+                "expected_generation": generation,
+            }))
+            .unwrap()
+            .into_envelope(JobId::from_u64(1).unwrap())
+        };
+        assert!(matches!(
+            request("cancel_extraction", Some(3)).unwrap().command,
+            Command::CancelExtraction { expected_generation, .. }
+                if expected_generation == Generation::from_u64(3).unwrap()
+        ));
+        for (action, generation) in [("cancel_extraction", None), ("cancel", Some(3))] {
+            assert_eq!(
+                request(action, generation).unwrap_err().code,
+                ErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[test]
     fn only_a_rename_carries_a_name() {
         let request = |action: &str, name: Option<&str>| {
             serde_json::from_value::<JobCommandRequest>(json!({
@@ -657,6 +801,7 @@ mod tests {
                 default_root: RootId::from_u64(4),
                 max_active_downloads: None,
                 download_speed_limit: None,
+                extract_archives: None,
             }
         );
         let preference: UpdateSettingsRequest = serde_json::from_value(json!({
@@ -673,6 +818,7 @@ mod tests {
                 default_root: None,
                 max_active_downloads: Some(PreferenceChange::Set(6)),
                 download_speed_limit: None,
+                extract_archives: None,
             }
         );
         let both: UpdateSettingsRequest = serde_json::from_value(json!({
@@ -981,6 +1127,52 @@ mod tests {
                 expected_revision: Revision::from_u64(2).unwrap(),
                 enabled: false,
             }
+        );
+    }
+
+    #[test]
+    fn an_extract_request_keeps_its_password_out_of_the_command() {
+        let request = |password: serde_json::Value| {
+            serde_json::from_value::<ExtractRequest>(json!({
+                "idempotency_key": IdempotencyKey::generate(),
+                "target": InstanceId::generate(),
+                "expected_revision": 4,
+                "password": password,
+            }))
+            .unwrap()
+        };
+        let job = JobId::from_u64(9).unwrap();
+        let with = request(json!("hunter2"));
+        assert!(!format!("{with:?}").contains("hunter2"));
+        let (envelope, password) = with.into_parts(job).unwrap();
+        assert_eq!(password.as_deref(), Some("hunter2"));
+        assert_eq!(
+            envelope.command,
+            Command::Extract {
+                job,
+                expected_revision: Revision::from_u64(4).unwrap(),
+                expected_generation: None,
+            }
+        );
+        assert!(
+            !serde_json::to_string(&envelope)
+                .unwrap()
+                .contains("hunter2")
+        );
+        let (_, none) = request(serde_json::Value::Null).into_parts(job).unwrap();
+        assert_eq!(none, None);
+        assert_eq!(
+            request(json!("")).into_parts(job).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            request(json!("a\nb")).into_parts(job).unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+        let long = "x".repeat(MAX_PASSWORD_BYTES + 1);
+        assert_eq!(
+            request(json!(long)).into_parts(job).unwrap_err().code,
+            ErrorCode::LimitExceeded
         );
     }
 }

@@ -182,6 +182,8 @@ pub(crate) struct SavedSettings {
     /// The saved total download speed limit, which may no longer be
     /// permitted.
     pub(crate) download_speed_limit: Option<SpeedLimit>,
+    /// Whether downloaded archives are unpacked as they finish.
+    pub(crate) extract_archives: bool,
 }
 
 /// A speed limit's stored form: 0 is Unlimited (migration 13).
@@ -204,13 +206,26 @@ fn read_speed_limit(stored: i64) -> Result<SpeedLimit, StoreError> {
 }
 
 fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
-    let (revision, root, max_active, speed): (i64, Option<i64>, Option<i64>, Option<i64>) = tx
-        .query_row(
-            "SELECT revision, default_root, max_active_downloads, download_speed_limit \
-             FROM settings WHERE id = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
+    let (revision, root, max_active, speed, extract): (
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        bool,
+    ) = tx.query_row(
+        "SELECT revision, default_root, max_active_downloads, download_speed_limit, \
+         extract_archives FROM settings WHERE id = 1",
+        [],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?;
     Ok(SavedSettings {
         revision: key(revision)?,
         default_root: root.map(key).transpose()?,
@@ -218,6 +233,7 @@ fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
             .map(|v| u64::try_from(v).map_err(|_| StoreError::Corrupt("max_active_downloads")))
             .transpose()?,
         download_speed_limit: speed.map(read_speed_limit).transpose()?,
+        extract_archives: extract,
     })
 }
 
@@ -296,6 +312,7 @@ pub(super) fn update_settings(
     default_root: Option<RootId>,
     max_active_downloads: Option<PreferenceChange>,
     download_speed_limit: Option<SpeedLimitChange>,
+    extract_archives: Option<bool>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let saved = settings(tx)?;
@@ -312,6 +329,7 @@ pub(super) fn update_settings(
             Some(SpeedLimitChange::Set(limit)) => Some(limit),
             Some(SpeedLimitChange::UseDefault) => None,
         },
+        extract_archives: extract_archives.unwrap_or(saved.extract_archives),
         ..saved
     };
     if wanted == saved {
@@ -331,12 +349,13 @@ pub(super) fn update_settings(
         .transpose()?;
     tx.execute(
         "UPDATE settings SET revision = ?1, default_root = ?2, max_active_downloads = ?3, \
-         download_speed_limit = ?4, updated_at = ?5 WHERE id = 1",
+         download_speed_limit = ?4, extract_archives = ?5, updated_at = ?6 WHERE id = 1",
         params![
             sql(next)?,
             wanted.default_root.map(sql).transpose()?,
             max_active,
             speed,
+            wanted.extract_archives,
             now.unix_millis()
         ],
     )
@@ -488,7 +507,7 @@ mod tests {
         );
         let first = first.revision;
         let tx = store.write().unwrap();
-        let updated = update_settings(&tx, first, Some(root), None, None, now()).unwrap();
+        let updated = update_settings(&tx, first, Some(root), None, None, None, now()).unwrap();
         assert_eq!(
             updated,
             CommandResult::SettingsUpdated {
@@ -496,11 +515,19 @@ mod tests {
                 changed: true
             }
         );
-        let stale = update_settings(&tx, first, Some(root), None, None, now()).unwrap_err();
+        let stale = update_settings(&tx, first, Some(root), None, None, None, now()).unwrap_err();
         assert_eq!(stale.code, ErrorCode::RevisionConflict);
         assert_eq!(stale.current_revision, first.next().ok());
-        let same =
-            update_settings(&tx, first.next().unwrap(), Some(root), None, None, now()).unwrap();
+        let same = update_settings(
+            &tx,
+            first.next().unwrap(),
+            Some(root),
+            None,
+            None,
+            None,
+            now(),
+        )
+        .unwrap();
         assert_eq!(
             same,
             CommandResult::SettingsUpdated {
@@ -528,12 +555,13 @@ mod tests {
         let root = store.allocate_root(Path::new("/a"), false, now()).unwrap();
         let tx = store.write().unwrap();
         let first = settings(&tx).unwrap().revision;
-        update_settings(&tx, first, Some(root), None, None, now()).unwrap();
+        update_settings(&tx, first, Some(root), None, None, None, now()).unwrap();
         let change = |revision: Revision, change| match update_settings(
             &tx,
             revision,
             None,
             Some(change),
+            None,
             None,
             now(),
         )
@@ -571,6 +599,7 @@ mod tests {
             None,
             max_active,
             speed,
+            None,
             now(),
         )
         .unwrap()
@@ -607,7 +636,7 @@ mod tests {
             (Some(3), None)
         );
         // A stale revision changes neither.
-        let stale = update_settings(&tx, second, None, None, unlimited, now()).unwrap_err();
+        let stale = update_settings(&tx, second, None, None, unlimited, None, now()).unwrap_err();
         assert_eq!(stale.code, ErrorCode::RevisionConflict);
         assert_eq!(settings(&tx).unwrap().download_speed_limit, None);
     }

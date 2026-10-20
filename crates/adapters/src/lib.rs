@@ -17,8 +17,9 @@
 //!   through an account.
 //! * [`youtube`]: recognizing YouTube video links, and reading them as
 //!   media through [`ytdlp`].
-//! * [`plugin`]: the helper programs media integrations run; [`ytdlp`]
-//!   reads videos, [`ffmpeg`] joins and converts their streams.
+//! * [`plugin`]: the helper programs integrations run; [`ytdlp`] reads
+//!   videos, [`ffmpeg`] joins and converts their streams, and
+//!   [`sevenzip`] unpacks downloaded archives, confined by [`confine`].
 //! * [`plugins`]: turning plugins on and off, updating them from their
 //!   signed releases ([`release`]), and removing copies Wayfetch
 //!   installed.
@@ -28,11 +29,13 @@ use std::sync::Arc;
 use wayfetch_engine::accounts::provider::{AccountProvider, ApiClient};
 
 pub mod common;
+pub mod confine;
 pub mod ffmpeg;
 pub mod plugin;
 pub mod plugins;
 pub mod real_debrid;
 pub mod release;
+pub mod sevenzip;
 pub mod youtube;
 pub mod ytdlp;
 

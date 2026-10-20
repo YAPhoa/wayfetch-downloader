@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 5, minor: 0 });
+export const PROTOCOL = Object.freeze({ major: 6, minor: 0 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -65,7 +65,11 @@ export const PROTOCOL = Object.freeze({ major: 5, minor: 0 });
  * @typedef {import('./generated/AuthorizationId.js').AuthorizationId} AuthorizationId
  * @typedef {import('./generated/ServiceSupport.js').ServiceSupport} ServiceSupport
  * @typedef {import('./generated/JobRoute.js').JobRoute} JobRoute
- * @typedef {Exclude<JobAction, 'rename' | 'remove' | 'delete_files'>} StateAction The
+ * @typedef {import('./generated/ExtractionSummary.js').ExtractionSummary} ExtractionSummary
+ * @typedef {import('./generated/ExtractionState.js').ExtractionState} ExtractionState
+ * @typedef {import('./generated/ExtractRequest.js').ExtractRequest} ExtractRequest
+ * @typedef {import('./generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
+ * @typedef {Exclude<JobAction, 'rename' | 'remove' | 'delete_files' | 'cancel_extraction'>} StateAction The
  *   actions that change whether a job runs.
  */
 
@@ -125,15 +129,9 @@ export const PROTOCOL = Object.freeze({ major: 5, minor: 0 });
  *     media?: MediaChoice,
  *   }) => Promise<CommandResult>,
  *   linkSource: (link: LinkId) => Promise<string>,
- *   jobCommand: (job: JobId, request: {
- *     idempotencyKey: string,
- *     target: string,
- *     action: JobAction,
- *     expectedRevision: number,
- *     name?: string,
- *     repeatProviderOperation?: boolean,
- *   }) => Promise<CommandResult>,
+ *   jobCommand: (job: JobId, request: JobChange) => Promise<CommandResult>,
  *   jobSource: (job: JobId) => Promise<string>,
+ *   extract: (job: JobId, request: ExtractChange) => Promise<CommandResult>,
  *   settings: () => Promise<Settings>,
  *   updateSettings: (change: SettingsChange) => Promise<CommandResult>,
  *   removeRoot: (request: {
@@ -184,8 +182,57 @@ export const PROTOCOL = Object.freeze({ major: 5, minor: 0 });
  *   defaultRoot?: RootId,
  *   maxActiveDownloads?: PreferenceChange,
  *   downloadSpeedLimit?: SpeedLimitChange,
+ *   extractArchives?: boolean,
  * }} SettingsChange
  */
+
+/**
+ * A command for one job at the revision the client saw. Stopping unpacking
+ * names the unpacking run it stops.
+ * @typedef {{
+ *   idempotencyKey: string,
+ *   target: string,
+ *   action: JobAction,
+ *   expectedRevision: number,
+ *   expectedGeneration?: number,
+ *   name?: string,
+ *   repeatProviderOperation?: boolean,
+ * }} JobChange
+ */
+
+/**
+ * Unpacking an archive download at the job revision and unpacking run the
+ * client saw, with its password if it needs one.
+ * @typedef {{
+ *   idempotencyKey: string,
+ *   target: string,
+ *   expectedRevision: number,
+ *   expectedGeneration?: number,
+ *   password?: string,
+ * }} ExtractChange
+ */
+
+/**
+ * The request both transports send for `change`.
+ * @param {JobChange} change
+ * @returns {JobCommandRequest}
+ */
+export function jobCommandRequest({
+  idempotencyKey,
+  target,
+  action,
+  expectedRevision,
+  expectedGeneration,
+  name,
+  repeatProviderOperation,
+}) {
+  /** @type {JobCommandRequest} */
+  const request = { idempotency_key: idempotencyKey, target, action, expected_revision: expectedRevision };
+  if (expectedGeneration !== undefined) request.expected_generation = expectedGeneration;
+  if (name !== undefined) request.name = name;
+  if (repeatProviderOperation) request.repeat_provider_operation = true;
+  return request;
+}
 
 /**
  * The request both transports send for `change`.
@@ -199,12 +246,27 @@ export function settingsRequest({
   defaultRoot,
   maxActiveDownloads,
   downloadSpeedLimit,
+  extractArchives,
 }) {
   /** @type {UpdateSettingsRequest} */
   const request = { idempotency_key: idempotencyKey, target, expected_revision: expectedRevision };
   if (defaultRoot !== undefined) request.default_root = defaultRoot;
   if (maxActiveDownloads !== undefined) request.max_active_downloads = maxActiveDownloads;
   if (downloadSpeedLimit !== undefined) request.download_speed_limit = downloadSpeedLimit;
+  if (extractArchives !== undefined) request.extract_archives = extractArchives;
+  return request;
+}
+
+/**
+ * The request both transports send for `change`.
+ * @param {ExtractChange} change
+ * @returns {ExtractRequest}
+ */
+export function extractRequest({ idempotencyKey, target, expectedRevision, expectedGeneration, password }) {
+  /** @type {ExtractRequest} */
+  const request = { idempotency_key: idempotencyKey, target, expected_revision: expectedRevision };
+  if (expectedGeneration !== undefined) request.expected_generation = expectedGeneration;
+  if (password !== undefined) request.password = password;
   return request;
 }
 

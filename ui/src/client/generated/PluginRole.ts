@@ -3,4 +3,4 @@
 /**
  * What a plugin does for Wayfetch.
  */
-export type PluginRole = "media_resolver" | "media_converter";
+export type PluginRole = "media_resolver" | "media_converter" | "archive_extractor";

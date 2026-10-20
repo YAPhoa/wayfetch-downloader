@@ -233,4 +233,8 @@ test('a save says what it changed', () => {
     ),
     'Saved. Downloads are not speed limited.',
   );
+  assert.equal(
+    savedMessage({ extractArchives: false }, /** @type {any} */ ({ ...saved, extract_archives: false })),
+    'Saved. Archives are kept as they download.',
+  );
 });

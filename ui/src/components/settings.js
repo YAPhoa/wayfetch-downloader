@@ -41,7 +41,7 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('../client/contract.js').SpeedLimit} SpeedLimit
  * @typedef {import('../client/contract.js').SpeedLimitSetting} SpeedLimitSetting
  * @typedef {import('../client/contract.js').SpeedLimitChange} SpeedLimitChange
- * @typedef {Pick<import('../client/contract.js').SettingsChange, 'maxActiveDownloads' | 'downloadSpeedLimit'>} Change
+ * @typedef {Pick<import('../client/contract.js').SettingsChange, 'maxActiveDownloads' | 'downloadSpeedLimit' | 'extractArchives'>} Change
  * @typedef {'KiB' | 'MiB'} RateUnit
  * @typedef {'compact' | 'comfortable'} Density
  * @typedef {'downloads' | 'folder' | 'display' | 'accounts' | 'plugins'} Section
@@ -295,6 +295,11 @@ export function savedMessage(change, saved) {
         : `Downloads share at most ${formatRate(limit.bytes_per_second)}.`,
     );
   }
+  if (change.extractArchives !== undefined) {
+    parts.push(
+      saved.extract_archives ? 'Archives are unpacked after they download.' : 'Archives are kept as they download.',
+    );
+  }
   return ['Saved.', ...parts].join(' ');
 }
 
@@ -526,9 +531,10 @@ export class SettingsPage {
   }
 
   /**
-   * The engine's download preferences: how many downloads run at once and
-   * the total download speed limit, within what the server's configuration
-   * allows. Both are saved together, all or none.
+   * The engine's download preferences: how many downloads run at once, the
+   * total download speed limit, within what the server's configuration
+   * allows, and whether archives are unpacked. All are saved together, all
+   * or none.
    */
   downloadsSection() {
     const { context } = this;
@@ -594,6 +600,24 @@ export class SettingsPage {
       RATE_UNITS.map((name) => h('option', { value: name }, `${name}/s`)),
     );
     const speedPolicy = h('span', { class: 'hint', id: 'speed-limit-policy' });
+
+    const extractRadio = (/** @type {boolean} */ value, /** @type {string} */ text) =>
+      h(
+        'label',
+        null,
+        h('input', {
+          type: 'radio',
+          name: 'extract-archives',
+          value: String(value),
+          'data-key': `extract-${value ? 'on' : 'off'}`,
+          onchange: () => update(),
+        }),
+        h('span', null, text),
+      );
+    const extractOffLabel = extractRadio(false, 'Off');
+    const extractOnLabel = extractRadio(true, 'On');
+    const extractOff = /** @type {HTMLInputElement} */ (extractOffLabel.querySelector('input'));
+    const extractOn = /** @type {HTMLInputElement} */ (extractOnLabel.querySelector('input'));
     const speedProblem = h('span', { class: 'problem', id: 'speed-limit-problem' });
 
     const message = h('p', { class: 'message', role: 'status' });
@@ -611,6 +635,7 @@ export class SettingsPage {
           if (!current) return;
           showCount(current.max_active_downloads);
           showSpeed(current.download_speed_limit);
+          showExtract(current.extract_archives);
           update();
           show(message, 'Changes discarded.');
           input.focus();
@@ -627,13 +652,14 @@ export class SettingsPage {
         onsubmit: (/** @type {SubmitEvent} */ event) => {
           event.preventDefault();
           if (!current) return;
-          const { count, speed } = draft();
+          const { count, speed, extract } = draft();
           if ((count.changed && count.parsed.error) || (speed.changed && speed.error)) return;
           /** @type {Change} */
           const change = {};
           if (count.changed && count.parsed.value !== null) change.maxActiveDownloads = { set: count.parsed.value };
           if (speed.changed && speed.limit) change.downloadSpeedLimit = { set: speed.limit };
-          if (change.maxActiveDownloads || change.downloadSpeedLimit) void save(change);
+          if (extract.changed) change.extractArchives = extract.value;
+          if (Object.keys(change).length > 0) void save(change);
         },
       },
       h(
@@ -693,6 +719,26 @@ export class SettingsPage {
               unit,
             ),
           ),
+          h(
+            'div',
+            { class: 'setting-row' },
+            h(
+              'div',
+              { class: 'setting-text' },
+              h('span', { class: 'setting-name', id: 'extract-archives-name' }, 'Unpack archives after download'),
+              h(
+                'span',
+                { class: 'hint' },
+                'Each archive is kept and unpacked into a new folder beside it. Multi-part archives wait for every part.',
+              ),
+            ),
+            h(
+              'div',
+              { class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'extract-archives-name' },
+              extractOffLabel,
+              extractOnLabel,
+            ),
+          ),
         ),
         h('div', { class: 'group-foot' }, message, useDefault, cancel, saveButton),
       ),
@@ -724,6 +770,12 @@ export class SettingsPage {
       }
     };
 
+    /** @param {boolean} on */
+    const showExtract = (on) => {
+      extractOn.checked = on;
+      extractOff.checked = !on;
+    };
+
     /**
      * What is typed, whether it differs from what applies, and whether it
      * can be saved.
@@ -750,7 +802,8 @@ export class SettingsPage {
           error: parsed.error,
         };
       }
-      return { count, speed };
+      const extract = { value: extractOn.checked, changed: extractOn.checked !== settings.extract_archives };
+      return { count, speed, extract };
     };
 
     /** Enables what can be done now, and says what is wrong with the draft. */
@@ -758,7 +811,7 @@ export class SettingsPage {
       if (!current) return;
       const countSetting = current.max_active_downloads;
       const speedSetting = current.download_speed_limit;
-      const { count, speed } = draft();
+      const { count, speed, extract } = draft();
       const countInvalid = count.changed && count.parsed.error !== null;
       const speedInvalid = speed.changed && speed.error !== null;
       show(problem, countInvalid ? count.parsed.error : '');
@@ -773,8 +826,10 @@ export class SettingsPage {
       limited.disabled = speedFixed;
       rate.disabled = speedFixed || !limited.checked;
       unit.disabled = rate.disabled;
-      const editable = canChange && !(countSetting.locked && speedSetting.locked);
-      const changed = count.changed || speed.changed;
+      extractOn.disabled = !canChange || saving;
+      extractOff.disabled = extractOn.disabled;
+      const editable = canChange;
+      const changed = count.changed || speed.changed || extract.changed;
       saveButton.hidden = !editable;
       cancel.hidden = !editable;
       saveButton.disabled = saving || !changed || countInvalid || speedInvalid;
@@ -805,6 +860,7 @@ export class SettingsPage {
       input.max = String(countSetting.max);
       if (!kept?.count.changed) showCount(countSetting);
       if (!kept?.speed.changed) showSpeed(settings.download_speed_limit);
+      if (!kept?.extract.changed) showExtract(settings.extract_archives);
       const denied = !canChange && ' You may not change settings.';
       show(policy, describeSetting(countSetting, client.local), denied);
       show(speedPolicy, describeSpeedLimit(settings.download_speed_limit, client.local), denied);
@@ -874,7 +930,8 @@ export class SettingsPage {
     const reload = async (said = '') => {
       try {
         const settings = await client.settings();
-        const changed = current !== null && (draft().count.changed || draft().speed.changed);
+        const kept = current !== null ? draft() : null;
+        const changed = kept !== null && (kept.count.changed || kept.speed.changed || kept.extract.changed);
         apply(
           settings,
           said || (changed ? 'The settings were changed elsewhere. Your unsaved values are kept.' : ''),

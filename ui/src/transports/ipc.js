@@ -15,7 +15,7 @@
 // stream ended, after which the feed resumes from its cursor as it does
 // after a lost HTTP stream.
 
-import { WayfetchError, settingsRequest } from '../client/contract.js';
+import { WayfetchError, extractRequest, jobCommandRequest, settingsRequest } from '../client/contract.js';
 
 /**
  * @typedef {import('../client/generated/StartRouting.js').StartRouting} StartRouting
@@ -31,6 +31,7 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/contract.js').RootId} RootId
  * @typedef {import('../client/contract.js').CollectMode} CollectMode
  * @typedef {import('../client/contract.js').SettingsChange} SettingsChange
+ * @typedef {import('../client/contract.js').ExtractChange} ExtractChange
  * @typedef {import('../client/contract.js').RootSummary} RootSummary
  * @typedef {import('../client/contract.js').LinkId} LinkId
  * @typedef {import('../client/contract.js').LinkRef} LinkRef
@@ -38,7 +39,6 @@ import { WayfetchError, settingsRequest } from '../client/contract.js';
  * @typedef {import('../client/generated/Query.js').Query} Query
  * @typedef {import('../client/generated/ProtocolError.js').ProtocolError} ProtocolError
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
- * @typedef {import('../client/generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
  * @typedef {import('../client/generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
  * @typedef {import('../client/generated/ChangePluginRequest.js').ChangePluginRequest} ChangePluginRequest
  * @typedef {import('../client/generated/PluginChange.js').PluginChange} PluginChange
@@ -181,19 +181,19 @@ export class DesktopIpcClient {
 
   /**
    * @param {JobId} job
-   * @param {{ idempotencyKey: string, target: string, action: JobAction, expectedRevision: number, name?: string, repeatProviderOperation?: boolean }} request
+   * @param {import('../client/contract.js').JobChange} change
    */
-  jobCommand(job, { idempotencyKey, target, action, expectedRevision, name, repeatProviderOperation }) {
-    /** @type {JobCommandRequest} */
-    const request = {
-      idempotency_key: idempotencyKey,
-      target,
-      action,
-      expected_revision: expectedRevision,
-    };
-    if (name !== undefined) request.name = name;
-    if (repeatProviderOperation) request.repeat_provider_operation = true;
-    return this.call('job_command', { job, request });
+  jobCommand(job, change) {
+    return this.call('job_command', { job, request: jobCommandRequest(change) });
+  }
+
+  /**
+   * Unpacks a downloaded archive, with its password if it needs one.
+   * @param {JobId} job
+   * @param {ExtractChange} change
+   */
+  extract(job, change) {
+    return this.call('extract', { job, request: extractRequest(change) });
   }
 
   /** @param {JobId} job */

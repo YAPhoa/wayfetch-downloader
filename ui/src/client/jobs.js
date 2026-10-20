@@ -7,6 +7,7 @@
  * @typedef {import('./contract.js').DisplayState} DisplayState
  * @typedef {import('./contract.js').ProgressSample} ProgressSample
  * @typedef {import('./contract.js').JobCounts} JobCounts
+ * @typedef {import('./contract.js').ExtractionState} ExtractionState
  * @typedef {import('./generated/FailureCode.js').FailureCode} FailureCode
  * @typedef {import('./generated/FailureSummary.js').FailureSummary} FailureSummary
  *
@@ -98,6 +99,62 @@ const STATES = Object.freeze({
   pausing: ['Pausing…', 'paused'],
   stopping: ['Stopping…', 'cancelled'],
 });
+
+/**
+ * How a finished archive's unpacking reads in place of Done, once it has
+ * any; one never unpacked reads Done.
+ * @type {Readonly<Record<ExtractionState, [string, Status] | null>>}
+ */
+const UNPACKING = Object.freeze({
+  idle: null,
+  waiting: ['Waiting for parts', 'queued'],
+  queued: ['Unpack queued', 'queued'],
+  extracting: ['Unpacking…', 'active'],
+  needs_password: ['Needs password', 'paused'],
+  complete: ['Unpacked', 'done'],
+  failed: ['Unpack failed', 'failed'],
+  cancelled: ['Unpack cancelled', 'cancelled'],
+});
+
+/**
+ * What can be done about unpacking `job`, mirroring the engine's rules
+ * (`store::extractions`): `start` names the command that unpacks it, and
+ * says whether a password is asked for first; `stop` whether unpacking,
+ * or waiting to, can be cancelled. Only a finished archive, or the first
+ * part of a multi-part one, has either.
+ * @param {JobSummary} job
+ * @returns {{ start: { label: string, password: boolean } | null, stop: boolean }}
+ */
+export function unpackActions(job) {
+  const state = job.stage === 'complete' ? job.extraction?.state : undefined;
+  switch (state) {
+    case undefined:
+      return { start: null, stop: false };
+    case 'idle':
+    case 'cancelled':
+      return { start: { label: 'Unpack', password: false }, stop: false };
+    case 'complete':
+    case 'failed':
+      return { start: { label: 'Unpack again', password: false }, stop: false };
+    case 'needs_password':
+      return { start: { label: 'Enter password…', password: true }, stop: true };
+    case 'waiting':
+    case 'queued':
+    case 'extracting':
+      return { start: null, stop: true };
+  }
+}
+
+/**
+ * What a finished archive's unpacking says beyond its state: why it is
+ * waiting, failed, or needs a password.
+ * @param {JobSummary} job
+ */
+export function unpackNote(job) {
+  const extraction = job.extraction;
+  if (!extraction || extraction.state === 'complete') return undefined;
+  return extraction.problem ?? undefined;
+}
 
 /**
  * What each failure means, briefly for a list and as what happened plus
@@ -223,6 +280,8 @@ export function groupCount(group, counts) {
  * @returns {{ label: string, status: Status | null }}
  */
 export function describe(job) {
+  const unpacking = job.display === 'complete' && job.extraction && UNPACKING[job.extraction.state];
+  if (unpacking) return { label: unpacking[0], status: unpacking[1] };
   /** @type {[string, Status | null]} */
   const [name, status] = STATES[job.display] ?? [String(job.display), null];
   const failure = job.failure;
