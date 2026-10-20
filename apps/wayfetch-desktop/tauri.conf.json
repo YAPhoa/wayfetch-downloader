@@ -38,7 +38,12 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "rpm"],
-    "icon": ["icons/icon.png"],
+    "icon": [
+      "icons/icon.png",
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ],
     "category": "Utility",
     "shortDescription": "A download manager with its engine built in",
     "longDescription": "Wayfetch Downloader downloads files and videos, resumes interrupted downloads, and keeps everything on this computer. No account or online service is needed.",

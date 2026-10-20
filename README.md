@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="ui/src/brand/logo-dark.svg">
+  <img src="ui/src/brand/logo-light.svg" alt="Wayfetch" height="64">
+</picture>
+
 # Wayfetch Downloader
 
 A Rust download manager built around one reusable download engine (`wayfetch-engine`) and three thin application hosts:
