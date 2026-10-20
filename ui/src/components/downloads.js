@@ -32,6 +32,8 @@ import {
   progress,
   restartNote,
   retryPlan,
+  unpackActions,
+  unpackNote,
 } from '../client/jobs.js';
 import { count, refusals } from '../client/links.js';
 import { pagePlace } from '../client/pages.js';
@@ -52,6 +54,7 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('../client/contract.js').JobSummary} JobSummary
  * @typedef {import('../client/contract.js').JobId} JobId
  * @typedef {import('../client/contract.js').StateAction} StateAction
+ * @typedef {import('../client/contract.js').JobAction} JobAction
  * @typedef {import('../client/contract.js').ProgressSample} ProgressSample
  * @typedef {import('../client/contract.js').Settings} Settings
  * @typedef {import('../client/contract.js').RootId} RootId
@@ -901,15 +904,17 @@ export class Downloads {
    * notice line, or passed to `refused` if given. While the engine has not
    * answered, the job takes no other command from this view, so a second
    * click cannot send a second request.
+   * `extract` unpacks an archive, with `password` if given.
    * @param {JobSummary} job
-   * @param {StateAction | 'rename' | 'remove' | 'delete_files'} action
+   * @param {JobAction | 'extract'} action
    * @param {{
    *   name?: string,
+   *   password?: string,
    *   repeatProviderOperation?: boolean,
    *   refused?: (text: string, error?: WayfetchError) => void,
    * }} [options]
    */
-  async send(job, action, { name, repeatProviderOperation, refused } = {}) {
+  async send(job, action, { name, password, repeatProviderOperation, refused } = {}) {
     const hello = this.feed.hello;
     if (!hello) {
       (refused ?? ((text) => (this.notice = text)))('Not connected yet. Try again in a moment.');
@@ -922,14 +927,13 @@ export class Downloads {
     this.schedule();
     let accepted = false;
     try {
-      await this.client.jobCommand(job.id, {
-        idempotencyKey: idempotencyKey(),
-        target: hello.instance,
-        action,
-        expectedRevision: job.revision,
-        name,
-        repeatProviderOperation,
-      });
+      const request = { idempotencyKey: idempotencyKey(), target: hello.instance, expectedRevision: job.revision };
+      // Unpacking names the run shown, so a late click cannot act on a newer one.
+      const expectedGeneration = job.extraction?.generation;
+      if (action === 'extract') await this.client.extract(job.id, { ...request, expectedGeneration, password });
+      else if (action === 'cancel_extraction')
+        await this.client.jobCommand(job.id, { ...request, action, expectedGeneration });
+      else await this.client.jobCommand(job.id, { ...request, action, name, repeatProviderOperation });
       accepted = true;
     } catch (error) {
       if (!(error instanceof WayfetchError)) throw error;
@@ -1140,6 +1144,29 @@ export class Downloads {
     if (client.permissions.includes('sources')) {
       entries.push({ key: 'copy-source', label: 'Copy source link', run: () => void this.copySource(job) });
     }
+    const unpacking = unpackActions(job);
+    if (unpacking.start || unpacking.stop) {
+      entries.push('separator');
+      const start = unpacking.start;
+      if (start) {
+        entries.push({
+          key: 'unpack',
+          label: start.label,
+          disabled: !control || busy,
+          hint: why(undefined),
+          run: () => (start.password ? this.askPassword(job) : void this.unpack(job)),
+        });
+      }
+      if (unpacking.stop) {
+        entries.push({
+          key: 'cancel-unpack',
+          label: 'Cancel unpacking',
+          disabled: !control || busy,
+          hint: why(undefined),
+          run: () => void this.send(job, 'cancel_extraction'),
+        });
+      }
+    }
     entries.push('separator');
     const toggle = actions.has('resume') ? 'resume' : 'pause';
     entries.push(
@@ -1319,6 +1346,81 @@ export class Downloads {
     keep.addEventListener('change', choiceChanged);
     erase.addEventListener('change', choiceChanged);
     keep.focus();
+  }
+
+  /**
+   * Unpacks a finished archive next to it, with `password` if given.
+   * Resolves to whether the engine accepted it.
+   * @param {JobSummary} job
+   * @param {{ password?: string, refused?: (text: string) => void }} [options]
+   */
+  async unpack(job, { password, refused } = {}) {
+    const accepted = await this.send(job, 'extract', { password, refused });
+    if (accepted) {
+      this.done(`Unpacking ${jobName(job)} into a new folder beside it.`);
+      this.schedule();
+    }
+    return accepted;
+  }
+
+  /**
+   * Asks for a protected archive's password, then unpacks it. The
+   * password is sent once and kept by nothing here.
+   * @param {JobSummary} job
+   */
+  askPassword(job) {
+    const name = jobName(job);
+    const message = h('p', { class: 'message', role: 'alert' });
+    const field = h('input', {
+      type: 'password',
+      id: 'archive-password',
+      name: 'password',
+      required: true,
+      autocomplete: 'off',
+      spellcheck: 'false',
+    });
+    const save = h('button', { type: 'submit', class: 'primary' }, 'Unpack');
+    const cancel = h('button', { type: 'button', onclick: () => dialog.close() }, 'Cancel');
+    const form = h(
+      'form',
+      {
+        class: 'rename-form',
+        onsubmit: async (/** @type {SubmitEvent} */ event) => {
+          event.preventDefault();
+          const password = field.value;
+          if (password === '') {
+            show(message, 'Enter the password.');
+            return;
+          }
+          save.disabled = true;
+          show(message, '');
+          const done = await this.unpack(this.heldJob(job.id) ?? job, {
+            password,
+            refused: (text) => show(message, text),
+          });
+          save.disabled = false;
+          if (done) dialog.close();
+          else field.focus();
+        },
+      },
+      h('label', { for: 'archive-password' }, 'Password'),
+      field,
+      message,
+      h('div', { class: 'row' }, save, cancel),
+    );
+    const dialog = openDialog(
+      {
+        title: `Unpack ${name}`,
+        className: 'rename',
+        closeLabel: 'Close without unpacking',
+        restore: () =>
+          /** @type {HTMLElement | null} */ (
+            this.tableBody.querySelector(`[data-key="menu-${job.id}"]`)
+          )?.focus(),
+      },
+      form,
+    );
+    field.focus();
   }
 
   /**
@@ -1838,8 +1940,15 @@ export class Downloads {
         ['Size', shown.size],
         [job.artifact ? 'Saved in' : 'Saves to', this.folder(job, where.folder)],
         ['Download via', this.via(job)],
+        ['Unpacked to', job.extraction?.output],
         ...this.source(job),
       ]),
+      unpackNote(job) &&
+        h(
+          'p',
+          { class: `note tone-${job.extraction?.state === 'failed' ? 'bad' : 'warn'}`, 'data-note': 'unpack' },
+          unpackNote(job),
+        ),
       job.failure && h('p', { class: `note tone-${state.status === 'failed' ? 'bad' : 'warn'}` }, explain(job.failure)),
       restartNote(job) && h('p', { class: 'note tone-warn', 'data-note': 'restart' }, restartNote(job)),
     );

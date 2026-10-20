@@ -71,14 +71,21 @@ export function pluginStatus(plugin) {
 }
 
 /**
+ * What a plugin with each role does.
+ * @type {Readonly<Record<PluginSummary['role'], string>>}
+ */
+const USES = Object.freeze({
+  media_resolver: 'Reads video titles and formats',
+  media_converter: 'Joins video with its sound and makes MP3 files',
+  archive_extractor: 'Unpacks downloaded archives',
+});
+
+/**
  * What a plugin is used for.
  * @param {PluginSummary} plugin
  */
 export function pluginUse(plugin) {
-  const what =
-    plugin.role === 'media_converter'
-      ? 'Joins video with its sound and makes MP3 files'
-      : 'Reads video titles and formats';
+  const what = USES[plugin.role];
   const services = plugin.services.map(mediaServiceName);
   return services.length > 0 ? `${what}, for ${services.join(', ')}` : what;
 }

@@ -67,6 +67,7 @@ use wayfetch_protocol::{
 
 mod accounts;
 mod crawl;
+mod extract;
 mod media;
 mod resolve;
 mod routing;
@@ -80,6 +81,7 @@ use crate::config::{ConfigError, EngineConfig, Preference};
 use crate::crawl::Inspector;
 use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
+use crate::extract::Extractor;
 use crate::fs::Root;
 use crate::media::{Converter, MediaService, PluginControl, PluginWork};
 use crate::progress::Progress;
@@ -136,6 +138,7 @@ pub struct EngineBuilder {
     media_services: Vec<Arc<dyn MediaService>>,
     converter: Option<Arc<dyn Converter>>,
     plugin_control: Option<Arc<dyn PluginControl>>,
+    extractor: Option<Arc<dyn Extractor>>,
 }
 
 impl std::fmt::Debug for EngineBuilder {
@@ -148,6 +151,7 @@ impl std::fmt::Debug for EngineBuilder {
             .field("media_services", &self.media_services.len())
             .field("converter", &self.converter.is_some())
             .field("plugin_control", &self.plugin_control.is_some())
+            .field("extractor", &self.extractor.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -164,7 +168,15 @@ impl EngineBuilder {
             media_services: Vec::new(),
             converter: None,
             plugin_control: None,
+            extractor: None,
         }
+    }
+
+    /// What unpacks downloaded archives. Without it, archives are kept as
+    /// they are and requests to unpack one are refused.
+    pub fn extractor(mut self, extractor: Arc<dyn Extractor>) -> Self {
+        self.extractor = Some(extractor);
+        self
     }
 
     /// Adds a media service: links it recognizes are checked when
@@ -228,6 +240,7 @@ impl EngineBuilder {
                 store.retry_failed_media(now())?;
                 store.requeue_checks()?;
                 store.recover_after_restart(now())?;
+                store.recover_extractions(now())?;
                 stage_all(&mut store)?;
                 prune(&mut store, &config.limits)?;
                 let head = store.event_head()?;
@@ -310,6 +323,7 @@ impl EngineBuilder {
                 self.converter,
                 self.plugin_control,
             ),
+            extractions: extract::Extractions::new(self.extractor, saved.extract_archives),
         };
         owner.supervisor.spawn(coordinator.run());
         owner
@@ -525,6 +539,12 @@ enum Request {
         AuthorizationId,
         oneshot::Sender<Result<Authorization, ProtocolError>>,
     ),
+    /// [`Command::Extract`], with the archive's password if given.
+    Extract(
+        Box<CommandEnvelope>,
+        Option<String>,
+        oneshot::Sender<Result<CommandResult, ProtocolError>>,
+    ),
     /// Runs arbitrary store work, for fault-injection tests.
     #[cfg(test)]
     Run(Box<dyn FnOnce(&mut Store) + Send>, oneshot::Sender<()>),
@@ -693,6 +713,24 @@ impl EngineHandle {
         authorize(Permission::Accounts, granted)?;
         let (reply, response) = oneshot::channel();
         self.send(Request::CancelAuthorization(id, reply))?;
+        response.await.map_err(|_| shutting_down())?
+    }
+
+    /// Unpacks a complete archive download ([`Command::Extract`]), with
+    /// the password `request` gives, if any, kept in memory for the
+    /// archive's next attempt only. Needs the `control` permission.
+    pub async fn extract(
+        &self,
+        job: JobId,
+        request: wayfetch_protocol::request::ExtractRequest,
+        granted: &[Permission],
+    ) -> Result<CommandResult, ProtocolError> {
+        let (envelope, password) = request.into_parts(job)?;
+        for required in envelope.command.required_permissions() {
+            authorize(required, granted)?;
+        }
+        let (reply, response) = oneshot::channel();
+        self.send(Request::Extract(Box::new(envelope), password, reply))?;
         response.await.map_err(|_| shutting_down())?
     }
 
@@ -980,6 +1018,8 @@ enum Internal {
     Resolve(ResolveRequest),
     /// A provider call for a download's link ended.
     Resolved(Box<resolve::Resolved>),
+    /// An extraction attempt ended.
+    Extracted(JobId),
     /// A link's check ended: its check, link, the link as collected, and
     /// what it found.
     Checked(
@@ -1100,6 +1140,8 @@ struct Coordinator {
     routing: routing::RoutingService,
     /// Media services, their converter, and the links being checked.
     media: media::MediaServices,
+    /// The archive extractor and the extraction running.
+    extractions: extract::Extractions,
 }
 
 impl Coordinator {
@@ -1136,6 +1178,7 @@ impl Coordinator {
                 Some(internal) = self.internal.recv() => self.handle_internal(internal).await,
             }
         }
+        self.clean_extractions().await;
         self.changed().await;
         loop {
             tokio::select! {
@@ -1242,6 +1285,9 @@ impl Coordinator {
             Request::Query(Query::Accounts {}, reply) => self.list_accounts(reply).await,
             Request::Query(Query::Authorization { id }, reply) => self.authorization(id, reply),
             Request::RefreshAccount(account, reply) => self.refresh_account(account, reply).await,
+            Request::Extract(envelope, password, reply) => {
+                self.extract(envelope, password, reply).await;
+            }
             Request::CancelAuthorization(id, reply) => self.cancel_authorization(id, reply),
             Request::Query(query, reply) => {
                 let result = self
@@ -1302,8 +1348,16 @@ impl Coordinator {
             | Command::AuthorizeAccount { .. }
             | Command::SetAccountEnabled { .. }
             | Command::RemoveAccount { .. }
-            | Command::ChangePlugin { .. } => None,
+            | Command::ChangePlugin { .. }
+            | Command::Extract { .. }
+            | Command::CancelExtraction { .. } => None,
         };
+        if let Command::Extract { .. } = envelope.command
+            && let Some(why) = self.extractions.unavailable()
+        {
+            let _ = reply.send(Err(why));
+            return;
+        }
         let account_command = matches!(
             envelope.command,
             Command::SetAccountEnabled { .. } | Command::RemoveAccount { .. }
@@ -1341,6 +1395,14 @@ impl Coordinator {
         };
         let retried = match envelope.command {
             Command::Retry { job, .. } => Some(job),
+            _ => None,
+        };
+        let stop_extraction = match envelope.command {
+            Command::CancelExtraction {
+                job,
+                expected_generation,
+                ..
+            } => Some((job, expected_generation)),
             _ => None,
         };
         let (result, interrupt, current) = self
@@ -1384,6 +1446,12 @@ impl Coordinator {
             // the change is reported.
             self.speed_limit = saved.download_speed_limit;
             self.bandwidth.set(self.download_speed_limit().value);
+            self.extractions.automatic = saved.extract_archives;
+        }
+        // Only the run the request named stops, even when an exact replay
+        // answers with the first request's result after a later run began.
+        if let (Some((job, generation)), Ok(_)) = (stop_extraction, &result) {
+            self.extractions.stop(job, generation);
         }
         if let Some(root) = gone {
             self.destinations.remove(root);
@@ -1430,7 +1498,9 @@ impl Coordinator {
                 // The download may have replaced its partial, or the job
                 // may have been queued to start from zero.
                 self.clean_staging();
+                self.plan_extractions(job).await;
             }
+            Internal::Extracted(job) => self.extracted(job),
             // `changed` below admits.
             Internal::Admit => {}
             Internal::Identified(found) => {
@@ -1572,6 +1642,7 @@ impl Coordinator {
                 default_root,
                 max_active_downloads,
                 download_speed_limit,
+                extract_archives,
                 ..
             } => {
                 if self.replays(envelope).await? {
@@ -1580,6 +1651,7 @@ impl Coordinator {
                 if default_root.is_none()
                     && max_active_downloads.is_none()
                     && download_speed_limit.is_none()
+                    && extract_archives.is_none()
                 {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidRequest,
@@ -1665,7 +1737,9 @@ impl Coordinator {
             | Command::AuthorizeAccount { .. }
             | Command::SetAccountEnabled { .. }
             | Command::RemoveAccount { .. }
-            | Command::ChangePlugin { .. } => {}
+            | Command::ChangePlugin { .. }
+            | Command::Extract { .. }
+            | Command::CancelExtraction { .. } => {}
         }
         Ok(Unusable::new())
     }
@@ -1728,7 +1802,9 @@ impl Coordinator {
         let instance = self.identity.instance;
         let max_active_downloads = self.max_active_downloads();
         let download_speed_limit = self.download_speed_limit();
-        let plugins = self.media.plugins();
+        let mut plugins = self.media.plugins();
+        plugins.extend(self.extractions.plugin());
+        let extract_archives = self.extractions.automatic;
         self.supervisor.spawn(async move {
             let mut checks = tokio::task::JoinSet::new();
             for (i, root) in destinations.all().into_iter().enumerate() {
@@ -1743,6 +1819,7 @@ impl Coordinator {
                 max_active_downloads,
                 download_speed_limit,
                 plugins,
+                extract_archives,
             );
             let _ = reply.send(Ok(QueryResult::Settings(settings)));
         });
@@ -1889,6 +1966,7 @@ impl Coordinator {
     /// events, and prune history when due.
     async fn changed(&mut self) {
         self.admit().await;
+        self.admit_extraction().await;
         self.run_checks().await;
         self.publish_events().await;
         if self.pruned_at.elapsed() >= PRUNE_INTERVAL {

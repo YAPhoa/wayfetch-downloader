@@ -186,6 +186,7 @@ impl Api {
             .route("/v1/jobs/{id}", get(routes::inspect_job))
             .route("/v1/job-counts", get(routes::count_jobs))
             .route("/v1/jobs/{id}/commands", post(routes::job_command))
+            .route("/v1/jobs/{id}/extract", post(routes::extract))
             .route("/v1/jobs/{id}/source", get(routes::job_source))
             .route(
                 "/v1/staging/links",

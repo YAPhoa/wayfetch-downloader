@@ -24,6 +24,7 @@ pub mod config;
 pub mod crawl;
 mod destinations;
 mod download;
+pub mod extract;
 pub mod fs;
 pub mod lifecycle;
 pub mod media;

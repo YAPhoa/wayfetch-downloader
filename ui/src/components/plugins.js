@@ -46,6 +46,16 @@ function explain(error) {
 }
 
 /**
+ * What stops while a plugin with each role is turned off.
+ * @type {Readonly<Record<PluginSummary['role'], string>>}
+ */
+const UNUSED = Object.freeze({
+  media_resolver: 'Video links that need it are not checked or downloaded',
+  media_converter: 'Formats that need it are not offered',
+  archive_extractor: 'Downloaded archives are kept but not unpacked',
+});
+
+/**
  * What a change did, in plain words.
  * @param {PluginSummary} plugin
  * @param {PluginChange} change
@@ -62,13 +72,24 @@ export function changeMessage(plugin, change, result) {
     case 'enable':
       return `${name} is turned on.`;
     case 'disable':
-      return `${name} is turned off. ${plugin.role === 'media_resolver' ? 'Video links that need it are not checked or downloaded' : 'Formats that need it are not offered'} until it is turned on.`;
+      return `${name} is turned off. ${UNUSED[plugin.role]} until it is turned on.`;
     case 'remove':
       return result.version
         ? `Removed the copy Wayfetch installed. ${name}${version} is used again.`
         : `Removed ${name}.`;
   }
 }
+
+/**
+ * What a plugin's status says while each change is on its way.
+ * @type {Readonly<Record<PluginChange, string>>}
+ */
+const DOING = Object.freeze({
+  enable: 'Turning on…',
+  disable: 'Turning off…',
+  update: 'Checking…',
+  remove: 'Removing…',
+});
 
 /**
  * @param {PluginsContext} context
@@ -80,6 +101,8 @@ export function pluginsSection(context) {
   const canChange = client.permissions.includes('control');
   /** The plugin with a change on its way, if any. @type {string | null} */
   let working = null;
+  /** What its status says meanwhile. */
+  let doing = '';
   /** @type {PluginSummary[]} */
   let shown = [];
   /** The settings revision last read. */
@@ -141,6 +164,7 @@ export function pluginsSection(context) {
       return;
     }
     working = plugin.id;
+    doing = DOING[change];
     render(shown, change === 'update' ? `Checking for a newer ${plugin.name}…` : 'Working…');
     try {
       const result = await client.changePlugin({
@@ -232,8 +256,8 @@ export function pluginsSection(context) {
    * @param {PluginSummary} plugin
    */
   const row = (plugin) => {
-    const [status, tone] = pluginStatus(plugin);
     const id = plugin.id;
+    const [status, tone] = working === id ? [doing, 'calm'] : pluginStatus(plugin);
     /** @param {import('./menu.js').Anchor} anchor */
     const open = (anchor) =>
       menu.show(entries(plugin), anchor, {
@@ -268,9 +292,9 @@ export function pluginsSection(context) {
       ),
       h(
         'td',
-        { class: `status tone-${tone}` },
-        h('span', null, status),
-        working === id ? h('span', { class: 'status-detail' }, 'Working…') : plugin.problem && h('span', { class: 'status-detail' }, plugin.problem),
+        { class: `plugin-status tone-${tone}` },
+        h('span', { class: 'status-label' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), status),
+        working !== id && plugin.problem && h('span', { class: 'status-detail' }, plugin.problem),
       ),
       h('td', { class: 'use' }, pluginUse(plugin)),
       canChange && h('td', { class: 'row-actions' }, more),

@@ -669,10 +669,10 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .statusbar .spacer { flex: 1; }
 .statusbar button.link { font-size: 12px; }
 
-.status { display: inline-flex; align-items: center; gap: 6px; }
-.status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--calm); }
-.status[data-status='live']::before { background: var(--ok); }
-.status[data-status='reconnecting']::before, .status[data-status='incompatible']::before { background: var(--warn); }
+.statusbar .status { display: inline-flex; align-items: center; gap: 6px; }
+.statusbar .status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--calm); }
+.statusbar .status[data-status='live']::before { background: var(--ok); }
+.statusbar .status[data-status='reconnecting']::before, .statusbar .status[data-status='incompatible']::before { background: var(--warn); }
 
 .account { display: inline-flex; align-items: center; gap: 12px; }
 .account .message:empty { display: none; }
@@ -951,7 +951,8 @@ th[aria-sort] button.sort { color: var(--ink); }
 .links td.num.unknown { color: var(--muted); }
 
 .links td.link-status { white-space: normal; min-width: 120px; max-width: 320px; }
-.link-status .status-label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+/* A status cell's mark and label: links, plugins. */
+.link-status .status-label, .plugin-status .status-label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .link-status .status-detail { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .links td.link-status.tone-warn .status-detail { color: var(--warn); }
 .links td.link-status.tone-bad .status-detail { color: var(--bad); }
@@ -1192,7 +1193,10 @@ th[aria-sort] button.sort { color: var(--ink); }
 .settings-group .accounts-table td.row-actions { width: 1%; padding-top: 0; padding-bottom: 0; text-align: right; white-space: nowrap; }
 .accounts-table .row-actions button { vertical-align: middle; }
 /* What a plugin is for, and what is wrong with it, wrap so its menu stays in view. */
-.plugins-table td.use, .plugins-table td.status { white-space: normal; }
+.plugins-table td.use, .plugins-table td.plugin-status { white-space: normal; }
+/* Room for the longest status, "Turning off…", so the column keeps its
+   width while a change runs. */
+.plugins-table .plugin-status .status-label { min-width: 7.25em; }
 .plugins-table .status-detail { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .accounts-table .row-actions button:not(.more) { min-height: 28px; padding: 0 10px; margin-right: 4px; }
 .settings-section > .message.notice { margin-bottom: 12px; }

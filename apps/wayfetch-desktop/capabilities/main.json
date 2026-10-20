@@ -7,6 +7,7 @@
     "allow-query",
     "allow-submit",
     "allow-job-command",
+    "allow-extract",
     "allow-collect-links",
     "allow-links-command",
     "allow-update-settings",
