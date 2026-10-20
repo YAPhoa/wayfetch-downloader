@@ -22,8 +22,8 @@ use url::Url;
 use wayfetch_engine::EngineOwner;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
-    AccountProvider, Checked, DeviceAuthorization, GeneratedLink, PollOutcome, Profile,
-    ProviderError, Reconciled, SupportedHosts, Unrestricted, WithCredentials,
+    AccountProvider, Availability, Checked, DeviceAuthorization, GeneratedLink, PollOutcome,
+    Profile, ProviderError, Reconciled, SupportedHosts, Unrestricted, WithCredentials,
 };
 use wayfetch_engine::crawl::{InspectError, InspectRequest, Inspection, Inspector};
 use wayfetch_engine::transfer::lease::Representation;
@@ -39,7 +39,9 @@ use wayfetch_protocol::domain::id::{AccountId, JobId};
 use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::domain::name::ProviderId;
 use wayfetch_protocol::domain::time::UtcTimestamp;
-use wayfetch_protocol::query::{CollectedLink, JobRoute, JobSummary, LinkCheck, PageSize};
+use wayfetch_protocol::query::{
+    CheckReason, CollectedLink, JobRoute, JobSummary, LinkCheck, PageSize,
+};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Permission, ProtocolError, Query,
     QueryResult,
@@ -109,6 +111,10 @@ struct Provider {
     /// What the generated file is called.
     filename: Mutex<Option<String>>,
     size: Mutex<Option<u64>>,
+    /// What a link check is told, instead of the file it would generate.
+    availability: Mutex<Option<Availability>>,
+    availabilities: AtomicUsize,
+    availability_panic: AtomicBool,
 }
 
 impl Provider {
@@ -137,6 +143,9 @@ impl Provider {
             delay: Mutex::new(Duration::ZERO),
             filename: Mutex::new(Some("Provider Name.bin".into())),
             size: Mutex::new(None),
+            availability: Mutex::new(None),
+            availabilities: AtomicUsize::new(0),
+            availability_panic: AtomicBool::new(false),
         })
     }
 
@@ -223,6 +232,24 @@ impl AccountProvider for Provider {
                 return Err(error);
             }
             SupportedHosts::new(self.domains.lock().unwrap().clone())
+        })
+    }
+
+    fn availability<'a>(&'a self, _link: &'a Url) -> BoxFuture<'a, Availability> {
+        Box::pin(async {
+            self.availabilities.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                !self.availability_panic.load(Ordering::SeqCst),
+                "synthetic availability panic"
+            );
+            self.availability
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| Availability::File {
+                    name: self.filename.lock().unwrap().clone(),
+                    size: *self.size.lock().unwrap(),
+                })
         })
     }
 
@@ -2440,6 +2467,25 @@ async fn checked(owner: &EngineOwner) -> Vec<CollectedLink> {
     }
 }
 
+/// Checks `links` again.
+async fn check_again(owner: &EngineOwner, links: &[&CollectedLink]) {
+    let refs = links
+        .iter()
+        .map(|l| LinkRef {
+            link: l.id,
+            revision: l.revision,
+        })
+        .collect::<Vec<_>>();
+    let check = Command::CheckLinks {
+        links: LinkRefs::try_from(refs).unwrap(),
+    };
+    owner
+        .handle()
+        .execute(envelope(owner, check), ALL)
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hoster_page_starts_through_an_account_or_once_it_is_a_file() {
     let mut env = env();
@@ -2450,7 +2496,7 @@ async fn a_hoster_page_starts_through_an_account_or_once_it_is_a_file() {
     host.serve(data.clone());
     *provider.size.lock().unwrap() = Some(data.len() as u64);
     let owner = env.start().await;
-    let account = add_account(&owner, provider).await;
+    // Collected before any account: the hoster answers its own check.
     collect(&owner, &[ORIGINAL, "https://hoster.example/file/later"]).await;
     let links = checked(&owner).await;
     let [hoster, later, pdf] = &links[..] else {
@@ -2458,9 +2504,31 @@ async fn a_hoster_page_starts_through_an_account_or_once_it_is_a_file() {
     };
     assert_eq!((hoster.check, hoster.found), (LinkCheck::Page, Some(1)));
     assert_eq!(later.check, LinkCheck::Page);
+    assert_eq!(hoster.checked_via, None);
     assert_eq!(pdf.found_on.as_deref(), Some(ORIGINAL));
+    assert_eq!(provider.availabilities.load(Ordering::SeqCst), 0);
 
-    // Directly, the page's address would download the page itself.
+    // Once an account would download them, checking again asks its
+    // provider, which finds the file, without generating anything.
+    let account = add_account(&owner, provider).await;
+    check_again(&owner, &[hoster, pdf]).await;
+    let links = checked(&owner).await;
+    let [hoster, _, pdf] = &links[..] else {
+        panic!("{links:?}")
+    };
+    assert_eq!(hoster.check, LinkCheck::Online);
+    assert_eq!(hoster.checked_via.as_ref(), Some(&provider.service));
+    assert_eq!(hoster.name_hint.as_deref(), Some("Provider Name.bin"));
+    assert_eq!(hoster.size, Some(data.len() as u64));
+    // A link on a host no account supports is still asked directly.
+    assert_eq!(
+        (pdf.check, pdf.checked_via.as_ref()),
+        (LinkCheck::Online, None)
+    );
+    assert_eq!(provider.availabilities.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.unrestricts(), 0);
+
+    // Its own server still serves a web page, so Direct still refuses it.
     let command = start_command(std::slice::from_ref(hoster), None);
     let CommandResult::LinksApplied { applied, refused } = owner
         .handle()
@@ -2475,6 +2543,7 @@ async fn a_hoster_page_starts_through_an_account_or_once_it_is_a_file() {
         refused[0].message.as_str().contains("web page"),
         "{refused:?}"
     );
+
     // Through the account, the provider resolves it to its file.
     let [id] = start(&owner, std::slice::from_ref(hoster), Some(account))
         .await
@@ -2485,24 +2554,120 @@ async fn a_hoster_page_starts_through_an_account_or_once_it_is_a_file() {
     support::complete(&owner, id).await;
     assert_eq!(env.published("Provider Name.bin"), data);
 
-    // A page checked again as a file starts directly.
-    pages.files.store(true, Ordering::SeqCst);
-    let refs = LinkRefs::try_from(vec![LinkRef {
-        link: later.id,
-        revision: later.revision,
-    }])
-    .unwrap();
-    let check = Command::CheckLinks { links: refs };
-    owner
-        .handle()
-        .execute(envelope(&owner, check), ALL)
-        .await
-        .unwrap();
+    // What the provider cannot tell is unknown, still through it, and
+    // what it says is gone is offline.
+    *provider.availability.lock().unwrap() = Some(Availability::Unknown(
+        CheckReason::ServerError,
+        "The provider cannot reach this host right now.".into(),
+    ));
+    check_again(&owner, &[later]).await;
     let links = checked(&owner).await;
     let later = links.iter().find(|l| l.id == later.id).unwrap();
-    assert_eq!(later.check, LinkCheck::Online);
+    assert_eq!(later.check, LinkCheck::Unknown);
+    assert_eq!(later.reason, Some(CheckReason::ServerError));
+    assert_eq!(later.checked_via.as_ref(), Some(&provider.service));
+    *provider.availability.lock().unwrap() = Some(Availability::Offline("Gone.".into()));
+    check_again(&owner, &[later]).await;
+    let links = checked(&owner).await;
+    let later = links.iter().find(|l| l.id == later.id).unwrap();
+    assert_eq!(
+        (later.check, later.reason),
+        (LinkCheck::Offline, Some(CheckReason::NotFound))
+    );
+
+    // With the account disabled, the hoster answers again: a page checked
+    // again as a file starts directly.
+    let revision = account_revision(&owner, account).await;
+    let disable = Command::SetAccountEnabled {
+        account,
+        expected_revision: revision,
+        enabled: false,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, disable), ALL)
+        .await
+        .unwrap();
+    pages.files.store(true, Ordering::SeqCst);
+    check_again(&owner, &[later]).await;
+    let links = checked(&owner).await;
+    let later = links.iter().find(|l| l.id == later.id).unwrap();
+    assert_eq!(
+        (later.check, later.checked_via.as_ref()),
+        (LinkCheck::Online, None)
+    );
+    assert_eq!(provider.availabilities.load(Ordering::SeqCst), 3);
     start(&owner, std::slice::from_ref(later), None)
         .await
         .unwrap();
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_provider_fails_only_the_check() {
+    for hosts in [true, false] {
+        let mut env = env();
+        env.inspector = Some(Arc::new(Pages::default()));
+        let provider = &env.server.provider;
+        let owner = env.start().await;
+        add_account(&owner, provider).await;
+        provider.hosts_panic.store(hosts, Ordering::SeqCst);
+        provider.availability_panic.store(!hosts, Ordering::SeqCst);
+        collect(&owner, &[ORIGINAL]).await;
+        let links = checked(&owner).await;
+        let link = links.iter().find(|l| l.found_on.is_none()).unwrap();
+        if hosts {
+            // Its supported hosts cannot be read: the link's own server
+            // answers.
+            assert_eq!(
+                (link.check, link.checked_via.as_ref()),
+                (LinkCheck::Page, None)
+            );
+        } else {
+            // Its check panics: unknown through it.
+            assert_eq!(
+                (link.check, link.checked_via.as_ref()),
+                (LinkCheck::Unknown, Some(&provider.service))
+            );
+            assert_eq!(provider.availabilities.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(
+            owner.handle().readiness(),
+            wayfetch_engine::Readiness::Ready
+        );
+        shutdown(owner).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_that_asks_to_slow_down_is_not_asked_again_for_a_while() {
+    let mut env = env();
+    env.inspector = Some(Arc::new(Pages::default()));
+    let provider = &env.server.provider;
+    *provider.availability.lock().unwrap() = Some(Availability::Unknown(
+        CheckReason::RateLimited,
+        "Slow down.".into(),
+    ));
+    let owner = env.start().await;
+    add_account(&owner, provider).await;
+    let many: Vec<String> = (0..12)
+        .map(|n| format!("https://hoster.example/file/{n}"))
+        .collect();
+    collect(&owner, &many.iter().map(String::as_str).collect::<Vec<_>>()).await;
+    let links = checked(&owner).await;
+    let typed: Vec<_> = links.iter().filter(|l| l.found_on.is_none()).collect();
+    assert_eq!(typed.len(), 12);
+    for link in &typed {
+        assert_eq!(
+            (link.check, link.reason, link.checked_via.as_ref()),
+            (
+                LinkCheck::Unknown,
+                Some(CheckReason::RateLimited),
+                Some(&provider.service)
+            )
+        );
+    }
+    // Only the checks already under way when it first asked reached it.
+    assert!(provider.availabilities.load(Ordering::SeqCst) <= 2);
     shutdown(owner).await;
 }

@@ -44,11 +44,11 @@ const REASONS = {
 
 /**
  * Why a check found `link` offline or could not tell, with what the
- * server said, or `null`.
+ * server said, or `null`. A provider's check says it in its own words.
  * @param {CollectedLink} link
  */
 export function checkReason(link) {
-  const parts = [link.reason && REASONS[link.reason], link.check_detail].filter(Boolean);
+  const parts = [!link.checked_via && link.reason && REASONS[link.reason], link.check_detail].filter(Boolean);
   return parts.length > 0 ? parts.join(' ') : null;
 }
 
@@ -68,12 +68,15 @@ export function linkName(link) {
  * background: a file's server is asked for its name and size, never its
  * content, and a page typed or analyzed is read once for the files on
  * it, which are listed beside it. A video link's service reads its title
- * and formats instead. A started link stays listed, added to Downloads,
- * until removed.
+ * and formats instead. A link an account would download is checked by
+ * that account's provider; when the provider cannot tell, it is not a
+ * failure, since starting goes through the account anyway. A started
+ * link stays listed, added to Downloads, until removed.
  * @param {CollectedLink} link
+ * @param {(service: string) => string} [serviceName] A service's display name.
  * @returns {{ label: string, tone: Tone, detail: string | null }}
  */
-export function linkStatus(link) {
+export function linkStatus(link, serviceName = (id) => id) {
   if (link.job) return { label: 'Added to Downloads', tone: 'ok', detail: null };
   if (link.check === 'invalid') {
     return { label: 'Invalid link', tone: 'bad', detail: link.problem ?? null };
@@ -88,14 +91,19 @@ export function linkStatus(link) {
     const length = media.duration_seconds === undefined ? null : durationText(media.duration_seconds);
     return { label: 'Video found', tone: refused ? 'warn' : 'ok', detail: refused ?? length };
   }
+  const via = link.checked_via ? serviceName(link.checked_via) : null;
   switch (link.check) {
     case 'checking':
       return { label: 'Checking', tone: 'calm', detail: null };
     case 'online':
-      return { label: 'Online', tone: refused ? 'warn' : 'ok', detail: refused };
+      return { label: 'Online', tone: refused ? 'warn' : 'ok', detail: refused ?? (via && `Checked through ${via}.`) };
     case 'offline':
       return { label: 'Offline', tone: 'bad', detail: checkReason(link) };
     case 'unknown':
+      if (via) {
+        const why = [checkReason(link), `Starting downloads it through ${via}.`].filter(Boolean).join(' ');
+        return { label: 'Not confirmed', tone: refused ? 'warn' : 'calm', detail: refused ?? why };
+      }
       return { label: 'Could not check', tone: 'warn', detail: checkReason(link) };
     case 'page':
       return { label: 'Web page', tone: 'calm', detail: pageDetail(link) };

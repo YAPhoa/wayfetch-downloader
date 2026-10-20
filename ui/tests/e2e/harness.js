@@ -196,6 +196,7 @@ export const RD_SIGNATURE = 'synthetic-download-signature';
 /**
  * A plain-HTTP stand-in for Real-Debrid's API on 127.0.0.1, following its
  * documented device flow, `GET /rest/1.0/user`, `POST
+ * /rest/1.0/unrestrict/check` (no sign-in), `POST
  * /rest/1.0/unrestrict/link`, and `GET /rest/1.0/downloads`, and serving
  * the links it generates. A sign-in is approved on the second poll; every
  * value is synthetic.
@@ -251,6 +252,16 @@ export class RealDebridFixture {
     switch (url.pathname) {
       case '/rest/1.0/hosts/domains':
         answer(200, ['hoster.example']);
+        return;
+      case '/rest/1.0/unrestrict/check':
+        // Named as the link's path, so collected rows keep their names.
+        answer(200, {
+          host: 'hoster.example',
+          link: form.get('link'),
+          filename: (form.get('link') ?? '').split('/').pop(),
+          filesize: this.size,
+          supported: 1,
+        });
         return;
       case '/oauth/v2/device/code':
         this.polls = 0;

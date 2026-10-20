@@ -13,6 +13,10 @@
 //! that might be this request's; anything less certain is unknown. Torrents, folders, passwords, Remote traffic, and
 //! multi-result links are not used.
 //!
+//! A link check asks `POST /unrestrict/check`, which needs no sign-in and
+//! generates nothing: whether Real-Debrid can download the link, with the
+//! file's name and size.
+//!
 //! The generated link is checked before the engine sees it: HTTPS (plain
 //! HTTP only to a loopback test server), without credentials, of bounded
 //! length. Real-Debrid's file name and size are hints; a size of 0 means
@@ -24,11 +28,12 @@ use serde::Deserialize;
 use url::Url;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
-    ApiErrorKind, ApiMethod, ApiResponse, GeneratedLink, ProviderError, Reconciled, Unrestricted,
-    WithCredentials,
+    ApiErrorKind, ApiMethod, ApiResponse, Availability, GeneratedLink, ProviderError, Reconciled,
+    Unrestricted, WithCredentials,
 };
 use wayfetch_engine::domain::failure::FailureCode;
 use wayfetch_engine::domain::time::UtcTimestamp;
+use wayfetch_engine::protocol::query::CheckReason;
 use zeroize::Zeroize;
 
 use super::{ErrorBody, FORMAT, RealDebrid, Stored};
@@ -64,6 +69,17 @@ impl Drop for Unrestrict {
             download.zeroize();
         }
     }
+}
+
+#[derive(Deserialize)]
+struct Checked {
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default)]
+    filesize: Option<u64>,
+    /// 1 if Real-Debrid can download the link.
+    #[serde(default)]
+    supported: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +150,77 @@ impl RealDebrid {
             *refreshed = true;
         }
         Ready::Ok
+    }
+
+    /// Asks Real-Debrid whether it can download `link`, without a sign-in.
+    pub(super) async fn availability(&self, link: &Url) -> Availability {
+        let url = self.api.endpoint().url("rest/1.0/unrestrict/check");
+        let body = form(&[("link", link.as_str())]);
+        let response = match self.api.call(ApiMethod::Post, url, None, Some(body)).await {
+            Ok(response) => response,
+            Err(ProviderError::Unavailable(why)) => {
+                return Availability::Unknown(CheckReason::Unreachable, format!("{why}."));
+            }
+            Err(e) => return Availability::Unknown(CheckReason::Unreadable, format!("{e}.")),
+        };
+        if response.status == 200 {
+            return match serde_json::from_slice::<Checked>(response.body.expose()) {
+                Ok(Checked {
+                    supported: Some(0), ..
+                }) => Availability::Unknown(
+                    CheckReason::Unreadable,
+                    "Real-Debrid does not support this link.".into(),
+                ),
+                Ok(answer) => Availability::File {
+                    name: answer
+                        .filename
+                        .filter(|n| !n.is_empty() && n.len() <= MAX_NAME),
+                    size: answer.filesize.filter(|&s| s > 0),
+                },
+                Err(_) => Availability::Unknown(
+                    CheckReason::Unreadable,
+                    "Real-Debrid's answer could not be read.".into(),
+                ),
+            };
+        }
+        let code = serde_json::from_slice::<ErrorBody>(response.body.expose())
+            .ok()
+            .and_then(|e| e.error_code);
+        let status = response.status;
+        match code {
+            Some(24) => Availability::Offline(
+                "Real-Debrid says the file is unavailable at its host.".into(),
+            ),
+            Some(28 | 35) => Availability::Offline("Real-Debrid will not serve this file.".into()),
+            Some(5 | 34) => Availability::Unknown(
+                CheckReason::RateLimited,
+                "Real-Debrid asked Wayfetch to slow down.".into(),
+            ),
+            Some(16) => Availability::Unknown(
+                CheckReason::Unreadable,
+                "Real-Debrid does not support this host.".into(),
+            ),
+            Some(17..=19) => Availability::Unknown(
+                CheckReason::ServerError,
+                "Real-Debrid cannot reach this host right now.".into(),
+            ),
+            _ if status == 429 => Availability::Unknown(
+                CheckReason::RateLimited,
+                "Real-Debrid asked Wayfetch to slow down.".into(),
+            ),
+            _ if status >= 500 => Availability::Unknown(
+                CheckReason::ServerError,
+                format!("Real-Debrid answered HTTP {status}."),
+            ),
+            _ => Availability::Unknown(
+                CheckReason::Unreadable,
+                format!(
+                    "Real-Debrid answered HTTP {status}{}.",
+                    code.map(|c| format!(", error code {c}"))
+                        .unwrap_or_default()
+                ),
+            ),
+        }
     }
 
     /// Asks Real-Debrid once for a download link for `link`.

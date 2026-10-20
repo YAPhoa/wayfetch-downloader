@@ -6,6 +6,7 @@ import type { HostName } from "./HostName.js";
 import type { JobId } from "./JobId.js";
 import type { LinkCheck } from "./LinkCheck.js";
 import type { LinkMedia } from "./LinkMedia.js";
+import type { ProviderId } from "./ProviderId.js";
 import type { Revision } from "./Revision.js";
 import type { RootId } from "./RootId.js";
 import type { SourceLinkId } from "./SourceLinkId.js";
@@ -100,6 +101,12 @@ found?: number,
  * which are never followed. Added in protocol 5.0.
  */
 skipped?: number, 
+/**
+ * The service whose provider answered the last check, for a link an
+ * enabled account would download; absent when the link's own server
+ * did. Added in protocol 6.1.
+ */
+checked_via?: ProviderId, 
 /**
  * For a link a media service recognized, such as a YouTube video:
  * its title, once checked, and what it will be downloaded as. Added
