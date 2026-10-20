@@ -42,7 +42,7 @@ test('a lagging total never contradicts the page', () => {
   });
 });
 
-test('an older engine without `before` counts full earlier pages', () => {
+test('without `before`, full earlier pages are counted', () => {
   assert.deepEqual(pagePlace({ earlier: 2, before: null, size: 100, rows: 7, more: false, total: null }), {
     first: 201,
     last: 207,

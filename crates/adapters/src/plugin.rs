@@ -38,13 +38,19 @@ const STDERR_BYTES: usize = 64 * 1024;
 
 /// A program file named `name` in a directory on `PATH`, if any.
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| find_in(&dir, name))
+}
+
+/// A program file named `name` in `dir`, if there is one.
+pub fn find_in(dir: &Path, name: &str) -> Option<PathBuf> {
     let names = if cfg!(windows) {
         vec![format!("{name}.exe"), name.to_owned()]
     } else {
         vec![name.to_owned()]
     };
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
+    names
+        .iter()
+        .map(|n| dir.join(n))
         .find(|path| path.is_file())
 }
 

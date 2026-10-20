@@ -10,7 +10,7 @@ import type { StartRouting } from "./StartRouting.js";
 
 /**
  * Starts, removes, or moves collected links at the revisions the client
- * saw. Added in protocol 1.1.
+ * saw.
  */
 export type LinksCommandRequest = { 
 /**
@@ -36,16 +36,16 @@ destination?: RootId,
 /**
  * For [`LinksAction::Start`] only: the provider account to download
  * through; automatic selection if absent unless routing requests
- * Direct. Account override added in protocol 2.2.
+ * Direct.
  */
 account?: AccountId, 
 /**
  * Explicit route intent for a start. Absent uses
- * automatic selection; cannot be combined with an account. Added in 3.0.
+ * automatic selection; cannot be combined with an account.
  */
 routing?: StartRouting, 
 /**
  * What to download media links as, for [`LinksAction::ChooseMedia`]
- * only. Added in protocol 4.0.
+ * only.
  */
 media?: MediaChoice, };

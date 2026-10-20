@@ -11,11 +11,11 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 6, minor: 1 });
+export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
- * `./generated` (see the README's web UI section).
+ * `./generated` (see ui/README.md).
  * @typedef {import('./generated/JobId.js').JobId} JobId
  * @typedef {import('./generated/ProtocolVersion.js').ProtocolVersion} ProtocolVersion
  * @typedef {import('./generated/EventCursor.js').EventCursor} EventCursor
@@ -307,10 +307,12 @@ export class WayfetchError extends Error {
 
 /**
  * Whether an engine speaking `engine` serves this UI: the same major
- * version, and nothing newer than it provides (`ProtocolVersion::serves`).
+ * version, and nothing newer than it provides; before 1.0, the same version
+ * (`ProtocolVersion::serves`).
  * @param {ProtocolVersion} engine
  */
 export function serves(engine) {
+  if (engine.major === 0) return PROTOCOL.major === 0 && engine.minor === PROTOCOL.minor;
   return engine.major === PROTOCOL.major && PROTOCOL.minor <= engine.minor;
 }
 

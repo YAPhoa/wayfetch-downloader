@@ -27,7 +27,7 @@
 //!
 //! These tests need an X display (`DISPLAY`, for example from `xvfb-run`)
 //! and `WebKitWebDriver` on `PATH`, so they are ignored by default; see
-//! the README's desktop section.
+//! apps/wayfetch-desktop/README.md.
 
 #![cfg(target_os = "linux")]
 
@@ -605,6 +605,17 @@ fn stalled(server: &Server, name: &str, size: usize, stall: usize) -> String {
 
 fn release(server: &Server, name: &str) {
     server.update(&format!("/{name}"), |r| r.stall_at = None);
+}
+
+/// Requests for `path` that could fetch its content: any but a check,
+/// which sends `HEAD` or asks for the first byte only.
+fn content_requests(server: &Server, path: &str) -> usize {
+    server
+        .log()
+        .iter()
+        .filter(|r| r.path == path)
+        .filter(|r| r.method != "HEAD" && r.header("range") != Some("bytes=0-0"))
+        .count()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1222,7 +1233,7 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
     shell
         .wait_for(
             "document.querySelector('.downloads-form .message')?.textContent
-               === 'Saved. Downloads share at most 512 KiB/s.'",
+               === 'Saved.'",
         )
         .await;
     shell.click("[data-key=\"speed-unlimited\"]").await;
@@ -1230,7 +1241,7 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
     shell
         .wait_for(
             "document.querySelector('.downloads-form .message')?.textContent
-               === 'Saved. Downloads are not speed limited.'",
+               === 'Saved.'",
         )
         .await;
 
@@ -1695,7 +1706,7 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
     server.put("/start.bin", Resource::new(body(MIB)));
     let shell = Shell::launch(&dirs).await;
     let links = format!(
-        "{}\nexample.com/no-scheme.bin\n{}",
+        "{}\nftp://example.com/other-scheme.bin\n{}",
         server.url("/keep.bin"),
         server.url("/start.bin")
     );
@@ -1703,7 +1714,8 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
     // toolbar's first row, in every view.
     let place = settings_place(&shell).await;
 
-    // Collecting fetches nothing and starts no download.
+    // Collecting checks the links, asking for their size and never their
+    // content, and starts no download.
     shell
         .collect(
             &links,
@@ -1715,9 +1727,14 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
         .await;
     assert_eq!(
         collected(&shell).await,
-        json!(["keep.bin", "example.com/no-scheme.bin", "start.bin"])
+        json!([
+            "keep.bin",
+            "ftp://example.com/other-scheme.bin",
+            "start.bin"
+        ])
     );
-    assert_eq!(server.hits("/keep.bin") + server.hits("/start.bin"), 0);
+    assert_eq!(content_requests(&server, "/keep.bin"), 0);
+    assert_eq!(content_requests(&server, "/start.bin"), 0);
     assert_eq!(settings_place(&shell).await, place);
     shell
         .click(".workspace > :not([hidden]) [data-key=\"add-links\"]")
@@ -1807,7 +1824,7 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
             .filter(|bytes| bytes.len() == MIB)
     })
     .await;
-    assert_eq!(server.hits("/keep.bin"), 0);
+    assert_eq!(content_requests(&server, "/keep.bin"), 0);
 
     // A narrow window keeps the views in reach without sideways scrolling.
     shell.client.set_window_size(480, 640).await.unwrap();

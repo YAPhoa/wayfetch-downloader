@@ -12,8 +12,7 @@
 /**
  * @param {{ earlier: number, before: number | null, size: number, rows: number, more: boolean, total: number | null }} at
  *   `earlier` pages were paged through to reach this one, `before` rows
- *   come before it (unknown from an older engine, which then counts full
- *   pages), `rows` are on it, whether `more` follow, and the list's
+ *   come before it (when unknown, full earlier pages are counted), `rows` are on it, whether `more` follow, and the list's
  *   `total` if known
  * @returns {PagePlace}
  */

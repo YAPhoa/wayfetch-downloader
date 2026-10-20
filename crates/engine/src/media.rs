@@ -1,6 +1,6 @@
 //! The seams between the engine and media services: links to a video page
 //! that resolve into one or more streams, such as YouTube watch pages
-//! (architecture brief ADR-27; protocol 4.0).
+//! (architecture brief ADR-27).
 //!
 //! * A [`MediaService`] recognizes its links without the network, checks
 //!   one (title and formats) in the background after it is collected, and

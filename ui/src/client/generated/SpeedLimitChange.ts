@@ -2,6 +2,6 @@
 import type { SpeedLimit } from "./SpeedLimit.js";
 
 /**
- * A change to the total download speed limit. Added in protocol 2.3.
+ * A change to the total download speed limit.
  */
 export type SpeedLimitChange = { "set": SpeedLimit } | "use_default";

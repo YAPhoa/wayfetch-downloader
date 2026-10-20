@@ -1,4 +1,4 @@
-//! Unpacking archives on the coordinator (protocol 6.0): one extraction at
+//! Unpacking archives on the coordinator: one extraction at
 //! a time, started after each state change while the extractor can be
 //! used, and archives queued as their downloads complete when the user
 //! has it on. See the extract module for what an attempt guarantees.

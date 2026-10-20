@@ -1,4 +1,4 @@
-//! A media download (protocol 4.0): the media service's streams, laid end
+//! A media download: the media service's streams, laid end
 //! to end in the job's one staging file, then joined or converted into a
 //! second file when the plan needs it.
 //!

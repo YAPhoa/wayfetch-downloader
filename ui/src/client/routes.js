@@ -1,5 +1,5 @@
 // How downloads go: directly from their hosts, or through a provider
-// account selected automatically or explicitly at start (protocol 3.0). The engine
+// account selected automatically or explicitly at start. The engine
 // decides which accounts may be used and keeps the choice with each job;
 // these helpers only say what a view offers and shows. Neither ever holds
 // a generated link or a credential.

@@ -3,8 +3,7 @@ import type { AccountId } from "./AccountId.js";
 import type { ProviderId } from "./ProviderId.js";
 
 /**
- * How a job is downloaded, when it is not directly from its host. Added
- * in protocol 2.2.
+ * How a job is downloaded, when it is not directly from its host.
  */
 export type JobRoute = { 
 /**

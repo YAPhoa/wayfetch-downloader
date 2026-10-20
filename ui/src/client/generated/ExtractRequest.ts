@@ -5,8 +5,7 @@ import type { InstanceId } from "./InstanceId.js";
 import type { Revision } from "./Revision.js";
 
 /**
- * Unpacks a downloaded archive, with its password if it needs one. Added
- * in protocol 6.0.
+ * Unpacks a downloaded archive, with its password if it needs one.
  */
 export type ExtractRequest = { 
 /**
