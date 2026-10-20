@@ -2080,7 +2080,21 @@ async fn links_are_downloaded_through_a_real_debrid_account_over_http() {
     let collect = client.command(json!({"text": format!("{original}\n{blocked}")}));
     let (status, collected) = client.post("/v1/staging/links", &collect).await;
     assert_eq!(status, StatusCode::OK, "{collected}");
-    let (_, listed) = client.get("/v1/staging/links").await;
+    // Background checks discover supported hosts and update the name.
+    // Finish them before testing that Start reuses that discovery: starting
+    // concurrently can legitimately make a second host-list request.
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    let listed = loop {
+        let (status, listed) = client.get("/v1/staging/links").await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        if listed["checking"] == 0 {
+            break listed;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{listed}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(provider.hits(rd::CHECK_PATH), 2);
+    assert_eq!(provider.hits("/rest/1.0/hosts/domains"), 1);
     let (_, accounts) = client.get("/v1/accounts").await;
     assert_eq!(
         provider.hits(rd::UNRESTRICT_PATH),
@@ -2090,7 +2104,7 @@ async fn links_are_downloaded_through_a_real_debrid_account_over_http() {
     assert_eq!(accounts["accounts"][0]["id"], account.as_str());
     let refs = |l: &Value| vec![json!({"link": l["id"], "revision": l["revision"]})];
     let (first, second) = (&listed["items"][0], &listed["items"][1]);
-    assert_eq!(first["name_hint"], "abc");
+    assert_eq!(first["name_hint"], "Synthetic File.bin");
 
     // Managing accounts does not grant downloading through them.
     let manager = daemon.client(MANAGER_TOKEN);
