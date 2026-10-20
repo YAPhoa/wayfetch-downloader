@@ -312,7 +312,13 @@ export class Downloads {
       'aria-label': 'Select all downloads shown',
       onchange: () => this.tick(this.shownJobs, this.selectAll.checked),
     });
-    this.selectionLine = h('p', { class: 'selection-summary reserved', role: 'status' });
+    this.selectionLine = h('p', { class: 'selection-summary', role: 'status' });
+    /**
+     * What is ticked, then the last notice, on one line above the table.
+     * While downloads are shown it keeps its room, empty or not, so
+     * ticking a row or a notice such as "Started 1 download." moves no row.
+     */
+    this.listBar = h('div', { class: 'list-bar' }, this.selectionLine, this.noticeLine);
     this.actionButtons = STATE_ACTIONS.map((action) =>
       h(
         'button',
@@ -372,8 +378,7 @@ export class Downloads {
         h(
           'main',
           { class: 'list' },
-          this.noticeLine,
-          this.selectionLine,
+          this.listBar,
           h('div', { class: 'table-scroll' }, this.buildTable(), this.listStatus),
           this.pager,
           this.inspector,
@@ -1616,15 +1621,13 @@ export class Downloads {
 
   /**
    * How many downloads are ticked, with a way to untick them, and how
-   * many of them the name filter hides, which commands leave out. While
-   * downloads are shown the line keeps its room, empty when none is
-   * ticked, so ticking one moves no row.
+   * many of them the name filter hides, which commands leave out.
    * @param {readonly JobSummary[]} shown
    */
   renderSelection(shown) {
     const ticked = this.selection.chosen(shown).length;
     const hidden = this.selection.size - ticked;
-    this.selectionLine.hidden = shown.length === 0 && this.selection.size === 0;
+    this.listBar.hidden = shown.length === 0 && this.selection.size === 0 && this.notice === '';
     show(
       this.selectionLine,
       ticked > 0 && h('strong', null, `${count(ticked, 'download')} selected`),
@@ -1954,25 +1957,33 @@ export class Downloads {
         id: 'inspector-panel',
         'aria-labelledby': 'tab-general',
       },
+      // How it is going on the left, where it goes on the right; the rows
+      // stay put as it runs, so the panel keeps its height.
       h(
         'div',
-        { class: 'big-progress' },
+        { class: 'transfer' },
         h(
           'div',
-          { class: 'figure' },
-          h('span', { class: 'percent' }, shown.percent ?? '—'),
-          h('span', { class: 'saved' }, `${shown.text} saved`),
+          { class: 'big-progress' },
+          h(
+            'div',
+            { class: 'figure' },
+            h('span', { class: 'percent' }, shown.percent ?? '—'),
+            h('span', { class: 'saved' }, `${shown.text} saved`),
+          ),
+          progressBar(shown, state, 'Saved'),
         ),
-        progressBar(shown, state, 'Saved'),
+        this.facts([
+          ['State', h('span', { class: 'state' }, dot(state.status), state.label)],
+          ['Speed', shown.rate ? [shown.rate, shown.left && `, ${shown.left} left`].join('') : '—'],
+          ['Download via', this.via(job)],
+        ]),
       ),
       this.facts([
-        ['State', h('span', { class: 'state' }, dot(state.status), state.label)],
-        ['Speed', shown.rate && [shown.rate, shown.left && `, ${shown.left} left`].join('')],
         ['File', name === undefined ? 'Named when it finishes' : h('span', { class: 'path', title: where.file }, name)],
         ['Type', name && fileKind(name)],
         ['Size', shown.size],
         [job.artifact ? 'Saved in' : 'Saves to', this.folder(job, where.folder)],
-        ['Download via', this.via(job)],
         ['Unpacked to', job.extraction?.output],
         ...this.source(job),
       ]),
@@ -2116,6 +2127,8 @@ export class Downloads {
         ['Package', job.package],
         ['Revision', job.revision],
         ['Generation', job.generation],
+      ]),
+      this.facts([
         ['Root', job.artifact?.root],
         ['Path', job.artifact?.path],
         ['Failure code', job.failure?.code],

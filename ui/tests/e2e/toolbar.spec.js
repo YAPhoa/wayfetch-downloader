@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 import { expect, test } from '@playwright/test';
 
-import { Daemon, freePort } from './harness.js';
+import { Daemon, Fixture, MIB, freePort } from './harness.js';
 
 test('Downloads and Links keep toolbar widths as the window narrows', async ({ page }) => {
   const daemon = await new Daemon(await freePort()).init();
@@ -88,5 +88,66 @@ test('Downloads and Links keep toolbar widths as the window narrows', async ({ p
     }
   } finally {
     await daemon.remove();
+  }
+});
+
+test('the details panel and the rows keep their place as downloads start, run, and finish', async ({ page }) => {
+  const fixture = await new Fixture().start();
+  const daemon = await new Daemon(await freePort()).init();
+  try {
+    await daemon.start();
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto(daemon.origin);
+    await page.getByLabel('Setup secret').fill((await daemon.setupSecret()).trim());
+    await page.getByLabel('Owner name').fill('owner');
+    await page.getByLabel('Password', { exact: true }).fill('correct horse battery staple');
+    await page.getByLabel('Repeat password').fill('correct horse battery staple');
+    await page.getByRole('button', { name: 'Create owner' }).click();
+    await expect(page.getByText('No downloads yet.')).toBeVisible();
+    /** @param {string} url */
+    const start = async (url) => {
+      await page.getByRole('button', { name: 'Add links' }).click();
+      await page.getByLabel('Links, text with links in it, or a page’s HTML').fill(url);
+      await page.getByRole('button', { name: 'Collect links' }).click();
+      await page.getByRole('button', { name: 'Start selected' }).click();
+      await expect(page.getByText('Started 1 download.')).toBeVisible();
+    };
+    const boxes = async () => {
+      const found = await Promise.all(
+        ['.table-scroll', '.pager', '.inspector'].map((selector) => page.locator(`.downloads-view ${selector}`).boundingBox()),
+      );
+      return found.map((box) => box && { y: Math.round(box.y), height: Math.round(box.height) });
+    };
+
+    await start(fixture.put('first.bin', 4 * MIB, MIB));
+    const first = page.locator('tr[data-job]', { hasText: 'first.bin' });
+    await expect(first.locator('td[data-state]')).toHaveText('Downloading');
+    await first.locator('td.name a').click();
+    await expect(page.locator('dd[data-fact="state"]')).toHaveText('Downloading');
+    await page.evaluate(() => document.fonts.ready);
+    const expected = await boxes();
+
+    // Neither tab, a notice, a new row, nor finishing moves the panel.
+    await page.getByRole('tab', { name: 'Engine details' }).click();
+    await expect(page.locator('dd[data-fact="job"]')).toBeVisible();
+    expect(await boxes()).toEqual(expected);
+    await page.getByRole('tab', { name: 'General' }).click();
+    await start(fixture.put('second.bin', MIB));
+    await expect(page.locator('tr[data-job]')).toHaveCount(2);
+    await page.locator('tr[data-job]', { hasText: 'first.bin' }).locator('td.name a').click();
+    expect(await boxes()).toEqual(expected);
+    fixture.release('first.bin');
+    await expect(page.locator('dd[data-fact="state"]')).toHaveText('Done');
+    await expect(page.locator('dd[data-fact="speed"]')).toHaveText('—');
+    expect(await boxes()).toEqual(expected);
+    // Everything in the panel fits its room at this size.
+    for (const tab of ['General', 'Engine details']) {
+      await page.getByRole('tab', { name: tab }).click();
+      const panel = page.locator('.inspector .panel');
+      expect(await panel.evaluate((element) => element.scrollHeight <= element.clientHeight), tab).toBe(true);
+    }
+  } finally {
+    await daemon.remove();
+    await fixture.stop();
   }
 });
