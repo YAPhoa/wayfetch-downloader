@@ -173,20 +173,13 @@ esac"#,
         run(&helper, &[&arg("env")], &confinement).await.unwrap(),
         "unset|C.UTF-8"
     );
-    // Everything else is refused, and no file's permissions, owner, or
-    // times change, not even in its own folder.
-    let made = output.join("made");
+    // Everything else is refused.
     for (what, target) in [
         ("read", &secret),
         ("write", &elsewhere),
         ("truncate", &given),
         ("link", &output),
         ("read", &PathBuf::from("/etc/passwd")),
-        ("chmod", &secret),
-        ("chmod", &made),
-        ("chown", &secret),
-        ("touch", &given),
-        ("touch", &made),
     ] {
         let refused = run(&helper, &[&arg(what), target], &confinement).await;
         assert!(
@@ -199,12 +192,30 @@ esac"#,
     }
     assert_eq!(std::fs::read(&given).unwrap(), b"given");
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
-    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
-    assert_eq!(mode(&secret), 0o600);
-    assert_eq!(
-        std::fs::metadata(&given).unwrap().modified().unwrap(),
-        modified
-    );
+
+    // Changing a file's permissions, owner, or times seems to succeed but
+    // changes nothing, not even in its own folder.
+    let made = output.join("made");
+    let (made_mode, made_modified) = {
+        let made = std::fs::metadata(&made).unwrap();
+        (made.permissions().mode(), made.modified().unwrap())
+    };
+    for (what, target) in [
+        ("chmod", &secret),
+        ("chmod", &made),
+        ("chown", &secret),
+        ("touch", &given),
+        ("touch", &made),
+    ] {
+        let ignored = run(&helper, &[&arg(what), target], &confinement).await;
+        assert_eq!(ignored.as_deref(), Ok(""), "{what} {}", target.display());
+    }
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode();
+    assert_eq!(mode(&secret) & 0o7777, 0o600);
+    assert_eq!(mode(&made), made_mode);
+    let modified_at = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+    assert_eq!(modified_at(&given), modified);
+    assert_eq!(modified_at(&made), made_modified);
 }
 
 async fn nothing_a_run_starts_outlives_it() {
@@ -369,12 +380,17 @@ async fn seven_zip_unpacks_confined() {
     let src = dir.path().join("src");
     std::fs::create_dir_all(src.join("d")).unwrap();
     std::fs::write(src.join("été.txt"), "hello").unwrap();
+    std::fs::write(src.join("run.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(src.join("run.sh"), std::fs::Permissions::from_mode(0o750)).unwrap();
     // Incompressible, so the archive spans several volumes.
     let noise: Vec<u8> = (0..300_000u32)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
         .collect();
     std::fs::write(src.join("d/noise.bin"), &noise).unwrap();
-    make(&src, &["a", "-v100k", "-mx0", "../set.7z", "été.txt", "d"]);
+    make(
+        &src,
+        &["a", "-v100k", "-mx0", "../set.7z", "été.txt", "run.sh", "d"],
+    );
     let first = dir.path().join("set.7z.001");
     let mut volumes: Vec<PathBuf> = (2..)
         .map(|n| dir.path().join(format!("set.7z.{n:03}")))
@@ -393,6 +409,7 @@ async fn seven_zip_unpacks_confined() {
         [
             ("d", EntryKind::Directory),
             ("d/noise.bin", EntryKind::File),
+            ("run.sh", EntryKind::File),
             ("été.txt", EntryKind::File),
         ]
     );
@@ -403,6 +420,19 @@ async fn seven_zip_unpacks_confined() {
         .unwrap();
     assert_eq!(std::fs::read(out.join("d/noise.bin")).unwrap(), noise);
     assert_eq!(std::fs::read(out.join("été.txt")).unwrap(), b"hello");
+    // 7-Zip 26 gives a file its stored permissions as it creates it;
+    // earlier releases set them afterwards, which confinement skips.
+    let mode = std::fs::metadata(out.join("run.sh"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    let version = Extractor::plugin(&zip).version.unwrap();
+    if version.as_str() >= "26" {
+        assert_eq!(mode, 0o750, "{version}");
+    } else {
+        assert_eq!(mode & 0o111, 0, "{version}: {mode:o}");
+    }
 
     // A volume it is not given cannot be read, even beside the others.
     let last = volumes.pop().unwrap();

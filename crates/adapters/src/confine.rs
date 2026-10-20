@@ -3,8 +3,8 @@
 //!
 //! A confined run sees only what it is given: the files it may read, one
 //! folder it may write in, and the system's program files. It cannot open
-//! a socket, change any file's permissions, owner, times, or extended
-//! attributes, or leave its process group; it gets an empty environment,
+//! a socket or leave its process group, and its changes to any file's
+//! permissions, owner, times, or extended attributes are skipped; it gets an empty environment,
 //! runs under memory, file size, and core dump limits, and is killed if
 //! Wayfetch exits. On Linux, Landlock confines its files (ABI 3, Linux
 //! 6.2, so it cannot truncate files it may only read) and, from Linux
@@ -206,20 +206,26 @@ mod imp {
     /// through a shell script, still starts.
     const SYSTEM: &[&str] = &["/usr", "/lib", "/lib64", "/lib32", "/bin", "/sbin"];
 
-    /// System calls a confined run may not make:
-    /// - sockets, so no network, and io_uring, which could open them
-    ///   indirectly;
-    /// - changes to a file's permissions, owner, times, or extended
-    ///   attributes, which Landlock does not confine, so no file outside
-    ///   the run's folder can be changed that way (7-Zip sets a file's
-    ///   permissions as it creates it, so it loses only stored times);
-    /// - leaving its process group, so stopping the group stops every
-    ///   process the run started.
+    /// System calls a confined run may not make, refused with `EACCES`:
+    /// sockets, so no network; io_uring, which could open them
+    /// indirectly; and leaving its process group, so stopping the group
+    /// stops every process the run started.
     const REFUSED: &[i64] = &[
         libc::SYS_socket,
         libc::SYS_io_uring_setup,
         libc::SYS_io_uring_enter,
         libc::SYS_io_uring_register,
+        libc::SYS_setsid,
+        libc::SYS_setpgid,
+    ];
+
+    /// System calls that change a file's permissions, owner, times, or
+    /// extended attributes, which Landlock does not confine. They are
+    /// skipped and answered as if they succeeded, so no file anywhere
+    /// changes that way, and a program that gives up when they fail, such
+    /// as 7-Zip 25.01, still runs. Files keep the permissions they were
+    /// created with; stored times are lost.
+    const IGNORED: &[i64] = &[
         libc::SYS_fchmod,
         libc::SYS_fchmodat,
         SYS_FCHMODAT2,
@@ -234,13 +240,11 @@ mod imp {
         libc::SYS_lremovexattr,
         libc::SYS_fremovexattr,
         SYS_REMOVEXATTRAT,
-        libc::SYS_setsid,
-        libc::SYS_setpgid,
     ];
 
     /// The same, by their older names that only some architectures have.
     #[cfg(target_arch = "x86_64")]
-    const REFUSED_LEGACY: &[i64] = &[
+    const IGNORED_LEGACY: &[i64] = &[
         libc::SYS_chmod,
         libc::SYS_chown,
         libc::SYS_lchown,
@@ -249,7 +253,7 @@ mod imp {
         libc::SYS_futimesat,
     ];
     #[cfg(not(target_arch = "x86_64"))]
-    const REFUSED_LEGACY: &[i64] = &[];
+    const IGNORED_LEGACY: &[i64] = &[];
 
     // System calls added since Linux 5.1 share one number on every
     // architecture; these are not yet in `libc` for all of them.
@@ -272,8 +276,8 @@ mod imp {
             .map_err(|e| format!("a run cannot be tied to Wayfetch: {e}"))?;
         let ruleset = ruleset(confinement, program)
             .map_err(|e| format!("Landlock cannot confine helper programs here: {e}"))?;
-        let filter =
-            filter().map_err(|e| format!("seccomp cannot confine helper programs: {e}"))?;
+        let filters =
+            filters().map_err(|e| format!("seccomp cannot confine helper programs: {e}"))?;
         for (resource, value) in [
             (Resource::As, confinement.memory_bytes),
             (Resource::Fsize, confinement.file_bytes),
@@ -288,8 +292,11 @@ mod imp {
         ruleset
             .restrict_self()
             .map_err(|e| format!("Landlock cannot confine helper programs here: {e}"))?;
-        seccompiler::apply_filter(&filter)
-            .map_err(|e| format!("seccomp cannot confine helper programs: {e}"))
+        for filter in &filters {
+            seccompiler::apply_filter(filter)
+                .map_err(|e| format!("seccomp cannot confine helper programs: {e}"))?;
+        }
+        Ok(())
     }
 
     /// Starts `program` in place of this process.
@@ -356,14 +363,15 @@ mod imp {
         Ok(ruleset)
     }
 
-    /// The seccomp filter refusing [`REFUSED`] and [`REFUSED_IOCTLS`]
-    /// with `EACCES`.
-    fn filter() -> Result<BpfProgram, seccompiler::BackendError> {
-        let mut rules = REFUSED
-            .iter()
-            .chain(REFUSED_LEGACY)
-            .map(|&call| (call, Vec::new()))
-            .collect::<BTreeMap<_, _>>();
+    /// The seccomp filters: one refusing [`REFUSED`] and
+    /// [`REFUSED_IOCTLS`] with `EACCES`, one skipping [`IGNORED`].
+    fn filters() -> Result<[BpfProgram; 2], seccompiler::BackendError> {
+        let calls = |calls: &mut dyn Iterator<Item = &i64>| {
+            calls
+                .map(|&call| (call, Vec::new()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let mut refused = calls(&mut REFUSED.iter());
         let ioctls = REFUSED_IOCTLS
             .iter()
             .map(|&request| {
@@ -372,14 +380,20 @@ mod imp {
                 SeccompRule::new(vec![condition])
             })
             .collect::<Result<_, _>>()?;
-        rules.insert(libc::SYS_ioctl, ioctls);
-        SeccompFilter::new(
-            rules,
-            SeccompAction::Allow,
-            SeccompAction::Errno(libc::EACCES.unsigned_abs()),
-            TargetArch::try_from(std::env::consts::ARCH)?,
-        )?
-        .try_into()
+        refused.insert(libc::SYS_ioctl, ioctls);
+        let ignored = calls(&mut IGNORED.iter().chain(IGNORED_LEGACY));
+        let arch = TargetArch::try_from(std::env::consts::ARCH)?;
+        let filter = |rules, errno: i32| -> Result<BpfProgram, seccompiler::BackendError> {
+            SeccompFilter::new(
+                rules,
+                SeccompAction::Allow,
+                // Error number 0 is success: the call returns 0 unmade.
+                SeccompAction::Errno(errno.unsigned_abs()),
+                arch,
+            )?
+            .try_into()
+        };
+        Ok([filter(refused, libc::EACCES)?, filter(ignored, 0)?])
     }
 }
 

@@ -566,11 +566,13 @@ nearly fill the drive, are refused, and only Wayfetch's private folder is
 removed. While an archive is unpacked, neither it nor any other part of its
 set can be renamed or deleted. 7-Zip runs confined: it may read only the
 archive's parts and write only in Wayfetch's private folder, cannot open
-network connections or change any file's permissions, owner, or times, and
-may use at most 4 GiB of memory (Landlock, which needs Linux 6.2 or newer,
-seccomp, and resource limits). Cancelling stops 7-Zip and everything it
-started before the private folder is removed. Unpacked files keep their
-permissions but get the time they were unpacked. Where that cannot be
+network connections, may use at most 4 GiB of memory, and its changes to any
+file's permissions, owner, or times are skipped (Landlock, which needs Linux
+6.2 or newer, seccomp, and resource limits). Cancelling stops 7-Zip and
+everything it started before the private folder is removed. Unpacked files
+get the time they were unpacked; with 7-Zip 26 or newer they keep their
+permissions, while older releases leave them with default permissions.
+Where that cannot be
 enforced, such as on an older kernel, Settings > Plugins shows 7-Zip as not
 working and nothing is unpacked.
 
