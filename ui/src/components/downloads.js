@@ -2,7 +2,8 @@
 // Downloads and Links views, act on the ticked downloads (or else the one
 // in the details), and open Settings; state filters; a table of one page
 // of jobs, each with a box to tick and a menu of what can be done with it
-// (with the ticked ones, when it is one of them); an inspector for the
+// (with the ticked ones, when it is one of them), which a column's header
+// sorts, reverses, then returns to the engine's order; an inspector for the
 // selected job; and a status bar. It talks to the engine only through a
 // `WayfetchClient`, so any transport can host it.
 //
@@ -29,6 +30,8 @@ import {
   formatBytes,
   groupCount,
   jobName,
+  jobSortValue,
+  JOB_SORT_COLUMNS,
   progress,
   restartNote,
   retryPlan,
@@ -38,10 +41,11 @@ import {
 import { count, refusals } from '../client/links.js';
 import { pagePlace } from '../client/pages.js';
 import { routeLabel } from '../client/routes.js';
+import { cycleSort, saveSort, savedSort, sortedBy } from '../client/sort.js';
 import { Selection } from '../client/selection.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
-import { copyText, focusedKey, h, pagerBar, refocus, show, stripe } from './dom.js';
+import { copyText, focusedKey, h, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
 import { icon } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu, rowMenuHandlers } from './menu.js';
@@ -63,6 +67,7 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('./settings.js').Density} Density
  * @typedef {import('../client/feed.js').FeedStatus} FeedStatus
  * @typedef {import('../client/jobs.js').Status} Status
+ * @typedef {import('../client/jobs.js').JobColumn} JobColumn
  */
 
 /** Jobs per page. */
@@ -97,6 +102,9 @@ const STATUS_LABELS = {
   incompatible: 'Out of date',
   stopped: 'Stopped',
 };
+
+/** Where the chosen order is kept, per browser. */
+const SORT_KEY = 'wayfetch.downloads-sort';
 
 /** Where the row density choice is kept, per browser. */
 const DENSITY_KEY = 'wayfetch.density';
@@ -325,6 +333,10 @@ export class Downloads {
     /** @type {HTMLElement[]} */
     this.viewSwitchers = [];
     this.filters = h('nav', { class: 'filters', 'aria-label': 'Filter by status' });
+    /** The column sorting the shown page, or none for the engine's order. */
+    /** @type {import('../client/sort.js').Sort<JobColumn | null>} */
+    this.sort = savedSort(SORT_KEY, JOB_SORT_COLUMNS, { column: null, descending: false });
+    this.tableHead = h('thead');
     this.tableBody = h('tbody');
     this.listStatus = h('p', { class: 'list-status', role: 'status' });
     this.pager = h('nav', { class: 'pager', 'aria-label': 'Pages' });
@@ -1538,38 +1550,52 @@ export class Downloads {
   // The table.
 
   buildTable() {
+    this.renderHead();
+    return h('table', { class: 'jobs' }, h('caption', { class: 'visually-hidden' }, 'Downloads'), this.tableHead, this.tableBody);
+  }
+
+  renderHead() {
+    /** @type {[JobColumn, string, string][]} */
     const columns = [
-      ['Name', 'name'],
-      ['Host', 'host'],
-      ['State', 'state'],
-      ['Progress', 'progress'],
-      ['Size', 'num'],
-      ['Speed', 'num'],
-      ['Left', 'num'],
+      ['name', 'Name', 'name'],
+      ['host', 'Host', 'host'],
+      ['state', 'State', 'state'],
+      ['progress', 'Progress', 'progress'],
+      ['size', 'Size', 'num'],
+      ['speed', 'Speed', 'num'],
+      ['left', 'Left', 'num'],
     ];
-    const actions = h('th', { scope: 'col', class: 'row-actions' }, h('span', { class: 'visually-hidden' }, 'Actions'));
-    return h(
-      'table',
-      { class: 'jobs' },
-      h('caption', { class: 'visually-hidden' }, 'Downloads'),
+    show(
+      this.tableHead,
       h(
-        'thead',
+        'tr',
         null,
-        h(
-          'tr',
-          null,
-          h('th', { scope: 'col', class: 'check' }, this.selectAll),
-          columns.map(([title, kind]) => h('th', { scope: 'col', class: kind }, title)),
-          actions,
+        h('th', { scope: 'col', class: 'check' }, this.selectAll),
+        columns.map(([column, label, className]) =>
+          sortHeader({ column, label, className, sort: this.sort, onSort: (c) => this.sortBy(c) }),
         ),
+        h('th', { scope: 'col', class: 'row-actions' }, h('span', { class: 'visually-hidden' }, 'Actions')),
       ),
-      this.tableBody,
     );
   }
 
-  /** The jobs of the page that the name filter shows. */
+  /**
+   * Sorts the shown page by `column`, reverses it, or goes back to the
+   * engine's order, in turn.
+   * @param {JobColumn} column
+   */
+  sortBy(column) {
+    this.sort = cycleSort(this.sort, column);
+    saveSort(SORT_KEY, this.sort);
+    this.renderHead();
+    this.render();
+  }
+
+  /** The jobs of the page that the name filter shows, in the chosen order. */
   get shownJobs() {
-    return this.feed.jobs.filter((job) => this.query === '' || jobName(job).toLowerCase().includes(this.query));
+    const jobs = this.feed.jobs.filter((job) => this.query === '' || jobName(job).toLowerCase().includes(this.query));
+    const { column, descending } = this.sort;
+    return column === null ? jobs : sortedBy(jobs, (job) => jobSortValue(job, this.feed.sample(job.id), column), descending);
   }
 
   /**

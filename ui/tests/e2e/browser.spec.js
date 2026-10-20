@@ -2002,6 +2002,27 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(pager.getByRole('button', { name: 'Previous page' })).toBeDisabled();
     await expect(pager.getByRole('button', { name: 'Next page' })).toBeDisabled();
 
+    // A column header sorts the page by it, again reverses it, and a third
+    // click goes back to the engine's order; stripes follow the new order.
+    const names = () => page.locator('tr[data-job] td.name').allTextContents();
+    const sizeHeader = page.locator('.downloads-view th.num', { hasText: 'Size' });
+    await expect(page.locator('.downloads-view th[aria-sort]')).toHaveCount(0);
+    const engineOrder = await names();
+    await sizeHeader.getByRole('button').click();
+    await expect(sizeHeader).toHaveAttribute('aria-sort', 'ascending');
+    expect((await names())[0]).toBe('bulk-c.bin');
+    expect(await page.locator('tr[data-job]').evaluateAll((rows) => rows.map((r) => r.getAttribute('data-stripe')))).toEqual([
+      'base',
+      'alternate',
+      'base',
+    ]);
+    await sizeHeader.getByRole('button').click();
+    await expect(sizeHeader).toHaveAttribute('aria-sort', 'descending');
+    expect((await names())[2]).toBe('bulk-c.bin');
+    await sizeHeader.getByRole('button').click();
+    await expect(page.locator('.downloads-view th[aria-sort]')).toHaveCount(0);
+    expect(await names()).toEqual(engineOrder);
+
     // The selection line keeps its room while empty, so ticking moves no row.
     await expect(summary).toBeEmpty();
     await expect(summary).toBeVisible();

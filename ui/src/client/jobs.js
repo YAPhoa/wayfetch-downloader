@@ -18,6 +18,9 @@
  * Which group of states a download is in, for its colour. Each state
  * filter is one; anything else is drawn in a neutral colour.
  * @typedef {'active' | 'paused' | 'queued' | 'failed' | 'cancelled' | 'done'} Status
+ *
+ * A column of the downloads table that sorts it.
+ * @typedef {'name' | 'host' | 'state' | 'progress' | 'size' | 'speed' | 'left'} JobColumn
  */
 
 /**
@@ -324,20 +327,66 @@ export function formatBytes(bytes) {
  * @param {ProgressSample | undefined} sample
  */
 export function progress(job, sample) {
-  const done = sample ? Math.max(sample.bytes_received, job.bytes_done) : job.bytes_done;
-  const total = sample?.bytes_total ?? job.bytes_total ?? job.artifact?.size;
-  const ratio = total ? done / total : NaN;
-  const fraction = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : undefined;
+  const { done, total, rate, fraction, seconds } = measure(job, sample);
   const text = total ? `${formatBytes(done)} of ${formatBytes(total)}` : formatBytes(done);
-  const rate = sample?.bytes_per_second;
   return {
     fraction,
     percent: fraction === undefined ? undefined : percent(fraction),
     text,
     size: total === undefined || total === null ? undefined : formatBytes(total),
     rate: rate === undefined ? undefined : `${formatBytes(rate)}/s`,
-    left: rate && total && total > done ? formatDuration((total - done) / rate) : undefined,
+    left: seconds === undefined ? undefined : formatDuration(seconds),
   };
+}
+
+/**
+ * A job's progress as numbers: bytes received and expected, the transfer
+ * rate, the fraction done and the seconds left, where known.
+ * @param {JobSummary} job
+ * @param {ProgressSample | undefined} sample
+ */
+function measure(job, sample) {
+  const done = sample ? Math.max(sample.bytes_received, job.bytes_done) : job.bytes_done;
+  const total = sample?.bytes_total ?? job.bytes_total ?? job.artifact?.size;
+  const ratio = total ? done / total : NaN;
+  const rate = sample?.bytes_per_second;
+  return {
+    done,
+    total,
+    rate,
+    fraction: Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : undefined,
+    seconds: rate && total && total > done ? (total - done) / rate : undefined,
+  };
+}
+
+/** The columns downloads can be sorted by. @type {readonly JobColumn[]} */
+export const JOB_SORT_COLUMNS = ['name', 'host', 'state', 'progress', 'size', 'speed', 'left'];
+
+/**
+ * What a job's row is sorted by in `column`: text as shown, amounts as
+ * numbers, and nothing where the row shows none.
+ * @param {JobSummary} job
+ * @param {ProgressSample | undefined} sample
+ * @param {JobColumn} column
+ * @returns {string | number | null | undefined}
+ */
+export function jobSortValue(job, sample, column) {
+  switch (column) {
+    case 'name':
+      return jobName(job);
+    case 'host':
+      return job.original_host;
+    case 'state':
+      return describe(job).label;
+    case 'progress':
+      return measure(job, sample).fraction;
+    case 'size':
+      return measure(job, sample).total;
+    case 'speed':
+      return measure(job, sample).rate;
+    case 'left':
+      return measure(job, sample).seconds;
+  }
 }
 
 /**

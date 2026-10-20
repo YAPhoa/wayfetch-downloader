@@ -51,7 +51,9 @@
   --note-warn: #fbebd9;
   --note-bad: #fbe4e1;
   --focus: #3b6fd1;
-  /* Download rows: alternate rows shaded; selected beats hovered. */
+  /* Download rows: alternate rows shaded; selected beats hovered. Their
+     rules stay visible against every row shade. */
+  --row-line: #d6dbe3;
   --row-alternate: #f8fafc;
   --row-hover: #f5f7fa;
   --row-selected: #e8eef8;
@@ -102,6 +104,7 @@
   --note-warn: #33261a;
   --note-bad: #3a1f1d;
   --focus: #7da6ee;
+  --row-line: #343d4a;
   --row-alternate: #151b23;
   --row-hover: #1c2430;
   --row-selected: #223047;
@@ -512,7 +515,24 @@ table.jobs {
   box-shadow: inset 0 -1px 0 var(--header-line);
 }
 
+.jobs td { border-bottom-color: var(--row-line); }
+
+/* A thin rule between the data columns, from the header down. Drawn
+   inside each cell, like the header's, and above a header's sort button. */
+.jobs td:not(.check) + td:not(.row-actions) { box-shadow: inset 1px 0 0 var(--row-line); }
+.jobs th:not(.check) + th:not(.row-actions)::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--row-line);
+  pointer-events: none;
+}
+
 .jobs .num { text-align: right; }
+.jobs th.num button.sort { justify-content: flex-end; }
 .jobs th.progress { width: 200px; }
 
 .jobs td.name {
