@@ -311,7 +311,7 @@ code { font-family: ui-monospace, monospace; }
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px 16px;
+  padding: 10px 16px;
   background: var(--chrome);
   border-bottom: 1px solid var(--line);
 }
@@ -326,18 +326,28 @@ code { font-family: ui-monospace, monospace; }
 }
 
 .toolbar > :not(.toolbar-main) { flex: none; }
-.toolbar > .brand { min-height: 32px; }
+/* The first row's 32px controls sit centred against the taller logo. */
+.toolbar > :not(.brand) { margin-top: 2px; }
 
+/* The logo's artwork, cropped to its edges, in the theme's lettering. */
 .brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  --logo-height: 36px;
+  height: var(--logo-height);
+  aspect-ratio: 1389 / 207;
   margin-right: 16px;
-  font-weight: 600;
-  font-size: 15px;
+  background: url('brand/logo-light.svg') center / contain no-repeat;
 }
 
-.brand .icon { width: 18px; height: 18px; color: var(--accent); }
+:root[data-theme='dark'] .brand { background-image: url('brand/logo-dark.svg'); }
+
+/* Where the wordmark would push the filter field off the first row, the
+   symbol alone stands for it. */
+@media (max-width: 1199px) {
+  .brand, :root[data-theme='dark'] .brand {
+    aspect-ratio: 1042 / 422;
+    background-image: url('brand/symbol.svg');
+  }
+}
 
 .tool-group {
   display: flex;
@@ -1340,6 +1350,8 @@ th[aria-sort] button.sort { color: var(--ink); }
   .toolbar .search { order: 1; }
   /* The name and Settings share the first row; the rest wraps below. */
   .toolbar { flex-wrap: wrap; justify-content: space-between; }
+  .brand { --logo-height: 32px; }
+  .toolbar > :not(.brand) { margin-top: 0; }
   .toolbar-main { order: 1; flex-basis: 100%; }
   .views { align-self: auto; margin: 0; }
   .view { min-height: 32px; }
