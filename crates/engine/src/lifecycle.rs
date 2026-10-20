@@ -37,7 +37,7 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -308,6 +308,7 @@ impl EngineBuilder {
             bandwidth,
             probes,
             file_jobs: Claims::default(),
+            stopping_removals: HashMap::new(),
             registering: 0,
             identifying: false,
             settings_waiting: Vec::new(),
@@ -963,6 +964,26 @@ impl SoleAttempt {
 
 type StoreWork = Box<dyn FnOnce(&mut Store) + Send>;
 
+/// A pause after a download ends and before the coordinator hears of it,
+/// for tests: configured to pause, a download in a folder named `stalled`
+/// waits there until the failpoint is removed.
+async fn stopping(_root: &Path) {
+    #[cfg(feature = "failpoints")]
+    {
+        let stalled = _root.file_name() == Some(std::ffi::OsStr::new("stalled"));
+        let _ = tokio::task::spawn_blocking(move || {
+            fail::fail_point!("download-stopping", stalled, |_| ());
+        })
+        .await;
+    }
+}
+
+/// A removal and where its answer goes.
+type WaitingRemoval = (
+    Box<CommandEnvelope>,
+    oneshot::Sender<Result<CommandResult, ProtocolError>>,
+);
+
 /// Work for the coordinator from its own tasks.
 enum Internal {
     /// Store work from a download.
@@ -1119,6 +1140,8 @@ struct Coordinator {
     probes: Probes,
     /// Jobs whose published file a request is working on.
     file_jobs: Claims<JobId>,
+    /// Removals waiting for their download to stop, by job.
+    stopping_removals: HashMap<JobId, Vec<WaitingRemoval>>,
     /// Folders being registered.
     registering: usize,
     /// Whether configured roots are being looked for.
@@ -1235,24 +1258,7 @@ impl Coordinator {
                     Command::Remove { .. } | Command::DeleteFiles { .. }
                 ) =>
             {
-                let id = match envelope.command {
-                    Command::Remove { job, .. } | Command::DeleteFiles { job, .. } => job,
-                    _ => unreachable!(),
-                };
-                if self.running.contains_key(&id) {
-                    let checked = self
-                        .with_store(move |store| store.check_remove_request(&envelope, instance))
-                        .await;
-                    let result = checked.and(Err(ProtocolError::new(
-                        ErrorCode::Busy,
-                        "the download is still stopping; try again shortly",
-                    )));
-                    let _ = reply.send(result);
-                } else {
-                    self.refresh_destinations().await;
-                    let files = self.files();
-                    self.answer(reply, async move { files.remove(*envelope).await });
-                }
+                self.remove(envelope, reply).await;
             }
             Request::Execute(envelope, reply) => {
                 if matches!(
@@ -1499,6 +1505,9 @@ impl Coordinator {
                 // may have been queued to start from zero.
                 self.clean_staging();
                 self.plan_extractions(job).await;
+                for (envelope, reply) in self.stopping_removals.remove(&job).unwrap_or_default() {
+                    self.remove(envelope, reply).await;
+                }
             }
             Internal::Extracted(job) => self.extracted(job),
             // `changed` below admits.
@@ -1837,6 +1846,45 @@ impl Coordinator {
         }
     }
 
+    /// Removes a job, or deletes its data. A download still stopping is
+    /// waited for: the removal runs once its task has ended.
+    async fn remove(
+        &mut self,
+        envelope: Box<CommandEnvelope>,
+        reply: oneshot::Sender<Result<CommandResult, ProtocolError>>,
+    ) {
+        let id = match envelope.command {
+            Command::Remove { job, .. } | Command::DeleteFiles { job, .. } => job,
+            _ => unreachable!("expected removal command"),
+        };
+        if !self.running.contains_key(&id) {
+            self.refresh_destinations().await;
+            let files = self.files();
+            self.answer(reply, async move { files.remove(*envelope).await });
+            return;
+        }
+        let instance = self.identity.instance;
+        let request = envelope.clone();
+        if let Err(e) = self
+            .with_store(move |store| store.check_remove_request(&request, instance))
+            .await
+        {
+            let _ = reply.send(Err(e));
+        } else if self.stopping_removals.values().map(Vec::len).sum::<usize>()
+            >= self.config.request_queue.get()
+        {
+            let _ = reply.send(Err(ProtocolError::new(
+                ErrorCode::Busy,
+                "too many removals are waiting for downloads to stop",
+            )));
+        } else {
+            self.stopping_removals
+                .entry(id)
+                .or_default()
+                .push((envelope, reply));
+        }
+    }
+
     /// Answers a request with `work`, run as an engine task of its own.
     /// The work stops between its steps at shutdown, so it is waited for
     /// rather than abandoned mid-step.
@@ -2003,6 +2051,7 @@ impl Coordinator {
             };
             let cancel = self.supervisor.cancel.child_token();
             self.running.insert(id, cancel.clone());
+            let folder = root.path.clone();
             let download = Download {
                 store: self.client.clone(),
                 transport: transport.clone(),
@@ -2027,6 +2076,7 @@ impl Coordinator {
             let finished = self.client.0.clone();
             self.supervisor.spawn(async move {
                 let interrupted = download.run().await;
+                stopping(&folder).await;
                 let _ = finished.send(Internal::Finished(id, interrupted)).await;
             });
         }
