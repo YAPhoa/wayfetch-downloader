@@ -30,6 +30,38 @@ pub(super) struct RoutingService {
     fetching: bool,
 }
 
+impl RoutingService {
+    /// The supported hosts of `service` read lately, if still fresh.
+    pub(super) fn cached(
+        &mut self,
+        service: &ProviderId,
+    ) -> Option<Result<SupportedHosts, ProviderError>> {
+        let fresh = |(at, result): &(Instant, Result<SupportedHosts, ProviderError>)| {
+            at.elapsed()
+                < if result.is_ok() {
+                    CACHE_FOR
+                } else {
+                    FAILURE_FOR
+                }
+        };
+        match self.cache.get(service) {
+            Some(entry) if fresh(entry) => Some(entry.1.clone()),
+            Some(_) => {
+                self.cache.remove(service);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Keeps supported hosts read elsewhere, such as by a link check.
+    pub(super) fn remember(&mut self, capabilities: Capabilities) {
+        for (service, result) in capabilities {
+            self.cache.insert(service, (Instant::now(), result));
+        }
+    }
+}
+
 impl Coordinator {
     pub(super) async fn start_routing(&mut self, envelope: Box<CommandEnvelope>, reply: Reply) {
         if envelope.target != self.identity.instance {
@@ -263,9 +295,7 @@ impl Coordinator {
 
     pub(super) async fn hosts_ready(&mut self, capabilities: Capabilities) {
         self.routing.fetching = false;
-        for (service, result) in capabilities {
-            self.routing.cache.insert(service, (Instant::now(), result));
-        }
+        self.routing.remember(capabilities);
         let pending = std::mem::take(&mut self.routing.pending);
         for (envelope, reply) in pending {
             self.start_routing(envelope, reply).await;

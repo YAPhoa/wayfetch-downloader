@@ -12,6 +12,9 @@
 //! for, and the private API token, which the documentation reserves for
 //! personal scripts, is not used.
 //!
+//! Link checks ask `POST /rest/1.0/unrestrict/check`, which needs no
+//! sign-in.
+//!
 //! Status checks read `GET /rest/1.0/user`, refreshing the access token
 //! first when it has expired or Real-Debrid answers 401. Downloading
 //! through an account is in [`downloads`].
@@ -26,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
-    AccountProvider, ApiClient, ApiMethod, ApiResponse, Checked, DeviceAuthorization, PollOutcome,
-    Profile, ProviderError, Reconciled, SupportedHosts, Unrestricted, WithCredentials,
+    AccountProvider, ApiClient, ApiMethod, ApiResponse, Availability, Checked, DeviceAuthorization,
+    PollOutcome, Profile, ProviderError, Reconciled, SupportedHosts, Unrestricted, WithCredentials,
 };
 use wayfetch_engine::domain::name::ProviderId;
 use wayfetch_engine::domain::time::UtcTimestamp;
@@ -481,6 +484,10 @@ impl AccountProvider for RealDebrid {
             }
             SupportedHosts::new(self.api.parse(&response, "supported hosts")?)
         })
+    }
+
+    fn availability<'a>(&'a self, link: &'a Url) -> BoxFuture<'a, Availability> {
+        Box::pin(self.availability(link))
     }
 
     fn unrestrict<'a>(

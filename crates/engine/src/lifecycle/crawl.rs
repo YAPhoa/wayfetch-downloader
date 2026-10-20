@@ -7,33 +7,54 @@
 //! again; one running when the engine stopped is sent again. A check's
 //! answer is recorded only if it is still its link's check.
 //!
+//! A link an enabled account would download, as starting it would route
+//! it, is also checked by asking that account's provider, since the
+//! hoster seldom answers anonymous requests for its files. The provider's
+//! check needs no sign-in and spends no quota (ADR-08); its answer is what
+//! the link shows, while what the link's own server said is kept apart, so
+//! a web page is still refused when started directly. Provider calls run
+//! as tasks of their own, so a panicking integration fails only the check,
+//! and a provider that asks to slow down is not asked again for
+//! [`PROVIDER_COOLDOWN`].
+//!
 //! Which links on a page are collected is decided here, where the video
 //! services are known: links a service recognizes and links that look like
 //! files. Links to other pages are counted and left alone, so analyzing a
 //! page never spiders a site.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use tokio::runtime::Handle;
 
 use url::Url;
 use wayfetch_domain::id::SourceLinkId;
+use wayfetch_domain::name::ProviderId;
 use wayfetch_protocol::command::{InputUrl, MAX_SUBMIT_ITEMS};
 use wayfetch_protocol::query::CheckReason;
 use wayfetch_protocol::{Command, CommandEnvelope, ErrorCode, ProtocolError};
 
+use super::routing::Capabilities;
 use super::{Coordinator, Internal, now};
+use crate::accounts::provider::{AccountProvider, Availability, ProviderError, SupportedHosts};
 use crate::crawl::extract::{self, Entry};
 use crate::crawl::{self as crawler, Checked, Inspector, looks_like_file};
 use crate::media::unusable;
-use crate::store::{Child, CollectPlan, Collecting, Found, Task};
+use crate::store::{Child, CollectPlan, Collecting, Found, Store, Task};
 
 /// Most checks running at once, across every queue.
 pub(super) const MAX_CHECKS: usize = 2;
 
-/// Longest one link check may take: up to three requests, each within its
-/// own deadline. A video service's check takes longer.
-const CHECK_DEADLINE: Duration = Duration::from_secs(100);
+/// Longest one link check may take: up to three requests to the link's
+/// server, each within its own deadline, alongside a provider's check,
+/// after reading its supported hosts if needed.
+const CHECK_DEADLINE: Duration = Duration::from_secs(130);
+
+/// How long a provider that asked to slow down is not asked to check
+/// links. Real-Debrid counts refused requests toward its limit.
+const PROVIDER_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Longest a video service's check may take.
 const MEDIA_CHECK_DEADLINE: Duration = Duration::from_secs(90);
@@ -46,6 +67,8 @@ pub(super) struct Checks {
     inspector: Option<Arc<dyn Inspector>>,
     /// Checks running, with their queues.
     running: BTreeMap<i64, String>,
+    /// Providers that asked to slow down, until when.
+    cooling: HashMap<ProviderId, Instant>,
 }
 
 impl Checks {
@@ -53,14 +76,39 @@ impl Checks {
         Self {
             inspector,
             running: BTreeMap::new(),
+            cooling: HashMap::new(),
         }
     }
+}
+
+/// A provider an enabled account downloads through, with its supported
+/// hosts when they were read lately, and whether it asked to slow down.
+#[derive(Clone)]
+struct Provider {
+    provider: Arc<dyn AccountProvider>,
+    hosts: Option<Result<SupportedHosts, ProviderError>>,
+    cooling: bool,
+}
+
+/// What a link check found.
+pub(super) struct LinkAnswer {
+    /// What the link shows: the provider's answer when one checked it,
+    /// else its own server's.
+    checked: Checked,
+    /// Its own server's answer, when a provider's is shown instead.
+    origin: Option<Checked>,
+    /// The provider that checked it.
+    via: Option<ProviderId>,
+    /// Supported hosts read on the way.
+    hosts: Capabilities,
+    /// Whether the provider asked to slow down.
+    limited: bool,
 }
 
 /// What a check's answer is, to record.
 pub(super) enum Answer {
     /// A link check's.
-    Link(Checked),
+    Link(Box<LinkAnswer>),
     /// A video service's.
     Media(Result<crate::media::MediaInfo, String>),
 }
@@ -145,24 +193,38 @@ impl Coordinator {
         else {
             return;
         };
+        let providers: Arc<[Provider]> =
+            if self.checks.inspector.is_some() && tasks.iter().any(|t| t.media.is_none()) {
+                self.check_providers().await.into()
+            } else {
+                Arc::from([])
+            };
         for task in tasks {
             if let Some(service) = task.media.clone() {
                 self.check_media(task, &service).await;
             } else if let Some(inspector) = self.checks.inspector.clone() {
                 self.checks.running.insert(task.id, task.queue.clone());
                 let (sender, cancel) = (self.client.0.clone(), self.supervisor.cancel.clone());
+                let (providers, runtime) = (providers.clone(), self.supervisor.runtime.clone());
                 self.supervisor.spawn(async move {
                     let checked = tokio::select! {
                         () = cancel.cancelled() => return,
                         checked = tokio::time::timeout(
                             CHECK_DEADLINE,
-                            crawler::check(inspector.as_ref(), &task.url, task.reach, task.analyze),
+                            check_link(inspector.as_ref(), &providers, &task, &runtime),
                         ) => checked,
                     };
-                    let checked = checked.unwrap_or_else(|_| {
-                        Checked::Unknown(CheckReason::TimedOut, "Checking took too long.".into())
+                    let answer = checked.unwrap_or_else(|_| LinkAnswer {
+                        checked: Checked::Unknown(
+                            CheckReason::TimedOut,
+                            "Checking took too long.".into(),
+                        ),
+                        origin: None,
+                        via: None,
+                        hosts: Capabilities::new(),
+                        limited: false,
                     });
-                    let answer = Answer::Link(checked);
+                    let answer = Answer::Link(Box::new(answer));
                     let _ = sender
                         .send(Internal::Checked(task.id, task.link, task.url, answer))
                         .await;
@@ -171,9 +233,41 @@ impl Coordinator {
         }
     }
 
+    /// The providers that enabled accounts download through, in the order
+    /// starting a link would try them.
+    async fn check_providers(&mut self) -> Vec<Provider> {
+        let Ok(mut accounts) = self.with_store(Store::accounts).await else {
+            return Vec::new();
+        };
+        accounts.sort_by_key(|a| a.id);
+        let now = Instant::now();
+        self.checks.cooling.retain(|_, until| *until > now);
+        let mut providers: Vec<Provider> = Vec::new();
+        for account in accounts.iter().filter(|a| a.enabled) {
+            let Some(provider) = self.accounts.provider(&account.service) else {
+                continue;
+            };
+            if !provider.support().downloads
+                || providers
+                    .iter()
+                    .any(|p| p.provider.service() == &account.service)
+            {
+                continue;
+            }
+            let hosts = self.routing.cached(&account.service);
+            let cooling = self.checks.cooling.contains_key(&account.service);
+            providers.push(Provider {
+                provider,
+                hosts,
+                cooling,
+            });
+        }
+        providers
+    }
+
     /// Starts a video service's check of a media link, or records at once
     /// why it cannot run.
-    async fn check_media(&mut self, task: Task, service: &wayfetch_domain::name::ProviderId) {
+    async fn check_media(&mut self, task: Task, service: &ProviderId) {
         let Some(service) = self.media.service(service).cloned() else {
             let problem = "Wayfetch has no integration for this video site any more.";
             let _ = self
@@ -218,7 +312,7 @@ impl Coordinator {
         answer: Answer,
     ) {
         self.checks.running.remove(&task);
-        let checked = match answer {
+        let answer = match answer {
             Answer::Media(found) => {
                 let _ = self
                     .with_store(move |s| {
@@ -228,12 +322,24 @@ impl Coordinator {
                     .await;
                 return;
             }
-            Answer::Link(checked) => checked,
+            Answer::Link(answer) => *answer,
         };
+        let LinkAnswer {
+            checked,
+            origin,
+            via,
+            hosts,
+            limited,
+        } = answer;
+        self.routing.remember(hosts);
+        if limited && let Some(via) = &via {
+            let until = Instant::now() + PROVIDER_COOLDOWN;
+            self.checks.cooling.insert(via.clone(), until);
+        }
         let mut found = Found::default();
         if let Checked::Page {
             links: Some(links), ..
-        } = &checked
+        } = origin.as_ref().unwrap_or(&checked)
         {
             let mut page = url.clone();
             page.set_fragment(None);
@@ -260,15 +366,126 @@ impl Coordinator {
         }
         let _ = self
             .with_store(move |s| {
-                s.record_link_check(task, link, &checked, &found, now())
+                let shown = (&checked, via.as_ref());
+                s.record_link_check(task, link, shown, origin.as_ref(), &found, now())
                     .or_else(|_| {
                         let unrecorded =
                             Checked::Unknown(CheckReason::Unreadable, UNRECORDED.into());
-                        s.record_link_check(task, link, &unrecorded, &Found::default(), now())
+                        let found = Found::default();
+                        s.record_link_check(task, link, (&unrecorded, None), None, &found, now())
                     })
             })
             .await;
     }
+}
+
+/// Checks the link of `task` with its own server and, if an enabled
+/// account would download it, with that account's provider too.
+async fn check_link(
+    inspector: &dyn Inspector,
+    providers: &[Provider],
+    task: &Task,
+    runtime: &Handle,
+) -> LinkAnswer {
+    let mut hosts = Capabilities::new();
+    let origin = crawler::check(inspector, &task.url, task.reach, task.analyze);
+    let Some(provider) = route(providers, &task.url, runtime, &mut hosts).await else {
+        return LinkAnswer {
+            checked: origin.await,
+            origin: None,
+            via: None,
+            hosts,
+            limited: false,
+        };
+    };
+    let available = async {
+        if provider.cooling {
+            return Availability::Unknown(
+                CheckReason::RateLimited,
+                "The service asked Wayfetch to slow down; check again in a minute.".into(),
+            );
+        }
+        let (service, url) = (provider.provider.clone(), task.url.clone());
+        isolated(runtime, async move {
+            tokio::time::timeout(crawler::REQUEST_DEADLINE, service.availability(&url)).await
+        })
+        .await
+        .unwrap_or_else(|| {
+            Availability::Unknown(
+                CheckReason::Unreadable,
+                "The service's check of this link failed.".into(),
+            )
+        })
+    };
+    let (origin, available) = tokio::join!(origin, available);
+    let limited = !provider.cooling
+        && matches!(
+            available,
+            Availability::Unknown(CheckReason::RateLimited, _)
+        );
+    let checked = match available {
+        Availability::File { name, size } => Checked::File { name, size },
+        Availability::Offline(why) => Checked::Offline(CheckReason::NotFound, why),
+        Availability::Unknown(reason, why) => Checked::Unknown(reason, why),
+    };
+    LinkAnswer {
+        checked,
+        origin: Some(origin),
+        via: Some(provider.provider.service().clone()),
+        hosts,
+        limited,
+    }
+}
+
+/// Runs a provider call as a task of its own on `runtime`: `None` if it
+/// panicked or timed out, which fails only this check. The task is aborted
+/// if the check is dropped, as at shutdown.
+async fn isolated<T: Send + 'static>(
+    runtime: &Handle,
+    call: impl Future<Output = Result<T, tokio::time::error::Elapsed>> + Send + 'static,
+) -> Option<T> {
+    let mut work = tokio::task::JoinSet::new();
+    work.spawn_on(call, runtime);
+    work.join_next().await?.ok()?.ok()
+}
+
+/// The provider starting `url` would route it through: the first that
+/// recognizes it as its own link, else the first whose supported hosts
+/// include its host. Hosts not read lately are read, into `read`; hosts
+/// that cannot be read leave the link to its own server.
+async fn route<'a>(
+    providers: &'a [Provider],
+    url: &Url,
+    runtime: &Handle,
+    read: &mut Capabilities,
+) -> Option<&'a Provider> {
+    if let Some(p) = providers.iter().find(|p| p.provider.requires_account(url)) {
+        return Some(p);
+    }
+    for p in providers {
+        let hosts = match &p.hosts {
+            Some(hosts) => hosts.clone(),
+            None => {
+                let provider = p.provider.clone();
+                let hosts = isolated(runtime, async move {
+                    tokio::time::timeout(crawler::REQUEST_DEADLINE, provider.supported_hosts())
+                        .await
+                })
+                .await
+                .unwrap_or_else(|| {
+                    Err(ProviderError::Unavailable(
+                        "supported hosts could not be read".into(),
+                    ))
+                });
+                read.insert(p.provider.service().clone(), hosts.clone());
+                hosts
+            }
+        };
+        if hosts.is_ok_and(|h| h.supports(url)) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// What a link says when what its check found could not be recorded, so

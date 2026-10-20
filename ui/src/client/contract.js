@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 6, minor: 0 });
+export const PROTOCOL = Object.freeze({ major: 6, minor: 1 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
