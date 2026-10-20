@@ -144,6 +144,22 @@ export function sortHeader({ column, label, sort, onSort, className }) {
 }
 
 /**
+ * Whether `event` is Ctrl+A (Cmd+A on a Mac) meant for a table's rows
+ * rather than the page's text: pressed in `table`, or with nothing
+ * focused while some rows are `selected`. Fields, menus and dialogs keep
+ * their own Select all.
+ * @param {KeyboardEvent} event
+ * @param {Element} table
+ * @param {boolean} selected
+ */
+export function isSelectAllKey(event, table, selected) {
+  if (event.key.toLowerCase() !== 'a' || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return false;
+  const target = /** @type {Element} */ (event.target);
+  const inTable = table.contains(target) && !(target instanceof HTMLInputElement && target.type !== 'checkbox');
+  return inTable || (target === document.body && selected);
+}
+
+/**
  * The bar under a paged table: which rows are shown out of how many, and
  * the way to the pages before and after. Both buttons stay in place,
  * disabled at either end, so paging never moves them.
