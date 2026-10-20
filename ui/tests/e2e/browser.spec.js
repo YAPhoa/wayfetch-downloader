@@ -857,7 +857,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   // Emptying the page goes back to the one before it.
   await page.getByRole('checkbox', { name: 'Select all downloads shown' }).check();
   await page.locator('tr[data-job]').first().getByRole('button', { name: /^Actions for / }).click();
-  await (await openMenu(page)).getByRole('menuitem', { name: /^Remove 3 downloads…/ }).click();
+  await (await openMenu(page)).getByRole('menuitem', { name: 'Remove…' }).click();
   await page.getByRole('dialog', { name: 'Remove 3 downloads' }).getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(pager.locator('.page')).toHaveText('Page 1 of 1');
   await expect(pager.locator('.range')).toHaveText('1\u201349 of 49');
@@ -2027,7 +2027,7 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await a.click({ button: 'right' });
     let menu = await openMenu(page);
     await expect(menu.getByRole('menuitem', { name: 'Rename…' })).toHaveCount(0);
-    await menu.getByRole('menuitem', { name: 'Cancel 2 downloads' }).click();
+    await menu.getByRole('menuitem', { name: 'Cancel', exact: true }).click();
     await expect(page.getByText('Cancelled 2 downloads.')).toBeVisible();
     await expect(a.locator('td[data-state]')).toHaveText('Cancelled');
     await expect(b.locator('td[data-state]')).toHaveText('Cancelled');
@@ -2057,7 +2057,7 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await page.getByRole('checkbox', { name: 'Select all downloads shown' }).check();
     await b.getByRole('button', { name: 'Actions for bulk-b.bin' }).click();
     menu = await openMenu(page);
-    await menu.getByRole('menuitem', { name: /^Remove 3 downloads…/ }).click();
+    await menu.getByRole('menuitem', { name: 'Remove…' }).click();
     const dialog = page.getByRole('dialog', { name: 'Remove 3 downloads' });
     await expect(dialog.getByRole('radio', { name: 'Remove from list only (keep files)' })).toBeChecked();
     await dialog.getByRole('button', { name: 'Remove', exact: true }).click();

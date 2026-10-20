@@ -1069,7 +1069,8 @@ export class Downloads {
 
   /**
    * What can be done with several downloads at once: the state commands
-   * and removal, each for those it applies to.
+   * and removal, each for those it applies to. Labelled plainly, as for
+   * one: the menu opened on the selection, and the dialog says how many.
    * @param {readonly JobSummary[]} jobs
    * @returns {MenuEntry[]}
    */
@@ -1079,14 +1080,14 @@ export class Downloads {
     /** @type {MenuEntry[]} */
     const entries = STATE_ACTIONS.map((action) => ({
       key: action,
-      label: this.actionLabel(action, jobs),
+      label: ACTION_LABELS[action],
       disabled: this.accepting(jobs, action).length === 0,
       hint: control ? undefined : NO_CONTROL,
       run: () => void this.sendAll(jobs, action),
     }));
     entries.push('separator', {
       key: 'remove',
-      label: removable.length > 1 ? `Remove ${count(removable.length, 'download')}…` : 'Remove…',
+      label: 'Remove…',
       disabled: !control || removable.length === 0,
       danger: true,
       run: () => void this.remove(removable),
