@@ -61,7 +61,7 @@ jobs:
         run: |
           cd target/release/bundle
           # The signatures and latest.json exist when the signing key does.
-          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" \
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "Wayfetch ${GITHUB_REF_NAME#v}" \
             deb/*.deb rpm/*.rpm SHA256SUMS \
             $(ls deb/*.sig rpm/*.sig latest.json 2>/dev/null)
       - name: Keep the packages of a manual run

@@ -29,7 +29,7 @@ use wayfetch_adapters::youtube::YouTube;
 use wayfetch_adapters::ytdlp::{self, YtDlp};
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::state_dir::StateDir;
-use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner};
+use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner, RootError};
 use wayfetch_net::ipnet::IpNet;
 use wayfetch_net::{CertificateDer, HttpConfig, HttpTransport};
 
@@ -206,8 +206,13 @@ impl EngineSettings {
         &self.config.state_dir
     }
 
-    /// Has `installer` get each newer release that a check finds ready to
-    /// install: for a host that installs updates itself.
+    /// The download root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Reports `installer`'s progress with each update check: for a host
+    /// that installs updates itself.
     pub fn installer(mut self, installer: Arc<dyn Installer>) -> Self {
         self.installer = Some(installer);
         self
@@ -337,11 +342,31 @@ pub fn init_root(args: &InitRootArgs) -> Result<PathBuf, String> {
     // Only the state directory matters here, whichever host the file is for.
     let loaded = args.state.load::<IgnoredAny>()?;
     let state_dir = args.state.state_dir(loaded.as_ref())?;
-    let state = StateDir::open(&state_dir).map_err(|e| e.to_string())?;
     let root = absolute(&args.root)?;
-    wayfetch_engine::initialize_root(&state, &root)
-        .map_err(|e| format!("cannot initialize {}: {e}", root.display()))?;
+    initialize(&state_dir, &root, wayfetch_engine::initialize_root)?;
     Ok(root)
+}
+
+/// Initializes the download root as [`init_root`] does, unless the state
+/// directory records that it finished initializing: on the first start, or
+/// a retry after an attempt failed partway. A finished root is never
+/// initialized again, so one whose mount goes missing is still refused.
+/// Returns whether it initialized.
+pub fn init_root_on_first_start(settings: &EngineSettings) -> Result<bool, String> {
+    initialize(
+        &settings.config.state_dir,
+        &settings.root,
+        wayfetch_engine::initialize_new_root,
+    )
+}
+
+fn initialize<T>(
+    state_dir: &Path,
+    root: &Path,
+    init: impl FnOnce(&StateDir, &Path) -> Result<T, RootError>,
+) -> Result<T, String> {
+    let state = StateDir::open(state_dir).map_err(|e| e.to_string())?;
+    init(&state, root).map_err(|e| format!("cannot initialize {}: {e}", root.display()))
 }
 
 /// A started engine and the absolute path of its download root.

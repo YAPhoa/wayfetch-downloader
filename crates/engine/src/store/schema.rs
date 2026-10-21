@@ -12,7 +12,8 @@ use super::StoreError;
 
 const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0001_initial.sql")),
-    M::up(include_str!("migrations/0002_automatic_update_checks.sql")),
+    M::up(include_str!("migrations/0002_root_initialized.sql")),
+    M::up(include_str!("migrations/0003_automatic_update_checks.sql")),
 ];
 
 /// Newest schema version this engine knows.
