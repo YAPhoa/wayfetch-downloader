@@ -90,9 +90,9 @@ ENTRYPOINT ["/usr/local/bin/wayfetchd"]
 # Two mounts: /data for Wayfetch's own files (the state directory, the API
 # token file, and beside it the account key and browser sign-in) and
 # /downloads. Neither exists in the image, so a missing mount fails instead
-# of writing into the container. A start initializes /downloads until the
-# state directory has recorded it; after that it never does, so a lost
-# mount is refused rather than written into.
+# of writing into the container. A start initializes /downloads until that
+# has finished once; after that it never does, so a lost mount is refused
+# rather than written into.
 CMD ["run", "--state-dir", "/data/state", "--download-root", "/downloads", \
      "--token-file", "/data/api-tokens", "--listen", "0.0.0.0:7878", \
      "--init-root-on-first-start"]

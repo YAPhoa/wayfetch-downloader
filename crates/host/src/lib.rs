@@ -327,9 +327,10 @@ pub fn init_root(args: &InitRootArgs) -> Result<PathBuf, String> {
 }
 
 /// Initializes the download root as [`init_root`] does, unless the state
-/// directory has recorded it before: on the first start, or a retry after
-/// it failed. A recorded root is never initialized again, so one whose
-/// mount goes missing is still refused. Returns whether it initialized.
+/// directory records that it finished initializing: on the first start, or
+/// a retry after an attempt failed partway. A finished root is never
+/// initialized again, so one whose mount goes missing is still refused.
+/// Returns whether it initialized.
 pub fn init_root_on_first_start(settings: &EngineSettings) -> Result<bool, String> {
     initialize(
         &settings.config.state_dir,

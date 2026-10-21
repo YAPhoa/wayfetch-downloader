@@ -97,17 +97,26 @@ pub fn initialize_root(state_dir: &StateDir, path: &Path) -> Result<RootId, Root
     initialize(&mut store, path, state_dir.identity().instance, false)
 }
 
-/// [`initialize_root`], but only for a folder the store has never recorded,
-/// such as the download root on a first start (or a retry after one
-/// failed). A recorded root is never initialized again here, so one whose
-/// mount goes missing stays refused. Returns whether it initialized.
+/// [`initialize_root`], unless the store records that the folder finished
+/// initializing: the download root on a first start, or a retry after an
+/// attempt failed partway. A finished root is never initialized again here,
+/// so one whose mount goes missing stays refused. Returns whether it
+/// initialized.
 pub fn initialize_new_root(state_dir: &StateDir, path: &Path) -> Result<bool, RootError> {
     let mut store = Store::open(state_dir.path())?;
+    initialize_unfinished(&mut store, path, state_dir.identity().instance)
+}
+
+fn initialize_unfinished(
+    store: &mut Store,
+    path: &Path,
+    instance: InstanceId,
+) -> Result<bool, RootError> {
     check_path(path)?;
-    if recorded(&mut store, path)?.is_some() {
+    if store.root_initialized(path)? {
         return Ok(false);
     }
-    initialize(&mut store, path, state_dir.identity().instance, false)?;
+    initialize(store, path, instance, false)?;
     Ok(true)
 }
 
@@ -138,15 +147,15 @@ fn claim(
 ) -> Result<(RootId, bool), RootError> {
     match identified {
         Some(id) => {
-            store.adopt_root(id, path, now())?;
+            store.adopt_root(id, path, false, now())?;
             Ok((id, false))
         }
         None => Ok((store.allocate_root(path, registered, now())?, true)),
     }
 }
 
-/// Finishes initializing root `id` after its marker was written, or
-/// forgets a new one whose directory could not be initialized.
+/// Finishes initializing root `id` after its marker and folders were
+/// written, or forgets a new one whose directory could not be initialized.
 /// `registered` marks a root the user chose. No filesystem access.
 fn settle(
     store: &mut Store,
@@ -161,6 +170,7 @@ fn settle(
         }
         return Err(e.into());
     }
+    store.root_was_initialized(id)?;
     if registered && !allocated {
         store.register_root(id)?;
     }
@@ -430,7 +440,9 @@ impl Destinations {
         path: PathBuf,
         id: RootId,
     ) -> Result<(), StoreError> {
-        store.adopt_root(id, &path, now())?;
+        // Identified by its marker, so it was set up and may hold jobs'
+        // files: never initialized again by a first-start setup.
+        store.adopt_root(id, &path, true, now())?;
         self.pending.retain(|p| *p != path);
         self.known.insert(id, path);
         Ok(())
@@ -890,6 +902,35 @@ mod tests {
             initialize(&mut f.store, Path::new("media"), f.instance, false),
             Err(RootError::Relative(_))
         ));
+    }
+
+    #[test]
+    fn a_setup_that_failed_partway_is_retried_but_a_finished_one_never_is() {
+        let mut f = fixture();
+        let path = f.dir("downloads");
+        // The marker can be written, but not the staging folder.
+        let private = path.join(crate::fs::PRIVATE_DIR);
+        std::fs::create_dir(&private).unwrap();
+        let blocker = private.join("staging");
+        std::fs::write(&blocker, b"x").unwrap();
+        for _ in 0..2 {
+            assert!(initialize_unfinished(&mut f.store, &path, f.instance).is_err());
+        }
+        // The second attempt adopted the first one's marker and kept it.
+        assert!(f.store.root_at(&path).unwrap().is_some());
+        assert!(!f.store.root_initialized(&path).unwrap());
+
+        std::fs::remove_file(&blocker).unwrap();
+        assert!(initialize_unfinished(&mut f.store, &path, f.instance).unwrap());
+        assert!(f.store.root_initialized(&path).unwrap());
+        assert!(blocker.is_dir());
+
+        // Finished: an empty folder in its place, such as a missing mount,
+        // is left alone.
+        std::fs::rename(&path, f.base.join("moved")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(!initialize_unfinished(&mut f.store, &path, f.instance).unwrap());
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
     }
 
     #[test]

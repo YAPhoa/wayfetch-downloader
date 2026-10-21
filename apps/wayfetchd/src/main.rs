@@ -213,10 +213,11 @@ struct RunArgs {
     #[command(flatten)]
     browser: BrowserArgs,
     /// Also initialize the download root, as `init-root` would, unless the
-    /// state directory has recorded it before: on the first start, or a
-    /// retry after it failed. A recorded root is never initialized again,
-    /// so one whose mount goes missing is still refused. For a container
-    /// whose download root is a mount Compose checks.
+    /// state directory records that it finished initializing: on the first
+    /// start, or a retry after an attempt failed partway. A finished root
+    /// is never initialized again, so one whose mount goes missing is still
+    /// refused. For a container whose download root is a mount Compose
+    /// checks.
     #[arg(long)]
     init_root_on_first_start: bool,
     /// Print one JSON object per line instead of text.
