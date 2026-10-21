@@ -67,6 +67,7 @@ use crate::store::{Admission, CommandContext, Store, StoreError, StoreInfo, Unus
 use crate::subscription::Subscription;
 use crate::transfer::throttle::Bandwidth;
 use crate::transfer::transport::Transport;
+use crate::updates::{UpdateSource, Updates};
 use crate::{preferences, published};
 
 /// How often history past retention is pruned while running.
@@ -116,6 +117,7 @@ pub struct EngineBuilder {
     converter: Option<Arc<dyn Converter>>,
     plugin_control: Option<Arc<dyn PluginControl>>,
     extractor: Option<Arc<dyn Extractor>>,
+    update_source: Option<Arc<dyn UpdateSource>>,
 }
 
 impl std::fmt::Debug for EngineBuilder {
@@ -129,6 +131,7 @@ impl std::fmt::Debug for EngineBuilder {
             .field("converter", &self.converter.is_some())
             .field("plugin_control", &self.plugin_control.is_some())
             .field("extractor", &self.extractor.is_some())
+            .field("update_source", &self.update_source.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -146,7 +149,15 @@ impl EngineBuilder {
             converter: None,
             plugin_control: None,
             extractor: None,
+            update_source: None,
         }
+    }
+
+    /// Where the application's releases are published. Without it, update
+    /// checks are refused.
+    pub fn update_source(mut self, source: Arc<dyn UpdateSource>) -> Self {
+        self.update_source = Some(source);
+        self
     }
 
     /// What unpacks downloaded archives. Without it, archives are kept as
@@ -302,6 +313,7 @@ impl EngineBuilder {
                 self.plugin_control,
             ),
             extractions: extract::Extractions::new(self.extractor, saved.extract_archives),
+            updates: Updates::new(self.update_source),
         };
         owner.supervisor.spawn(coordinator.run());
         owner
@@ -1132,6 +1144,8 @@ struct Coordinator {
     media: media::MediaServices,
     /// The archive extractor and the extraction running.
     extractions: extract::Extractions,
+    /// Update checks, when a client asks.
+    updates: Updates,
 }
 
 impl Coordinator {
@@ -1257,6 +1271,10 @@ impl Coordinator {
             Request::Query(Query::Settings {}, reply) => self.settings(reply).await,
             Request::Query(Query::Accounts {}, reply) => self.list_accounts(reply).await,
             Request::Query(Query::Authorization { id }, reply) => self.authorization(id, reply),
+            Request::Query(Query::Updates {}, reply) => {
+                let cancel = self.supervisor.cancel.clone();
+                self.answer(reply, self.updates.clone().check(cancel));
+            }
             Request::RefreshAccount(account, reply) => self.refresh_account(account, reply).await,
             Request::Extract(envelope, password, reply) => {
                 self.extract(envelope, password, reply).await;
@@ -2114,6 +2132,7 @@ impl Coordinator {
             instance,
             boot_epoch: self.identity.boot_epoch,
             protocol: ProtocolVersion::CURRENT,
+            version: crate::updates::VERSION.into(),
             head: EventCursor {
                 instance,
                 position: head,

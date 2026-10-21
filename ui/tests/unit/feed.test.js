@@ -102,6 +102,11 @@ class FakeClient {
     throw new Error('not used');
   }
 
+  /** @returns {Promise<import('../../src/client/contract.js').UpdateCheck>} */
+  async checkForUpdates() {
+    throw new Error('not used');
+  }
+
   /** @returns {Promise<import('../../src/client/contract.js').CommandResult>} */
   async authorizeAccount() {
     throw new Error('not used');
@@ -141,6 +146,7 @@ class FakeClient {
       instance: this.instance,
       boot_epoch: this.epoch,
       protocol: this.protocol,
+      version: '0.1.0',
       head: this.cursor(),
       limits: { max_page_size: 500, max_submit_items: 1000, max_url_bytes: 8192, max_collected_links: 10000, max_collect_text_bytes: 524288 },
     };
@@ -216,6 +222,7 @@ class FakeClient {
       instance: this.instance,
       boot_epoch: this.epoch,
       protocol: this.protocol,
+      version: '0.1.0',
       head: this.cursor(),
       limits: { max_page_size: 500, max_submit_items: 1000, max_url_bytes: 8192, max_collected_links: 10000, max_collect_text_bytes: 524288 },
     };

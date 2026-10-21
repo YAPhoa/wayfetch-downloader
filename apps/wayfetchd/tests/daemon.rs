@@ -275,7 +275,19 @@ fn position(id: &str) -> u64 {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_complete_workflow_over_http() {
     let server = Server::https().await;
-    let dirs = Dirs::ready(&server);
+    let mut dirs = Dirs::ready(&server);
+    // GitHub's list of releases, from the same stand-in.
+    let latest = json!([{
+        "tag_name": "v99.0.0",
+        "html_url": server.url("/github/releases/tag/v99.0.0"),
+        "prerelease": true,
+    }]);
+    server.put(
+        "/github/releases",
+        Resource::new(latest.to_string().into_bytes().into()),
+    );
+    dirs.args
+        .extend(["--updates-endpoint".into(), server.url("/github/").into()]);
     let daemon = Daemon::start(&dirs).await;
     let client = daemon.owner();
 
@@ -283,7 +295,21 @@ async fn the_complete_workflow_over_http() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(hello["instance"], daemon.instance.as_str());
     assert_eq!(hello["limits"]["max_submit_items"], 1000);
+    assert_eq!(hello["version"], env!("CARGO_PKG_VERSION"));
     client.serves_the_ui().await;
+
+    // Checking for updates finds the newer release and its page.
+    let (status, check) = client.post("/v1/updates/check", &json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{check}");
+    assert_eq!(check["current"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        check["outcome"],
+        json!({
+            "kind": "available",
+            "version": "99.0.0",
+            "url": server.url("/github/releases/tag/v99.0.0"),
+        })
+    );
 
     // Submit, inspect, list, and publish the exact bytes.
     let small = body(MIB);

@@ -844,10 +844,13 @@ impl Store {
                 url: links::source(&tx, *link)?,
             },
             // Availability is checked outside the store, by the coordinator.
-            Query::Settings {} | Query::Accounts {} | Query::Authorization { .. } => {
+            Query::Settings {}
+            | Query::Accounts {}
+            | Query::Authorization { .. }
+            | Query::Updates {} => {
                 return Err(ProtocolError::new(
                     wayfetch_protocol::ErrorCode::Internal,
-                    "settings and accounts are answered by the coordinator",
+                    "settings, accounts, and updates are answered by the coordinator",
                 ));
             }
         };

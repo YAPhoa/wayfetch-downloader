@@ -18,6 +18,7 @@ use crate::command::Permission;
 use crate::error::{ErrorCode, ProtocolError};
 use crate::event::EventCursor;
 use crate::media::{JobMedia, LinkMedia, PluginSummary};
+use crate::update::UpdateCheck;
 
 /// Items per page: 1 to [`PageSize::MAX`], default [`PageSize::DEFAULT`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +161,9 @@ pub enum Query {
         /// The authorization.
         id: AuthorizationId,
     },
+    /// Whether a newer release of the application is published. The only
+    /// query that contacts the project's release listing.
+    Updates {},
 }
 
 impl Query {
@@ -172,7 +176,8 @@ impl Query {
             | Self::ListJobs { .. }
             | Self::CountJobs { .. }
             | Self::Settings {}
-            | Self::ListLinks { .. } => Permission::Read,
+            | Self::ListLinks { .. }
+            | Self::Updates {} => Permission::Read,
         }
     }
 }
@@ -745,6 +750,8 @@ pub enum QueryResult {
     Accounts(Accounts),
     /// Answer to [`Query::Authorization`].
     Authorization(Authorization),
+    /// Answer to [`Query::Updates`].
+    Updates(UpdateCheck),
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ pub mod instance;
 pub mod media;
 pub mod query;
 pub mod request;
+pub mod update;
 
 pub use command::{Command, CommandEnvelope, CommandResult, IdempotencyKey, Permission};
 pub use error::{ErrorCode, ProtocolError};
