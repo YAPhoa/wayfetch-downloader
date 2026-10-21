@@ -212,12 +212,18 @@ test('account commands carry no credentials, only the protocol JSON', async () =
 });
 
 test('update checks are an engine query, and installing is a host command', async () => {
-  const core = new FakeCore({ query: () => ({ type: 'updates' }), restart_to_update: () => null });
+  const core = new FakeCore({
+    query: () => ({ type: 'updates' }),
+    download_update: () => null,
+    restart_to_update: () => null,
+  });
   const client = new DesktopIpcClient(core);
   await client.updates();
   await client.checkForUpdates();
+  await client.downloadUpdate();
   await client.restartToUpdate();
   assert.deepEqual(core.calledWith('query'), [{ query: { type: 'updates' } }, { query: { type: 'updates', check: true } }]);
+  assert.deepEqual(core.calledWith('download_update'), [undefined]);
   assert.deepEqual(core.calledWith('restart_to_update'), [undefined]);
 });
 

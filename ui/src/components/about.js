@@ -1,7 +1,8 @@
 // Settings > About: the running version, its author, and updates. While
-// automatic updates are on, the engine checks GitHub daily; the reload
-// button checks now. The desktop app downloads a newer release in the
-// background and then offers to restart into it.
+// Check automatically is on, the engine checks GitHub daily; the reload
+// button checks now. Nothing is downloaded until asked: the desktop app
+// then downloads the newer release in the background and offers to
+// restart into it.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { addedWhen } from '../client/links.js';
@@ -27,7 +28,7 @@ import { icon } from './icons.js';
  *   tone: 'ok' | 'run' | 'bad',
  *   detail: string,
  *   link: { href: string, label: string } | null,
- *   restart: boolean,
+ *   command: 'download' | 'restart' | null,
  *   busy: boolean,
  * }} UpdateStatus
  */
@@ -47,7 +48,8 @@ const sentence = (text) => `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
 /**
  * How a check's result is shown: a status badge with its icon and tone,
  * a detail line if there is more to say, the page to go to, if any, and
- * whether the app can restart into the newer release now. `null` before
+ * what the person can do about it in this app: download the newer
+ * release, or restart into it. `null` before
  * the first check.
  * @param {UpdateCheck} check
  * @returns {UpdateStatus | null}
@@ -55,7 +57,7 @@ const sentence = (text) => `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
 export function updateStatus(check) {
   const { outcome, install } = check;
   /** @type {UpdateStatus} */
-  const plain = { badge: '', icon: 'check', tone: 'ok', detail: '', link: null, restart: false, busy: false };
+  const plain = { badge: '', icon: 'check', tone: 'ok', detail: '', link: null, command: null, busy: false };
   switch (outcome.kind) {
     case 'not_checked':
       return null;
@@ -72,19 +74,29 @@ export function updateStatus(check) {
       };
   }
   const get = { href: outcome.url, label: `Get ${outcome.version}` };
+  const available = { ...plain, badge: `${outcome.version} available`, icon: /** @type {const} */ ('up'), tone: /** @type {const} */ ('run') };
   switch (install?.state) {
     case undefined:
-      return { ...plain, badge: `${outcome.version} available`, icon: 'up', tone: 'run', link: get };
+      return { ...available, link: get };
+    case 'idle':
+      return { ...available, command: 'download' };
     case 'downloading': {
       const share = install.total ? ` ${Math.floor((install.received / install.total) * 100)}%` : '…';
       return { ...plain, badge: `Downloading${share}`, icon: 'down', tone: 'run', busy: true };
     }
     case 'ready':
-      return { ...plain, badge: `${outcome.version} ready`, icon: 'up', restart: true };
+      return { ...plain, badge: `${outcome.version} ready`, icon: 'up', command: 'restart' };
     case 'installing':
       return { ...plain, badge: 'Installing…', icon: 'more', tone: 'run', busy: true };
     case 'failed':
-      return { ...plain, badge: 'Failed', icon: 'cancel', tone: 'bad', detail: sentence(install.problem), link: get };
+      return {
+        ...plain,
+        badge: 'Failed',
+        icon: 'cancel',
+        tone: 'bad',
+        detail: sentence(install.problem),
+        command: 'download',
+      };
   }
 }
 
@@ -147,6 +159,11 @@ export function aboutSection(context) {
     },
     icon('retry'),
   );
+  const download = h(
+    'button',
+    { type: 'button', class: 'primary', 'data-key': 'download-update', onclick: () => void downloadUpdate() },
+    'Download update',
+  );
   const restart = h(
     'button',
     { type: 'button', class: 'primary', 'data-key': 'restart-to-update', onclick: () => void restartToUpdate() },
@@ -158,7 +175,7 @@ export function aboutSection(context) {
   let polling;
 
   /**
-   * Shows the badge, its detail line, and the link or restart button.
+   * Shows the badge, its detail line, and the link and command, if any.
    * @param {UpdateStatus | null} status
    * @param {string} [problem] why the last request failed, which wins
    */
@@ -174,8 +191,14 @@ export function aboutSection(context) {
     detail.classList.toggle('problem', Boolean(more));
     detail.title = more;
     const link = status?.link;
-    if (status?.restart && client.restartToUpdate) show(action, restart);
-    else show(action, ...(link ? [outsideLink(client, link.href, link.label, { 'data-key': 'update-link' })] : []));
+    const command =
+      (status?.command === 'download' && client.downloadUpdate && download) ||
+      (status?.command === 'restart' && client.restartToUpdate && restart);
+    show(
+      action,
+      ...(link ? [outsideLink(client, link.href, link.label, { 'data-key': 'update-link' })] : []),
+      ...(command ? [command] : []),
+    );
   };
 
   /**
@@ -227,6 +250,18 @@ export function aboutSection(context) {
     }
   };
 
+  const downloadUpdate = async () => {
+    download.disabled = true;
+    try {
+      await client.downloadUpdate?.();
+      await read();
+    } catch (error) {
+      failed(error);
+    } finally {
+      download.disabled = false;
+    }
+  };
+
   const restartToUpdate = async () => {
     restart.disabled = true;
     try {
@@ -240,7 +275,7 @@ export function aboutSection(context) {
     }
   };
 
-  // Automatic updates, saved at once at the revision shown.
+  // Automatic checks, saved at once at the revision shown.
   /** @type {Settings | null} */
   let settings = null;
   const automatic = /** @type {[boolean, string][]} */ ([
@@ -252,9 +287,9 @@ export function aboutSection(context) {
       null,
       h('input', {
         type: 'radio',
-        name: 'automatic-updates',
+        name: 'automatic-update-checks',
         value: String(value),
-        'data-key': `automatic-updates-${value ? 'on' : 'off'}`,
+        'data-key': `automatic-update-checks-${value ? 'on' : 'off'}`,
         disabled: true,
         onchange: () => void setAutomatic(value),
       }),
@@ -262,14 +297,14 @@ export function aboutSection(context) {
     ),
   );
   const inputs = automatic.map((label) => /** @type {HTMLInputElement} */ (label.querySelector('input')));
-  const automaticNote = h('span', { class: 'hint', 'data-key': 'automatic-updates-note' });
+  const automaticNote = h('span', { class: 'hint', 'data-key': 'automatic-update-checks-note' });
   /** @param {Settings} saved */
   const showSettings = (saved) => {
     settings = saved;
-    inputs[0].checked = !saved.automatic_updates;
-    inputs[1].checked = saved.automatic_updates;
+    inputs[0].checked = !saved.automatic_update_checks;
+    inputs[1].checked = saved.automatic_update_checks;
     for (const input of inputs) input.disabled = false;
-    show(automaticNote, client.restartToUpdate ? 'Checks daily and downloads in the background' : 'Checks daily');
+    show(automaticNote, 'Daily');
   };
   const readSettings = async () => {
     try {
@@ -288,7 +323,7 @@ export function aboutSection(context) {
         idempotencyKey: idempotencyKey(),
         target: hello.instance,
         expectedRevision: settings.revision,
-        automaticUpdates: on,
+        automaticUpdateChecks: on,
       });
       const saved = await client.settings();
       context.onSettings(saved);
@@ -339,10 +374,10 @@ export function aboutSection(context) {
           h(
             'div',
             { class: 'setting-text' },
-            h('span', { class: 'setting-name', id: 'automatic-updates-name' }, 'Automatic updates'),
+            h('span', { class: 'setting-name', id: 'automatic-update-checks-name' }, 'Check automatically'),
             automaticNote,
           ),
-          h('div', { class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'automatic-updates-name' }, automatic),
+          h('div', { class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'automatic-update-checks-name' }, automatic),
         ),
       ),
     ),
@@ -353,7 +388,7 @@ export function aboutSection(context) {
 }
 
 /** @type {UpdateStatus} */
-const FAILED = { badge: 'Failed', icon: 'cancel', tone: 'bad', detail: '', link: null, restart: false, busy: false };
+const FAILED = { badge: 'Failed', icon: 'cancel', tone: 'bad', detail: '', link: null, command: null, busy: false };
 /** @type {UpdateStatus} */
 const CHECKING = { ...FAILED, badge: 'Checking…', icon: 'more', tone: 'run' };
 /** @type {UpdateStatus} */

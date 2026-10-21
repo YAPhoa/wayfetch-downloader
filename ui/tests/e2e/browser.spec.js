@@ -548,7 +548,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
     `${fixture.base}/pages/releases/tag/v99.0.0`,
   );
   await expect(page.locator('[data-key="open-settings"].has-update')).not.toHaveCount(0);
-  // Automatic updates are on by default, and turning them off is saved.
+  // Checking automatically is on by default, and turning it off is saved.
   const automaticOn = pane.getByRole('radio', { name: 'On' });
   const automaticOff = pane.getByRole('radio', { name: 'Off' });
   await expect(automaticOn).toBeChecked();

@@ -1,8 +1,8 @@
-//! Installing a newer release the way a browser does: the engine's update
-//! check finds it, this downloads and verifies its package in the
-//! background through Tauri's updater, and the window offers to restart
-//! into it. Installing a .deb or .rpm needs the administrator, so the
-//! system asks for the password then.
+//! Installing a newer release when the person asks: the engine's update
+//! check finds it, Download update has this download and verify its package
+//! in the background through Tauri's updater, and the window then offers to
+//! restart into it. Installing a .deb or .rpm needs the administrator, so
+//! the system asks for the password then.
 //!
 //! The updater runs from here only; the window gets none of its commands.
 //! It reads `latest.json` from the newest published release and checks
@@ -20,7 +20,7 @@ use wayfetch_engine::protocol::update::UpdateInstall;
 use wayfetch_engine::protocol::{ErrorCode, ProtocolError};
 use wayfetch_host::Installer;
 
-/// Gets the newer release ready, then installs it on request. Clones
+/// Downloads the newer release, then installs it, each on request. Clones
 /// share it.
 #[derive(Debug, Clone, Default)]
 pub struct Updates(Arc<Inner>);
@@ -221,8 +221,10 @@ fn explain(error: &Error) -> String {
     }
 }
 
-impl Installer for Updates {
-    fn prepare(&self, version: &str) {
+impl Updates {
+    /// Starts downloading `version` in the background, unless it is already
+    /// on its way or ready. One that failed starts again.
+    pub fn download_update(&self, version: &str) {
         let Some(app) = self.0.app.get().cloned() else {
             return;
         };
@@ -241,10 +243,12 @@ impl Installer for Updates {
         }
         tauri::async_runtime::spawn(self.clone().download(app, version.to_owned()));
     }
+}
 
-    fn state(&self) -> Option<UpdateInstall> {
-        Some(match &*self.0.state.lock().unwrap() {
-            State::Idle => return None,
+impl Installer for Updates {
+    fn state(&self) -> UpdateInstall {
+        match &*self.0.state.lock().unwrap() {
+            State::Idle => UpdateInstall::Idle,
             State::Downloading {
                 received, total, ..
             } => UpdateInstall::Downloading {
@@ -256,7 +260,7 @@ impl Installer for Updates {
             State::Failed { problem, .. } => UpdateInstall::Failed {
                 problem: DiagnosticText::new(problem),
             },
-        })
+        }
     }
 }
 

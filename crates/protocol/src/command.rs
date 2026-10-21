@@ -400,7 +400,7 @@ pub enum Command {
         extract_archives: Option<bool>,
         /// Whether the engine checks for a newer release on its own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        automatic_updates: Option<bool>,
+        automatic_update_checks: Option<bool>,
     },
     /// Give a completed job's published file another name in the same
     /// folder. Never replaces an existing file.
@@ -977,7 +977,7 @@ mod tests {
             max_active_downloads: None,
             download_speed_limit: None,
             extract_archives: None,
-            automatic_updates: None,
+            automatic_update_checks: None,
         };
         assert_eq!(
             serde_json::to_string(&command).unwrap(),
@@ -989,7 +989,7 @@ mod tests {
             max_active_downloads: Some(PreferenceChange::Set(6)),
             download_speed_limit: None,
             extract_archives: None,
-            automatic_updates: None,
+            automatic_update_checks: None,
         };
         assert_eq!(
             serde_json::to_string(&change).unwrap(),

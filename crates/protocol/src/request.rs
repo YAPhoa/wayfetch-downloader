@@ -231,7 +231,7 @@ pub struct UpdateSettingsRequest {
     /// Whether the engine checks for a newer release on its own.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
-    pub automatic_updates: Option<bool>,
+    pub automatic_update_checks: Option<bool>,
 }
 
 impl UpdateSettingsRequest {
@@ -246,7 +246,7 @@ impl UpdateSettingsRequest {
                 max_active_downloads: self.max_active_downloads,
                 download_speed_limit: self.download_speed_limit,
                 extract_archives: self.extract_archives,
-                automatic_updates: self.automatic_updates,
+                automatic_update_checks: self.automatic_update_checks,
             },
         }
     }
@@ -797,7 +797,7 @@ mod tests {
                 max_active_downloads: None,
                 download_speed_limit: None,
                 extract_archives: None,
-                automatic_updates: None,
+                automatic_update_checks: None,
             }
         );
         let preference: UpdateSettingsRequest = serde_json::from_value(json!({
@@ -815,7 +815,7 @@ mod tests {
                 max_active_downloads: Some(PreferenceChange::Set(6)),
                 download_speed_limit: None,
                 extract_archives: None,
-                automatic_updates: None,
+                automatic_update_checks: None,
             }
         );
         let both: UpdateSettingsRequest = serde_json::from_value(json!({

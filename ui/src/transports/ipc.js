@@ -240,6 +240,14 @@ export class DesktopIpcClient {
   }
 
   /**
+   * Downloads the newer release the last check found, in the background.
+   * @returns {Promise<void>}
+   */
+  downloadUpdate() {
+    return this.call('download_update');
+  }
+
+  /**
    * Installs the newer release the app downloaded, which asks for the
    * administrator's password, then restarts into it.
    * @returns {Promise<void>}

@@ -4,7 +4,7 @@ import type { DiagnosticText } from "./DiagnosticText.js";
 /**
  * How far a host that installs updates has got with the newer release.
  */
-export type UpdateInstall = { "state": "downloading", 
+export type UpdateInstall = { "state": "idle" } | { "state": "downloading", 
 /**
  * Bytes received so far.
  */

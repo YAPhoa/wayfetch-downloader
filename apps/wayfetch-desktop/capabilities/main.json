@@ -23,6 +23,7 @@
     "allow-subscribe",
     "allow-acknowledge",
     "allow-unsubscribe",
+    "allow-download-update",
     "allow-restart-to-update"
   ]
 }

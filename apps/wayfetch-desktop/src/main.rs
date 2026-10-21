@@ -285,6 +285,7 @@ fn run_on(
             ipc::subscribe,
             ipc::acknowledge,
             ipc::unsubscribe,
+            ipc::download_update,
             ipc::restart_to_update,
         ])
         .on_page_load(|webview, payload| {

@@ -451,7 +451,7 @@ pub struct Settings {
     pub extract_archives: bool,
     /// Whether the engine checks for a newer release on its own.
     #[serde(default)]
-    pub automatic_updates: bool,
+    pub automatic_update_checks: bool,
 }
 
 /// An engine preference with a whole-number value, as the operator's
@@ -947,7 +947,7 @@ mod tests {
                 fallback_version: Some("2026.07.04".into()),
             }],
             extract_archives: true,
-            automatic_updates: true,
+            automatic_update_checks: true,
         });
         assert_eq!(
             serde_json::to_value(&settings).unwrap(),
@@ -973,7 +973,7 @@ mod tests {
                     "fallback_version": "2026.07.04",
                 }],
                 "extract_archives": true,
-                "automatic_updates": true,
+                "automatic_update_checks": true,
             })
         );
         // A 4.0 engine's plugins carry none of 4.1's fields: each is on,

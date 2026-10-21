@@ -167,6 +167,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
  *   refreshAccount: (account: AccountId) => Promise<AccountSummary>,
  *   updates: () => Promise<UpdateCheck>,
  *   checkForUpdates: () => Promise<UpdateCheck>,
+ *   downloadUpdate?: () => Promise<void>,
  *   restartToUpdate?: () => Promise<void>,
  *   subscribe: (after: EventCursor | null, sink: StreamSink) => Subscription,
  *   chooseDownloadFolder?: () => Promise<RootSummary | null>,
@@ -188,7 +189,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
  *   maxActiveDownloads?: PreferenceChange,
  *   downloadSpeedLimit?: SpeedLimitChange,
  *   extractArchives?: boolean,
- *   automaticUpdates?: boolean,
+ *   automaticUpdateChecks?: boolean,
  * }} SettingsChange
  */
 
@@ -253,7 +254,7 @@ export function settingsRequest({
   maxActiveDownloads,
   downloadSpeedLimit,
   extractArchives,
-  automaticUpdates,
+  automaticUpdateChecks,
 }) {
   /** @type {UpdateSettingsRequest} */
   const request = { idempotency_key: idempotencyKey, target, expected_revision: expectedRevision };
@@ -261,7 +262,7 @@ export function settingsRequest({
   if (maxActiveDownloads !== undefined) request.max_active_downloads = maxActiveDownloads;
   if (downloadSpeedLimit !== undefined) request.download_speed_limit = downloadSpeedLimit;
   if (extractArchives !== undefined) request.extract_archives = extractArchives;
-  if (automaticUpdates !== undefined) request.automatic_updates = automaticUpdates;
+  if (automaticUpdateChecks !== undefined) request.automatic_update_checks = automaticUpdateChecks;
   return request;
 }
 

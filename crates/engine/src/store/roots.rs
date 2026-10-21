@@ -185,7 +185,7 @@ pub(crate) struct SavedSettings {
     /// Whether downloaded archives are unpacked as they finish.
     pub(crate) extract_archives: bool,
     /// Whether the engine checks for a newer release on its own.
-    pub(crate) automatic_updates: bool,
+    pub(crate) automatic_update_checks: bool,
 }
 
 /// A speed limit's stored form: 0 is Unlimited.
@@ -215,7 +215,7 @@ fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
         bool,
     ) = tx.query_row(
         "SELECT revision, default_root, max_active_downloads, download_speed_limit, \
-         extract_archives, automatic_updates FROM settings WHERE id = 1",
+         extract_archives, automatic_update_checks FROM settings WHERE id = 1",
         [],
         |row| {
             Ok((
@@ -236,7 +236,7 @@ fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
             .transpose()?,
         download_speed_limit: speed.map(read_speed_limit).transpose()?,
         extract_archives: extract,
-        automatic_updates: updates,
+        automatic_update_checks: updates,
     })
 }
 
@@ -314,7 +314,7 @@ pub(super) fn update_settings(
     max_active_downloads: Option<PreferenceChange>,
     download_speed_limit: Option<SpeedLimitChange>,
     extract_archives: Option<bool>,
-    automatic_updates: Option<bool>,
+    automatic_update_checks: Option<bool>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let saved = settings(tx)?;
@@ -332,7 +332,7 @@ pub(super) fn update_settings(
             Some(SpeedLimitChange::UseDefault) => None,
         },
         extract_archives: extract_archives.unwrap_or(saved.extract_archives),
-        automatic_updates: automatic_updates.unwrap_or(saved.automatic_updates),
+        automatic_update_checks: automatic_update_checks.unwrap_or(saved.automatic_update_checks),
         ..saved
     };
     if wanted == saved {
@@ -352,7 +352,7 @@ pub(super) fn update_settings(
         .transpose()?;
     tx.execute(
         "UPDATE settings SET revision = ?1, default_root = ?2, max_active_downloads = ?3, \
-         download_speed_limit = ?4, extract_archives = ?5, automatic_updates = ?6, \
+         download_speed_limit = ?4, extract_archives = ?5, automatic_update_checks = ?6, \
          updated_at = ?7 WHERE id = 1",
         params![
             sql(next)?,
@@ -360,7 +360,7 @@ pub(super) fn update_settings(
             max_active,
             speed,
             wanted.extract_archives,
-            wanted.automatic_updates,
+            wanted.automatic_update_checks,
             now.unix_millis()
         ],
     )
@@ -646,10 +646,10 @@ mod tests {
             (Some(3), None)
         );
         // Turning automatic updates off is one more setting.
-        assert!(settings(&tx).unwrap().automatic_updates);
+        assert!(settings(&tx).unwrap().automatic_update_checks);
         let current = settings(&tx).unwrap().revision;
         update_settings(&tx, current, None, None, None, None, Some(false), now()).unwrap();
-        assert!(!settings(&tx).unwrap().automatic_updates);
+        assert!(!settings(&tx).unwrap().automatic_update_checks);
         // A stale revision changes neither.
         let stale =
             update_settings(&tx, second, None, None, unlimited, None, None, now()).unwrap_err();

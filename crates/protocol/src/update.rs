@@ -54,6 +54,8 @@ pub enum UpdateOutcome {
 #[serde(tag = "state", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum UpdateInstall {
+    /// The host can install it, and waits for the person to ask.
+    Idle,
     /// Its package is being downloaded.
     Downloading {
         /// Bytes received so far.
@@ -68,7 +70,7 @@ pub enum UpdateInstall {
     /// Being installed; the app restarts when it is done.
     Installing,
     /// It could not be downloaded, verified, or installed; `problem` says
-    /// why. Checking again tries again.
+    /// why. Asking again tries again.
     Failed {
         /// Why.
         problem: DiagnosticText,

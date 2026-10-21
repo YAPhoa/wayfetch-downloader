@@ -1,6 +1,6 @@
 //! Update checks in a host that installs updates itself, as the desktop app
-//! does: a check that finds a newer release starts getting it ready, and
-//! the check's status says how far that has got.
+//! does: the check's status says how far installing the newer release has
+//! got, which the person starts.
 
 use std::sync::Arc;
 
@@ -8,17 +8,13 @@ use wayfetch_engine::protocol::update::{UpdateInstall, UpdateOutcome};
 use wayfetch_engine::transfer::writer::BoxFuture;
 use wayfetch_engine::updates::UpdateSource;
 
-/// Gets a newer release ready to install, in the background.
+/// Installs a newer release when the person asks.
 pub trait Installer: std::fmt::Debug + Send + Sync + 'static {
-    /// Starts getting `version` ready, unless it already is or is on its
-    /// way. One that failed starts again.
-    fn prepare(&self, version: &str);
-
-    /// How far it has got, once [`Self::prepare`] was called.
-    fn state(&self) -> Option<UpdateInstall>;
+    /// How far installing the newer release has got.
+    fn state(&self) -> UpdateInstall;
 }
 
-/// `source`'s checks, with `installer` getting each newer release ready.
+/// `source`'s checks, with `installer`'s progress.
 pub(crate) struct Installing<S> {
     pub(crate) source: S,
     pub(crate) installer: Arc<dyn Installer>,
@@ -30,24 +26,16 @@ impl<S: UpdateSource> UpdateSource for Installing<S> {
     }
 
     fn check<'a>(&'a self, current: &'a str) -> BoxFuture<'a, UpdateOutcome> {
-        Box::pin(async move {
-            let outcome = self.source.check(current).await;
-            if let UpdateOutcome::Available { version, .. } = &outcome {
-                self.installer.prepare(version);
-            }
-            outcome
-        })
+        self.source.check(current)
     }
 
     fn install(&self) -> Option<UpdateInstall> {
-        self.installer.state()
+        Some(self.installer.state())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
 
     struct Newer;
@@ -58,41 +46,27 @@ mod tests {
         }
 
         fn check<'a>(&'a self, _: &'a str) -> BoxFuture<'a, UpdateOutcome> {
-            Box::pin(async {
-                UpdateOutcome::Available {
-                    version: "0.2.0".into(),
-                    url: "https://example.test/releases/v0.2.0".into(),
-                }
-            })
+            Box::pin(async { UpdateOutcome::UpToDate })
         }
     }
 
-    #[derive(Debug, Default)]
-    struct Recording(Mutex<Vec<String>>);
+    #[derive(Debug)]
+    struct Waiting;
 
-    impl Installer for Recording {
-        fn prepare(&self, version: &str) {
-            self.0.lock().unwrap().push(version.to_owned());
-        }
-
-        fn state(&self) -> Option<UpdateInstall> {
-            Some(UpdateInstall::Ready)
+    impl Installer for Waiting {
+        fn state(&self) -> UpdateInstall {
+            UpdateInstall::Idle
         }
     }
 
     #[tokio::test]
-    async fn a_newer_release_is_got_ready() {
-        let installer = Arc::new(Recording::default());
+    async fn checks_pass_through_and_installing_is_reported() {
         let source = Installing {
             source: Newer,
-            installer: installer.clone(),
+            installer: Arc::new(Waiting),
         };
-        assert!(matches!(
-            source.check("0.1.0").await,
-            UpdateOutcome::Available { .. }
-        ));
-        assert_eq!(*installer.0.lock().unwrap(), ["0.2.0"]);
-        assert_eq!(source.install(), Some(UpdateInstall::Ready));
+        assert_eq!(source.check("0.1.0").await, UpdateOutcome::UpToDate);
+        assert_eq!(source.install(), Some(UpdateInstall::Idle));
         assert_eq!(source.releases(), "https://example.test/releases");
     }
 }

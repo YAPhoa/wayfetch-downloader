@@ -278,7 +278,7 @@ impl EngineBuilder {
             Probes::new(supervisor.guard()),
             Probes::new(supervisor.guard()),
         );
-        let updates = Updates::new(self.update_source, saved.automatic_updates);
+        let updates = Updates::new(self.update_source, saved.automatic_update_checks);
         let coordinator = Coordinator {
             identity,
             inbox,
@@ -1442,7 +1442,7 @@ impl Coordinator {
             self.speed_limit = saved.download_speed_limit;
             self.bandwidth.set(self.download_speed_limit().value);
             self.extractions.automatic = saved.extract_archives;
-            self.updates.set_automatic(saved.automatic_updates);
+            self.updates.set_automatic(saved.automatic_update_checks);
         }
         // Only the run the request named stops, even when an exact replay
         // answers with the first request's result after a later run began.
@@ -1635,7 +1635,7 @@ impl Coordinator {
                 max_active_downloads,
                 download_speed_limit,
                 extract_archives,
-                automatic_updates,
+                automatic_update_checks,
                 ..
             } => {
                 if self.replays(envelope).await? {
@@ -1645,7 +1645,7 @@ impl Coordinator {
                     && max_active_downloads.is_none()
                     && download_speed_limit.is_none()
                     && extract_archives.is_none()
-                    && automatic_updates.is_none()
+                    && automatic_update_checks.is_none()
                 {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidRequest,
@@ -1799,7 +1799,7 @@ impl Coordinator {
         let mut plugins = self.media.plugins();
         plugins.extend(self.extractions.plugin());
         let extract_archives = self.extractions.automatic;
-        let automatic_updates = self.updates.automatic();
+        let automatic_update_checks = self.updates.automatic();
         self.supervisor.spawn(async move {
             let mut checks = tokio::task::JoinSet::new();
             for (i, root) in destinations.all().into_iter().enumerate() {
@@ -1815,7 +1815,7 @@ impl Coordinator {
                 download_speed_limit,
                 plugins,
                 extract_archives,
-                automatic_updates,
+                automatic_update_checks,
             );
             let _ = reply.send(Ok(QueryResult::Settings(settings)));
         });

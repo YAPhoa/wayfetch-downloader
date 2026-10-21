@@ -23,6 +23,7 @@ use wayfetch_engine::protocol::request::{
     ExtractRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
     UpdateSettingsRequest,
 };
+use wayfetch_engine::protocol::update::{UpdateCheck, UpdateOutcome};
 use wayfetch_engine::protocol::{
     ErrorCode, EventCursor, Hello, Permission, ProtocolError, Query, QueryResult, StreamItem,
     Subscribe,
@@ -323,6 +324,32 @@ pub fn acknowledge(
 #[tauri::command]
 pub fn unsubscribe(webview: Webview, desktop: State<'_, Desktop>, subscription: SubscriptionId) {
     desktop.subscriptions.close(webview.label(), subscription);
+}
+
+/// Downloads the newer release the last update check found, in the
+/// background; the `updates` query reports how far it has got.
+#[tauri::command]
+pub async fn download_update(desktop: State<'_, Desktop>) -> IpcResult<()> {
+    let Some(updates) = &desktop.updates else {
+        return Err(ProtocolError::new(
+            ErrorCode::NotApplicable,
+            "this app does not install updates",
+        ));
+    };
+    let query = Query::Updates { check: false };
+    match desktop.engine.query(query, GRANTED).await? {
+        QueryResult::Updates(UpdateCheck {
+            outcome: UpdateOutcome::Available { version, .. },
+            ..
+        }) => {
+            updates.download_update(&version);
+            Ok(())
+        }
+        _ => Err(ProtocolError::new(
+            ErrorCode::NotApplicable,
+            "no newer release was found; check for updates first",
+        )),
+    }
 }
 
 /// Installs the newer release that is ready, which asks for the

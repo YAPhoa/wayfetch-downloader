@@ -42,4 +42,4 @@ extract_archives?: boolean,
 /**
  * Whether the engine checks for a newer release on its own.
  */
-automatic_updates?: boolean, };
+automatic_update_checks?: boolean, };
