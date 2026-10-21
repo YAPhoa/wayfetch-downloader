@@ -1015,8 +1015,27 @@ async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
     assert_eq!(refused["code"], "not_applicable", "{refused}");
     assert!(!missing.exists());
 
+    // The chosen folder is another Wayfetch profile's download folder too,
+    // which neither stops it being chosen nor is touched.
     let folder = dirs.tmp.path().join("chosen");
     std::fs::create_dir(&folder).unwrap();
+    const THEIRS: &str = "0d3a7c1e-5b2f-4c8a-9e61-7f0b2d4a6c13";
+    let marker = format!(r#"{{"instance":"{THEIRS}","root":1}}"#).into_bytes();
+    let theirs = [
+        (folder.join(".wayfetch/root.json"), marker.clone()),
+        (
+            folder.join(format!(".wayfetch/roots/{THEIRS}.json")),
+            marker,
+        ),
+        (
+            folder.join(format!(".wayfetch/staging/{THEIRS}/1.g1.part")),
+            b"their partial".to_vec(),
+        ),
+    ];
+    for (path, bytes) in &theirs {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
     std::fs::write(dirs.picker(), folder.to_str().unwrap()).unwrap();
     let url = server.url("/picked.bin");
     server.put("/picked.bin", Resource::new(body(MIB)));
@@ -1037,6 +1056,9 @@ async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
     shell.add(&url).await;
     shell.wait_for_state("job-1", "Done").await;
     assert_eq!(std::fs::read(folder.join("picked.bin")).unwrap(), body(MIB));
+    for (path, bytes) in &theirs {
+        assert_eq!(&std::fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
 
     // The download limit is changed through IPC within the policy, and
     // refused outside it, as over HTTP.

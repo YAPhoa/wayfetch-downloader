@@ -4,24 +4,27 @@
 //! # Roots are capabilities
 //!
 //! An operator configures roots by path, and the engine's store gives each
-//! a stable [`RootId`] that its sentinel records. The engine opens a
+//! a stable [`RootId`] that its marker in the folder records. The engine opens a
 //! [`Root`] once and from then on reaches files only through that open
 //! directory handle with [`RelativePath`]s, using `cap-std`, which resolves
 //! every path inside the handle: `..`, absolute paths, and symlinks that
 //! lead outside the root fail instead of escaping it. Destination strings
 //! from adapters or clients are never joined onto a host path.
 //!
-//! A root must carry a sentinel written by [`Root::initialize`]. Opening
-//! fails closed when it is missing or names another root or instance, so an
+//! A root must carry this profile's marker, written by [`Root::initialize`].
+//! Opening fails closed when it is missing or names another root, so an
 //! unmounted bind mount is never mistaken for an empty destination and
-//! nothing is written into the directory underneath (T30).
+//! nothing is written into the directory underneath (T30). A folder is not
+//! owned by one profile: others may use it at once, each with its own
+//! marker and staging folder, and none touches the others' (see the root
+//! module).
 //! [`Root::verify`] repeats the check by path before publication, which
 //! also catches a mount replaced after the root was opened.
 //!
 //! # Staging
 //!
 //! Each job generation writes to its own private file under
-//! `.wayfetch/staging/` in the destination root, created exclusively and
+//! `.wayfetch/staging/<instance>/` in the destination root, created exclusively and
 //! never reused by another generation, so the final rename stays on one
 //! filesystem. The file's identity (device and inode) is recorded with the
 //! store's staging record. After a restart a partial is reopened only by
@@ -72,7 +75,7 @@ pub use path::{
 pub use publish::{PublicationCheck, PublishedFile, RenameCheck};
 pub use root::Root;
 #[cfg(test)]
-pub(crate) use staging::tests::{root as test_root, staging_path};
+pub(crate) use staging::tests::{own_name, root as test_root, staging_path};
 pub use staging::{Removal, StagingFile, StagingRecord, SyncedRanges};
 use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::id::RootId;
@@ -110,17 +113,16 @@ impl FileIdentity {
 /// Why a filesystem operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum FsError {
-    /// The root has no sentinel: it is unmounted, replaced by an empty
-    /// directory, or was never initialized.
-    #[error("{0} has no sentinel; it may be unmounted or uninitialized")]
-    SentinelMissing(RootId),
-    /// The root's sentinel belongs to another root or instance, or is
-    /// unreadable.
-    #[error("{0} carries the sentinel of another root or instance")]
+    /// The root has no marker of this profile: it is unmounted, replaced by
+    /// an empty directory, or was never set up by this profile.
+    #[error("{0} has no Wayfetch marker; it may be unmounted or not set up")]
+    MarkerMissing(RootId),
+    /// This profile's marker in the folder names another of its roots.
+    #[error("the folder of {0} is marked as another download folder")]
     WrongRoot(RootId),
-    /// The directory carries an unreadable sentinel or another instance's.
-    #[error("the folder is marked for another Wayfetch instance")]
-    ForeignSentinel,
+    /// This profile's marker in the folder cannot be read.
+    #[error("the folder's Wayfetch marker is damaged")]
+    UnreadableMarker,
     /// The directory at the root's path is no longer the one opened.
     #[error("{0} was replaced or remounted after it was opened")]
     RootReplaced(RootId),
@@ -169,11 +171,11 @@ pub enum FsError {
 
 impl FsError {
     /// Whether opening a root failed because the folder is gone: it no
-    /// longer exists, or it no longer holds its sentinel, as when its
+    /// longer exists, or it no longer holds this profile's marker, as when its
     /// contents were deleted. An empty mount point looks the same.
     pub fn is_absent_root(&self) -> bool {
         match self {
-            Self::SentinelMissing(_) => true,
+            Self::MarkerMissing(_) => true,
             Self::Io {
                 op: OPEN_ROOT,
                 source,
@@ -201,9 +203,9 @@ impl FsError {
             | Self::PublishedMissing(_)
             | Self::PublishedChanged(_) => FailureCode::IntegrityMismatch,
             Self::Unsupported(_) => FailureCode::UnsupportedCapability,
-            Self::SentinelMissing(_)
+            Self::MarkerMissing(_)
             | Self::WrongRoot(_)
-            | Self::ForeignSentinel
+            | Self::UnreadableMarker
             | Self::RootReplaced(_)
             | Self::Path(_)
             | Self::TargetExists(_)
@@ -236,7 +238,7 @@ mod tests {
         }
         let root = RootId::from_u64(1).unwrap();
         assert_eq!(
-            FsError::SentinelMissing(root).failure_code().next_action(),
+            FsError::MarkerMissing(root).failure_code().next_action(),
             NextAction::BlockUntilRemediated
         );
         assert_eq!(
