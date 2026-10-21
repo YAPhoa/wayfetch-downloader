@@ -27,7 +27,7 @@ use wayfetch_domain::version::Generation;
 use wayfetch_protocol::event::EventKind;
 use wayfetch_protocol::media::{LinkMedia, MediaChoice, MediaState};
 
-use super::{Store, StoreError, files, key, outbox, sql};
+use super::{OrCorrupt, Store, StoreError, files, key, outbox, sql};
 use crate::fs::{FileIdentity, StagingRecord};
 use crate::media::MediaInfo;
 
@@ -38,7 +38,7 @@ pub(crate) const NEEDS_CONVERTER: &str =
 /// A link's stored choice, the default if none.
 pub(super) fn decode_choice(raw: Option<&str>) -> Result<MediaChoice, StoreError> {
     raw.map_or(Ok(MediaChoice::default()), |raw| {
-        serde_json::from_str(raw).map_err(|_| StoreError::Corrupt("media choice"))
+        serde_json::from_str(raw).or_corrupt("media choice")
     })
 }
 
@@ -49,7 +49,7 @@ pub(super) fn encode_choice(choice: &MediaChoice) -> String {
 
 /// A stored check result.
 pub(super) fn decode_info(raw: Option<&str>) -> Result<Option<MediaInfo>, StoreError> {
-    raw.map(|raw| serde_json::from_str(raw).map_err(|_| StoreError::Corrupt("media info")))
+    raw.map(|raw| serde_json::from_str(raw).or_corrupt("media info"))
         .transpose()
 }
 
@@ -80,7 +80,7 @@ impl LinkColumns {
         let Some(service) = self.service else {
             return Ok(None);
         };
-        let service = ProviderId::new(service).map_err(|_| StoreError::Corrupt("media service"))?;
+        let service = ProviderId::new(service).or_corrupt("media service")?;
         let state = match self.state.as_deref() {
             Some("ready") => MediaState::Ready,
             Some("failed") => MediaState::Unavailable,
@@ -194,8 +194,7 @@ impl Store {
         }
         let (state, info, problem) = match found {
             Ok(info) => {
-                let info = serde_json::to_string(&info.normalized())
-                    .map_err(|_| StoreError::Corrupt("media info"))?;
+                let info = serde_json::to_string(&info.normalized()).or_corrupt("media info")?;
                 // A pathological answer is a failed check, never a huge row.
                 if info.len() > 8192 {
                     (
@@ -431,7 +430,7 @@ pub(super) fn retry_failed(tx: &Transaction<'_>, now: UtcTimestamp) -> Result<us
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<Result<_, _>>()?;
     for (id, url, service) in &failed {
-        let url = Url::parse(url).map_err(|_| StoreError::Corrupt("source URL"))?;
+        let url = Url::parse(url).or_corrupt("source URL")?;
         super::crawl::enqueue(tx, *id, &url, Some(service), now)?;
     }
     Ok(failed.len())

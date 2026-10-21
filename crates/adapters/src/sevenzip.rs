@@ -33,7 +33,7 @@ use wayfetch_engine::extract::{
 use wayfetch_engine::protocol::media::{PluginRole, PluginState, PluginSummary};
 use wayfetch_engine::transfer::writer::BoxFuture;
 
-use crate::plugin::{Check, Confinement, Describe, Limits, Plugin, Program, RunError, last_line};
+use crate::plugin::{Check, Confinement, Describe, Limits, Plugin, RunError, last_line};
 
 /// The plugin.
 pub const PLUGIN: Describe = Describe {
@@ -88,8 +88,7 @@ impl SevenZip {
 
     /// 7-Zip at `path`, if found, checked by asking its version.
     pub async fn detect(path: Option<PathBuf>) -> Self {
-        let program = Program::detect(PLUGIN, path, &Self::check()).await;
-        Self::new(Arc::new(Plugin::new(PLUGIN, Self::check(), program, false)))
+        Self::new(Plugin::detect(PLUGIN, Self::check(), path).await)
     }
 
     /// The plugin.
