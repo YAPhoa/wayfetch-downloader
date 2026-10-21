@@ -312,6 +312,13 @@ impl Watch {
     }
 }
 
+fn oversized(limits: Limits) -> String {
+    format!(
+        "the package is larger than {} MB, more than any Wayfetch release",
+        limits.size / 1024 / 1024
+    )
+}
+
 /// `work`, ended early when the package is too large, stops arriving, takes
 /// too long, or the app stops.
 async fn bounded<T>(
@@ -329,10 +336,7 @@ async fn bounded<T>(
                 () = tokio::time::sleep_until(stalled.min(deadline).into()) => {}
             }
             if watch.oversized.load(Ordering::SeqCst) {
-                return format!(
-                    "the package is larger than {} MB, more than any Wayfetch release",
-                    limits.size / 1024 / 1024
-                );
+                return oversized(limits);
             }
             let now = Instant::now();
             if now >= deadline {
@@ -344,7 +348,14 @@ async fn bounded<T>(
         }
     };
     tokio::select! {
-        result = work => result,
+        // The last chunk can cross the limit as the download completes.
+        result = work => {
+            if watch.oversized.load(Ordering::SeqCst) {
+                Err(oversized(limits))
+            } else {
+                result
+            }
+        }
         problem = watchdog => Err(problem),
         () = stop.cancelled() => Err("the app stopped before the download finished".to_owned()),
     }
@@ -493,6 +504,14 @@ mod tests {
         let work = async {
             watch.chunk(101, None);
             std::future::pending::<Result<(), String>>().await
+        };
+        let refused = bounded(work, &watch, SHORT, &CancellationToken::new()).await;
+        assert!(refused.unwrap_err().contains("larger than"));
+        // Or by the last chunk, as the download completes.
+        let watch = Watch::new(SHORT.size);
+        let work = async {
+            watch.chunk(101, None);
+            Ok("package")
         };
         let refused = bounded(work, &watch, SHORT, &CancellationToken::new()).await;
         assert!(refused.unwrap_err().contains("larger than"));
