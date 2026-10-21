@@ -39,10 +39,10 @@ let daemon;
 test.beforeAll(async () => {
   fixture = await new Fixture().start();
   realDebrid = await new RealDebridFixture().start();
-  // GitHub's answer for the newest release, from the same stand-in.
+  // GitHub's list of releases, from the same stand-in.
   fixture.page(
-    'releases/latest',
-    JSON.stringify({ tag_name: 'v99.0.0', html_url: `${fixture.base}/pages/releases/tag/v99.0.0` }),
+    'releases',
+    JSON.stringify([{ tag_name: 'v99.0.0', html_url: `${fixture.base}/pages/releases/tag/v99.0.0`, prerelease: true }]),
   );
   daemon = await new Daemon(await freePort(), {
     realDebrid: realDebrid.base,

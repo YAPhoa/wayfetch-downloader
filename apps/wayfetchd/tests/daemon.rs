@@ -276,13 +276,14 @@ fn position(id: &str) -> u64 {
 async fn the_complete_workflow_over_http() {
     let server = Server::https().await;
     let mut dirs = Dirs::ready(&server);
-    // GitHub's answer for the newest release, from the same stand-in.
-    let latest = json!({
+    // GitHub's list of releases, from the same stand-in.
+    let latest = json!([{
         "tag_name": "v99.0.0",
         "html_url": server.url("/github/releases/tag/v99.0.0"),
-    });
+        "prerelease": true,
+    }]);
     server.put(
-        "/github/releases/latest",
+        "/github/releases",
         Resource::new(latest.to_string().into_bytes().into()),
     );
     dirs.args
