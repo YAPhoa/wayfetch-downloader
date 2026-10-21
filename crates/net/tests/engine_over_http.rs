@@ -164,6 +164,8 @@ async fn a_resume_the_server_does_not_honor_restarts_from_zero() {
         // old bytes with new ones appended.
         assert_eq!(env.published(&format!("{name}.bin")), data, "{name}");
         assert_eq!(done.artifact.unwrap().size, data.len() as u64, "{name}");
+        // The abandoned partial was removed before the new generation ran.
+        assert_eq!(env.staging_files(), 0, "{name}");
         shutdown(owner).await;
     }
 }
