@@ -1,11 +1,6 @@
-//! Queries: bounded, paginated reads (architecture brief sections 4.6 and
-//! 11.1, test T48).
-//!
-//! List results use keyset pagination in ascending job ID order: a page
-//! carries the last ID it returned, and the next request continues after it.
-//! Each page also carries the event cursor the snapshot is consistent with,
-//! so a client can subscribe from exactly that point without missing or
-//! double-applying changes.
+//! Queries: bounded, keyset-paginated reads. Each page carries the event
+//! cursor it is consistent with, so a client can subscribe from exactly that
+//! point.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU16;

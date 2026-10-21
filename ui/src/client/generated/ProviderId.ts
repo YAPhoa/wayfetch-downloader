@@ -2,6 +2,6 @@
 
 /**
  * A resolver or provider identity, distinct from the resource's original
- * host (architecture brief section 3.4). Same syntax as [`Namespace`].
+ * host. Same syntax as [`Namespace`].
  */
 export type ProviderId = string;

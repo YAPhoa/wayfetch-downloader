@@ -1,13 +1,9 @@
-//! A media download: the media service's streams, laid end
-//! to end in the job's one staging file, then joined or converted into a
-//! second file when the plan needs it.
+//! A media download: the service's streams, end to end in the job's staging
+//! file, then joined or converted into a second file if needed.
 //!
-//! The staging file's recorded resource is its [`Layout`]: the recipe,
-//! the extension, each stream's length, and the service's identity of what
-//! was chosen. A continued download asks the service for fresh links and
-//! goes on only if the new plan has the same layout; streams already
-//! complete need no links at all, so a conversion interrupted by a crash
-//! runs again from the recorded layout alone.
+//! The recorded [`Layout`] identifies what was chosen, so a continued
+//! download resumes only if fresh links give the same layout, and an
+//! interrupted conversion can rerun from it alone.
 
 use std::str::FromStr;
 use std::sync::Arc;

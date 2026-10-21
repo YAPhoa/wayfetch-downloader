@@ -1,26 +1,9 @@
-//! Real-Debrid accounts: sign-in, status, and downloads through them
-//! (architecture brief sections 3.11, 6.4, and 8.3).
+//! Real-Debrid accounts: sign-in, status, link checks, and downloads
+//! ([`downloads`]).
 //!
-//! Signing in uses Real-Debrid's documented OAuth 2.0 device flow for
-//! open-source applications (<https://api.real-debrid.com/>, section
-//! "Authentication"): the device code is requested with the client ID
-//! Real-Debrid publishes for open-source apps, [`OPEN_SOURCE_CLIENT_ID`],
-//! and `new_credentials=yes`; the person enters the code on Real-Debrid's
-//! site; Real-Debrid then issues a client ID and secret bound to that
-//! person, which obtain the access and refresh tokens. Those per-user
-//! credentials are this installation's alone. No password is ever asked
-//! for, and the private API token, which the documentation reserves for
-//! personal scripts, is not used.
-//!
-//! Link checks ask `POST /rest/1.0/unrestrict/check`, which needs no
-//! sign-in.
-//!
-//! Status checks read `GET /rest/1.0/user`, refreshing the access token
-//! first when it has expired or Real-Debrid answers 401. Downloading
-//! through an account is in [`downloads`].
-//!
-//! Every stored credential records the API origin it was issued by, and is
-//! only ever sent back there.
+//! Sign-in uses Real-Debrid's OAuth device flow for open-source apps, which
+//! issues per-user client credentials; no password or private API token is
+//! used. Credentials are only sent back to the API origin that issued them.
 
 use std::sync::Arc;
 use std::time::Duration;

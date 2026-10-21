@@ -1,12 +1,8 @@
 //! Link checks' metadata requests: the engine's [`Inspector`] over the same
-//! client, redirect rules, and egress policy as transfers (link crawler
-//! stage 1).
+//! client and egress policy as transfers.
 //!
-//! A check asks with `HEAD`, a first-byte `GET`, or a `GET` whose body is
-//! read only when the answer is a web page, up to the request's limit. A
-//! file's body is never read: the response is dropped after its headers.
-//! These requests may be repeated, so redirects are followed like a direct
-//! download's. Errors never carry the URL, which may hold a token.
+//! A file's body is never read; a page's is read only up to a limit. Errors
+//! never carry the URL, which may hold a token.
 
 use bytes::BytesMut;
 use reqwest::header::HeaderMap;

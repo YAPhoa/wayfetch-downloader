@@ -1,6 +1,5 @@
-//! Library embedding harness: a host starts, uses, and stops the engine
-//! through its public API only, with no daemon process and no listener
-//! (architecture brief section 11.6; foundation for tests T26, T61, T63).
+//! Embedding the engine: a host starts, uses, and stops it through its
+//! public API only, with no daemon or listener.
 
 use std::time::Duration;
 

@@ -1,21 +1,9 @@
 //! Media links and the conversions of their downloads.
 //!
-//! A collected link a media service recognized is recorded `pending`; the
-//! coordinator checks pending links in the background and records what the
-//! service found, announcing it with `links_changed`. The person's choice
-//! is kept with the link and copied to its job when it starts.
-//!
-//! A media download's staging file holds its streams end to end. When they
-//! must be joined or converted, the output is a second file beside it,
-//! named by the same record (`aux_*`) before anything is written to it:
-//!
-//! * `converting`: `aux_*` is the output being written. A restart removes
-//!   it and converts again from the streams, which are still complete.
-//! * `converted`: the record names the output, and `aux_*`, until it is
-//!   removed, the streams. The output's coverage replaces the streams'.
-//!
-//! Cleanup and explicit deletion remove `aux_*` files like staging files:
-//! by recorded identity only.
+//! A recognized link is checked in the background and the person's format
+//! choice is copied to its job. A join or conversion writes a second file
+//! named by its record (`aux_*`) before anything is written, so a restart
+//! can redo it and cleanup can remove it by identity.
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use url::Url;

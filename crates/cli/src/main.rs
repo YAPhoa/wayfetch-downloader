@@ -1,13 +1,6 @@
-//! `wayfetch`: a foreground command-line host for the Wayfetch Downloader
-//! engine (architecture brief sections 1.1 and 4.3, "application host").
-//!
-//! The host owns the Tokio runtime, the engine's lifecycle, its
-//! configuration, signals, and the terminal. Everything about persistence,
-//! scheduling, transfers, recovery, and cleanup stays in the engine; the
-//! session only turns typed lines into engine commands and queries and
-//! prints what comes back. Controls exist only inside the running session:
-//! a second invocation on the same state directory is refused. `wayfetchd`
-//! serves the same engine over HTTP instead.
+//! `wayfetch`: a foreground command-line host. It owns the runtime,
+//! configuration, signals, and terminal, and turns typed lines into engine
+//! commands; everything else stays in the engine.
 
 mod input;
 mod output;

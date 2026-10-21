@@ -1,19 +1,8 @@
-//! Live transfer progress (architecture brief section 4.7 and ADR-28):
-//! ephemeral, coalesced samples, never persisted.
+//! Live transfer progress: ephemeral samples, never persisted (ADR-28).
 //!
-//! A download writing a body holds a [`Metering`]; its writer records each
-//! byte position it reaches with one atomic store. While any download is
-//! metered, one sampler task reads every meter once per [`PERIOD`] and
-//! publishes the whole set as the latest value of a `watch` channel.
-//! Subscribers therefore only ever see the newest set: a slow one skips
-//! samples instead of being buffered for or told to resynchronize, and
-//! memory stays bounded by the number of active downloads. Nothing is sent
-//! while nothing transfers.
-//!
-//! Speed is the bytes received over the last [`WINDOW`], like curl's
-//! one-second slots, which evens out the bursts of the shared bandwidth
-//! budget and of checkpoint syncs while following a speed-limit change
-//! within a few seconds. Time left is the client's to derive.
+//! One sampler reads every active download's meter each [`PERIOD`] and
+//! publishes the newest set on a `watch` channel, so slow subscribers skip
+//! samples and memory stays bounded. Speed is averaged over [`WINDOW`].
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};

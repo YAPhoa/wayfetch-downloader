@@ -1,29 +1,12 @@
 //! Confining a helper program that reads untrusted input, such as 7-Zip
-//! unpacking a downloaded archive (architecture brief section 9.3).
+//! unpacking an archive.
 //!
-//! A confined run sees only what it is given: the files it may read, one
-//! folder it may write in, and the system's program files. It cannot open
-//! a socket or leave its process group, and its changes to any file's
-//! permissions, owner, times, or extended attributes are skipped; it gets an empty environment,
-//! runs under memory, file size, and core dump limits, and is killed if
-//! Wayfetch exits. On Linux, Landlock confines its files (ABI 3, Linux
-//! 6.2, so it cannot truncate files it may only read) and, from Linux
-//! 6.12, signals to other processes; seccomp refuses the rest, and
-//! resource limits bound it. The restrictions bind the program and
-//! anything it starts. It inherits no open file but its
-//! standard input and output, since every file Wayfetch opens is closed
-//! when a program starts.
-//!
-//! The restrictions are entered by a launcher: the host's own program,
-//! started again with [`LAUNCH`] before its arguments, which restricts
-//! itself and then becomes the helper. So no code runs between creating
-//! the child process and starting the helper, and the host needs no
-//! unsafe code. Each host calls [`enter_if_asked`] first thing in `main`.
-//!
-//! Where a restriction cannot be enforced, such as on an older kernel, a
-//! container that forbids Landlock, another system, or a host that is no
-//! launcher, the run fails and says why: a confined program never runs
-//! unconfined.
+//! The host program restarts itself with [`LAUNCH`], restricts itself with
+//! Landlock, seccomp, and resource limits, then becomes the helper, so it
+//! sees only its inputs, one output folder, and the system's programs, with
+//! no network. Each host calls [`enter_if_asked`] first in `main`. Where a
+//! restriction cannot be enforced, the run fails; a confined program never
+//! runs unconfined.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};

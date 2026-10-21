@@ -1,8 +1,5 @@
-//! The HTTP transport and broker against a local server over real sockets
-//! (architecture brief section 13.1). Brief tests exercised here at the
-//! transport level: T01, T02, T06, T07, T08, T09, T10, T11, and T12, plus TLS
-//! verification and the egress policy (section 8.2). The engine-level
-//! scenarios are in `engine_over_http.rs`.
+//! The HTTP transport and broker against a local server over real sockets.
+//! The engine-level scenarios are in `engine_over_http.rs`.
 
 #[path = "../../engine/tests/support/mod.rs"]
 mod engine_support;

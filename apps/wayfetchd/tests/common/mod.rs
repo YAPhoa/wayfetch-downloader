@@ -1,8 +1,6 @@
 //! What the daemon's tests share, whether they run `wayfetchd` as a
 //! subprocess or in its container: an API client, stalling fixture files,
-//! and the sizes and deadlines they assume. Each including test file also
-//! includes the net and engine test support as `support` and
-//! `engine_support`.
+//! and the sizes and deadlines they assume.
 
 #![allow(dead_code, reason = "each test file uses part of the support")]
 

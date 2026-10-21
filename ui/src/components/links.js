@@ -1,33 +1,11 @@
-// The Links page: links collected for review, until they are started or
-// removed. Clicking a column's header sorts the shown page by it, and
-// clicking it again reverses the order; the order is kept for next time. The engine holds the
-// list; this page shows one page of it and never keeps its own copy as
-// the authority.
+// The Links page (`/links`): collected links waiting for review until they
+// are started or removed. The engine holds the list; this page shows one
+// page of it.
 //
-// - Collected links are checked in the background, at most one at a time
-//   per host: a file shows its name and size, a missing one is Offline,
-//   and a web page typed or analyzed is read once for the files and
-//   videos on it, which are listed with the page they were found on. A
-//   page starts only through a provider account; directly, the engine
-//   refuses it and says why. Check again
-//   repeats a check; Analyze also reads a link that is a page.
-// - Commands act on the selected links that are shown. A filter never
-//   selects, starts, or removes links it hides; selected links it hides
-//   are counted and left out.
-// - Each command carries the revisions shown, so a link changed elsewhere
-//   since is refused rather than started as it was. Links leave the page
-//   only once the engine has confirmed the command; refused ones stay,
-//   with the reason. Once every link sent is started, the workspace
-//   switches to Downloads; if any is refused, the page stays to say why.
-// - The page re-reads the list when shown, after events that can change
-//   it, and now and then while shown, since removals and moves made in
-//   another window have no event of their own.
-// - A video link, such as YouTube's, shows its title once its service
-//   has read it, and a Format list: a picture height (the tallest available by default), or
-//   sound only as MP3 or M4A. Formats that need a missing plugin are
-//   listed but cannot be chosen.
-//
-// Route: `/links`.
+// Links are checked in the background. Commands act only on selected links
+// that are shown, at the revisions shown, so a link changed elsewhere is
+// refused rather than started as it was. The page re-reads the list now and
+// then, since removals in another window have no event.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { formatBytes } from '../client/jobs.js';

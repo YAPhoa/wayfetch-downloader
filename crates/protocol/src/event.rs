@@ -1,26 +1,10 @@
-//! Event subscriptions and resynchronization (architecture brief sections
-//! 4.7, 7.8 and ADR-28; tests T47 and T66).
+//! Event subscriptions and resynchronization (ADR-28).
 //!
-//! There are two kinds of events:
-//!
-//! * **Durable events** come from the engine's outbox. Each has a position
-//!   that increases by one per event and is committed with the state change
-//!   it describes, so it survives restarts. Delivery is at least once:
-//!   clients ignore any position they have already applied.
-//! * **Progress samples** are ephemeral, coalesced, and may be dropped. They
-//!   are tagged with the boot epoch and job generation; a client discards
-//!   samples from a previous engine run or an older generation.
-//!
-//! A client keeps an authoritative view with this loop:
-//!
-//! 1. Query a snapshot. Its `as_of` cursor marks the last event it reflects.
-//! 2. Subscribe after that cursor. The engine replays newer events, then
-//!    streams live ones.
-//! 3. On [`StreamItem::Resync`], drop the subscription and go back to step 1.
-//!
-//! The engine never buffers without bound for a slow client: when a client's
-//! queue fills, it sends `Resync` with [`ResyncReason::Lagged`] and ends the
-//! stream. Nothing about a subscription affects job execution.
+//! Durable events come from the engine's outbox, with increasing positions,
+//! delivered at least once. Progress samples are ephemeral and may be
+//! dropped. A client queries a snapshot, subscribes after its `as_of`
+//! cursor, and on [`StreamItem::Resync`] starts over; a slow client gets
+//! `Resync` instead of unbounded buffering.
 
 use serde::{Deserialize, Serialize};
 use wayfetch_domain::id::{BatchId, JobId};
@@ -183,7 +167,7 @@ pub enum SubscriptionStart {
 
 impl Retained {
     /// Decides how to answer a subscription request. Every transport uses
-    /// this, so HTTP and desktop clients resynchronize identically (T62).
+    /// this, so HTTP and desktop clients resynchronize identically.
     pub fn plan(&self, request: Subscribe) -> SubscriptionStart {
         let Some(after) = request.after else {
             return SubscriptionStart::ReplayAfter(self.head);

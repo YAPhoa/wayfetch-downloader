@@ -1,6 +1,5 @@
 //! Reading a response's status and headers into what the engine checks:
-//! framing, representation, and a suggested file name (sections 7.5 and
-//! 8.2; tests T02 to T04, T07, and T08).
+//! framing, representation, and a suggested file name.
 //!
 //! Parsing is strict: a malformed `Content-Range` or `Content-Length` is a
 //! failure, never a guess, and an encoded body is refused rather than
@@ -86,8 +85,8 @@ pub(crate) fn read(
 /// Identifies the resource `url` names: a digest of the URL without its
 /// fragment, which the client never sends. Validators are compared only
 /// within one resource, so any other final URL, even on the same origin,
-/// restarts a resume (rule 7.5.5). A digest rather than the URL, which may
-/// carry a signed token that must not be stored.
+/// restarts a resume. A digest rather than the URL, which may carry a
+/// signed token that must not be stored.
 fn resource(url: &Url) -> String {
     let mut url = url.clone();
     url.set_fragment(None);
@@ -104,7 +103,7 @@ fn timestamp(at: SystemTime) -> UtcTimestamp {
 
 /// Classifies a status that carries no body to download. `replay_safe` is
 /// false for a request whose repetition could repeat an action: a server
-/// error after it leaves the outcome unknown (T12).
+/// error after it leaves the outcome unknown.
 pub(crate) fn status_failure(status: StatusCode, replay_safe: bool) -> TransportError {
     let code = match status.as_u16() {
         500..=599 if !replay_safe => FailureCode::OperationAmbiguous,
@@ -174,7 +173,7 @@ pub(crate) fn describe(status: StatusCode, headers: &HeaderMap) -> Described {
 }
 
 /// Transfers address the stored bytes, so a body in any encoding but
-/// `identity` is refused instead of decoded (rule 7.5.6, ADR-15, T07).
+/// `identity` is refused instead of decoded (ADR-15).
 fn refuse_encoding(headers: &HeaderMap) -> Result<(), TransportError> {
     for value in headers.get_all(header::CONTENT_ENCODING) {
         let value = value

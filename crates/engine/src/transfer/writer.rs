@@ -1,17 +1,10 @@
 //! Streaming a response body into a staging file with backpressure,
-//! cancellation, and checkpoints (sections 7.5 and 7.6; tests T08, T09,
-//! T23, and T27).
+//! cancellation, and checkpoints.
 //!
-//! The writer pulls the next chunk only after the previous one is on disk,
-//! so a slow disk slows the network read instead of filling memory: at most
-//! one chunk per writer is resident, plus whatever the HTTP client buffers.
-//! Writes run on the blocking pool and never stall the runtime.
-//!
-//! A body that stops sending fails after the idle-read deadline instead of
-//! holding its transfer slot forever (T09). A writer given the engine's
-//! [`Bandwidth`] writes each chunk only as fast as it grants, so the next
-//! chunk is read later; that wait is not counted against the deadline,
-//! which covers reading alone.
+//! The next chunk is read only after the previous one is on disk, so a slow
+//! disk slows the read instead of filling memory. A body that stops sending
+//! fails at the idle-read deadline; waiting for the speed limit does not
+//! count toward it.
 
 use std::any::Any;
 use std::future::Future;
@@ -48,8 +41,7 @@ pub enum WriteError {
     /// No chunk arrived within the idle-read deadline.
     #[error("no data for {0:?}")]
     Stalled(Duration),
-    /// Writing or synchronizing the staging file failed. Never progress
-    /// (section 7.6).
+    /// Writing or synchronizing the staging file failed. Never progress.
     #[error("writing the staging file: {0}")]
     File(#[source] io::Error),
     /// The body extends past the writer's interval; the excess chunk was not
@@ -85,7 +77,7 @@ pub enum StreamEnd {
 }
 
 /// Writes one interval of a staging file, sequentially from its start.
-/// Each writer owns its interval and cannot write outside it (rule 7.5.9).
+/// Each writer owns its interval and cannot write outside it.
 pub struct IntervalWriter {
     file: Arc<StagingFile>,
     end: Option<u64>,
@@ -232,18 +224,11 @@ impl IntervalWriter {
     }
 
     /// Streams `source` into the interval until the body ends or `cancel`
-    /// fires, sending a checkpoint to `checkpoints` whenever `every` bytes
-    /// are uncertified and once at the end. A wait of more than `idle` for
-    /// the next chunk fails with [`WriteError::Stalled`]. Sending waits for room in the
-    /// channel, so a coordinator that commits slowly slows the transfer
-    /// instead of queueing certificates.
-    ///
-    /// Throttled, each chunk is written in the pieces the bandwidth grants,
-    /// and the wait for a grant is not part of the idle deadline.
-    /// Cancellation is checked before each read and while waiting for data
-    /// or a grant; a write already handed to the blocking pool finishes
-    /// first. A finished body must have filled the interval exactly when
-    /// its end is known.
+    /// fires, sending a checkpoint whenever `every` bytes are uncertified
+    /// and once at the end. Waiting more than `idle` for a chunk fails with
+    /// [`WriteError::Stalled`]; waiting for the speed limit does not count.
+    /// A write already handed to the blocking pool finishes before
+    /// cancellation takes effect.
     pub async fn stream(
         &mut self,
         source: &mut dyn ChunkSource,

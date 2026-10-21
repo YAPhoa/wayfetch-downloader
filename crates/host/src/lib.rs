@@ -1,13 +1,10 @@
-//! What every Wayfetch Downloader application host composes the same way
-//! (architecture brief section 4.3, "application host"): the operator's
-//! configuration file, state-directory, root, network, and credential-key
-//! options, explicit root initialization, engine startup with the HTTP
-//! transport and account integrations, signals, and non-blocking output.
+//! What every application host composes the same way: configuration,
+//! state-directory, root, and network options, explicit root initialization,
+//! engine startup with the HTTP transport and integrations, signals, and
+//! non-blocking output.
 //!
-//! Hosts differ only in how they talk to people: `wayfetch` reads standard
-//! input, `wayfetchd` serves HTTP, and `wayfetch-desktop` shows the shared
-//! UI in a window over in-process IPC. Neither initializes a root implicitly,
-//! and both leave persistence, scheduling, and recovery to the engine.
+//! Hosts differ only in how they talk to people, and never initialize a root
+//! implicitly.
 
 pub mod config;
 mod signals;

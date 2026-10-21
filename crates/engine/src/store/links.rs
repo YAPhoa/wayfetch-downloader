@@ -1,14 +1,9 @@
-//! Collected links: entries kept for review until the user starts or
-//! removes them (architecture brief sections 3.2 and 7.1).
+//! Collected links, kept for review until the user starts or removes them.
 //!
-//! Collecting records a batch whose links are held: the ingestion step
-//! skips them, so collecting never creates a job or fetches anything.
-//! Starting a link creates its job and releases the link in one
-//! transaction, and a link has at most one job, so a retried, repeated, or
-//! concurrent start never adds a second download; accepted links leave
-//! the collection while their source records remain. Each command
-//! applies to the links it can and refuses the rest with a reason; refused
-//! links stay in the list as they were.
+//! Collecting never creates a job or fetches anything. Starting a link
+//! creates its one job and releases the link in a single transaction, so a
+//! repeated start never adds a second download. Each command applies to the
+//! links it can and refuses the rest with a reason.
 
 use std::collections::{BTreeMap, BTreeSet};
 

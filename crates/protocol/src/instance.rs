@@ -1,11 +1,9 @@
-//! Engine instance identity and the client handshake (architecture brief
-//! sections 4.7 and 11.2).
+//! Engine instance identity and the client handshake.
 //!
-//! Before any mutation, a client learns which engine instance it is talking
-//! to, that instance's current boot epoch, and whether its protocol version
-//! is compatible. Commands name their target instance, so a client that
-//! reconnects to a different instance (another state directory, or a remote
-//! host that changed) is refused instead of acting on the wrong queue.
+//! A client learns the instance, boot epoch, and protocol compatibility
+//! before any change, and commands name their target instance, so
+//! reconnecting to a different engine is refused rather than acting on the
+//! wrong queue.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -45,16 +43,10 @@ impl std::fmt::Display for InstanceId {
 
 /// Protocol version.
 ///
-/// A minor version may only add optional fields, which older decoders
-/// ignore, and new commands or queries, which older clients never send. Any
-/// new value a client must decode from the engine (an event kind, stream
-/// item, error code, job stage, failure code, or resync reason) needs a new
-/// major version, because an older client cannot decode it. Extending those
-/// vocabularies within a major version needs capability negotiation first.
-///
-/// Before 1.0 the protocol is still settling, so as in Cargo's rules for
-/// `0.x` versions, the minor version is the incompatible one: an engine
-/// serves only clients of exactly its own `0.x`.
+/// A minor version may only add optional fields and new commands or
+/// queries. Any new value a client must decode (an event kind, error code,
+/// stage, and so on) needs a new major version. Before 1.0, as in Cargo,
+/// the minor version is the incompatible one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ProtocolVersion {

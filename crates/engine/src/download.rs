@@ -1,31 +1,11 @@
-//! One job's work for a direct link: request, stream into owned staging,
-//! verify, and publish, or reconcile what a previous run left (architecture
-//! brief sections 7.5 to 7.7 and the first slice of section 14.3).
+//! One direct-link job: request, stream into its staging file, verify, and
+//! publish, or reconcile what a previous run left.
 //!
-//! A [`Download`] runs as an engine task. It never holds the store: every
-//! state change is a generation-checked call the coordinator runs in turn,
-//! so a stale worker (cancelled, or left over from before a restart) cannot
-//! change the job. The stages it moves the job through:
-//!
-//! * A queued job is admitted as `resolving`. A direct link needs no
-//!   provider resolution, so this is where the request is sent.
-//! * A `recovering` job (active when the engine last stopped) first
-//!   reconciles an interrupted publication, then adopts its staging file
-//!   if the durable bytes can be continued.
-//! * A job the user retried adopts the staging file the retry reserved for
-//!   it, under the coordinator's proof that no earlier task of the job
-//!   still runs, then settles any publication an earlier attempt left
-//!   unfinished, and continues the durable bytes like a recovering job.
-//! * Bytes from several responses are combined only when the stored
-//!   representation is trustworthy and the server reports it unchanged
-//!   (rules 7.5.4 and 7.5.5); otherwise the job is queued again under a new
-//!   generation and starts from zero (rule 7.5.2), recording why.
-//! * `verifying` has no checksum to compare for a direct link; publication
-//!   itself requires durable coverage of exactly the artifact's length.
-//!
-//! Provider leases, retries with backoff, and segmented transfers arrive
-//! with the provider slice; until then a request that fails parks the job
-//! as failed with the failure the transport classified.
+//! A [`Download`] never holds the store; each state change is a
+//! generation-checked call on the coordinator, so a stale task cannot change
+//! the job. Bytes from several responses are combined only when the server
+//! reports the same representation; otherwise the job starts again from zero
+//! and says why.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -792,7 +772,7 @@ impl Download {
             } => (start, end, complete),
             // `416` finishes the job only when the durable bytes already
             // cover exactly the length it reports, from the same resource
-            // and representation (rule 7.5.3, T04).
+            // and representation.
             Plan::Reconcile {
                 complete: Some(complete),
             } if continued
@@ -1145,7 +1125,7 @@ mod tests {
 
     /// A job whose engine stopped after recording the intent to publish
     /// `hello` as `a.bin`; `crash` changes the files as the crash left
-    /// them. Returns the recovering job as the next start sees it (T24).
+    /// them. Returns the recovering job as the next start sees it.
     fn crashed_publishing(crash: impl FnOnce(&Root, &Path, &StagingRecord)) -> Crashed {
         interrupted_publishing(crash, false)
     }

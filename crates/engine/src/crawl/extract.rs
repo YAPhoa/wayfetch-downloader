@@ -1,21 +1,8 @@
-//! Finding links in collected text and in fetched pages, without the
-//! network.
+//! Finding links in collected text and in fetched HTML, without the network.
 //!
-//! * Plain text: every `scheme://` link in it, with surrounding
-//!   punctuation, BBCode tags, and JSON's escaped slashes left out. Words
-//!   that are not links are ignored; a link Wayfetch cannot download, such
-//!   as an `ftp://` one, is kept as invalid so the person sees why.
-//! * HTML: the targets of links and embedded media (`a`, `area`, `iframe`,
-//!   `frame`, `embed`, `video`, `audio`, `source`), read against the
-//!   page's address and its `<base href>`, plus links written in its text.
-//!   Scripts are not read, let alone run. Only `http(s)` targets are kept;
-//!   anchors within the page, `mailto:`, `javascript:`, and the like are
-//!   page furniture and skipped.
-//!
-//! Links come in order of first appearance, each once: the URL as parsed,
-//! which lower-cases the scheme and host but keeps the path, query order,
-//! repeated parameters, escapes, and fragment as written. A truncated link
-//! is never repaired.
+//! Links come once each, in order of first appearance and as written;
+//! non-HTTP links are kept as invalid so the person sees why, and scripts
+//! are never read.
 
 use std::cell::Cell;
 use std::collections::HashSet;

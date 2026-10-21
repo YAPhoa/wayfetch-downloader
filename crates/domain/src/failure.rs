@@ -1,11 +1,8 @@
 //! Typed failures: a stable code, the scope it applies to, and what to do
-//! next (ADR-12, architecture brief sections 3.5 and 7.4).
+//! next (ADR-12).
 //!
-//! The scope says how far a failure reaches: one request, one lease, an
-//! account, an account-and-host pair through a provider, a destination, and
-//! so on. Each code accepts only the scopes the failure-policy matrix allows,
-//! so an invalid credential cannot be recorded against a single file and a
-//! provider outage cannot be recorded as the resource being deleted.
+//! Each code accepts only the scopes that make sense for it, so, for
+//! example, an invalid credential cannot be recorded against a single file.
 
 use crate::id::{AccountId, ArchiveSetId, AttemptId, JobId, ResourceId, RootId};
 use crate::name::{DiagnosticText, HostName, InvalidName, Namespace, ProviderId};

@@ -1,16 +1,9 @@
-//! The local owner account and the setup secret that creates it
-//! (architecture brief section 8.6).
+//! The local owner account and the setup secret that creates it, both
+//! owner-only files in the auth directory.
 //!
-//! Both live in the operator's auth directory, owner-only:
-//!
-//! - `setup-secret` holds a random single-use secret, written at startup
-//!   while no owner exists and valid for [`SETUP_LIFETIME`]. Only its
-//!   digest is kept in memory, and it is never printed.
-//! - `owner-account` holds the owner's name and an Argon2id hash of their
-//!   password as a PHC string. It is written to a temporary file and then
-//!   hard-linked into place, which fails if an owner already exists, so
-//!   two setups, even by two processes, can never both succeed or leave a
-//!   partial account behind.
+//! The setup secret is single-use, valid for [`SETUP_LIFETIME`], and never
+//! printed. The account stores an Argon2id hash and is linked into place
+//! without replacing, so two setups can never both succeed.
 
 use std::io::{self, Write};
 use std::path::Path;

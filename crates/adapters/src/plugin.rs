@@ -1,22 +1,10 @@
-//! Helper programs integrations run, such as yt-dlp, ffmpeg, and 7-Zip
-//! (ADR-27).
+//! Helper programs such as yt-dlp, ffmpeg, and 7-Zip (ADR-27).
 //!
-//! A program is found at a path the host configures, or on `PATH`, and
-//! asked for its version once when the host starts: that answer is what
-//! Settings > Plugins shows. Each run is a separate process started
-//! without a shell, with no standard input unless the run gives it some
-//! (a password, which so never appears on a command line), with its
-//! output bounded and a deadline. Each run leads a process group that
-//! whatever it starts joins; when the run ends, is stopped, or is dropped,
-//! the whole group is killed, and on Linux a run returns only once none
-//! of it still runs. A program that reads
-//! untrusted input runs confined ([`Confinement`]), its version check
-//! included, so a system that cannot confine it reports it not working.
-//!
-//! A [`Plugin`] is the program as Settings changes it: turned on or off,
-//! and either the copy found that way or one Wayfetch installed in its
-//! place ([`crate::plugins`]). Each run takes the copy in use when it
-//! starts and keeps it to the end.
+//! A program is found once at startup, then each run is its own bounded
+//! process group with a deadline, killed as a whole when the run ends.
+//! Programs that read untrusted input run confined ([`Confinement`]). A
+//! [`Plugin`] is the program as Settings manages it; a run keeps the copy it
+//! started with.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};

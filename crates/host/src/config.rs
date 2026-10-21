@@ -1,21 +1,9 @@
-//! The operator's configuration file (architecture brief section 11.3).
+//! The operator's TOML configuration file, read once from `--config`.
 //!
-//! A host reads one TOML file, named with `--config`, at startup; nothing
-//! looks for one anywhere else, and changes need a restart. It holds what
-//! every host shares (the state directory, permitted roots, network
-//! exceptions, request deadlines, and the policy for preferences users
-//! change at run time); a host-specific section, such as `wayfetchd`'s
-//! `[server]`, is typed by that host. Users' own changes are saved in the
-//! engine's database, never written back here.
-//!
-//! Precedence: an option given on the command line replaces the file's
-//! value, and a repeatable option (`--root`, `--allow-network`,
-//! `--ca-cert`) adds to the file's list. Relative paths in the file are
-//! resolved against the file's directory; relative paths on the command
-//! line against the working directory.
-//!
-//! The file holds no secrets. Errors name the line, column, and key, but
-//! never quote the file or a value from it.
+//! It holds what every host shares; a host-specific section such as
+//! `[server]` is typed by that host. Command-line options override it, and
+//! repeatable ones add to it. Users' own changes live in the engine's
+//! database. Errors never quote values from the file.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

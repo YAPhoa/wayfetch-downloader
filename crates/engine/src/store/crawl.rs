@@ -1,14 +1,9 @@
-//! The frontier of link checks, and what they found (link crawler
-//! stage 1).
+//! The queue of link checks and what they found.
 //!
-//! A check is a `crawl_tasks` row, one per link at most: pending until the
-//! coordinator takes it, running while it is sent, deleted when its result
-//! is recorded. Checking a link again replaces its row, so a running
-//! check's late answer finds its row gone and changes nothing; so does an
-//! answer for a link removed, started, or unlisted meanwhile, since those
-//! drop the row too. Results commit with the row's deletion and a
-//! `links_changed` event, and links found on a page with their own checks,
-//! all in one transaction.
+//! A check is one `crawl_tasks` row per link. Checking again, or removing or
+//! starting the link, drops the row, so a late answer changes nothing.
+//! Results commit with the row's deletion and a `links_changed` event in one
+//! transaction.
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use url::Url;

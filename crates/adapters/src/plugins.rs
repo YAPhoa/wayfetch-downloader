@@ -1,17 +1,10 @@
-//! The plugins as Settings changes them: turned on or off, updated from
-//! their official signed releases, and copies Wayfetch installed removed
-//! ([`PluginControl`]).
+//! Plugins as Settings manages them: on or off, updated from signed
+//! releases, or the installed copy removed ([`PluginControl`]).
 //!
-//! Choices are kept in `plugins.json` in the plugins directory of the
-//! engine's state directory, replaced atomically on each change, and
-//! installed copies sit beside it. An update downloads into a file the
-//! record names before any byte arrives, checks the release's signature
-//! and the file's checksum ([`crate::release`]), and runs the new copy
-//! once; it is used only if it runs and reports a newer version, and
-//! anything failing deletes it and leaves the copy in use (rollback). A
-//! copy replaced or removed is deleted at the next start, since runs
-//! that started with it may still read it; only files the record names
-//! are ever deleted.
+//! Choices live in `plugins.json` beside the installed copies. An update is
+//! checked ([`crate::release`]) and run once before it is used; any failure
+//! keeps the copy in use. Replaced copies are deleted at the next start, and
+//! only files the record names are ever deleted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};

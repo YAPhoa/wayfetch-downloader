@@ -1,12 +1,8 @@
-//! Which browser origins may use the API (architecture brief section 8.5).
+//! Which browser origins may use the API.
 //!
-//! The operator names the origins browsers reach the server under, such
-//! as `https://wayfetch.example.lan`. A browser request must arrive with
-//! one of their `Host` values, which defeats DNS rebinding, and must come
-//! from one of them: a cross-site or cross-origin request is refused by
-//! its `Sec-Fetch-Site` metadata when the browser sends it, and by its
-//! `Origin`, which every state-changing request must carry. No CORS
-//! headers are ever sent, so other origins cannot read responses either.
+//! A browser request must use a configured `Host`, which defeats DNS
+//! rebinding, and come from a configured origin per `Sec-Fetch-Site` and
+//! `Origin`. No CORS headers are ever sent.
 
 use axum::http::{HeaderMap, Method, header};
 use url::{Host, Url};
