@@ -1,14 +1,9 @@
-//! Provider API requests for account integrations: the engine's
-//! [`ApiClient`] over the same client, TLS, and egress policy as transfers
-//! (architecture brief sections 6.5 and 8.2, ADR-15).
+//! Provider API requests for account integrations, over the same client and
+//! egress policy as transfers (ADR-15).
 //!
-//! A metadata request differs from a transfer: it is sent once, its whole
-//! body is read within a size limit and a deadline, and nothing about it is
-//! resumable. So redirects are not followed at all (a provider API that
-//! redirects is answered as refused, and no credential can follow a hop),
-//! the body must not be encoded, and the bearer token and form body are
-//! marked sensitive. Errors are built from the client's error kinds without
-//! the URL, which may carry a provider's device code.
+//! A request is sent once, its body is read whole within a limit and
+//! deadline, and redirects are refused so no credential can follow one.
+//! Errors never include the URL, which may carry a device code.
 
 use std::time::Duration;
 

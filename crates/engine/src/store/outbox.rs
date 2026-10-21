@@ -1,4 +1,4 @@
-//! Durable event outbox (architecture brief section 7.8, ADR-28).
+//! Durable event outbox (ADR-28).
 //!
 //! Events are appended inside the transaction that makes the change they
 //! describe, so an event exists exactly when its change committed. Positions
@@ -9,7 +9,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_protocol::event::EventKind;
 
-use super::{Store, StoreError};
+use super::{OrCorrupt, Store, StoreError};
 
 /// Appends an event in the caller's transaction and returns its position.
 pub(super) fn append(
@@ -17,12 +17,12 @@ pub(super) fn append(
     kind: &EventKind,
     now: UtcTimestamp,
 ) -> Result<u64, StoreError> {
-    let json = serde_json::to_string(kind).map_err(|_| StoreError::Corrupt("event"))?;
+    let json = serde_json::to_string(kind).or_corrupt("event")?;
     tx.execute(
         "INSERT INTO event_outbox (kind, created_at) VALUES (?1, ?2)",
         params![json, now.unix_millis()],
     )?;
-    u64::try_from(tx.last_insert_rowid()).map_err(|_| StoreError::Corrupt("event position"))
+    u64::try_from(tx.last_insert_rowid()).or_corrupt("event position")
 }
 
 /// Position of the newest event ever appended, or 0. Counts pruned events,
@@ -35,7 +35,7 @@ pub(super) fn head(tx: &Transaction<'_>) -> Result<u64, StoreError> {
             |row| row.get(0),
         )
         .optional()?;
-    u64::try_from(seq.unwrap_or(0)).map_err(|_| StoreError::Corrupt("event position"))
+    u64::try_from(seq.unwrap_or(0)).or_corrupt("event position")
 }
 
 /// Up to `limit` events after `position`, oldest first.
@@ -55,8 +55,8 @@ fn after(
     .map(|row| {
         let (position, kind) = row?;
         Ok((
-            u64::try_from(position).map_err(|_| StoreError::Corrupt("event position"))?,
-            serde_json::from_str(&kind).map_err(|_| StoreError::Corrupt("event"))?,
+            u64::try_from(position).or_corrupt("event position")?,
+            serde_json::from_str(&kind).or_corrupt("event")?,
         ))
     })
     .collect()
@@ -83,9 +83,7 @@ impl Store {
                 row.get(0)
             })?;
         let pruned_through = match oldest {
-            Some(oldest) => {
-                u64::try_from(oldest - 1).map_err(|_| StoreError::Corrupt("event position"))?
-            }
+            Some(oldest) => u64::try_from(oldest - 1).or_corrupt("event position")?,
             // Nothing is retained, so nothing up to the head can be replayed.
             None => head,
         };
@@ -105,7 +103,7 @@ impl Store {
         let cutoff = head(&tx)?.saturating_sub(keep_events);
         let events = tx.execute(
             "DELETE FROM event_outbox WHERE position <= ?1",
-            [i64::try_from(cutoff).map_err(|_| StoreError::Corrupt("event position"))?],
+            [i64::try_from(cutoff).or_corrupt("event position")?],
         )?;
         let commands = tx.execute(
             "DELETE FROM commands WHERE created_at < ?1",

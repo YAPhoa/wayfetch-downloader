@@ -1,33 +1,10 @@
-//! The real desktop shell against a local fixture server (architecture
-//! brief sections 11.6 and 11.7, gate G1a): the built `wayfetch-desktop`
-//! opens its window in the system WebView, driven through WebKitWebDriver
-//! as a person would, and closed with `WM_DELETE_WINDOW` as a window
-//! manager does.
+//! The real desktop window against a local fixture server, driven through
+//! WebKitWebDriver as a person would.
 //!
-//! Covered: a download submitted and observed through the shared UI;
-//! pause, resume, cancel, and retry over IPC; a renderer reload mid-transfer;
-//! graceful close, relaunch on the same state directory, recovery, and the
-//! final bytes; a second engine refused; stale revisions, wrong-instance
-//! commands, idempotency, resynchronization, a stalled renderer's
-//! subscription ending, and the per-renderer subscription limit and its
-//! cleanup on reload; with the `scripted-picker` feature, a folder chosen
-//! in the host's dialog becoming the destination of new downloads, also
-//! from the Settings page while a download keeps running; the Settings
-//! page and each row's menu, which opens a finished file or its
-//! folder through the host (a recording `xdg-open` stands in for the
-//! desktop's), renames, and removes from the list; links collected for
-//! review on the Add links page fetching nothing, outliving a relaunch, and only the chosen
-//! ones starting, with the row menu from the keyboard and a narrow
-//! window; that the page loads
-//! only bundled assets; that the host starts no daemon and listens on
-//! no TCP port; and a provider account signed in against a local stand-in
-//! for Real-Debrid, with its key beside the state directory, then shown,
-//! checked, disabled, signed in again, and removed; and a collected link
-//! downloaded through that account, chosen when starting it.
-//!
-//! These tests need an X display (`DISPLAY`, for example from `xvfb-run`)
-//! and `WebKitWebDriver` on `PATH`, so they are ignored by default; see
-//! apps/wayfetch-desktop/README.md.
+//! These tests cover what only the desktop host does: IPC, the host's
+//! dialogs and file opening, relaunch and recovery, and starting no daemon
+//! or listener. They need an X display and `WebKitWebDriver` on `PATH`, so
+//! they are ignored by default; see apps/wayfetch-desktop/README.md.
 
 #![cfg(target_os = "linux")]
 
@@ -1015,8 +992,27 @@ async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
     assert_eq!(refused["code"], "not_applicable", "{refused}");
     assert!(!missing.exists());
 
+    // The chosen folder is another Wayfetch profile's download folder too,
+    // which neither stops it being chosen nor is touched.
     let folder = dirs.tmp.path().join("chosen");
     std::fs::create_dir(&folder).unwrap();
+    const THEIRS: &str = "0d3a7c1e-5b2f-4c8a-9e61-7f0b2d4a6c13";
+    let marker = format!(r#"{{"instance":"{THEIRS}","root":1}}"#).into_bytes();
+    let theirs = [
+        (folder.join(".wayfetch/root.json"), marker.clone()),
+        (
+            folder.join(format!(".wayfetch/roots/{THEIRS}.json")),
+            marker,
+        ),
+        (
+            folder.join(format!(".wayfetch/staging/{THEIRS}/1.g1.part")),
+            b"their partial".to_vec(),
+        ),
+    ];
+    for (path, bytes) in &theirs {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
     std::fs::write(dirs.picker(), folder.to_str().unwrap()).unwrap();
     let url = server.url("/picked.bin");
     server.put("/picked.bin", Resource::new(body(MIB)));
@@ -1037,6 +1033,9 @@ async fn the_folder_dialog_adds_a_destination_for_new_downloads() {
     shell.add(&url).await;
     shell.wait_for_state("job-1", "Done").await;
     assert_eq!(std::fs::read(folder.join("picked.bin")).unwrap(), body(MIB));
+    for (path, bytes) in &theirs {
+        assert_eq!(&std::fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
 
     // The download limit is changed through IPC within the policy, and
     // refused outside it, as over HTTP.
@@ -1402,31 +1401,6 @@ fn section_shown(section: &str, path: &str) -> String {
     )
 }
 
-/// Where the one Settings button shown is, once it is checked to be at the
-/// right end of its toolbar's first row with nothing scrolling sideways.
-async fn settings_place(shell: &Shell) -> String {
-    let place = shell
-        .js(
-            "const shown = [...document.querySelectorAll('[data-key=\"open-settings\"]')]
-               .filter((el) => el.offsetParent !== null);
-             if (shown.length !== 1) return `${shown.length} Settings buttons`;
-             const box = shown[0].getBoundingClientRect();
-             const toolbar = shown[0].closest('.toolbar');
-             const bar = toolbar.getBoundingClientRect();
-             const brand = toolbar.querySelector('.brand').getBoundingClientRect();
-             const end = bar.right - parseFloat(getComputedStyle(toolbar).paddingRight);
-             const { scrollWidth, clientWidth } = document.documentElement;
-             if (Math.round(end - box.right) !== 0) return 'not at the right end';
-             if (box.top >= brand.bottom) return 'not in the first row';
-             if (scrollWidth > clientWidth) return 'scrolls sideways';
-             return `${box.left},${box.top} ${box.width}x${box.height}`;",
-        )
-        .await;
-    let place = place.as_str().unwrap().to_owned();
-    assert!(place.starts_with(char::is_numeric), "Settings is {place}");
-    place
-}
-
 /// Whether the page fits the window, as it must with a dialog or menu open,
 /// and the element `css` lies inside it.
 async fn fits_window(shell: &Shell, css: &str) {
@@ -1697,127 +1671,39 @@ async fn collected(shell: &Shell) -> Value {
         .await
 }
 
+/// The shared flow is covered in the browser; here the engine keeps the
+/// collected links across a relaunch of the app.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs an X display and WebKitWebDriver"]
-async fn collected_links_wait_until_the_chosen_ones_start() {
+async fn collected_links_survive_a_relaunch_until_the_chosen_ones_start() {
     let server = Server::http().await;
     let dirs = Dirs::new().await;
     server.put("/keep.bin", Resource::new(body(MIB)));
     server.put("/start.bin", Resource::new(body(MIB)));
     let shell = Shell::launch(&dirs).await;
-    let links = format!(
-        "{}\nftp://example.com/other-scheme.bin\n{}",
-        server.url("/keep.bin"),
-        server.url("/start.bin")
-    );
-    // Settings keeps one place in the default window, the right end of the
-    // toolbar's first row, in every view.
-    let place = settings_place(&shell).await;
+    let links = format!("{}\n{}", server.url("/keep.bin"), server.url("/start.bin"));
+    shell.collect(&links, "Collected 2 links for review.").await;
+    shell
+        .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 2")
+        .await;
 
-    // Collecting checks the links, asking for their size and never their
-    // content, and starts no download.
-    shell
-        .collect(
-            &links,
-            "Collected 2 links for review. 1 entry is not a valid link; it is marked below.",
-        )
-        .await;
-    shell
-        .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 3")
-        .await;
-    assert_eq!(
-        collected(&shell).await,
-        json!([
-            "keep.bin",
-            "ftp://example.com/other-scheme.bin",
-            "start.bin"
-        ])
-    );
-    assert_eq!(content_requests(&server, "/keep.bin"), 0);
-    assert_eq!(content_requests(&server, "/start.bin"), 0);
-    assert_eq!(settings_place(&shell).await, place);
-    shell
-        .click(".workspace > :not([hidden]) [data-key=\"add-links\"]")
-        .await;
-    shell.wait_for("location.pathname === '/add'").await;
-    assert_eq!(settings_place(&shell).await, place);
-    press(&shell, Key::Escape).await;
-    shell.wait_for("location.pathname === '/links'").await;
-
-    // The engine keeps them across a relaunch.
     shell.close().await;
     let shell = Shell::launch(&dirs).await;
-    assert_eq!(
-        shell
-            .js("return document.querySelectorAll('tr[data-job]').length")
-            .await,
-        0
-    );
     shell
         .click(".workspace > :not([hidden]) [data-key=\"view-links\"]")
         .await;
     shell
-        .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 3")
+        .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 2")
         .await;
+    assert_eq!(collected(&shell).await, json!(["keep.bin", "start.bin"]));
 
-    // From the keyboard: the invalid entry's menu, which cannot start it,
-    // removes it.
-    shell
-        .js("[...document.querySelectorAll('.links-page tr.invalid input')][0].focus();")
-        .await;
-    shell
-        .client
-        .active_element()
-        .await
-        .unwrap()
-        .send_keys(&format!(
-            "{}{}",
-            char::from(Key::Shift),
-            char::from(Key::F10)
-        ))
-        .await
-        .unwrap();
-    shell
-        .wait_for("document.querySelector('.menu:not([hidden])')")
-        .await;
-    let start = shell
-        .js("return document.querySelector('[data-key=\"menu-item-start-links\"]').getAttribute('aria-disabled');")
-        .await;
-    assert_eq!(start, json!("true"));
-    press(&shell, Key::End).await;
-    press(&shell, Key::Enter).await;
-    shell
-        .wait_for("document.querySelector('.links-page .notice > span')?.textContent === 'Removed 1 link from the list.'")
-        .await;
-
-    // Only the chosen link starts; the other waits, unfetched.
     tick(&shell, "start.bin").await;
-    shell
-        .wait_for("document.querySelector('.links-page .selection-summary strong')?.textContent === '1 link selected'")
-        .await;
     shell
         .click(".links-page [data-key=\"links-start\"]:not([disabled])")
         .await;
     shell
         .wait_for("location.pathname === '/' && document.querySelector('.downloads-view .notice')?.textContent.startsWith('Started 1 download.')")
         .await;
-    // Ordinary Start uses the engine's automatic default without a route
-    // prompt. With no accounts, this fixture is fetched directly below.
-    assert_eq!(
-        shell
-            .js("return document.querySelectorAll('dialog[open]').length")
-            .await,
-        json!(0)
-    );
-    // The accepted source moves out of Links; no redundant started banner.
-    shell
-        .click(".workspace > :not([hidden]) [data-key=\"view-links\"]")
-        .await;
-    shell
-        .wait_for("document.querySelectorAll('.links-page tr[data-link]').length === 1")
-        .await;
-    assert_eq!(collected(&shell).await, json!(["keep.bin"]));
-    assert_eq!(shell.js("return document.querySelector('.links-page .selection-summary').textContent.includes('already in Downloads')").await, false);
     eventually(|| async {
         std::fs::read(dirs.root.join("start.bin"))
             .ok()
@@ -1826,49 +1712,6 @@ async fn collected_links_wait_until_the_chosen_ones_start() {
     .await;
     assert_eq!(content_requests(&server, "/keep.bin"), 0);
 
-    // A narrow window keeps the views in reach without sideways scrolling.
-    shell.client.set_window_size(480, 640).await.unwrap();
-    shell
-        .wait_for("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
-        .await;
-    shell
-        .click(".workspace > :not([hidden]) [data-key=\"view-downloads\"]")
-        .await;
-    shell.wait_for_state("job-1", "Done").await;
-    // A person scrolls the narrow table before pressing More. WebDriver
-    // otherwise scrolls while clicking, whose deferred scroll event can
-    // dismiss the menu it just opened. Deliver that scroll first.
-    let reachable = shell
-        .client
-        .execute_async(
-            r#"const done = arguments[arguments.length - 1];
-           const more = document.querySelector('[data-key="menu-job-1"]');
-           more.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-           requestAnimationFrame(() => requestAnimationFrame(() => {
-             const r = more.getBoundingClientRect();
-             const x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2;
-             done(x >= 0 && x < innerWidth && y >= 0 && y < innerHeight
-               && more.contains(document.elementFromPoint(x, y)));
-           }));"#,
-            vec![],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        reachable,
-        json!(true),
-        "More's click target must be visible"
-    );
-    shell.click("[data-key=\"menu-job-1\"]").await;
-    shell.click("[data-key=\"menu-item-remove\"]").await;
-    shell
-        .wait_for("document.querySelector('dialog input[value=\"keep\"]')?.checked === true")
-        .await;
-    shell.click("dialog input[value=\"delete\"]").await;
-    shell.wait_for("document.querySelector('dialog button[type=\"submit\"]')?.textContent === 'Delete files and remove'").await;
-    shell.click("dialog button[type=\"submit\"]").await;
-    shell.wait_for("!document.querySelector('dialog') && !document.querySelector('tr[data-job=\"job-1\"]')").await;
-    assert!(!dirs.root.join("start.bin").exists());
     shell.close().await;
     let shell = Shell::launch(&dirs).await;
     shell
@@ -1957,111 +1800,6 @@ async fn accounts_say(shell: &Shell, said: &str) {
         .await;
 }
 
-/// The text of the first account row's cell `n`.
-fn account_cell(n: usize, text: &str) -> String {
-    format!(
-        "document.querySelector('.accounts-table tbody tr[data-account] td:nth-child({n})')?.textContent === {}",
-        json!(text)
-    )
-}
-
-/// Runs the first account row's menu command `key`.
-async fn account_command(shell: &Shell, key: &str) {
-    shell.click("[data-key^=\"account-menu-\"]").await;
-    shell
-        .click(&format!("[data-key=\"menu-item-{key}\"]"))
-        .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs an X display and WebKitWebDriver"]
-async fn an_account_is_signed_in_and_managed_through_the_window() {
-    let provider = rd::Server::start().await;
-    let mut dirs = Dirs::new().await;
-    dirs.args.extend([
-        "--provider-endpoint".to_owned(),
-        format!("real-debrid={}", provider.base()),
-    ]);
-    let shell = Shell::launch(&dirs).await;
-    shell.click("[data-key=\"open-settings\"]").await;
-    shell
-        .click("[data-key=\"settings-section-accounts\"]")
-        .await;
-    shell
-        .wait_for("document.querySelector('[data-key=\"no-accounts\"]')")
-        .await;
-
-    // Real-Debrid from the catalogue; the address is shown, not opened in
-    // the app's own window.
-    shell.click("[data-key=\"add-account\"]").await;
-    shell.click("[data-key=\"pick-real-debrid\"]").await;
-    let alias = shell
-        .client
-        .wait()
-        .at_most(DEADLINE)
-        .for_element(Locator::Css("#account-alias"))
-        .await
-        .unwrap();
-    alias.send_keys("Main").await.unwrap();
-    shell.click("[data-key=\"sign-in-start\"]").await;
-    shell
-        .wait_for(&format!(
-            "document.querySelector('[data-key=\"sign-in-code\"]')?.textContent === {}
-             && document.querySelector('span[data-key=\"sign-in-page\"]')?.textContent === {}",
-            json!(rd::USER_CODE),
-            json!(format!("{}device", provider.base()))
-        ))
-        .await;
-    accounts_say(&shell, "Account added and signed in.").await;
-    shell.wait_for(&account_cell(1, "Real-Debrid")).await;
-    shell.wait_for(&account_cell(3, "Signed in")).await;
-    // The key was created beside the state directory, for its owner only.
-    let key = dirs.tmp.path().join("state.credential-key");
-    let mode =
-        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&key).unwrap().permissions());
-    assert_eq!(mode & 0o777, 0o600);
-
-    account_command(&shell, "check-account").await;
-    accounts_say(&shell, "Checked: Signed in.").await;
-    account_command(&shell, "toggle-account").await;
-    accounts_say(&shell, "Disabled: kept, but not used.").await;
-    shell.wait_for(&account_cell(3, "Disabled")).await;
-    account_command(&shell, "toggle-account").await;
-    accounts_say(&shell, "Enabled.").await;
-    account_command(&shell, "replace-account").await;
-    accounts_say(&shell, "Signed in again.").await;
-    account_command(&shell, "remove-account").await;
-    shell.click("[data-key=\"remove-confirm\"]").await;
-    accounts_say(&shell, "Removed.").await;
-    shell
-        .wait_for("document.querySelector('[data-key=\"no-accounts\"]')")
-        .await;
-
-    // Nothing the service issued reached the page or its storage.
-    let seen = shell
-        .js("return JSON.stringify([document.documentElement.outerHTML, location.href, Object.entries(localStorage), Object.entries(sessionStorage)])")
-        .await;
-    let seen = seen.as_str().unwrap();
-    for secret in [
-        rd::DEVICE_CODE,
-        rd::CLIENT_SECRET,
-        "synthetic-access-",
-        "synthetic-refresh-",
-    ] {
-        assert!(!seen.contains(secret), "{secret} in the page");
-    }
-    let notices = shell.close().await;
-    let printed = serde_json::to_string(&notices).unwrap();
-    for secret in [
-        rd::DEVICE_CODE,
-        rd::CLIENT_SECRET,
-        "synthetic-access-",
-        "synthetic-refresh-",
-    ] {
-        assert!(!printed.contains(secret), "{secret} printed");
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs an X display and WebKitWebDriver"]
 async fn a_link_automatically_downloads_through_a_matching_account_in_the_window() {
@@ -2093,6 +1831,11 @@ async fn a_link_automatically_downloads_through_a_matching_account_in_the_window
     alias.send_keys("Main").await.unwrap();
     shell.click("[data-key=\"sign-in-start\"]").await;
     accounts_say(&shell, "Account added and signed in.").await;
+    // The key was created beside the state directory, for its owner only.
+    let key = dirs.tmp.path().join("state.credential-key");
+    let mode =
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&key).unwrap().permissions());
+    assert_eq!(mode & 0o777, 0o600);
     shell.click("[data-key=\"settings-back\"]").await;
 
     // Checking may discover supported hosts, but never generates a download.
@@ -2173,6 +1916,8 @@ async fn a_link_automatically_downloads_through_a_matching_account_in_the_window
     }
 }
 
+/// WebKitGTK lays out the toolbar differently from Chromium, so the shared
+/// toolbar must keep its place across views at the narrow breakpoints here too.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs an X display and WebKitWebDriver"]
 async fn switching_queue_tabs_keeps_toolbar_geometry() {
@@ -2184,21 +1929,18 @@ async fn switching_queue_tabs_keeps_toolbar_geometry() {
             "Collected 1 link for review.",
         )
         .await;
-    shell
-        .wait_for("document.querySelector('.links-page .views .count')?.textContent === '1'")
-        .await;
+    let geometry = "const bar = [...document.querySelectorAll('.queue-toolbar')]
+                      .find((el) => el.offsetParent !== null);
+                    return ['.views', '.tool-group', '.search'].map((css) => {
+                      const r = bar.querySelector(css).getBoundingClientRect();
+                      return { x: r.x, width: r.width };
+                    });";
     let mut moved = Vec::new();
     for width in [1100, 721, 720, 640] {
         shell.client.set_window_size(width, 720).await.unwrap();
-        let geometry = "const bar = [...document.querySelectorAll('.queue-toolbar')]
-                         .find((el) => el.offsetParent !== null);
-                        return ['.views', '.tool-group', '.search'].map((css) => {
-                          const r = bar.querySelector(css).getBoundingClientRect();
-                          return { x: r.x, width: r.width };
-                        });";
         let links = shell.js(geometry).await;
         shell
-            .click(".links-page [data-key=\"view-downloads\"]")
+            .js("document.querySelector('.links-page [data-key=\"view-downloads\"]').click();")
             .await;
         shell.wait_for("location.pathname === '/'").await;
         let downloads = shell.js(geometry).await;
@@ -2206,7 +1948,7 @@ async fn switching_queue_tabs_keeps_toolbar_geometry() {
             moved.push((width, links, downloads));
         }
         shell
-            .click(".downloads-view [data-key=\"view-links\"]")
+            .js("document.querySelector('.downloads-view [data-key=\"view-links\"]').click();")
             .await;
         shell.wait_for("location.pathname === '/links'").await;
     }

@@ -1,25 +1,8 @@
-//! Durable transfer progress (architecture brief section 7.6, ADR-16;
-//! tests T23, T25, T27).
+//! Durable transfer progress (ADR-16).
 //!
-//! The rule: **the durable range map never outruns durable file data.**
-//!
-//! * A checkpoint can only be built by [`StagingFile::sync_ranges`], which
-//!   synchronizes the partial file first. A sync error is a failure, never
-//!   progress. The database commits afterwards, so a crash in between
-//!   leaves bytes on disk that the map does not trust, never the reverse.
-//! * Ranges are half-open byte intervals of the partial owned by one job
-//!   generation. A checkpoint from any other generation is rejected, so a
-//!   late writer from a cancelled or pre-restart run cannot claim coverage.
-//! * New ranges must not overlap ranges already durable or each other: each
-//!   byte is acknowledged once, by the writer that owns it. Adjacent ranges
-//!   are merged when stored.
-//! * Coverage is the set of committed ranges. File length is never used as
-//!   coverage, so a sparse or preallocated file with holes is not mistaken
-//!   for a complete one.
-//!
-//! * The synced file must be the staging file registered for that job
-//!   generation, matched by root, name, and file identity, so bytes written
-//!   to any other file cannot be certified.
+//! The durable range map never outruns durable file data: a checkpoint comes
+//! only from a synced staging file of the same job generation, ranges never
+//! overlap, and file length is never taken as coverage.
 
 use rangemap::RangeSet;
 use rusqlite::Transaction;
@@ -28,7 +11,7 @@ use wayfetch_domain::id::JobId;
 use wayfetch_domain::job::{JobError, JobStage};
 use wayfetch_domain::version::Generation;
 
-use super::{Store, StoreError, files, jobs, sql};
+use super::{OrCorrupt, Store, StoreError, files, jobs, sql};
 #[cfg(doc)]
 use crate::fs::StagingFile;
 use crate::fs::SyncedRanges;
@@ -70,8 +53,7 @@ impl Store {
         }
         // Disjoint ranges below i64::MAX cannot sum past u64::MAX.
         let durable: u64 = coverage.iter().map(|r| r.end - r.start).sum();
-        let durable_sql =
-            i64::try_from(durable).map_err(|_| StoreError::Corrupt("durable bytes"))?;
+        let durable_sql = i64::try_from(durable).or_corrupt("durable bytes")?;
         let partial = match partial {
             Some((id, seq)) => {
                 tx.execute(
@@ -149,9 +131,9 @@ pub(super) fn load_coverage(
 }
 
 fn offset(value: i64) -> Result<u64, StoreError> {
-    u64::try_from(value).map_err(|_| StoreError::Corrupt("byte offset"))
+    u64::try_from(value).or_corrupt("byte offset")
 }
 
 fn offset_sql(value: u64) -> Result<i64, StoreError> {
-    i64::try_from(value).map_err(|_| StoreError::Corrupt("byte offset"))
+    i64::try_from(value).or_corrupt("byte offset")
 }

@@ -1,4 +1,4 @@
-//! Generation-private staging files (section 7.6, tests T27 and T28).
+//! Generation-private staging files.
 
 use std::fs::File;
 use std::io;
@@ -22,7 +22,9 @@ pub struct StagingRecord {
     /// Owning generation. A file adopted after a restart keeps its name but
     /// changes owner.
     pub generation: Generation,
-    /// Name inside the root's staging directory.
+    /// Name inside the root's staging directory: `<instance>/<file>` in
+    /// the folder of the profile that created it, or a bare file name for
+    /// one an earlier version staged directly in the directory.
     pub name: String,
     /// Identity of the file created under that name.
     pub identity: FileIdentity,
@@ -42,7 +44,7 @@ impl StagingFile {
     }
 
     /// Current file length. Not coverage: a preallocated or sparse file is
-    /// longer than its written data (T25).
+    /// longer than its written data.
     pub fn file_len(&self) -> io::Result<u64> {
         Ok(self.file.metadata()?.len())
     }
@@ -97,9 +99,11 @@ impl SyncedRanges {
 }
 
 impl Root {
-    /// Creates the private staging file for `job` at `generation`. The name
-    /// is derived from both and created exclusively, so no other generation
-    /// can share its inode. The directory entry is synchronized before this
+    /// Creates the private staging file for `job` at `generation` in this
+    /// profile's staging folder. The name is derived from both and created
+    /// exclusively, so no other generation can share its inode, and the
+    /// folder is the profile's own, so another profile staging the same job
+    /// and generation IDs in the same root never meets it. The directory entry is synchronized before this
     /// returns, so a store record made afterwards never names a file a crash
     /// could lose. A crash before the record commits leaves an unowned file,
     /// which is never adopted and which the next start removes.
@@ -128,8 +132,28 @@ impl Root {
     pub fn staging_file_path(&self, name: &str) -> std::path::PathBuf {
         self.path()
             .join(super::PRIVATE_DIR)
-            .join("staging")
+            .join(super::root::STAGING)
             .join(name)
+    }
+
+    /// The directory holding the staging file `record` names, and its name
+    /// there: this profile's folder, or the shared directory for a file an
+    /// earlier version staged. A record of another root, or a name in
+    /// another profile's folder, finds nothing: that file is never touched.
+    pub(super) fn locate<'a>(
+        &'a self,
+        record: &'a StagingRecord,
+    ) -> Result<(&'a cap_std::fs::Dir, &'a str), FsError> {
+        if record.root != self.id {
+            return Err(FsError::WrongRoot(record.root));
+        }
+        match record.name.split_once('/') {
+            None => Ok((&self.legacy_staging, &record.name)),
+            Some((owner, file)) if owner == self.owner && !file.contains('/') => {
+                Ok((&self.staging, file))
+            }
+            Some(_) => Err(FsError::StagingMissing(record.name.clone())),
+        }
     }
 
     fn create_named(
@@ -145,6 +169,7 @@ impl Root {
             .open_with(&name, &options)
             .map_err(FsError::io("create staging file"))?;
         sys::sync_dir(&self.staging).map_err(FsError::io("sync staging directory"))?;
+        let name = format!("{}/{name}", self.owner);
         let identity = sys::identity(
             &file
                 .metadata()
@@ -166,7 +191,7 @@ impl Root {
     /// `durable_end`, after checking that it is still the file that was
     /// created and still holds every durable byte. A missing, replaced, or
     /// shrunk file is a reconciliation failure: its partial must restart,
-    /// never be appended to (T28).
+    /// never be appended to.
     ///
     /// Content changed in place by something else cannot be detected here;
     /// verification of the finished file catches it.
@@ -175,12 +200,10 @@ impl Root {
         record: &StagingRecord,
         durable_end: u64,
     ) -> Result<StagingFile, FsError> {
-        if record.root != self.id {
-            return Err(FsError::WrongRoot(record.root));
-        }
+        let (dir, name) = self.locate(record)?;
         let mut options = OpenOptions::new();
         options.read(true).write(true);
-        let file = match self.staging.open_with(&record.name, &options) {
+        let file = match dir.open_with(name, &options) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(FsError::StagingMissing(record.name.clone()));
@@ -225,34 +248,29 @@ pub enum Removal {
 }
 
 impl Root {
-    /// Removes the recorded staging file `record`, after checking that its
-    /// name still holds the very file that was created: a regular file
-    /// with the recorded identity. Anything else is left in place. Whether
-    /// this removed the name or found it already gone, perhaps removed by
-    /// a pass a crash interrupted before its directory sync, the directory
-    /// is synchronized before this returns, so a record deleted afterwards
-    /// never outlives a name a crash could bring back.
+    /// Removes the recorded staging file `record` if its name still holds
+    /// the file with the recorded identity; anything else is left in
+    /// place. The directory is synced before returning, so the record can
+    /// be deleted safely afterwards. Files no record names are never
+    /// removed, and the directory is never scanned.
     ///
-    /// Only a recorded identity proves the engine created a file. A file in
-    /// the staging directory that no record names (a crash between creating
-    /// and registering it) is never removed: its name alone does not prove
-    /// it is still the engine's file.
-    ///
-    /// The check and the removal are two steps; a file swapped in between
-    /// by something else with write access to the private staging
+    /// The check and the removal are two steps, so a file swapped in
+    /// between by something with write access to the private staging
     /// directory would be removed.
     pub fn remove_staging(&self, record: &StagingRecord) -> Result<Removal, FsError> {
-        if record.root != self.id {
-            return Err(FsError::WrongRoot(record.root));
-        }
+        let (dir, name) = match self.locate(record) {
+            Ok(found) => found,
+            Err(FsError::StagingMissing(_)) => return Ok(Removal::Foreign),
+            Err(e) => return Err(e),
+        };
         // Never follows a symlink: a link planted under the name is foreign.
-        let found = match self.staging.symlink_metadata(&record.name) {
+        let found = match dir.symlink_metadata(name) {
             Ok(meta) if !meta.is_file() || !sys::identity(&meta)?.matches(&record.identity) => {
                 return Ok(Removal::Foreign);
             }
             Ok(_) => {
                 crash_point!("cleanup-before-unlink");
-                match self.staging.remove_file(&record.name) {
+                match dir.remove_file(name) {
                     Ok(()) => Removal::Removed,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => Removal::Missing,
                     Err(e) => return Err(FsError::io("remove staging file")(e)),
@@ -261,7 +279,7 @@ impl Root {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Removal::Missing,
             Err(e) => return Err(FsError::io("inspect staging file")(e)),
         };
-        sys::sync_dir(&self.staging).map_err(FsError::io("sync staging directory"))?;
+        sys::sync_dir(dir).map_err(FsError::io("sync staging directory"))?;
         Ok(found)
     }
 }
@@ -291,6 +309,11 @@ pub(crate) mod tests {
 
     pub(crate) fn staging_path(tmp: &Path, name: &str) -> std::path::PathBuf {
         tmp.join(PRIVATE_DIR).join("staging").join(name)
+    }
+
+    /// The recorded name of `file` in `root`'s own staging folder.
+    pub(crate) fn own_name(root: &Root, file: &str) -> String {
+        format!("{}/{file}", root.owner)
     }
 
     #[test]
@@ -426,5 +449,83 @@ pub(crate) mod tests {
         assert_eq!(root.remove_staging(&record).unwrap(), Removal::Foreign);
         assert!(path.is_symlink());
         assert_eq!(std::fs::read(outside.path()).unwrap(), b"outside");
+    }
+
+    /// Two profiles' roots in one shared folder, each with its own ID.
+    pub(crate) fn shared() -> (tempfile::TempDir, Root, Root) {
+        let tmp = tempfile::tempdir().unwrap();
+        let open = |id| {
+            let (id, instance) = (RootId::from_u64(id).unwrap(), InstanceId::generate());
+            Root::initialize(tmp.path(), id, instance).unwrap();
+            Root::open(tmp.path(), id, instance).unwrap()
+        };
+        let (a, b) = (open(1), open(1));
+        (tmp, a, b)
+    }
+
+    #[test]
+    fn profiles_sharing_a_root_stage_apart() {
+        let (tmp, a, b) = shared();
+        // The same job and generation IDs, in two profiles' stores.
+        let ours = a.create_staging(job(), Generation::INITIAL).unwrap();
+        let theirs = b.create_staging(job(), Generation::INITIAL).unwrap();
+        let (ours, theirs) = (ours.record().clone(), theirs.record().clone());
+        assert_ne!(ours.name, theirs.name);
+        assert_ne!(ours.identity, theirs.identity);
+        let path = |r: &StagingRecord| staging_path(tmp.path(), &r.name);
+        assert_eq!(
+            path(&ours),
+            tmp.path()
+                .join(PRIVATE_DIR)
+                .join("staging")
+                .join(a.owner.as_str())
+                .join(format!("{}.g{}.part", job(), Generation::INITIAL))
+        );
+        assert!(path(&ours).is_file() && path(&theirs).is_file());
+
+        // Neither can reach the other's file, even by its record.
+        let foreign = StagingRecord {
+            root: a.id(),
+            ..theirs.clone()
+        };
+        assert!(matches!(
+            a.reopen_staging(&foreign, 0),
+            Err(FsError::StagingMissing(_))
+        ));
+        assert_eq!(a.remove_staging(&foreign).unwrap(), Removal::Foreign);
+        assert!(path(&theirs).is_file());
+        // Removing its own leaves the other's in place.
+        assert_eq!(a.remove_staging(&ours).unwrap(), Removal::Removed);
+        assert!(!path(&ours).exists());
+        b.reopen_staging(&theirs, 0).unwrap();
+    }
+
+    #[test]
+    fn a_partial_an_earlier_version_staged_is_still_continued() {
+        let (tmp, root) = root();
+        // An earlier version staged directly in the shared directory.
+        let name = format!("{}.g{}.part", job(), Generation::INITIAL);
+        let path = staging_path(tmp.path(), &name);
+        std::fs::write(&path, b"0123456789").unwrap();
+        let identity = sys::identity(&root.legacy_staging.metadata(&name).unwrap()).unwrap();
+        let record = StagingRecord {
+            root: root.id(),
+            job: job(),
+            generation: Generation::INITIAL,
+            name,
+            identity,
+        };
+        let file = root.reopen_staging(&record, 10).unwrap();
+        file.write_all_at(b"abc", 10).unwrap();
+        drop(file);
+        assert_eq!(std::fs::read(&path).unwrap(), b"0123456789abc");
+        assert_eq!(root.remove_staging(&record).unwrap(), Removal::Removed);
+        assert!(!path.exists());
+        // New files go in the profile's own folder.
+        let next = root.create_staging(job(), Generation::INITIAL).unwrap();
+        assert_eq!(
+            next.record().name,
+            own_name(&root, &format!("{}.g{}.part", job(), Generation::INITIAL))
+        );
     }
 }

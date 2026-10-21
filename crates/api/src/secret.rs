@@ -11,6 +11,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
+pub(crate) use wayfetch_engine::fs::{create_private, is_private};
 
 /// Random bytes in a generated secret: 256 bits.
 pub(crate) const SECRET_BYTES: usize = 32;
@@ -40,7 +41,7 @@ pub(crate) enum ReadError {
 /// Reads the owner-only text file at `path`, of at most `max` bytes.
 pub(crate) fn read_private(path: &Path, max: u64) -> Result<String, ReadError> {
     let file = File::open(path).map_err(ReadError::Io)?;
-    if !is_private(&file).map_err(ReadError::Io)? {
+    if !is_private(&file.metadata().map_err(ReadError::Io)?) {
         return Err(ReadError::Exposed);
     }
     let mut text = String::new();
@@ -51,23 +52,6 @@ pub(crate) fn read_private(path: &Path, max: u64) -> Result<String, ReadError> {
         return Err(ReadError::TooLarge);
     }
     Ok(text)
-}
-
-/// Creates `path`, which must not exist, readable and writable only by
-/// its owner.
-#[cfg(unix)]
-pub(crate) fn create_private(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn create_private(path: &Path) -> io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 /// Opens `path` for locking, creating it owner-only if missing.
@@ -112,23 +96,7 @@ pub(crate) fn private_dir(path: &Path) -> io::Result<bool> {
             "not a directory",
         ));
     }
-    Ok(mode_is_private(&metadata))
-}
-
-/// Whether only `file`'s owner may read or change it.
-pub(crate) fn is_private(file: &File) -> io::Result<bool> {
-    Ok(mode_is_private(&file.metadata()?))
-}
-
-#[cfg(unix)]
-fn mode_is_private(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o077 == 0
-}
-
-#[cfg(not(unix))]
-fn mode_is_private(_: &fs::Metadata) -> bool {
-    true
+    Ok(is_private(&metadata))
 }
 
 /// Removes `path`, which may already be gone.

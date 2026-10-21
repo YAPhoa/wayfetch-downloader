@@ -1,14 +1,10 @@
-// The Plugins section of Settings: the programs Wayfetch runs for video
-// links, such as yt-dlp, which reads YouTube's titles and formats, and
-// ffmpeg, which joins a video with its sound and makes MP3 files. Each
-// shows the version it reports and whether it can be used. Each row's
-// menu turns its plugin off or on, checks for a newer official release of
-// one Wayfetch can update and installs it, and removes a copy Wayfetch
-// installed, going back to the copy included with Wayfetch, if any.
+// Settings > Plugins: the programs Wayfetch runs for video links, such as
+// yt-dlp and ffmpeg, with their versions and state. Each row's menu turns a
+// plugin on or off, updates it, or removes the copy Wayfetch installed.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { pluginStatus, pluginUse } from '../client/media.js';
-import { openDialog } from './dialog.js';
+import { confirmDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { icon } from './icons.js';
 import { Menu, rowMenuHandlers } from './menu.js';
@@ -191,27 +187,9 @@ export function pluginsSection(context) {
     const after = plugin.fallback_version
       ? `Wayfetch goes back to ${plugin.name} ${plugin.fallback_version}, the copy it found before.`
       : `No other copy of ${plugin.name} was found, so what needs it stops working until it is updated again.`;
-    const dialog = openDialog(
-      { title: `Remove ${plugin.name}`, className: 'confirm' },
-      h('p', null, `Delete the copy of ${plugin.name} that Wayfetch installed? ${after}`),
-      h(
-        'div',
-        { class: 'dialog-actions' },
-        h('button', { type: 'button', 'data-key': 'remove-cancel', onclick: () => dialog.close() }, 'Cancel'),
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'primary',
-            'data-key': 'remove-confirm',
-            onclick: () => {
-              dialog.close();
-              void run(plugin, 'remove');
-            },
-          },
-          'Remove',
-        ),
-      ),
+    confirmDialog(
+      { title: `Remove ${plugin.name}`, confirm: 'Remove', onConfirm: () => void run(plugin, 'remove') },
+      `Delete the copy of ${plugin.name} that Wayfetch installed? ${after}`,
     );
   };
 

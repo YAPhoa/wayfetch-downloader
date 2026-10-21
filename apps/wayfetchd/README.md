@@ -14,8 +14,8 @@ wayfetchd init-root --state-dir /srv/wayfetch/state /srv/downloads
 wayfetchd run --state-dir /srv/wayfetch/state --download-root /srv/downloads \
     --token-file /srv/wayfetch/api-tokens
 
-# Or let the first start (no state directory yet) initialize the download root,
-# as the container image does; later starts never initialize a root
+# Or let the first start initialize the download root, as the container image
+# does; once the state directory has recorded it, it is never initialized again
 wayfetchd run --state-dir /srv/wayfetch/state --download-root /srv/downloads \
     --token-file /srv/wayfetch/api-tokens --init-root-on-first-start
 

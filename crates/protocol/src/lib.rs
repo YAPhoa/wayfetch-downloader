@@ -1,19 +1,9 @@
-//! Transport-neutral commands, queries, errors, and events.
+//! Transport-neutral commands, queries, errors, and events, shared by the
+//! HTTP and desktop IPC adapters.
 //!
-//! Shared by the HTTP adapter and the desktop IPC adapter. It must not depend
-//! on any host, HTTP framework, or UI toolkit (architecture brief section 4.5).
-//! The wire form is JSON via serde; both transports carry these types
-//! unchanged, so they share validation, idempotency, revision checks, error
-//! codes, and resynchronization (test T62).
-//!
-//! * [`instance`]: instance identity, protocol version, and the handshake;
-//! * [`account`]: provider accounts and their authorization, redacted;
-//! * [`command`]: idempotent mutations and their results;
-//! * [`query`]: bounded, paginated reads;
-//! * [`request`]: command request bodies clients send, shared by transports;
-//! * [`event`]: durable events, progress samples, and resync rules;
-//! * [`media`]: media links, their choices, and the plugins they need;
-//! * [`error`]: structured errors.
+//! The wire form is JSON via serde, carried unchanged by both transports so
+//! they behave the same. This crate depends on no host, HTTP framework, or
+//! UI toolkit.
 
 pub mod account;
 pub mod command;

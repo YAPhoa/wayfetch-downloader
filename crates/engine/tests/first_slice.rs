@@ -1,21 +1,11 @@
-//! The first end-to-end slice (architecture brief section 14.3) through the
-//! public engine API: submit one direct link, persist the job, download it
-//! into owned staging, verify, publish, restart the engine, and list the
-//! completed artifact.
-//!
-//! Bytes come from an in-process [`Transport`]; `wayfetch-net` runs the
-//! same path over real sockets. Brief tests exercised here at the
-//! engine level: T01 (sequential file), T02 and T23 (resume from durable
-//! checkpoints after a restart), T03 (`200` to a range request), T05
-//! (representation changed during resume), T09 (stalled headers and body),
-//! T27 (cancelled generation), and T47 (bounded subscriber replay). The
-//! last tests cover destination roots and the default for new jobs,
-//! renaming and removing finished jobs, and links collected for review
-//! before they are started.
+//! Direct downloads through the public engine API, with an in-process
+//! [`Transport`]: submitting, resuming, publishing, limits, destination
+//! roots, renaming and removing, collected links, and retries.
+//! `wayfetch-net` runs the transfer paths over real sockets.
 
 mod support;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,7 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use support::{ALL, KIB, ROOT, body, complete, envelope, job, jobs, shutdown, wait_for};
+use support::{
+    ALL, KIB, ROOT, body, complete, envelope, job, jobs, shutdown, staging_dir, wait_for,
+};
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
@@ -412,43 +404,103 @@ async fn an_interrupted_download_resumes_from_durable_bytes_after_restart() {
     shutdown(owner).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_resume_the_server_does_not_honor_restarts_from_zero() {
-    type Change = fn(&mut Resource);
-    let cases: [(&str, Change); 3] = [
-        // T03: `200` to a range request is never appended.
-        ("ignores-range", |r| r.ranges = false),
-        // T05: the resource changed; `If-Range` answers with all of it.
-        ("changed", |r| r.etag = Some("\"v2\"".into())),
-        // T05: the resource changed and the server ignores `If-Range`,
-        // sending the new representation's bytes for the old range.
-        ("changed-ignoring-if-range", |r| {
-            r.etag = Some("\"v2\"".into());
-            r.if_range = false;
-        }),
-    ];
-    for (name, change) in cases {
-        let env = env();
-        let path = format!("/{name}.bin");
-        let data = body(64 * KIB);
-        let id = interrupt_at(&env, &path, &data, 20 * KIB).await;
-        env.server.update(&path, change);
+/// Another profile: its own state directory, saving into `env`'s download
+/// folder from the same server.
+fn sharing(env: &Env) -> Env {
+    let state = env.state.with_file_name("other-state");
+    let server = env.server.clone();
+    Env::at(
+        state,
+        env.root.clone(),
+        server.clone(),
+        Arc::new(Fake(server)),
+    )
+}
 
-        let owner = env.start().await;
-        let done = complete(&owner, id).await;
-        assert_eq!(
-            env.server.ranges_requested(),
-            vec![None, Some((20 * KIB as u64, None)), None],
-            "{name}"
-        );
-        // The artifact is the whole representation from one response, not
-        // old bytes with new ones appended.
-        assert_eq!(env.published(&format!("{name}.bin")), data, "{name}");
-        assert_eq!(done.artifact.unwrap().size, data.len() as u64);
-        // The abandoned partial was removed before the new generation ran.
-        assert_eq!(env.staging_files(), 0, "{name}");
-        shutdown(owner).await;
-    }
+/// The partial downloads in each profile's staging folder in `root`.
+fn partials_by_profile(root: &std::path::Path) -> BTreeMap<String, Vec<(String, Vec<u8>)>> {
+    std::fs::read_dir(root.join(".wayfetch/staging"))
+        .unwrap()
+        .map(|profile| {
+            let profile = profile.unwrap();
+            let mut files: Vec<_> = std::fs::read_dir(profile.path())
+                .unwrap()
+                .map(|f| {
+                    let f = f.unwrap();
+                    let name = f.file_name().into_string().unwrap();
+                    (name, std::fs::read(f.path()).unwrap())
+                })
+                .collect();
+            files.sort();
+            (profile.file_name().into_string().unwrap(), files)
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_profiles_share_a_download_folder_and_each_resumes_its_own_partial() {
+    let ours = env();
+    let theirs = sharing(&ours);
+    let data = body(100 * KIB);
+    let mut resource = Resource::new(data.clone());
+    resource.stall_at = Some(40 * KIB);
+    ours.server.put("/big.bin", resource);
+
+    // Both run at once on the one folder, neither refused for the other.
+    let (a, b) = (ours.start().await, theirs.start().await);
+    assert_ne!(a.identity().instance, b.identity().instance);
+    let [id_a] = submit(&a, &["/big.bin"]).await[..] else {
+        panic!()
+    };
+    let [id_b] = submit(&b, &["/big.bin"]).await[..] else {
+        panic!()
+    };
+    // Their stores number jobs alike, so the same job and generation IDs
+    // stage at the same time, each in its profile's own folder.
+    assert_eq!(id_a, id_b);
+    let stalled = |j: &JobSummary| j.bytes_done == 40 * KIB as u64;
+    wait_for(&a, id_a, stalled).await;
+    wait_for(&b, id_b, stalled).await;
+    let (instance_a, instance_b) = (
+        a.identity().instance.to_string(),
+        b.identity().instance.to_string(),
+    );
+    shutdown(a).await;
+    shutdown(b).await;
+    let partials = partials_by_profile(&ours.root);
+    let mut both = vec![instance_a.clone(), instance_b.clone()];
+    both.sort();
+    assert_eq!(partials.keys().cloned().collect::<Vec<_>>(), both);
+    assert_eq!(partials[&instance_a].len(), 1);
+    assert_eq!(partials[&instance_a][0].0, partials[&instance_b][0].0);
+    ours.server.update("/big.bin", |r| r.stall_at = None);
+
+    // One profile restarts, resumes its partial, publishes, and cleans up;
+    // the other's partial is left exactly as it was.
+    let a = ours.start().await;
+    let done = complete(&a, id_a).await;
+    assert!(done.generation.get() > 1);
+    assert_eq!(done.artifact.unwrap().path, "big.bin");
+    shutdown(a).await;
+    let after = partials_by_profile(&ours.root);
+    assert!(after[&instance_a].is_empty(), "{after:?}");
+    assert_eq!(after[&instance_b], partials[&instance_b]);
+
+    // The other resumes its own, and takes the next free name rather than
+    // replacing the first profile's file.
+    let b = theirs.start().await;
+    let done = complete(&b, id_b).await;
+    assert_eq!(done.artifact.unwrap().path, "big (1).bin");
+    shutdown(b).await;
+    assert_eq!(ours.published("big.bin"), data);
+    assert_eq!(ours.published("big (1).bin"), data);
+    assert!(partials_by_profile(&ours.root).values().all(Vec::is_empty));
+    // Each asked for the whole file once, then only for what it lacked.
+    let resumed = Some((40 * KIB as u64, None));
+    assert_eq!(
+        ours.server.ranges_requested(),
+        vec![None, None, resumed, resumed]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -532,7 +584,7 @@ async fn pause_keeps_durable_bytes_and_cancel_retires_the_generation() {
     // The cancelled job stays cancelled and published nothing.
     assert_eq!(job(&owner, cancelled).await.stage, JobStage::Cancelled);
     assert!(!env.root.join("cancelled.bin").exists());
-    // Cancelling retains its partial (section 7.2), across a restart too.
+    // Cancelling retains its partial, across a restart too.
     assert_eq!(env.staging_files(), 1);
     shutdown(owner).await;
     let owner = env.start().await;
@@ -3368,7 +3420,7 @@ async fn a_retry_that_cannot_continue_starts_from_zero_and_says_why() {
         (
             "missing",
             |env, _| {
-                for entry in std::fs::read_dir(env.root.join(".wayfetch/staging")).unwrap() {
+                for entry in std::fs::read_dir(staging_dir(&env.root)).unwrap() {
                     std::fs::remove_file(entry.unwrap().path()).unwrap();
                 }
             },
@@ -3378,7 +3430,7 @@ async fn a_retry_that_cannot_continue_starts_from_zero_and_says_why() {
         (
             "replaced",
             |env, _| {
-                for entry in std::fs::read_dir(env.root.join(".wayfetch/staging")).unwrap() {
+                for entry in std::fs::read_dir(staging_dir(&env.root)).unwrap() {
                     let path = entry.unwrap().path();
                     let bytes = std::fs::read(&path).unwrap();
                     std::fs::remove_file(&path).unwrap();

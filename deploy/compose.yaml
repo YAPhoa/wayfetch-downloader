@@ -10,12 +10,12 @@
 # refuses to start otherwise, so an unmounted dataset is never written to.
 #
 # Then, from this folder: docker compose up -d
-# The first start downloads the image (or builds it, if WAYFETCH_IMAGE
-# names one that cannot be pulled) and marks the downloads folder
-# as Wayfetch's; later starts refuse to save into it if that mark is gone.
+# The first start builds the image (or pulls the one WAYFETCH_IMAGE names)
+# and marks the downloads folder as Wayfetch's; later starts refuse to save
+# into it if that mark is gone.
 services:
   wayfetchd:
-    image: ${WAYFETCH_IMAGE:-ghcr.io/yaphoa/wayfetch-downloader:v0.1.0}
+    image: ${WAYFETCH_IMAGE:-wayfetch:local}
     build:
       context: ..
       dockerfile: Dockerfile

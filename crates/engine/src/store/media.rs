@@ -1,21 +1,9 @@
 //! Media links and the conversions of their downloads.
 //!
-//! A collected link a media service recognized is recorded `pending`; the
-//! coordinator checks pending links in the background and records what the
-//! service found, announcing it with `links_changed`. The person's choice
-//! is kept with the link and copied to its job when it starts.
-//!
-//! A media download's staging file holds its streams end to end. When they
-//! must be joined or converted, the output is a second file beside it,
-//! named by the same record (`aux_*`) before anything is written to it:
-//!
-//! * `converting`: `aux_*` is the output being written. A restart removes
-//!   it and converts again from the streams, which are still complete.
-//! * `converted`: the record names the output, and `aux_*`, until it is
-//!   removed, the streams. The output's coverage replaces the streams'.
-//!
-//! Cleanup and explicit deletion remove `aux_*` files like staging files:
-//! by recorded identity only.
+//! A recognized link is checked in the background and the person's format
+//! choice is copied to its job. A join or conversion writes a second file
+//! named by its record (`aux_*`) before anything is written, so a restart
+//! can redo it and cleanup can remove it by identity.
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use url::Url;
@@ -27,7 +15,7 @@ use wayfetch_domain::version::Generation;
 use wayfetch_protocol::event::EventKind;
 use wayfetch_protocol::media::{LinkMedia, MediaChoice, MediaState};
 
-use super::{Store, StoreError, files, key, outbox, sql};
+use super::{OrCorrupt, Store, StoreError, files, key, outbox, sql};
 use crate::fs::{FileIdentity, StagingRecord};
 use crate::media::MediaInfo;
 
@@ -38,7 +26,7 @@ pub(crate) const NEEDS_CONVERTER: &str =
 /// A link's stored choice, the default if none.
 pub(super) fn decode_choice(raw: Option<&str>) -> Result<MediaChoice, StoreError> {
     raw.map_or(Ok(MediaChoice::default()), |raw| {
-        serde_json::from_str(raw).map_err(|_| StoreError::Corrupt("media choice"))
+        serde_json::from_str(raw).or_corrupt("media choice")
     })
 }
 
@@ -49,7 +37,7 @@ pub(super) fn encode_choice(choice: &MediaChoice) -> String {
 
 /// A stored check result.
 pub(super) fn decode_info(raw: Option<&str>) -> Result<Option<MediaInfo>, StoreError> {
-    raw.map(|raw| serde_json::from_str(raw).map_err(|_| StoreError::Corrupt("media info")))
+    raw.map(|raw| serde_json::from_str(raw).or_corrupt("media info"))
         .transpose()
 }
 
@@ -80,7 +68,7 @@ impl LinkColumns {
         let Some(service) = self.service else {
             return Ok(None);
         };
-        let service = ProviderId::new(service).map_err(|_| StoreError::Corrupt("media service"))?;
+        let service = ProviderId::new(service).or_corrupt("media service")?;
         let state = match self.state.as_deref() {
             Some("ready") => MediaState::Ready,
             Some("failed") => MediaState::Unavailable,
@@ -194,8 +182,7 @@ impl Store {
         }
         let (state, info, problem) = match found {
             Ok(info) => {
-                let info = serde_json::to_string(&info.normalized())
-                    .map_err(|_| StoreError::Corrupt("media info"))?;
+                let info = serde_json::to_string(&info.normalized()).or_corrupt("media info")?;
                 // A pathological answer is a failed check, never a huge row.
                 if info.len() > 8192 {
                     (
@@ -431,7 +418,7 @@ pub(super) fn retry_failed(tx: &Transaction<'_>, now: UtcTimestamp) -> Result<us
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<Result<_, _>>()?;
     for (id, url, service) in &failed {
-        let url = Url::parse(url).map_err(|_| StoreError::Corrupt("source URL"))?;
+        let url = Url::parse(url).or_corrupt("source URL")?;
         super::crawl::enqueue(tx, *id, &url, Some(service), now)?;
     }
     Ok(failed.len())

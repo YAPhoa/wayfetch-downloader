@@ -1,11 +1,8 @@
-//! Engine configuration (architecture brief sections 4.6, 10 and 11.3,
-//! `EngineConfig`).
+//! Engine configuration: engine settings only, no listener, window, or UI
+//! options.
 //!
-//! Holds engine settings only: no listener address, window, or UI option.
-//! Every queue, buffer, and retention window the engine keeps is set here
-//! with a default and a validated range, so nothing grows with the number
-//! of jobs, events, or clients (section 10.3). The defaults are the brief's
-//! initial targets, not measurements.
+//! Every queue, buffer, and retention window has a default and a validated
+//! range, so nothing grows with the number of jobs, events, or clients.
 
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
@@ -76,8 +73,7 @@ pub struct Limits {
     pub command_retention: Duration,
 }
 
-/// Separate deadlines for each phase of a request (section 10.4).
-/// Operation and retry deadlines arrive with the retry policy.
+/// Separate deadlines for each phase of a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timeouts {
     /// Establishing a connection, enforced by the transport.
@@ -380,7 +376,7 @@ const SECOND_MS: u64 = 1000;
 const HOUR_MS: u64 = 3600 * SECOND_MS;
 
 impl Limits {
-    /// The brief's initial targets for the server profile (section 10.1).
+    /// Defaults for the server profile.
     pub const DEFAULT: Self = Self {
         read_buffer_bytes: NonZeroUsize::new(256 * 1024).unwrap(),
         checkpoint_bytes: NonZeroU64::new(8 * MIB).unwrap(),

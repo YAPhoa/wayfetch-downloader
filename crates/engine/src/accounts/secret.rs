@@ -1,5 +1,5 @@
 //! Secret bytes that never print, serialize, or outlive their use in
-//! memory longer than needed (architecture brief section 8.4).
+//! memory longer than needed.
 
 use zeroize::Zeroizing;
 

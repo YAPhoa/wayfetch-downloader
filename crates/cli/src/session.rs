@@ -1,12 +1,9 @@
-//! The foreground session: starts the engine, turns input lines into engine
-//! commands and queries, prints durable events as they happen, and shuts
-//! the engine down gracefully on `quit`, end of input, or a signal.
+//! The foreground session: starts the engine, turns input lines into
+//! commands and queries, prints events, and shuts down gracefully on `quit`,
+//! end of input, or a signal.
 //!
-//! Shutdown never cancels jobs: the engine keeps every unfinished job
-//! durable and takes it over on the next start. Job control goes through
-//! the same commands every host uses, each with a fresh idempotency key and
-//! the revision the session just read, so a job that changed in between is
-//! reported as a conflict rather than acted on blindly.
+//! Shutdown never cancels jobs, and each command carries the revision just
+//! read, so a job changed meanwhile is reported as a conflict.
 
 use std::convert::Infallible;
 use std::process::ExitCode;

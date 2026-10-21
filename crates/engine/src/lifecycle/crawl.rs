@@ -1,26 +1,11 @@
-//! Link checks on the coordinator: finding the links in a collect's text,
-//! and running the checks the frontier holds (link crawler stage 1).
+//! Link checks on the coordinator: finding links in collected text and
+//! running the queued checks.
 //!
-//! At most [`MAX_CHECKS`] checks run at once, one per queue (a host, or a
-//! video service), each outside the coordinator under [`CHECK_DEADLINE`].
-//! The checks waiting are rows in the store, so a restart picks them up
-//! again; one running when the engine stopped is sent again. A check's
-//! answer is recorded only if it is still its link's check.
-//!
-//! A link an enabled account would download, as starting it would route
-//! it, is also checked by asking that account's provider, since the
-//! hoster seldom answers anonymous requests for its files. The provider's
-//! check needs no sign-in and spends no quota (ADR-08); its answer is what
-//! the link shows, while what the link's own server said is kept apart, so
-//! a web page is still refused when started directly. Provider calls run
-//! as tasks of their own, so a panicking integration fails only the check,
-//! and a provider that asks to slow down is not asked again for
-//! [`PROVIDER_COOLDOWN`].
-//!
-//! Which links on a page are collected is decided here, where the video
-//! services are known: links a service recognizes and links that look like
-//! files. Links to other pages are counted and left alone, so analyzing a
-//! page never spiders a site.
+//! Checks are stored rows, so a restart resumes them. At most [`MAX_CHECKS`]
+//! run at once, one per host or video service, each with a deadline. A link
+//! an enabled account would download is also checked with that provider.
+//! Analyzing a page collects the files and videos it links to, never other
+//! pages.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;

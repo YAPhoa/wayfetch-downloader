@@ -1,11 +1,6 @@
-//! Downloads through a provider account, through the public engine API,
-//! with an in-process provider and download host (architecture brief
-//! sections 6.5 and 7.3, ADR-09, ADR-24; test T12): the link is generated
-//! only once a download starts, never while collecting or listing; the
-//! provider's request is recorded before it is sent and never repeated
-//! blindly; credentials stay current across concurrent calls; and a
-//! cancelled, disabled, or removed account's work is never published.
-//! Real-Debrid's own client is tested in `wayfetch-adapters`.
+//! Downloads through a provider account, through the public engine API, with
+//! an in-process provider and download host (ADR-09, ADR-24). Real-Debrid's
+//! own client is tested in `wayfetch-adapters`.
 
 mod support;
 

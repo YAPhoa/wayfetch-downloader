@@ -1,14 +1,9 @@
 //! The `wayfetch` executable driven as a subprocess against the local
-//! HTTP/HTTPS fixture: submit and publish, observe durable progress, pause,
-//! resume, and cancel, shut down mid-transfer and finish after a restart,
-//! refuse a second owner, survive malformed input, and keep TLS
-//! verification and the egress policy unless the operator names an
-//! exception.
+//! HTTP/HTTPS fixture.
 //!
-//! Sessions run with `--json`, except where the text output is the subject,
-//! so each test reads typed results instead of scraping text. Every file is
-//! large enough to cross a default 8 MiB checkpoint before the fixture
-//! stalls it, so there are durable bytes to observe and resume from.
+//! Sessions run with `--json` unless the text output is the subject.
+//! Stalling files are larger than the default 8 MiB checkpoint, so there are
+//! durable bytes to observe and resume from.
 
 #[path = "../../engine/tests/support/mod.rs"]
 mod engine_support;
@@ -95,7 +90,15 @@ impl Dirs {
 
     /// Lengths of the partials in the root's staging directory.
     fn partials(&self) -> Vec<u64> {
-        std::fs::read_dir(self.root.join(".wayfetch/staging"))
+        let staging = self.root.join(".wayfetch/staging");
+        let [own] = &std::fs::read_dir(staging)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("one engine's staging folder")
+        };
+        std::fs::read_dir(own)
             .unwrap()
             .map(|e| e.unwrap().metadata().unwrap().len())
             .collect()

@@ -1,12 +1,28 @@
 // The browser transport: `WayfetchClient` over the daemon's `/v1` HTTP API
-// and server-sent events, authenticated by the owner's session cookie
-// (architecture brief sections 8.5 and 11.1).
+// and server-sent events, authenticated by the owner's session cookie.
 //
 // The CSRF token is held in memory only and re-read from the session after
 // a reload. A response that says the session is gone calls
 // `onUnauthenticated`, so the shell can ask the user to sign in again.
 
-import { WayfetchError, extractRequest, jobCommandRequest, settingsRequest } from '../client/contract.js';
+import {
+  WayfetchError,
+  accountCommandRequest,
+  authorizeAccountRequest,
+  changePluginRequest,
+  collectRequest,
+  extractRequest,
+  jobCommandRequest,
+  linksCommandRequest,
+  removeRootRequest,
+  settingsRequest,
+  submitRequest,
+} from '../client/contract.js';
+
+/**
+ * @template {keyof WayfetchClient} M
+ * @typedef {import('../client/contract.js').Args<M>} Args
+ */
 
 /**
  * @typedef {import('../client/generated/StartRouting.js').StartRouting} StartRouting
@@ -19,12 +35,9 @@ import { WayfetchError, extractRequest, jobCommandRequest, settingsRequest } fro
  * @typedef {import('../client/contract.js').JobStage} JobStage
  * @typedef {import('../client/contract.js').Permission} Permission
  * @typedef {import('../client/contract.js').RootId} RootId
- * @typedef {import('../client/contract.js').CollectMode} CollectMode
  * @typedef {import('../client/contract.js').SettingsChange} SettingsChange
  * @typedef {import('../client/contract.js').ExtractChange} ExtractChange
  * @typedef {import('../client/contract.js').LinkId} LinkId
- * @typedef {import('../client/contract.js').LinkRef} LinkRef
- * @typedef {import('../client/contract.js').LinksAction} LinksAction
  * @typedef {import('../client/generated/SessionStatus.js').SessionStatus} SessionStatus
  * @typedef {import('../client/generated/SetupRequest.js').SetupRequest} SetupRequest
  * @typedef {import('../client/generated/LoginRequest.js').LoginRequest} LoginRequest
@@ -38,8 +51,6 @@ import { WayfetchError, extractRequest, jobCommandRequest, settingsRequest } fro
  * @typedef {import('../client/generated/AuthorizeAccountRequest.js').AuthorizeAccountRequest} AuthorizeAccountRequest
  * @typedef {import('../client/generated/AccountCommandRequest.js').AccountCommandRequest} AccountCommandRequest
  * @typedef {import('../client/contract.js').AccountId} AccountId
- * @typedef {import('../client/contract.js').AccountRef} AccountRef
- * @typedef {import('../client/contract.js').AccountAction} AccountAction
  * @typedef {import('../client/contract.js').AuthorizationId} AuthorizationId
  */
 
@@ -138,11 +149,9 @@ export class HttpClient {
     return this.request('GET', '/v1/job-counts');
   }
 
-  /** @param {{ idempotencyKey: string, target: string, items: string[] }} request */
-  submit({ idempotencyKey, target, items }) {
-    /** @type {SubmitRequest} */
-    const body = { idempotency_key: idempotencyKey, target, items };
-    return this.request('POST', '/v1/inputs', { body });
+  /** @param {Args<'submit'>[0]} request */
+  submit(request) {
+    return this.request('POST', '/v1/inputs', { body: submitRequest(request) });
   }
 
   /** @param {{ after?: LinkId | null, pageSize: number }} request */
@@ -152,27 +161,16 @@ export class HttpClient {
     return this.request('GET', `/v1/staging/links?${query}`);
   }
 
-  /** @param {{ idempotencyKey: string, target: string, text: string, baseUrl?: string | null, mode?: CollectMode, destination?: RootId | null }} request */
-  collectLinks({ idempotencyKey, target, text, baseUrl, mode, destination }) {
-    /** @type {CollectRequest} */
-    const body = { idempotency_key: idempotencyKey, target, text };
-    if (baseUrl) body.base_url = baseUrl;
-    if (mode) body.mode = mode;
-    if (destination) body.destination = destination;
-    return this.request('POST', '/v1/staging/links', { body });
+  /** @param {Args<'collectLinks'>[0]} request */
+  collectLinks(request) {
+    return this.request('POST', '/v1/staging/links', { body: collectRequest(request) });
   }
 
   /**
-   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId, account?: AccountId, routing?: StartRouting, media?: MediaChoice }} request
+   * @param {Args<'linksCommand'>[0]} request
    */
-  linksCommand({ idempotencyKey, target, action, links, destination, account, routing, media }) {
-    /** @type {LinksCommandRequest} */
-    const body = { idempotency_key: idempotencyKey, target, action, links };
-    if (destination !== undefined) body.destination = destination;
-    if (account !== undefined) body.account = account;
-    if (routing !== undefined) body.routing = routing;
-    if (media !== undefined) body.media = media;
-    return this.request('POST', '/v1/staging/commands', { body });
+  linksCommand(request) {
+    return this.request('POST', '/v1/staging/commands', { body: linksCommandRequest(request) });
   }
 
   /** @param {LinkId} link */
@@ -214,28 +212,19 @@ export class HttpClient {
   }
   /**
    * Stops offering a download folder the user added; its files stay.
-   * @param {{ idempotencyKey: string, target: string, expectedRevision: number, root: RootId }} request
+   * @param {Args<'removeRoot'>[0]} request
    */
-  removeRoot({ idempotencyKey, target, expectedRevision, root }) {
-    /** @type {RemoveRootRequest} */
-    const body = {
-      idempotency_key: idempotencyKey,
-      target,
-      expected_revision: expectedRevision,
-      root,
-    };
-    return this.request('POST', '/v1/roots/remove', { body });
+  removeRoot(request) {
+    return this.request('POST', '/v1/roots/remove', { body: removeRootRequest(request) });
   }
 
   /**
    * Turns a plugin on or off, updates it, or removes the copy Wayfetch
    * installed.
-   * @param {{ idempotencyKey: string, target: string, plugin: string, change: PluginChange }} request
+   * @param {Args<'changePlugin'>[0]} request
    */
-  changePlugin({ idempotencyKey, target, plugin, change }) {
-    /** @type {ChangePluginRequest} */
-    const body = { idempotency_key: idempotencyKey, target, plugin, change };
-    return this.request('POST', '/v1/plugins/change', { body });
+  changePlugin(request) {
+    return this.request('POST', '/v1/plugins/change', { body: changePluginRequest(request) });
   }
 
   /**
@@ -262,14 +251,10 @@ export class HttpClient {
   }
 
   /**
-   * @param {{ idempotencyKey: string, target: string, service: string, account?: AccountRef, alias?: string }} request
+   * @param {Args<'authorizeAccount'>[0]} request
    */
-  authorizeAccount({ idempotencyKey, target, service, account, alias }) {
-    /** @type {AuthorizeAccountRequest} */
-    const body = { idempotency_key: idempotencyKey, target, service };
-    if (account) body.account = account;
-    if (alias) body.alias = alias;
-    return this.request('POST', '/v1/accounts/authorizations', { body });
+  authorizeAccount(request) {
+    return this.request('POST', '/v1/accounts/authorizations', { body: authorizeAccountRequest(request) });
   }
 
   /** @param {AuthorizationId} id */
@@ -284,12 +269,10 @@ export class HttpClient {
 
   /**
    * @param {AccountId} account
-   * @param {{ idempotencyKey: string, target: string, action: AccountAction, expectedRevision: number }} request
+   * @param {Args<'accountCommand'>[1]} request
    */
-  accountCommand(account, { idempotencyKey, target, action, expectedRevision }) {
-    /** @type {AccountCommandRequest} */
-    const body = { idempotency_key: idempotencyKey, target, action, expected_revision: expectedRevision };
-    return this.request('POST', `/v1/accounts/${encodeURIComponent(account)}/commands`, { body });
+  accountCommand(account, request) {
+    return this.request('POST', `/v1/accounts/${encodeURIComponent(account)}/commands`, { body: accountCommandRequest(request) });
   }
 
   /** @param {AccountId} account */

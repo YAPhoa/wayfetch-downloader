@@ -1,11 +1,8 @@
-//! Unpacking downloaded archives: which archive downloads wait for their
-//! other volumes, wait for their turn, are being unpacked, and how each
-//! attempt ended (architecture brief section 9).
+//! Archive extractions: waiting for volumes or a turn, running, and how each
+//! attempt ended.
 //!
-//! Each attempt runs under a new generation; its result is recorded only
-//! while the row is still at that attempt, so a cancelled or replaced
-//! attempt cannot overwrite a later state. Every change announces the
-//! archive's job with `job_changed`.
+//! Each attempt runs under a new generation, so a cancelled or replaced
+//! attempt cannot overwrite a later state.
 
 use std::str::FromStr;
 
@@ -18,7 +15,7 @@ use wayfetch_domain::version::{Generation, Revision};
 use wayfetch_protocol::query::{ExtractionState, ExtractionSummary};
 use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 
-use super::{Store, StoreError, jobs, key, renames, sql};
+use super::{OrCorrupt, Store, StoreError, jobs, key, renames, sql};
 use crate::extract::{ArchiveName, Layout};
 use crate::fs::{PublishedFile, RelativePath};
 
@@ -35,8 +32,7 @@ pub(super) fn decode(
         return Ok(None);
     };
     Ok(Some(ExtractionSummary {
-        state: ExtractionState::from_str(&state)
-            .map_err(|_| StoreError::Corrupt("extraction state"))?,
+        state: ExtractionState::from_str(&state).or_corrupt("extraction state")?,
         generation: generation.map(key).transpose()?,
         output,
         problem: problem.as_deref().map(DiagnosticText::new),
@@ -87,8 +83,7 @@ fn row(tx: &Transaction<'_>, job: JobId) -> Result<Option<(ExtractionState, i64)
     .optional()?
     .map(|(state, generation)| {
         Ok((
-            ExtractionState::from_str(&state)
-                .map_err(|_| StoreError::Corrupt("extraction state"))?,
+            ExtractionState::from_str(&state).or_corrupt("extraction state")?,
             generation,
         ))
     })

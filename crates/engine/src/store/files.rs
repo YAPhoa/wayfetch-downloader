@@ -1,6 +1,5 @@
 //! Staging-file records, adoption after a restart or a manual retry, and
-//! publication intents (sections 7.6 and 7.7, ADR-16, ADR-17; tests T24,
-//! T27, T28, T31).
+//! publication intents (ADR-16, ADR-17).
 //!
 //! The store never touches files. The filesystem side ([`crate::fs`])
 //! creates, validates, links, and reconciles them; these records say which
@@ -12,7 +11,7 @@ use wayfetch_domain::job::{JobError, JobStage, Outcome};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{BootEpoch, Generation};
 
-use super::{Store, StoreError, jobs, key, progress, sql};
+use super::{OrCorrupt, Store, StoreError, jobs, key, progress, sql};
 use crate::fs::{FileIdentity, RelativePath, Removal, StagingRecord};
 use crate::lifecycle::SoleAttempt;
 use crate::transfer::lease::Representation;
@@ -138,7 +137,7 @@ pub(super) fn staging(
 /// generation may still reopen as abandoned: none can any more. Called when
 /// a newer generation registers its own file, which is then the only one
 /// the job can continue, and when the job goes back to the queue under a
-/// new generation, which starts from zero (section 7.6).
+/// new generation, which starts from zero.
 pub(super) fn abandon_staging(
     tx: &Transaction<'_>,
     job: JobId,
@@ -210,7 +209,7 @@ fn hand_over(
          WHERE job_id = ?2 AND generation = ?3 AND state = 'intended'",
         params![sql(generation)?, sql(job)?, previous],
     )?;
-    staging(tx, job, generation)?.ok_or(StoreError::Corrupt("staging file"))
+    staging(tx, job, generation)?.or_corrupt("staging file")
 }
 
 /// Loads `id` and checks it is at `generation` in one of `stages`.
@@ -316,7 +315,7 @@ impl Store {
                     length: length
                         .map(u64::try_from)
                         .transpose()
-                        .map_err(|_| StoreError::Corrupt("representation length"))?,
+                        .or_corrupt("representation length")?,
                     strong_etag: etag,
                     last_modified: modified.map(UtcTimestamp::from_unix_millis),
                     resource,
@@ -367,7 +366,7 @@ impl Store {
             .length
             .map(i64::try_from)
             .transpose()
-            .map_err(|_| StoreError::Corrupt("representation length"))?;
+            .or_corrupt("representation length")?;
         let updated = tx.execute(
             "UPDATE staging_files SET representation_known = 1, representation_length = ?1, \
              representation_etag = ?2, representation_modified = ?3, suggested_name = ?6, \
@@ -403,7 +402,7 @@ impl Store {
     ///
     /// Only a file from an earlier engine start (`epoch`) can be adopted:
     /// no writer of this process can still hold it, so the new generation
-    /// is its only writer (section 7.6).
+    /// is its only writer.
     pub fn adopt_staging(
         &mut self,
         job: JobId,
@@ -442,12 +441,8 @@ impl Store {
     /// generation, before that attempt sends a request. The caller has
     /// reopened and validated the file first.
     ///
-    /// The file may come from this engine start, so its boot epoch proves
-    /// nothing. Two things together do instead: the retry reserved the
-    /// file for exactly this generation in its own transaction, and
-    /// `attempt` shows the coordinator admitted this job only after every
-    /// earlier task of it ended, so no writer of this process still holds
-    /// the file (section 7.6).
+    /// The boot epoch proves nothing here; the retry's reservation and
+    /// `attempt` together show no earlier writer still holds the file.
     pub fn adopt_retained(
         &mut self,
         job: JobId,
@@ -490,9 +485,9 @@ impl Store {
     /// Records the intent to publish the job generation's staging file at
     /// `target` as an artifact of `size` bytes, reserving the target. The
     /// job must be publishing, and durable coverage must be exactly
-    /// `0..size`: file length is never accepted in place of coverage (T25).
-    /// A target whose case-folded name is already reserved in the root, by
-    /// a publication or a rename, is refused with
+    /// `0..size`: file length is never accepted in place of coverage. A
+    /// target whose case-folded name is already reserved in the root, by a
+    /// publication or a rename, is refused with
     /// [`StoreError::TargetReserved`].
     pub fn begin_publication(
         &mut self,
@@ -517,7 +512,7 @@ impl Store {
                 "durable coverage is not the whole artifact",
             ));
         }
-        let size_sql = i64::try_from(size).map_err(|_| StoreError::Corrupt("size"))?;
+        let size_sql = i64::try_from(size).or_corrupt("size")?;
         let reserved: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM publications WHERE root_id = ?1 AND target_key = ?2) \
              OR EXISTS (SELECT 1 FROM renames WHERE root_id = ?1 AND target_key = ?2)",
@@ -574,9 +569,8 @@ impl Store {
         row.map(|(staging, target, size)| {
             Ok(PublicationIntent {
                 staging: staging.decode()?,
-                target: RelativePath::new(&target)
-                    .map_err(|_| StoreError::Corrupt("publication target"))?,
-                size: u64::try_from(size).map_err(|_| StoreError::Corrupt("size"))?,
+                target: RelativePath::new(&target).or_corrupt("publication target")?,
+                size: u64::try_from(size).or_corrupt("size")?,
             })
         })
         .transpose()

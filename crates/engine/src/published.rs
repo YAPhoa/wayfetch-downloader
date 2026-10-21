@@ -1,22 +1,9 @@
-//! Changes to published files on the user's request: renaming one, and
-//! finding one for the host to open (architecture brief sections 7.7 and
-//! 11.7).
+//! Renaming a published file, and finding one for the host to open.
 //!
-//! Each request runs as a task of its own. The store records and finishes
-//! the change on the coordinator, and the filesystem steps run between, on
-//! blocking threads, one at a time per root folder ([`Probes`]), so a
-//! folder that hangs delays only the requests about it, and is reported as
-//! busy to the ones after. A step is never abandoned once started; at
-//! shutdown the request stops before its next one.
-//!
-//! Requests about one job's file run one at a time, from the first look
-//! at the job to the last step ([`Files::jobs`]); another that arrives
-//! meanwhile is refused as busy.
-//!
-//! A rename recorded but unfinished, and no longer running, was left by a
-//! crash or a filesystem error. It is reconciled at startup, and again
-//! before anything else is done with the job's file, judged by where the
-//! file is now. One still running is never reconciled: its file is moving.
+//! Each request runs as its own task, with filesystem steps off the
+//! coordinator and one request per job file at a time; others are refused as
+//! busy. A rename left unfinished by a crash is reconciled at startup and
+//! before the file is next used.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -30,7 +17,7 @@ use wayfetch_protocol::{
 
 use crate::destinations::{Claims, Destinations, PROBE_TIMEOUT, Probes, Slot};
 use crate::fs::{FsError, RenameCheck, Root};
-use crate::lifecycle::StoreClient;
+use crate::lifecycle::{StoreClient, shutting_down};
 use crate::store::{DeleteStart, RenameIntent, RenameStart, Store, StoreError};
 
 fn now() -> UtcTimestamp {
@@ -91,10 +78,6 @@ pub(crate) struct Files {
     pub(crate) instance: InstanceId,
     /// Once cancelled, no further step starts.
     pub(crate) cancel: CancellationToken,
-}
-
-fn shutting_down() -> ProtocolError {
-    ProtocolError::new(ErrorCode::ShuttingDown, "engine is not running")
 }
 
 impl Files {

@@ -1,9 +1,6 @@
 //! Provider accounts through the public engine API, with an in-process
-//! provider (architecture brief sections 7.3 and 8.3, ADR-24): credentials
-//! sealed in the state database under a key kept outside it, the vault's
-//! locked states, revisions and idempotent retries, single-flight checks,
-//! and replacement or removal winning over provider work still under way.
-//! Real-Debrid's own client is tested in `wayfetch-adapters`.
+//! provider (ADR-24). Real-Debrid's own client is tested in
+//! `wayfetch-adapters`.
 
 mod support;
 

@@ -1,16 +1,13 @@
 //! The reusable Wayfetch Downloader engine library.
 //!
-//! Application hosts (`wayfetchd`, the desktop shell, test harnesses) compose
-//! the engine; it never owns an HTTP listener, window, process-wide signal
-//! handler, or frontend asset build (architecture brief sections 4.5 and 4.6).
-//!
-//! A host starts an engine with [`EngineBuilder`] on its own Tokio runtime,
-//! keeps the [`EngineOwner`], hands [`EngineHandle`]s to its adapters, and
-//! awaits [`EngineOwner::shutdown`] before exiting.
+//! Hosts compose the engine; it never owns a listener, window, signal
+//! handler, or UI build. A host starts it with [`EngineBuilder`] on its own
+//! runtime, keeps the [`EngineOwner`], hands out [`EngineHandle`]s, and
+//! awaits [`EngineOwner::shutdown`].
 
-/// Marks a named crash-injection boundary (architecture brief section 13.2).
-/// With the `failpoints` feature a test can stop the process here through
-/// the `fail` crate and kill it; otherwise it compiles to nothing.
+/// Marks a named crash-injection boundary. With the `failpoints` feature a
+/// test can stop the process here through the `fail` crate and kill it;
+/// otherwise it compiles to nothing.
 macro_rules! crash_point {
     ($name:literal) => {
         #[cfg(feature = "failpoints")]
@@ -40,7 +37,7 @@ pub use config::{
     ConfigError, EngineConfig, IntegerPolicy, Limits, Policy, Preference, SpeedLimitPolicy,
     Timeouts,
 };
-pub use destinations::{RootError, initialize_root};
+pub use destinations::{RootError, initialize_new_root, initialize_root};
 #[cfg(feature = "failpoints")]
 pub use fail;
 pub use lifecycle::{

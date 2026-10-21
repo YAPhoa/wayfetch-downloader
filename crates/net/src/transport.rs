@@ -1,29 +1,13 @@
-//! The HTTP client behind the engine's [`Transport`], and the broker that
-//! holds prepared requests and open responses for transfer leases
-//! (architecture brief sections 6.5, 7.5, and 8.2; ADR-09, ADR-14, ADR-15).
+//! The HTTP client behind the engine's [`Transport`], and the broker holding
+//! prepared requests and open responses for transfer leases (ADR-09, ADR-14,
+//! ADR-15).
 //!
-//! Policies the client is configured with, rather than library defaults:
-//!
-//! * TLS through rustls with the platform's roots plus any configured
-//!   extra roots; verification cannot be switched off.
-//! * HTTP/1.1 only, no proxy, no cookies, no `Referer`, no automatic
-//!   retries, and no decompression: the request asks for `identity` and an
-//!   encoded answer is refused.
-//! * Redirects are followed here, one hop at a time, within a hop budget.
-//!   Every target passes the [`EgressPolicy`]; a hop to another origin drops
-//!   credentials and never carries a request body; HTTPS never downgrades
-//!   to HTTP; a hop that would resend a body or an unsafe method, or
-//!   request a URL already requested, is followed only for a request that
-//!   may be repeated.
-//! * Names resolve through the policy, so the connector only ever sees
-//!   permitted addresses. A request for a link found on a web page
-//!   ([`Reach::Public`]) uses a client of its own that reaches public
-//!   addresses only, whatever local networks the operator allows.
-//!
-//! The broker never sends a request twice unless the transfer's lease
-//! authorizes the repetition, and hands out an open response's body once.
-//! A failure after a non-replayable request may have reached the server is
-//! reported as an ambiguous outcome, not a timeout (T11, T12).
+//! The client is strict by design: rustls with no way to skip verification,
+//! HTTP/1.1 only, no proxy, cookies, retries, or decompression. Redirects
+//! are followed one hop at a time, each checked by the [`EgressPolicy`]. The
+//! broker never sends a request twice unless the lease allows it, and
+//! reports a possibly delivered non-replayable request as ambiguous, not as
+//! a timeout.
 
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -102,7 +86,7 @@ pub enum BuildError {
 
 /// A request an adapter prepared, for example a form submission. Its
 /// headers and body may carry secrets; they stay in the broker, and a lease
-/// refers to the request by [`RequestRef`] (section 6.5).
+/// refers to the request by [`RequestRef`].
 #[derive(Clone)]
 pub struct PreparedRequest {
     /// The method.
@@ -447,8 +431,8 @@ impl HttpTransport {
     /// prepared request or takes the open response; every later one must be
     /// authorized by the lease ([`Transfer::authorize`]), so a
     /// non-replayable request is never sent twice and an open response is
-    /// never cloned (section 6.5). A lease must name the replay policy its
-    /// request was prepared with, so it cannot weaken it.
+    /// never cloned. A lease must name the replay policy its request was
+    /// prepared with, so it cannot weaken it.
     pub async fn open_lease(
         &self,
         transfer: &Transfer,
@@ -633,7 +617,7 @@ impl HttpTransport {
             // unsafe method, or any method to a URL already requested in
             // this chain is sent only if the request may be repeated: the
             // first one reached the server, so for any other the outcome is
-            // unknown and it is never resent (section 6.5, T11, T12).
+            // unknown and it is never resent.
             let mut target = next.clone();
             target.set_fragment(None);
             if !out.replay_safe
@@ -741,7 +725,7 @@ fn if_range(representation: &Representation) -> Option<HeaderValue> {
 
 /// Classifies a request that produced no response. Nothing reached the
 /// server if the connection failed; after that, a non-replayable request's
-/// outcome is unknown (T12).
+/// outcome is unknown.
 fn send_failure(err: reqwest::Error, replay_safe: bool) -> TransportError {
     // The URL may carry a signed token.
     let err = err.without_url();

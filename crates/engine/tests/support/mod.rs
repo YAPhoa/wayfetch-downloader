@@ -1,7 +1,6 @@
-//! Driving an engine through its public API in tests: a state directory
-//! and download root, an engine started with a given transport, and
-//! commands and queries as a host would send them. Shared by the engine's
-//! own tests and the HTTP crate's tests over real sockets.
+//! Driving an engine through its public API in tests: a state directory and
+//! root, an engine on a given transport, and commands and queries as a host
+//! sends them.
 
 #![allow(dead_code, reason = "each test file uses part of the support")]
 
@@ -115,7 +114,7 @@ impl<S> Env<S> {
     pub async fn start(&self) -> EngineOwner {
         let owner = self.start_uninitialized().await;
         // An operator action, once per root and instance. The engine
-        // identifies the root by its sentinel; ID 1 is the one roots of
+        // identifies the root by its marker; ID 1 is the one roots of
         // earlier versions carry.
         Root::initialize(&self.root, ROOT, owner.identity().instance).unwrap();
         owner
@@ -173,9 +172,19 @@ impl<S> Env<S> {
 }
 
 pub fn staging_files(root: &Path) -> usize {
-    std::fs::read_dir(root.join(".wayfetch/staging"))
+    std::fs::read_dir(staging_dir(root)).unwrap().count()
+}
+
+/// The engine's own staging folder in `root`: the only folder in the
+/// root's staging directory, since one engine uses the root.
+pub fn staging_dir(root: &Path) -> std::path::PathBuf {
+    let mut dirs = std::fs::read_dir(root.join(".wayfetch/staging"))
         .unwrap()
-        .count()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir());
+    let dir = dirs.next().expect("a staging folder");
+    assert!(dirs.next().is_none(), "one engine's staging folder");
+    dir
 }
 
 /// Deterministic bytes of `len`.

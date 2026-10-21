@@ -3,16 +3,10 @@
 /**
  * Protocol version.
  *
- * A minor version may only add optional fields, which older decoders
- * ignore, and new commands or queries, which older clients never send. Any
- * new value a client must decode from the engine (an event kind, stream
- * item, error code, job stage, failure code, or resync reason) needs a new
- * major version, because an older client cannot decode it. Extending those
- * vocabularies within a major version needs capability negotiation first.
- *
- * Before 1.0 the protocol is still settling, so as in Cargo's rules for
- * `0.x` versions, the minor version is the incompatible one: an engine
- * serves only clients of exactly its own `0.x`.
+ * A minor version may only add optional fields and new commands or
+ * queries. Any new value a client must decode (an event kind, error code,
+ * stage, and so on) needs a new major version. Before 1.0, as in Cargo,
+ * the minor version is the incompatible one.
  */
 export type ProtocolVersion = { 
 /**

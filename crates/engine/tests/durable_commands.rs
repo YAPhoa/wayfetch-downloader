@@ -1,5 +1,4 @@
-//! Durable commands and queries through the public engine API (tests T46,
-//! T47 foundations).
+//! Durable commands and queries through the public engine API.
 
 use tokio::runtime::Handle;
 use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner, ShutdownRequest};

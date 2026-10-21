@@ -1,18 +1,8 @@
 //! The `wayfetchd` executable driven as a subprocess over its HTTP API,
-//! against the local HTTPS fixture: the bundled web UI; the complete
-//! submit, list, inspect, pause, resume, and cancel workflow; choosing the
-//! default destination among the server's folders;
-//! authentication and scoped tokens; server-sent events that resume from
-//! `Last-Event-ID` or say to resynchronize; downloads that continue after
-//! every client disconnects; request and stream bounds; graceful shutdown
-//! on SIGTERM or SIGINT with jobs kept for the next start and a single
-//! owner per state directory; and browser access: owner setup with a setup
-//! secret, sign-in, sessions for commands and events, origin and CSRF
-//! checks, sign-out, restarts, and owner reset; and provider accounts,
-//! signed in against a local stand-in for Real-Debrid.
+//! against the local HTTPS fixture.
 //!
-//! Files that stall are large enough to cross a default 8 MiB checkpoint
-//! first, so there are durable bytes to observe and resume from.
+//! Stalling files are larger than the default 8 MiB checkpoint, so there are
+//! durable bytes to observe and resume from.
 
 mod common;
 #[path = "../../../crates/engine/tests/support/mod.rs"]
@@ -652,6 +642,38 @@ fn folders_at(path: &std::path::Path) -> String {
     format!("{}?{}", url.path(), url.query().unwrap())
 }
 
+/// Marks `folder` as another Wayfetch profile's download folder, in the
+/// layout of this version and of earlier ones, with a partial download of
+/// its own. Returns every file written, with its contents.
+fn mark_for_another_profile(folder: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    const THEIRS: &str = "0d3a7c1e-5b2f-4c8a-9e61-7f0b2d4a6c13";
+    let private = folder.join(".wayfetch");
+    let marker = format!(r#"{{"instance":"{THEIRS}","root":1}}"#).into_bytes();
+    let files = [
+        (private.join("root.json"), marker.clone()),
+        (private.join("roots").join(format!("{THEIRS}.json")), marker),
+        (
+            private.join("staging/1.g1.part"),
+            b"legacy partial".to_vec(),
+        ),
+        (
+            private.join("staging").join(THEIRS).join("1.g1.part"),
+            b"their partial".to_vec(),
+        ),
+    ];
+    for (path, bytes) in &files {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    files.into()
+}
+
+fn assert_untouched(files: &[(std::path::PathBuf, Vec<u8>)]) {
+    for (path, bytes) in files {
+        assert_eq!(&std::fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
     let server = Server::https().await;
@@ -688,9 +710,25 @@ async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
     let (status, _) = client.get("/v1/folders?path=relative").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
+    // A folder another Wayfetch profile uses can be added too, and what
+    // that profile keeps there is left alone; a missing one is refused
+    // in so many words, and not created.
+    let theirs = mark_for_another_profile(&parent.join("films"));
+    let missing = json!({ "path": parent.join("unplugged") });
+    let (status, error) = client.post("/v1/roots", &missing).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("the folder is missing"),
+        "{error}"
+    );
+    assert!(!parent.join("unplugged").exists());
     let (status, root) = client.post("/v1/roots", &add).await;
     assert_eq!(status, StatusCode::OK, "{root}");
     assert_eq!(root["available"], true);
+    assert_untouched(&theirs);
     let (_, settings) = client.get("/v1/settings").await;
     assert!(
         settings["roots"]
@@ -737,6 +775,7 @@ async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
         "{settings}"
     );
     assert!(parent.join("films/kept.bin").exists());
+    assert_untouched(&theirs);
     // Once another folder is the default, the operator's goes too, and
     // stays gone across a restart until it is added again.
     let (_, root) = client.post("/v1/roots", &add).await;
@@ -767,6 +806,7 @@ async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
             .any(|r| r["id"] == configured["id"]),
         "{settings}"
     );
+    assert_untouched(&theirs);
     // The daemon's own state cannot become a destination.
     let (status, error) = client
         .post("/v1/roots", &json!({ "path": dirs.state }))
@@ -1449,13 +1489,21 @@ async fn readiness_needs_no_token_and_requires_a_usable_root() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_first_start_may_initialize_the_download_root_but_no_later_one() {
+async fn the_download_root_is_initialized_until_recorded_but_never_again() {
     let server = Server::https().await;
     let mut dirs = Dirs::new(&server);
     dirs.args.push("--init-root-on-first-start".into());
 
-    // A new state directory: the root is initialized, and the daemon is
-    // ready without `init-root`.
+    // The first start fails because the root cannot be initialized yet; it
+    // is retried on the next start.
+    std::fs::remove_dir(&dirs.root).unwrap();
+    let out = Daemon::command(&dirs).output().await.unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot initialize"), "{stderr}");
+    std::fs::create_dir(&dirs.root).unwrap();
+
+    // The root is initialized, and the daemon is ready without `init-root`.
     let daemon = Daemon::start(&dirs).await;
     assert!(
         daemon
@@ -1471,7 +1519,8 @@ async fn the_first_start_may_initialize_the_download_root_but_no_later_one() {
     daemon.stop("TERM").await;
 
     // Later, the mount is gone and an empty folder is in its place: the
-    // state directory exists, so nothing initializes or writes into it.
+    // state directory recorded the root, so nothing initializes or writes
+    // into it.
     let moved = dirs.tmp.path().join("moved");
     std::fs::rename(&dirs.root, &moved).unwrap();
     std::fs::create_dir(&dirs.root).unwrap();
@@ -1498,9 +1547,13 @@ async fn a_stuck_readiness_check_neither_piles_up_nor_holds_up_exit() {
     let (status, _) = anonymous.get("/v1/ready").await;
     assert_eq!(status, StatusCode::OK);
 
-    // The root's sentinel becomes a FIFO nobody writes to: opening it
+    // The root's marker becomes a FIFO nobody writes to: opening it
     // blocks, as a read on a hung mount would.
-    let sentinel = dirs.root.join(".wayfetch").join("root.json");
+    let sentinel = dirs
+        .root
+        .join(".wayfetch")
+        .join("roots")
+        .join(format!("{}.json", daemon.instance));
     std::fs::remove_file(&sentinel).unwrap();
     let made = std::process::Command::new("mkfifo")
         .arg(&sentinel)

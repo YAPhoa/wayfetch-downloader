@@ -1,63 +1,19 @@
-//! Destination roots, private staging, and publication (architecture brief
-//! sections 7.6 and 7.7, ADR-16, ADR-17, ADR-29).
+//! Destination roots, private staging, and crash-safe publication (ADR-16,
+//! ADR-17, ADR-29).
 //!
-//! # Roots are capabilities
+//! A [`Root`] is an open directory handle reached only through
+//! [`RelativePath`]s, so nothing escapes it. It must carry this profile's
+//! marker, so an unmounted folder fails closed instead of being written
+//! into. Each job generation writes to its own staging file, reopened after
+//! a restart only by its recorded identity. Publication and renames use
+//! no-clobber hard links between store intents, so a crash never overwrites
+//! a file Wayfetch does not own.
 //!
-//! An operator configures roots by path, and the engine's store gives each
-//! a stable [`RootId`] that its sentinel records. The engine opens a
-//! [`Root`] once and from then on reaches files only through that open
-//! directory handle with [`RelativePath`]s, using `cap-std`, which resolves
-//! every path inside the handle: `..`, absolute paths, and symlinks that
-//! lead outside the root fail instead of escaping it. Destination strings
-//! from adapters or clients are never joined onto a host path.
-//!
-//! A root must carry a sentinel written by [`Root::initialize`]. Opening
-//! fails closed when it is missing or names another root or instance, so an
-//! unmounted bind mount is never mistaken for an empty destination and
-//! nothing is written into the directory underneath (T30).
-//! [`Root::verify`] repeats the check by path before publication, which
-//! also catches a mount replaced after the root was opened.
-//!
-//! # Staging
-//!
-//! Each job generation writes to its own private file under
-//! `.wayfetch/staging/` in the destination root, created exclusively and
-//! never reused by another generation, so the final rename stays on one
-//! filesystem. The file's identity (device and inode) is recorded with the
-//! store's staging record. After a restart a partial is reopened only by
-//! that record, and a missing, replaced, or shrunk file is a reconciliation
-//! failure, never a reason to append blindly (T28). A file no generation
-//! can reopen is removed by [`Root::remove_staging`] only while its name
-//! still holds the recorded file; see the engine's cleanup module.
-//!
-//! # Publication
-//!
-//! [`Root::publish`] gives the synchronized staging file its final name
-//! with a hard link, which fails instead of replacing an existing name on
-//! every platform (a plain rename would replace it), synchronizes the
-//! directory, then removes the staging name (ADR-16). The store
-//! records a publication intent before and completes it after. After a
-//! crash, [`Root::reconcile_publication`] compares both names with the
-//! recorded identity and never deletes or overwrites a file it does not own
-//! (T24, T31).
-//!
-//! [`Root::rename_published`] renames a published file the same way: a
-//! no-clobber hard link to the new name in the same folder, checked and
-//! synchronized before the old name is removed, between a rename record
-//! and its completion in the store, with [`Root::reconcile_rename`] for a
-//! crash in between.
-//!
-//! # Platform support
-//!
-//! File identity and directory synchronization are implemented for Unix.
-//! Elsewhere staging fails with [`FsError::Unsupported`] until the desktop
-//! work adds them. Publication needs hard links in the destination root;
-//! filesystems without them, and destinations that cross a mount point
-//! below the root, are reported as unavailable rather than copied (T32 is
-//! later work).
+//! Unix only for now; elsewhere staging reports [`FsError::Unsupported`].
 
 mod extract;
 mod path;
+mod private;
 mod publish;
 mod root;
 mod staging;
@@ -69,10 +25,11 @@ pub use extract::{RESERVE_BYTES, Tally, TreeError};
 pub use path::{
     MAX_COMPONENT_BYTES, MAX_DEPTH, MAX_PATH_BYTES, PRIVATE_DIR, PathError, RelativePath,
 };
+pub use private::{create_private, is_private};
 pub use publish::{PublicationCheck, PublishedFile, RenameCheck};
 pub use root::Root;
 #[cfg(test)]
-pub(crate) use staging::tests::{root as test_root, staging_path};
+pub(crate) use staging::tests::{own_name, root as test_root, staging_path};
 pub use staging::{Removal, StagingFile, StagingRecord, SyncedRanges};
 use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::id::RootId;
@@ -110,17 +67,16 @@ impl FileIdentity {
 /// Why a filesystem operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum FsError {
-    /// The root has no sentinel: it is unmounted, replaced by an empty
-    /// directory, or was never initialized.
-    #[error("{0} has no sentinel; it may be unmounted or uninitialized")]
-    SentinelMissing(RootId),
-    /// The root's sentinel belongs to another root or instance, or is
-    /// unreadable.
-    #[error("{0} carries the sentinel of another root or instance")]
+    /// The root has no marker of this profile: it is unmounted, replaced by
+    /// an empty directory, or was never set up by this profile.
+    #[error("{0} has no Wayfetch marker; it may be unmounted or not set up")]
+    MarkerMissing(RootId),
+    /// This profile's marker in the folder names another of its roots.
+    #[error("the folder of {0} is marked as another download folder")]
     WrongRoot(RootId),
-    /// The directory carries an unreadable sentinel or another instance's.
-    #[error("the folder is marked for another Wayfetch instance")]
-    ForeignSentinel,
+    /// This profile's marker in the folder cannot be read.
+    #[error("the folder's Wayfetch marker is damaged")]
+    UnreadableMarker,
     /// The directory at the root's path is no longer the one opened.
     #[error("{0} was replaced or remounted after it was opened")]
     RootReplaced(RootId),
@@ -169,11 +125,11 @@ pub enum FsError {
 
 impl FsError {
     /// Whether opening a root failed because the folder is gone: it no
-    /// longer exists, or it no longer holds its sentinel, as when its
+    /// longer exists, or it no longer holds this profile's marker, as when its
     /// contents were deleted. An empty mount point looks the same.
     pub fn is_absent_root(&self) -> bool {
         match self {
-            Self::SentinelMissing(_) => true,
+            Self::MarkerMissing(_) => true,
             Self::Io {
                 op: OPEN_ROOT,
                 source,
@@ -187,9 +143,9 @@ impl FsError {
         move |source| Self::Io { op, source }
     }
 
-    /// The failure to record for this error (failure matrix, section 7.4).
+    /// The failure to record for this error.
     /// Access refusals are told apart from unavailable destinations, and a
-    /// damaged partial restarts rather than blocking the root (T29, T30).
+    /// damaged partial restarts rather than blocking the root.
     pub fn failure_code(&self) -> FailureCode {
         match self {
             Self::Io { source, .. } if source.kind() == io::ErrorKind::PermissionDenied => {
@@ -201,9 +157,9 @@ impl FsError {
             | Self::PublishedMissing(_)
             | Self::PublishedChanged(_) => FailureCode::IntegrityMismatch,
             Self::Unsupported(_) => FailureCode::UnsupportedCapability,
-            Self::SentinelMissing(_)
+            Self::MarkerMissing(_)
             | Self::WrongRoot(_)
-            | Self::ForeignSentinel
+            | Self::UnreadableMarker
             | Self::RootReplaced(_)
             | Self::Path(_)
             | Self::TargetExists(_)
@@ -236,7 +192,7 @@ mod tests {
         }
         let root = RootId::from_u64(1).unwrap();
         assert_eq!(
-            FsError::SentinelMissing(root).failure_code().next_action(),
+            FsError::MarkerMissing(root).failure_code().next_action(),
             NextAction::BlockUntilRemediated
         );
         assert_eq!(

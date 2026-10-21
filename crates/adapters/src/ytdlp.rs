@@ -1,12 +1,8 @@
-//! yt-dlp as a media resolver (ADR-27): it reads a video page's title and
-//! formats, and the stream links for a choice; the engine downloads the
-//! streams itself.
+//! yt-dlp as a media resolver (ADR-27): it reads a video's title, formats,
+//! and stream links; the engine downloads the streams itself.
 //!
-//! yt-dlp runs once per check and once per download start, with
-//! `--ignore-config` so no configuration file on the host changes what it
-//! does, `-J` so it only describes the video, and `--no-playlist`. Only
-//! formats served whole over HTTP(S) with an exact size and no DRM are
-//! used; fragmented formats (DASH, HLS) are not offered yet.
+//! It runs with `--ignore-config`, `-J`, and `--no-playlist`, and only whole
+//! HTTP(S) formats with an exact size and no DRM are offered.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +17,7 @@ use wayfetch_engine::media::{
 };
 use wayfetch_engine::protocol::media::{AudioFormat, MediaChoice, PluginRole};
 
-use crate::plugin::{Check, Describe, Limits, Plugin, Program, RunError, last_line};
+use crate::plugin::{Check, Describe, Limits, Plugin, RunError, last_line};
 
 /// The plugin.
 pub const PLUGIN: Describe = Describe {
@@ -83,9 +79,7 @@ impl YtDlp {
         cache_dir: Option<PathBuf>,
         js_runtimes: Option<String>,
     ) -> Self {
-        let check = Self::check(cache_dir.as_deref());
-        let program = Program::detect(PLUGIN, path, &check).await;
-        let plugin = Arc::new(Plugin::new(PLUGIN, check, program, false));
+        let plugin = Plugin::detect(PLUGIN, Self::check(cache_dir.as_deref()), path).await;
         Self::new(plugin, cache_dir, js_runtimes)
     }
 

@@ -1,25 +1,11 @@
-//! Hard-kill recovery over real sockets (architecture brief section 13.2,
-//! "crash-injection harness"): an engine runs in a child process against
-//! the local HTTPS fixture and is killed with `SIGKILL` while streaming, at
-//! each checkpoint step, and at each publication step. An engine restarted
-//! on the same state directory must take it over, resume only from the
-//! durable bytes, complete the interrupted publication, and publish exactly
-//! the served bytes without overwriting anything.
+//! Hard-kill recovery: an engine in a child process is killed with `SIGKILL`
+//! at named steps, then restarted on the same state directory, which must
+//! resume from durable bytes only and never overwrite a file it does not
+//! own.
 //!
-//! Brief tests exercised here: T23 (crash before and after the file sync
-//! and the checkpoint commit), T24 (crash before and after the link and the
-//! completion commit), T26 (the killed engine held the state directory
-//! until it died, and nothing had to clean its lock up), and T31 (a file
-//! that took the target name meanwhile is never overwritten). Repeated
-//! kills while recovery abandons a partial and while cleanup removes it
-//! show that cleanup is safe to interrupt and repeat (section 7.6). Kills
-//! while a manual retry hands a failed job's partial to its next attempt,
-//! and while that attempt publishes, show the saved data is kept and the
-//! file published once.
-//!
-//! The child is this test binary running [`child_engine`]. It stops at a
-//! named boundary of the engine's `failpoints` feature and reports it, so
-//! every kill lands on a known step rather than on a timer.
+//! The child is this test binary running [`child_engine`], stopping at a
+//! named boundary of the engine's `failpoints` feature, so every kill lands
+//! on a known step.
 
 #![cfg(unix)]
 
@@ -35,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use engine_support::{KIB, body, complete, jobs, settled, shutdown, staging_files};
+use engine_support::{KIB, body, complete, jobs, settled, shutdown, staging_dir, staging_files};
 use support::{Resource, Server, config_trusting, https_env};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -295,7 +281,7 @@ const SIGKILL: i32 = 9;
 
 /// Lengths of the staging files in `root`.
 fn staging_lengths(root: &Path) -> Vec<u64> {
-    std::fs::read_dir(root.join(".wayfetch/staging"))
+    std::fs::read_dir(staging_dir(root))
         .map(|entries| {
             entries
                 .map(|e| e.unwrap().metadata().unwrap().len())
@@ -622,7 +608,7 @@ async fn a_file_left_unregistered_by_a_kill_is_never_removed() {
     child.kill(&env.state).await;
     // The file the killed engine created but never recorded is replaced
     // before the next start; only a record could prove it the engine's.
-    let staging = env.root.join(".wayfetch/staging");
+    let staging = staging_dir(&env.root);
     let [left] = &std::fs::read_dir(&staging)
         .unwrap()
         .map(|e| e.unwrap().path())

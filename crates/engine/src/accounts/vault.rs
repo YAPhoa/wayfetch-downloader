@@ -1,36 +1,12 @@
-//! Encryption of stored provider credentials (architecture brief section
-//! 8.4, ADR-24).
+//! Encryption of stored provider credentials (ADR-24).
 //!
-//! Credentials are sealed with ChaCha20-Poly1305 (`ring`) under a key kept
-//! in a file outside the state directory, so the database, its WAL, and a
-//! copy of the state directory hold only ciphertext. Each record has a
-//! fresh random 96-bit nonce, and its associated data binds the record
-//! format, the account's opaque secret reference, and the service, so a
-//! record moved to another account or service fails to open.
-//!
-//! The key file holds 32 random bytes as 64 hexadecimal digits. The two
-//! keys in use are derived from it with HMAC-SHA-256 under fixed labels:
-//! one encrypts, and one yields the key check the database stores, which
-//! tells a wrong key from a right one without decrypting anything and
-//! reveals nothing about the key.
-//!
-//! Provisioning and restart:
-//!
-//! * No key file configured: accounts cannot be added
-//!   ([`VaultState::NotConfigured`]).
-//! * Configured, and the database never stored a key check: the vault is
-//!   uninitialized. Adding the first account reads the file, or creates it
-//!   owner-only if it does not exist, and stores its check.
-//! * The database stores a check: the file must exist, be owner-only, and
-//!   hold the key with that check. Anything else locks the vault
-//!   ([`VaultState::Locked`]) with the reason; the engine never generates
-//!   a replacement, which would make the stored credentials unreadable.
-//!   Downloads without an account are not affected.
-//!
-//! Rotating the key, and recovering from losing it, are not supported:
-//! with the key gone, the accounts must be removed and signed in again.
+//! Records are sealed with ChaCha20-Poly1305 under a key file kept outside
+//! the state directory, and bound to their account and service. The database
+//! stores only a key check. A missing, exposed, or wrong key locks the vault
+//! instead of being replaced, since a new key would make the stored
+//! credentials unreadable.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,6 +20,7 @@ use wayfetch_protocol::{ErrorCode, ProtocolError};
 use zeroize::Zeroizing;
 
 use super::Secret;
+use crate::fs::{create_private, is_private};
 
 /// Bytes of key material in the key file.
 const KEY_BYTES: usize = 32;
@@ -345,7 +322,10 @@ fn read_key(path: &Path) -> Result<Option<Keys>, String> {
             ));
         }
     };
-    if !is_private(&file).map_err(|e| format!("the credential key file {shown}: {e}"))? {
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("the credential key file {shown}: {e}"))?;
+    if !is_private(&metadata) {
         return Err(format!(
             "the credential key file {shown} is accessible to other users; make it owner-only (mode 600)"
         ));
@@ -397,35 +377,6 @@ fn decode_hex(text: &str) -> Option<Zeroizing<[u8; KEY_BYTES]>> {
         *byte = u8::try_from(value(pair[0])? << 4 | value(pair[1])?).ok()?;
     }
     Some(out)
-}
-
-#[cfg(unix)]
-fn create_private(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn create_private(path: &Path) -> io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).open(path)
-}
-
-/// Whether only the file's owner may read or write it.
-#[cfg(unix)]
-fn is_private(file: &File) -> io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(file.metadata()?.mode() & 0o077 == 0)
-}
-
-/// Other platforms' permissions are not checked here; the file still
-/// lives outside the state directory.
-#[cfg(not(unix))]
-fn is_private(_file: &File) -> io::Result<bool> {
-    Ok(true)
 }
 
 #[cfg(test)]

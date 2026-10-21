@@ -1,21 +1,29 @@
 // The desktop transport: `WayfetchClient` over the desktop host's IPC
-// commands, for the shared UI in the desktop window (architecture brief
-// sections 4.7 and 11.7, ADR-33).
+// commands (ADR-33).
 //
-// Arguments and answers are the protocol's JSON, as over HTTP, and the
-// host's refusals are the protocol's errors, so the views behave the same
-// in both shells. There is no sign-in: the window belongs to the person
-// using this computer, and the host decides what it may do. Being local,
-// this client can also show the host's folder dialog and open a finished
-// job's file or folder; each names a job, never a path.
-//
-// Event subscriptions arrive on a Tauri channel. The host sends a bounded
-// number of items ahead of this client's acknowledgements, so a page that
-// stops reading never makes the host queue without bound; `null` says the
-// stream ended, after which the feed resumes from its cursor as it does
-// after a lost HTTP stream.
+// Arguments, answers, and errors are the protocol's JSON, as over HTTP.
+// There is no sign-in: the window belongs to the local user. Events arrive
+// on a Tauri channel with acknowledgements, so a page that stops reading
+// never makes the host queue without bound.
 
-import { WayfetchError, extractRequest, jobCommandRequest, settingsRequest } from '../client/contract.js';
+import {
+  WayfetchError,
+  accountCommandRequest,
+  authorizeAccountRequest,
+  changePluginRequest,
+  collectRequest,
+  extractRequest,
+  jobCommandRequest,
+  linksCommandRequest,
+  removeRootRequest,
+  settingsRequest,
+  submitRequest,
+} from '../client/contract.js';
+
+/**
+ * @template {keyof WayfetchClient} M
+ * @typedef {import('../client/contract.js').Args<M>} Args
+ */
 
 /**
  * @typedef {import('../client/generated/StartRouting.js').StartRouting} StartRouting
@@ -29,13 +37,10 @@ import { WayfetchError, extractRequest, jobCommandRequest, settingsRequest } fro
  * @typedef {import('../client/contract.js').JobStage} JobStage
  * @typedef {import('../client/contract.js').Permission} Permission
  * @typedef {import('../client/contract.js').RootId} RootId
- * @typedef {import('../client/contract.js').CollectMode} CollectMode
  * @typedef {import('../client/contract.js').SettingsChange} SettingsChange
  * @typedef {import('../client/contract.js').ExtractChange} ExtractChange
  * @typedef {import('../client/contract.js').RootSummary} RootSummary
  * @typedef {import('../client/contract.js').LinkId} LinkId
- * @typedef {import('../client/contract.js').LinkRef} LinkRef
- * @typedef {import('../client/contract.js').LinksAction} LinksAction
  * @typedef {import('../client/generated/Query.js').Query} Query
  * @typedef {import('../client/generated/ProtocolError.js').ProtocolError} ProtocolError
  * @typedef {import('../client/generated/SubmitRequest.js').SubmitRequest} SubmitRequest
@@ -47,8 +52,6 @@ import { WayfetchError, extractRequest, jobCommandRequest, settingsRequest } fro
  * @typedef {import('../client/generated/AuthorizeAccountRequest.js').AuthorizeAccountRequest} AuthorizeAccountRequest
  * @typedef {import('../client/generated/AccountCommandRequest.js').AccountCommandRequest} AccountCommandRequest
  * @typedef {import('../client/contract.js').AccountId} AccountId
- * @typedef {import('../client/contract.js').AccountRef} AccountRef
- * @typedef {import('../client/contract.js').AccountAction} AccountAction
  * @typedef {import('../client/contract.js').AuthorizationId} AuthorizationId
  */
 
@@ -133,11 +136,9 @@ export class DesktopIpcClient {
     return this.call('query', { query });
   }
 
-  /** @param {{ idempotencyKey: string, target: string, items: string[] }} request */
-  submit({ idempotencyKey, target, items }) {
-    /** @type {SubmitRequest} */
-    const request = { idempotency_key: idempotencyKey, target, items };
-    return this.call('submit', { request });
+  /** @param {Args<'submit'>[0]} request */
+  submit(request) {
+    return this.call('submit', { request: submitRequest(request) });
   }
 
   /** @param {{ after?: LinkId | null, pageSize: number }} request */
@@ -148,27 +149,16 @@ export class DesktopIpcClient {
     return this.call('query', { query });
   }
 
-  /** @param {{ idempotencyKey: string, target: string, text: string, baseUrl?: string | null, mode?: CollectMode, destination?: RootId | null }} request */
-  collectLinks({ idempotencyKey, target, text, baseUrl, mode, destination }) {
-    /** @type {CollectRequest} */
-    const request = { idempotency_key: idempotencyKey, target, text };
-    if (baseUrl) request.base_url = baseUrl;
-    if (mode) request.mode = mode;
-    if (destination) request.destination = destination;
-    return this.call('collect_links', { request });
+  /** @param {Args<'collectLinks'>[0]} request */
+  collectLinks(request) {
+    return this.call('collect_links', { request: collectRequest(request) });
   }
 
   /**
-   * @param {{ idempotencyKey: string, target: string, action: LinksAction, links: LinkRef[], destination?: RootId, account?: AccountId, routing?: StartRouting, media?: MediaChoice }} request
+   * @param {Args<'linksCommand'>[0]} request
    */
-  linksCommand({ idempotencyKey, target, action, links, destination, account, routing, media }) {
-    /** @type {LinksCommandRequest} */
-    const request = { idempotency_key: idempotencyKey, target, action, links };
-    if (destination !== undefined) request.destination = destination;
-    if (account !== undefined) request.account = account;
-    if (routing !== undefined) request.routing = routing;
-    if (media !== undefined) request.media = media;
-    return this.call('links_command', { request });
+  linksCommand(request) {
+    return this.call('links_command', { request: linksCommandRequest(request) });
   }
 
   /** @param {LinkId} link */
@@ -216,28 +206,19 @@ export class DesktopIpcClient {
   }
   /**
    * Stops offering a download folder the user added; its files stay.
-   * @param {{ idempotencyKey: string, target: string, expectedRevision: number, root: RootId }} request
+   * @param {Args<'removeRoot'>[0]} request
    */
-  removeRoot({ idempotencyKey, target, expectedRevision, root }) {
-    /** @type {RemoveRootRequest} */
-    const request = {
-      idempotency_key: idempotencyKey,
-      target,
-      expected_revision: expectedRevision,
-      root,
-    };
-    return this.call('remove_root', { request });
+  removeRoot(request) {
+    return this.call('remove_root', { request: removeRootRequest(request) });
   }
 
   /**
    * Turns a plugin on or off, updates it, or removes the copy Wayfetch
    * installed.
-   * @param {{ idempotencyKey: string, target: string, plugin: string, change: PluginChange }} request
+   * @param {Args<'changePlugin'>[0]} request
    */
-  changePlugin({ idempotencyKey, target, plugin, change }) {
-    /** @type {ChangePluginRequest} */
-    const request = { idempotency_key: idempotencyKey, target, plugin, change };
-    return this.call('change_plugin', { request });
+  changePlugin(request) {
+    return this.call('change_plugin', { request: changePluginRequest(request) });
   }
 
   accounts() {
@@ -247,14 +228,10 @@ export class DesktopIpcClient {
   }
 
   /**
-   * @param {{ idempotencyKey: string, target: string, service: string, account?: AccountRef, alias?: string }} request
+   * @param {Args<'authorizeAccount'>[0]} request
    */
-  authorizeAccount({ idempotencyKey, target, service, account, alias }) {
-    /** @type {AuthorizeAccountRequest} */
-    const request = { idempotency_key: idempotencyKey, target, service };
-    if (account) request.account = account;
-    if (alias) request.alias = alias;
-    return this.call('authorize_account', { request });
+  authorizeAccount(request) {
+    return this.call('authorize_account', { request: authorizeAccountRequest(request) });
   }
 
   /** @param {AuthorizationId} id */
@@ -271,12 +248,10 @@ export class DesktopIpcClient {
 
   /**
    * @param {AccountId} account
-   * @param {{ idempotencyKey: string, target: string, action: AccountAction, expectedRevision: number }} request
+   * @param {Args<'accountCommand'>[1]} request
    */
-  accountCommand(account, { idempotencyKey, target, action, expectedRevision }) {
-    /** @type {AccountCommandRequest} */
-    const request = { idempotency_key: idempotencyKey, target, action, expected_revision: expectedRevision };
-    return this.call('account_command', { account, request });
+  accountCommand(account, request) {
+    return this.call('account_command', { account, request: accountCommandRequest(request) });
   }
 
   /** @param {AccountId} account */

@@ -1,18 +1,9 @@
-//! Provider accounts and their sealed credentials (architecture brief
-//! sections 6.1, 7.3, 8.4, ADR-24).
+//! Provider accounts and their sealed credentials (ADR-24).
 //!
-//! Only redacted metadata is stored in the clear. Credentials arrive here
-//! already sealed by the vault, and leave sealed; this module never sees a
-//! key or a plaintext secret.
-//!
-//! Two counters guard an account. `revision` is what a client presents to
-//! change it. `credential_generation` advances whenever its credentials
-//! change, and work that read older credentials (a status check, a
-//! refresh, a sign-in that started before another finished) can only store
-//! its result while the generation it read is current, so a late answer
-//! never restores obsolete credentials or status. `sign_in` advances
-//! only when the account is signed in again, so a link generated with an
-//! earlier sign-in is never used, while a refresh keeps links usable.
+//! Only redacted metadata is stored in the clear; credentials arrive and
+//! leave sealed. `revision` guards client edits, `credential_generation`
+//! keeps a late answer from restoring older credentials, and `sign_in`
+//! retires links generated before the account was signed in again.
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::id::AccountId;
@@ -25,7 +16,7 @@ use wayfetch_protocol::account::{
 use wayfetch_protocol::{CommandEnvelope, CommandResult, ErrorCode, InstanceId, ProtocolError};
 
 use super::commands::{record, replayed};
-use super::{Store, StoreError, key, sql};
+use super::{OrCorrupt, Store, StoreError, key, sql};
 use crate::accounts::provider::Profile;
 use crate::accounts::vault::{FORMAT, KeyCheck, REFERENCE_BYTES, Reference};
 
@@ -155,7 +146,7 @@ fn decode(raw: Raw) -> Result<AccountRow, StoreError> {
     let corrupt = |_| StoreError::Corrupt("account");
     Ok(AccountRow {
         id: key(id)?,
-        service: ProviderId::new(service).map_err(|_| StoreError::Corrupt("account service"))?,
+        service: ProviderId::new(service).or_corrupt("account service")?,
         alias: alias
             .map(|a| AccountAlias::new(&a))
             .transpose()
@@ -164,13 +155,13 @@ fn decode(raw: Raw) -> Result<AccountRow, StoreError> {
         generation: key(generation)?,
         sign_in: key(sign_in)?,
         enabled,
-        status: from_text(&status).ok_or(StoreError::Corrupt("account status"))?,
+        status: from_text(&status).or_corrupt("account status")?,
         problem: problem.map(|p| DiagnosticText::new(&p)),
         checked_at: checked_at.map(UtcTimestamp::from_unix_millis),
         provider_user,
         username,
         plan: plan
-            .map(|p| from_text(&p).ok_or(StoreError::Corrupt("account plan")))
+            .map(|p| from_text(&p).or_corrupt("account plan"))
             .transpose()?,
         expires_at: expires_at.map(UtcTimestamp::from_unix_millis),
         added_at: UtcTimestamp::from_unix_millis(added_at),
@@ -236,7 +227,7 @@ fn next<C: Copy>(
     value: C,
     step: impl FnOnce(C) -> Result<C, wayfetch_domain::version::CounterExhausted>,
 ) -> Result<C, StoreError> {
-    step(value).map_err(|_| StoreError::Corrupt("account counter"))
+    step(value).or_corrupt("account counter")
 }
 
 fn write_credential(
@@ -325,7 +316,7 @@ impl Store {
             )
             .optional()?;
         check
-            .map(|c| c.try_into().map_err(|_| StoreError::Corrupt("key check")))
+            .map(|c| c.try_into().or_corrupt("key check"))
             .transpose()
     }
 
@@ -387,9 +378,8 @@ impl Store {
             )
             .optional()?
             .ok_or(StoreError::NotFound("account credentials"))?;
-        let reference: [u8; REFERENCE_BYTES] = reference
-            .try_into()
-            .map_err(|_| StoreError::Corrupt("credential reference"))?;
+        let reference: [u8; REFERENCE_BYTES] =
+            reference.try_into().or_corrupt("credential reference")?;
         Ok((row, StoredCredential { reference, sealed }))
     }
 

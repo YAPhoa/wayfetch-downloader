@@ -1,20 +1,10 @@
-//! Link discovery for the Links list: finding links in collected text,
-//! and checking each collected link in the background (link crawler
-//! stage 1).
+//! Link discovery for the Links list: finding links in text, and checking
+//! each collected link in the background.
 //!
-//! * [`extract`] finds links in pasted text or HTML, without the network.
-//! * [`Inspector`] is the seam to the HTTP client: one bounded metadata
-//!   request, under the same egress policy as downloads. `wayfetch-net`
-//!   implements it.
-//! * [`check`] decides what a link is from at most a few such requests: a
-//!   file (with its name and size when the server says), a web page (with
-//!   the links on it, when the link may be analyzed), offline, or unknown
-//!   with a typed reason. Unknown is never offline.
-//!
-//! The checks waiting are rows in the store (the frontier), never futures
-//! in memory, so a restart picks them up again. A link found on a page is
-//! only ever checked, never read as a page itself: analysis does not
-//! spider a site.
+//! [`extract`] finds links without the network, [`Inspector`] is the seam to
+//! the HTTP client, and [`check`] decides from a few bounded requests
+//! whether a link is a file, a page, offline, or unknown. Waiting checks are
+//! stored rows, and a link found on a page is never crawled further.
 
 pub mod extract;
 

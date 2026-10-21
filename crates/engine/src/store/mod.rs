@@ -1,57 +1,11 @@
-//! The engine's durable state (architecture brief sections 6.2 and 7.6 to
-//! 7.8, ADR-02, ADR-04 and ADR-16).
+//! The engine's durable state in one SQLite database (ADR-02, ADR-04,
+//! ADR-16).
 //!
-//! One [`Store`] owns the SQLite database inside the locked state directory.
-//! Only the coordinator holds it, so every write is serialized through one
-//! connection.
-//!
-//! # Durability profile
-//!
-//! The database uses WAL with `synchronous=FULL` and foreign keys, and
-//! refuses a linked SQLite without the WAL-reset fix (ADR-04). A write is
-//! reported only after its transaction commits.
-//!
-//! # Transaction boundaries
-//!
-//! Each write operation is one `IMMEDIATE` transaction that commits the
-//! state change together with its outbox events and, for client commands,
-//! the idempotency record:
-//!
-//! * [`Store::execute`]: a client command, its outbox events, and its
-//!   idempotency record.
-//! * [`Store::stage_pending`]: jobs for submitted inputs, with `job_added`
-//!   events. Collected links are held until a start command creates their
-//!   jobs, in the command's transaction.
-//! * [`Store::advance_job`]: one generation-checked stage transition and its
-//!   event.
-//! * [`Store::recover_after_restart`]: every active job moved to recovery,
-//!   with their events.
-//! * [`Store::commit_checkpoint`]: synchronized byte ranges for one partial.
-//! * [`Store::record_response`]: what the first response reported about a
-//!   staging file's bytes, and the job's expected size.
-//! * [`Store::prune`]: events and idempotency records past retention.
-//! * [`Store::register_staging`] and [`Store::adopt_staging`]: which job
-//!   generation owns a staging file. Registering a newer generation's file,
-//!   and queueing a job under a new generation, mark the job's older files
-//!   abandoned in the same transaction.
-//! * [`Store::finish_staging_cleanup`]: what removing an abandoned staging
-//!   file found.
-//! * `Store::allocate_root`, `Store::adopt_root`, `Store::register_root`,
-//!   and `Store::forget_root`: one root recorded by path.
-//! * `Store::begin_operation` and `Store::finish_operation`: a provider
-//!   operation's intent, before its request is sent, and its outcome,
-//!   before any transfer uses it.
-//! * [`Store::begin_publication`], [`Store::complete_publication`] (with
-//!   the job's completion), and [`Store::abandon_publication`]: the
-//!   publication intent around the filesystem link.
-//!
-//! Reads run in a short deferred transaction so a page and its `as_of`
-//! cursor agree, and never span a network request or a subscription.
-//!
-//! # Schema migrations
-//!
-//! See [`schema`]: numbered, forward-only, append-only once merged, and an
-//! engine refuses a database written by a newer schema.
+//! Only the coordinator holds the [`Store`], so writes are serialized. Each
+//! write is one `IMMEDIATE` transaction that commits the change with its
+//! outbox events and, for client commands, the idempotency record; a write
+//! is reported only after it commits. Reads use short transactions so a page
+//! and its cursor agree. Migrations live in [`schema`].
 
 mod accounts;
 mod commands;
@@ -282,6 +236,23 @@ fn check_sqlite_version(version: i32) -> Result<(), StoreError> {
         Ok(())
     } else {
         Err(StoreError::UnsupportedSqlite(rusqlite::version()))
+    }
+}
+
+/// Reads a stored value back, or reports the record as corrupt.
+trait OrCorrupt<T> {
+    fn or_corrupt(self, what: &'static str) -> Result<T, StoreError>;
+}
+
+impl<T, E> OrCorrupt<T> for Result<T, E> {
+    fn or_corrupt(self, what: &'static str) -> Result<T, StoreError> {
+        self.map_err(|_| StoreError::Corrupt(what))
+    }
+}
+
+impl<T> OrCorrupt<T> for Option<T> {
+    fn or_corrupt(self, what: &'static str) -> Result<T, StoreError> {
+        self.ok_or(StoreError::Corrupt(what))
     }
 }
 

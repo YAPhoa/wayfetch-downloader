@@ -1,16 +1,9 @@
-//! Exclusive state-directory ownership and instance identity (ADR-34,
-//! test T26).
+//! Exclusive state-directory ownership and instance identity (ADR-34).
 //!
-//! An engine holds an exclusive advisory lock on `<state_dir>/wayfetch.lock`
-//! for as long as any of its tasks may touch the directory. A second engine,
-//! in this process or another, fails to start instead of waiting or taking
-//! over. The lock is released by the operating system when the holder's file
-//! handle closes, including on a crash, so no stale-lock cleanup exists or is
-//! needed.
-//!
-//! `<state_dir>/instance.json` records the instance identity and the last
-//! boot epoch. Each start advances the epoch and replaces the file
-//! atomically (temporary file, fsync, rename, directory fsync).
+//! An engine holds an advisory lock on `wayfetch.lock` while any of its
+//! tasks may touch the directory, so a second engine fails to start; the OS
+//! releases it on exit or crash. `instance.json` holds the instance identity
+//! and boot epoch, replaced atomically on each start.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};

@@ -1,6 +1,6 @@
 //! Explicit, retryable deletion of recorded artifacts. The store never touches files.
 use super::commands::{record_as, replayed};
-use super::{Store, StoreError, jobs, key, renames, sql};
+use super::{OrCorrupt, Store, StoreError, jobs, key, renames, sql};
 use crate::fs::{FileIdentity, PublishedFile, RelativePath, StagingRecord};
 use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::id::{JobId, RootId};
@@ -184,15 +184,13 @@ impl Store {
                 Ok((
                     key(root)?,
                     PublishedFile {
-                        path: RelativePath::new(&path)
-                            .map_err(|_| StoreError::Corrupt("publication path"))?,
+                        path: RelativePath::new(&path).or_corrupt("publication path")?,
                         identity: FileIdentity {
                             device: device.cast_unsigned(),
                             inode: inode.cast_unsigned(),
                             birth_ns,
                         },
-                        size: u64::try_from(size)
-                            .map_err(|_| StoreError::Corrupt("publication size"))?,
+                        size: u64::try_from(size).or_corrupt("publication size")?,
                     },
                 ))
             })

@@ -1,5 +1,5 @@
 //! No-clobber publication, renaming published files, and their crash
-//! reconciliation (section 7.7, tests T24 and T31).
+//! reconciliation.
 
 use std::io;
 use std::path::PathBuf;
@@ -52,12 +52,9 @@ impl Root {
     /// `size` bytes, creating missing parent directories. The caller has
     /// recorded a publication intent for that size first.
     ///
-    /// Bytes past `size` (uncertified data or preallocation) are cut off
-    /// while the file is still private; a file shorter than `size` is
-    /// refused. The file is synchronized, hard-linked to the target name,
-    /// which fails rather than replacing anything there, checked to be the
-    /// staged file at `size` bytes, the target directory is synchronized,
-    /// and then the staging name is removed. Any crash leaves a state
+    /// Extra bytes are cut off while the file is private, then it is
+    /// synced, hard-linked to the target (never replacing anything there),
+    /// checked, and the staging name removed. Any crash leaves a state
     /// [`Root::reconcile_publication`] can classify.
     pub fn publish(
         &self,
@@ -89,8 +86,9 @@ impl Root {
         let parent = self
             .parent_dir(parent, true)?
             .expect("created parents exist");
+        let (staging_dir, staged) = self.locate(record)?;
         crash_point!("publish-before-link");
-        match self.staging.hard_link(&record.name, &parent, name) {
+        match staging_dir.hard_link(staged, &parent, name) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 return Err(FsError::TargetExists(target.clone()));
@@ -133,8 +131,13 @@ impl Root {
             Some(dir) => file_at(dir, name)?,
             None => None,
         };
-        let staged = file_at(&self.staging, &record.name)?
-            .filter(|(identity, _)| identity.matches(&record.identity));
+        // A name in another profile's staging folder is never looked at.
+        let staged = match self.locate(record) {
+            Ok((dir, name)) => file_at(dir, name)?,
+            Err(FsError::StagingMissing(_)) => None,
+            Err(e) => return Err(e),
+        }
+        .filter(|(identity, _)| identity.matches(&record.identity));
         let ours = |found: Option<(FileIdentity, u64)>| {
             found.is_some_and(|(identity, _)| identity.matches(&record.identity))
         };
@@ -164,13 +167,10 @@ impl Root {
     /// Gives the published file `file` the name `to` in the same folder.
     /// The caller has recorded the rename first.
     ///
-    /// The file must still be the one published, at its published size;
-    /// anything else at the old name was put there outside Wayfetch and is
-    /// left alone. The new name is hard-linked, which fails rather than
-    /// replacing a file there, checked to be the published file, and the
-    /// folder synchronized; only then is the old name removed, if it still
-    /// holds the file, and the folder synchronized again. Any crash leaves
-    /// a state [`Root::reconcile_rename`] can classify.
+    /// Only the file Wayfetch published is moved. The new name is
+    /// hard-linked without replacing anything and checked before the old
+    /// name is removed, so any crash leaves a state
+    /// [`Root::reconcile_rename`] can classify.
     pub fn rename_published(&self, file: &PublishedFile, to: &RelativePath) -> Result<(), FsError> {
         let (dir, from_name, to_name) = self.rename_names(file, to)?;
         if !is_staged(file_at(&dir, from_name)?, &file.identity, file.size) {
@@ -321,10 +321,10 @@ impl Root {
     }
 
     fn remove_staging_name(&self, record: &StagingRecord) -> Result<(), FsError> {
-        self.staging
-            .remove_file(&record.name)
+        let (dir, name) = self.locate(record)?;
+        dir.remove_file(name)
             .map_err(FsError::io("remove staging name"))?;
-        sys::sync_dir(&self.staging).map_err(FsError::io("sync staging directory"))
+        sys::sync_dir(dir).map_err(FsError::io("sync staging directory"))
     }
 
     /// Opens the directory `parent` below the root, or the root itself.
@@ -400,6 +400,43 @@ mod tests {
             .unwrap();
         staging.write_all_at(bytes, 0).unwrap();
         staging
+    }
+
+    #[test]
+    fn profiles_publishing_one_name_at_once_never_overwrite() {
+        let (tmp, a, b) = crate::fs::staging::tests::shared();
+        for round in 0..20u64 {
+            let target = path(&format!("same-{round}.bin"));
+            let barrier = std::sync::Barrier::new(2);
+            let publish = |root: &Root, bytes: &'static [u8]| {
+                let staging = staged(root, round + 1, bytes);
+                let record = staging.record().clone();
+                barrier.wait();
+                (root.publish(staging, &target, 4), record)
+            };
+            let (a, b, publish) = (&a, &b, &publish);
+            let results = std::thread::scope(|scope| {
+                let ours = scope.spawn(move || publish(a, b"ours"));
+                let theirs = scope.spawn(move || publish(b, b"them"));
+                [ours.join().unwrap(), theirs.join().unwrap()]
+            });
+            // Exactly one took the name; the other was refused and keeps
+            // its staged file for the conflict policy to name again.
+            let won: Vec<_> = results.iter().filter(|(r, _)| r.is_ok()).collect();
+            assert_eq!(won.len(), 1, "round {round}");
+            let content = std::fs::read(tmp.path().join(target.as_str())).unwrap();
+            for ((result, record), (root, bytes)) in
+                results.iter().zip([(a, b"ours"), (b, b"them")])
+            {
+                match result {
+                    Ok(()) => assert_eq!(&content, bytes),
+                    Err(FsError::TargetExists(_)) => {
+                        root.reopen_staging(record, 4).unwrap();
+                    }
+                    Err(e) => panic!("round {round}: {e}"),
+                }
+            }
+        }
     }
 
     #[test]
@@ -574,7 +611,7 @@ mod tests {
         std::fs::remove_dir_all(tmp.path().join(crate::fs::PRIVATE_DIR)).unwrap();
         assert!(matches!(
             root.reconcile_publication(&record, &path("a.bin"), 1),
-            Err(FsError::SentinelMissing(_))
+            Err(FsError::MarkerMissing(_))
         ));
     }
 
@@ -719,7 +756,7 @@ mod tests {
         std::fs::remove_dir_all(tmp.path().join(crate::fs::PRIVATE_DIR)).unwrap();
         assert!(matches!(
             root.published_path(&file),
-            Err(FsError::SentinelMissing(_))
+            Err(FsError::MarkerMissing(_))
         ));
     }
 

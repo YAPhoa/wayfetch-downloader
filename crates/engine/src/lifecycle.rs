@@ -1,38 +1,15 @@
-//! Engine startup, readiness, handles, scheduling, and bounded shutdown
-//! (architecture brief sections 4.6 and 10, ADR-31 and ADR-34).
+//! Engine startup, readiness, the coordinator, and bounded shutdown (ADR-31,
+//! ADR-34).
 //!
-//! * [`EngineBuilder`] starts an engine on a runtime the host supplies. The
-//!   engine never creates a runtime, installs signal handlers, opens a
-//!   listener, or exits the process.
-//! * [`EngineOwner`] is held by the application host, not by a window. It
-//!   owns the state-directory lock and every engine task, and is the only
-//!   way to shut down.
-//! * [`EngineHandle`] is a cloneable, bounded request facade for UIs and
-//!   adapters. Dropping handles never stops the engine; a handle that
-//!   outlives the engine gets `ShuttingDown` errors.
+//! [`EngineBuilder`] starts an engine on the host's runtime. [`EngineOwner`]
+//! holds the state-directory lock and every task, and is the only way to
+//! shut down. [`EngineHandle`] is the cloneable, bounded request facade;
+//! dropping it never stops the engine.
 //!
-//! Startup opens the store, retires work authorized by the previous run
-//! (moving active jobs to recovery), stages submitted inputs, and prunes
-//! history past retention before the engine reports ready. Before admitting
-//! work, and after each download ends, the coordinator removes staging
-//! files no job generation can reopen (see the cleanup module).
-//!
-//! The coordinator serializes every state change. It admits recovering,
-//! then queued jobs while fewer downloads run than the effective most
-//! downloads at once (the operator's policy applied to the user's saved
-//! preference), reading only as many from the database as it has free
-//! slots; each runs as a download task whose store calls come back to the
-//! coordinator. Lowering that limit never stops a running download: new
-//! ones wait until fewer run than the new limit.
-//! A pause or cancel stops the job's task, and the coordinator settles the
-//! job once it has. After each change it broadcasts the new durable events
-//! to subscribers through a ring of `limits.event_buffer` events.
-//!
-//! Shutdown stops admitting requests, cancels engine tasks, and waits up to a
-//! deadline. Every engine task holds a reference to the state-directory lock,
-//! so a task still running after the deadline keeps the directory locked and
-//! the report says so; another engine cannot take over while old work may
-//! still write.
+//! The coordinator serializes every state change, admits jobs up to the
+//! download limit, and broadcasts committed events. Shutdown waits up to a
+//! deadline; a task still running keeps the directory locked, so no other
+//! engine can take over while it may write.
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -583,9 +560,7 @@ impl EngineHandle {
 
     /// The connection handshake.
     pub async fn hello(&self) -> Result<Hello, ProtocolError> {
-        let (reply, response) = oneshot::channel();
-        self.send(Request::Hello(reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(Request::Hello).await
     }
 
     /// Runs a command durably. Success is returned only after the command
@@ -609,9 +584,8 @@ impl EngineHandle {
             }
             authorize(required, granted)?;
         }
-        let (reply, response) = oneshot::channel();
-        self.send(Request::Execute(Box::new(envelope), reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::Execute(Box::new(envelope), reply))
+            .await
     }
 
     /// Answers a read query.
@@ -621,9 +595,7 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<QueryResult, ProtocolError> {
         authorize(query.required_permission(), granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::Query(query, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::Query(query, reply)).await
     }
 
     /// Subscribes to durable events after `request.after`. A cursor from
@@ -636,9 +608,7 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<Subscription, ProtocolError> {
         authorize(Permission::Read, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::Subscribe(request, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::Subscribe(request, reply)).await
     }
 
     /// Permits the existing directory `path` as a destination on the
@@ -653,9 +623,7 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<RootSummary, ProtocolError> {
         authorize(Permission::Control, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::RegisterRoot(path, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::RegisterRoot(path, reply)).await
     }
 
     /// The folders inside the folder at `path` on the engine's host (the
@@ -667,9 +635,7 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<FolderListing, ProtocolError> {
         authorize(Permission::Control, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::BrowseFolders(path, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::BrowseFolders(path, reply)).await
     }
 
     /// Where a listed, complete job's file is on this computer, after
@@ -684,9 +650,7 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<PathBuf, ProtocolError> {
         authorize(Permission::Read, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::PublishedPath(job, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::PublishedPath(job, reply)).await
     }
 
     /// Checks an account with its provider now, refreshing its credentials
@@ -699,9 +663,8 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<AccountSummary, ProtocolError> {
         authorize(Permission::Accounts, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::RefreshAccount(account, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::RefreshAccount(account, reply))
+            .await
     }
 
     /// Cancels a sign-in still waiting for the person's approval, and
@@ -712,9 +675,8 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<Authorization, ProtocolError> {
         authorize(Permission::Accounts, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::CancelAuthorization(id, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::CancelAuthorization(id, reply))
+            .await
     }
 
     /// Unpacks a complete archive download ([`Command::Extract`]), with
@@ -730,8 +692,18 @@ impl EngineHandle {
         for required in envelope.command.required_permissions() {
             authorize(required, granted)?;
         }
+        self.ask(|reply| Request::Extract(Box::new(envelope), password, reply))
+            .await
+    }
+
+    /// Sends the request `make` builds around a reply channel and waits for
+    /// the coordinator's answer.
+    async fn ask<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, ProtocolError>>) -> Request,
+    ) -> Result<T, ProtocolError> {
         let (reply, response) = oneshot::channel();
-        self.send(Request::Extract(Box::new(envelope), password, reply))?;
+        self.send(make(reply))?;
         response.await.map_err(|_| shutting_down())?
     }
 
@@ -748,7 +720,7 @@ impl EngineHandle {
     }
 }
 
-fn shutting_down() -> ProtocolError {
+pub(crate) fn shutting_down() -> ProtocolError {
     ProtocolError::new(ErrorCode::ShuttingDown, "engine is not running")
 }
 
@@ -791,16 +763,6 @@ fn prune(store: &mut Store, limits: &crate::config::Limits) -> Result<(), StoreE
 /// still start.
 const ADMIT_BLOCK_BUDGET: usize = 64;
 
-/// Picks up to `free` jobs to run, other than `excluded`, with where each
-/// is saved, moving queued ones to resolving. A job submitted without a
-/// destination belongs to the operator's download root, never to a
-/// default chosen since; only an engine with no download root gives such
-/// a job the default, since it was meant for none. A job whose root is no longer permitted, or that
-/// has none while the download root cannot be identified, is blocked, and
-/// the jobs behind it are looked at instead; without any download root,
-/// or while configured roots are being looked for (`identifying`), such a
-/// job waits. Also returns whether jobs are left to look at because
-/// the pass blocked [`ADMIT_BLOCK_BUDGET`] of them.
 /// Why a destination cannot be chosen: it is not permitted (`None`), or
 /// not available now.
 fn unusable_destination(problem: Option<String>) -> ProtocolError {
@@ -813,6 +775,11 @@ fn unusable_destination(problem: Option<String>) -> ProtocolError {
     }
 }
 
+/// Picks up to `free` jobs to run, other than `excluded`, with where each
+/// is saved, moving queued ones to resolving. A job keeps the root it was
+/// submitted for; one whose root is not permitted is blocked and the jobs
+/// behind it are looked at instead. Also returns whether jobs are left
+/// because the pass blocked [`ADMIT_BLOCK_BUDGET`] of them.
 fn admit(
     store: &mut Store,
     free: usize,
@@ -937,7 +904,7 @@ fn settle(store: &mut Store, job: JobId, interrupted: bool) -> Result<bool, Stor
 /// starts and drops its files before it returns. So no writer of this
 /// process still holds a staging file the job's earlier generations wrote,
 /// which is what lets a retried attempt adopt one without the boot-epoch
-/// rule (section 7.6, [`Store::adopt_retained`]).
+/// rule ([`Store::adopt_retained`]).
 #[derive(Debug, Clone)]
 pub(crate) struct SoleAttempt {
     job: JobId,
@@ -1585,16 +1552,9 @@ impl Coordinator {
         self.changed().await;
     }
 
-    /// Checks a command before the store runs it. A submit or a collect
-    /// without a chosen destination needs every configured root
-    /// identified that can be, so the default is current. A settings
-    /// change, and a destination chosen for links, must name a permitted
-    /// root that is available now, and only a permitted root can be
-    /// removed. A start of links learns which of their destinations cannot
-    /// be used, which it returns, and the account it downloads through,
-    /// which must be enabled, of a service that downloads, with credential
-    /// storage unlocked. A retry of a command already recorded is only
-    /// replayed.
+    /// Checks a command's destinations and account before the store runs
+    /// it, and returns the destinations a start of links cannot use. A
+    /// command already recorded is only replayed.
     async fn prepare(
         &mut self,
         envelope: &CommandEnvelope,

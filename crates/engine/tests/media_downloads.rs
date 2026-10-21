@@ -1,11 +1,6 @@
 //! Media downloads through the public engine API, with an in-process media
-//! service, video host, and converter (ADR-27): a collected
-//! media link is checked in the background and shows its title and
-//! formats; the person's choice is kept and made; the engine downloads
-//! every stream itself, end to end in one staging file, continues it with
-//! fresh links after a pause, starts again when the formats changed, and
-//! converts only through the converter. yt-dlp and ffmpeg themselves are
-//! tested in `wayfetch-adapters`.
+//! service, video host, and converter (ADR-27). yt-dlp and ffmpeg themselves
+//! are tested in `wayfetch-adapters`.
 
 mod support;
 
@@ -15,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use support::{ALL, KIB, body, complete, envelope, job, shutdown, wait_for};
+use support::{ALL, KIB, body, complete, envelope, job, shutdown, staging_dir, wait_for};
 use url::Url;
 use wayfetch_engine::media::{
     Container, Conversion, Converter, MediaError, MediaInfo, MediaPlan, MediaService, MediaStream,
@@ -770,7 +765,7 @@ async fn without_a_converter_only_single_streams_are_offered_and_kept_as_they_ar
 
 /// The conversion outputs in the staging directory.
 fn outputs(env: &Env) -> Vec<String> {
-    std::fs::read_dir(env.root.join(".wayfetch/staging"))
+    std::fs::read_dir(staging_dir(&env.root))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .filter(|name| name.ends_with(".media"))
@@ -787,9 +782,16 @@ async fn an_interrupted_conversion_runs_again_from_the_saved_streams_after_a_res
     let link = collect(&owner).await;
     let id = start(&owner, &link).await;
     wait_for(&owner, id, |j| j.stage == JobStage::Verifying).await;
-    while outputs(&f.env).is_empty() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    // The engine creates the output before polling the converter. Wait for
+    // the converter itself, or shutdown may precede the first conversion.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while f.joiner.runs.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first conversion started");
+    assert_eq!(outputs(&f.env).len(), 1);
     shutdown(owner).await;
     assert_eq!(f.env.staging_files(), 2);
 

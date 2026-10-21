@@ -1,14 +1,9 @@
-//! The frontier of link checks, and what they found (link crawler
-//! stage 1).
+//! The queue of link checks and what they found.
 //!
-//! A check is a `crawl_tasks` row, one per link at most: pending until the
-//! coordinator takes it, running while it is sent, deleted when its result
-//! is recorded. Checking a link again replaces its row, so a running
-//! check's late answer finds its row gone and changes nothing; so does an
-//! answer for a link removed, started, or unlisted meanwhile, since those
-//! drop the row too. Results commit with the row's deletion and a
-//! `links_changed` event, and links found on a page with their own checks,
-//! all in one transaction.
+//! A check is one `crawl_tasks` row per link. Checking again, or removing or
+//! starting the link, drops the row, so a late answer changes nothing.
+//! Results commit with the row's deletion and a `links_changed` event in one
+//! transaction.
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use url::Url;
@@ -19,7 +14,7 @@ use wayfetch_protocol::command::{InputUrl, MAX_COLLECTED_LINKS};
 use wayfetch_protocol::event::EventKind;
 use wayfetch_protocol::query::CheckReason;
 
-use super::{Store, StoreError, key, outbox, sql};
+use super::{OrCorrupt, Store, StoreError, key, outbox, sql};
 use crate::crawl::Checked;
 use crate::transfer::transport::Reach;
 
@@ -167,14 +162,14 @@ impl Store {
             tasks.push(Task {
                 id,
                 link: key(link)?,
-                url: Url::parse(&url).map_err(|_| StoreError::Corrupt("source URL"))?,
+                url: Url::parse(&url).or_corrupt("source URL")?,
                 queue,
                 analyze,
                 reach: reach(public_only),
                 media: media
                     .map(ProviderId::new)
                     .transpose()
-                    .map_err(|_| StoreError::Corrupt("media service"))?,
+                    .or_corrupt("media service")?,
             });
         }
         tx.commit()?;
@@ -267,7 +262,7 @@ impl Store {
                     .map(|p| DiagnosticText::new(p).as_str().to_owned()),
                 size.map(i64::try_from)
                     .transpose()
-                    .map_err(|_| StoreError::Corrupt("file size"))?,
+                    .or_corrupt("file size")?,
                 name,
                 collected,
                 collected.map(|_| found.skipped),

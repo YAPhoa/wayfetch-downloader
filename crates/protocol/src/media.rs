@@ -1,16 +1,9 @@
-//! Media links: links to a video page that a media service resolves into
-//! streams, such as a YouTube watch page, and the helper programs
-//! (plugins) that service needs.
+//! Media links, such as YouTube watch pages, their format choices, and the
+//! plugins their services need.
 //!
-//! A collected media link is checked once in the background: the engine
-//! asks its media service for the title and the formats, and announces the
-//! answer with `links_changed`. Before starting it, the person chooses a
-//! video quality or an audio-only format; the choice is kept with the
-//! link, then with its download.
-//!
-//! Settings can turn a plugin off and on, update one that
-//! Wayfetch can update from its official signed releases, and remove the
-//! copy Wayfetch installed ([`crate::Command::ChangePlugin`]).
+//! A media link is checked once in the background for its title and formats,
+//! and the person's choice is kept with the link and then its download.
+//! Settings manage plugins with [`crate::Command::ChangePlugin`].
 
 use serde::{Deserialize, Serialize};
 use wayfetch_domain::name::{DiagnosticText, PluginId, ProviderId};

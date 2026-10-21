@@ -1,13 +1,9 @@
-//! Provider operations: the durable record of asking a provider to
-//! generate a download link (architecture brief sections 6.2 and 6.5,
-//! ADR-09; test T12).
+//! Provider operations: the durable record of asking a provider for a
+//! download link (ADR-09).
 //!
-//! The intent is committed before the request is sent, and the outcome
-//! before any transfer starts, so a crash, lost answer, or late reply is
-//! never repeated blindly. A job has at most one open operation (the
-//! schema's unique index): every attempt, pause, restart, and replayed
-//! command of the job reuses it. A generated link is stored sealed with
-//! the vault's key; this module never sees it in the clear.
+//! The intent commits before the request is sent and the outcome before any
+//! transfer, so nothing is repeated blindly. A job has at most one open
+//! operation, and generated links are stored sealed.
 
 use std::str::FromStr;
 
@@ -18,7 +14,7 @@ use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Generation;
 use wayfetch_protocol::query::JobRoute;
 
-use super::{Store, StoreError, jobs, key, sql};
+use super::{OrCorrupt, Store, StoreError, jobs, key, sql};
 use crate::accounts::vault::{REFERENCE_BYTES, Reference};
 
 /// The open states, as the schema's index names them.
@@ -191,7 +187,7 @@ pub(super) fn decode_route(
 ) -> Result<Option<JobRoute>, StoreError> {
     match (service, account) {
         (Some(service), Some(account)) => Ok(Some(JobRoute {
-            service: ProviderId::new(&service).map_err(|_| StoreError::Corrupt("job route"))?,
+            service: ProviderId::new(&service).or_corrupt("job route")?,
             account: key(account)?,
         })),
         (None, None) => Ok(None),
@@ -245,7 +241,7 @@ impl Store {
                 now.unix_millis()
             ],
         )?;
-        let operation = open(&tx, job)?.ok_or(StoreError::Corrupt("provider operation"))?;
+        let operation = open(&tx, job)?.or_corrupt("provider operation")?;
         tx.commit()?;
         Ok(operation)
     }

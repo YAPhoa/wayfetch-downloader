@@ -1,17 +1,9 @@
-// A pop-up menu of commands, following the WAI-ARIA menu pattern: arrow
-// keys, Home and End move between items, Enter or Space runs one, Escape
-// or Tab closes it, and focus returns to where it came from. It is placed
-// inside the window, and closes on a press outside it, a scroll, a
-// resize, or the window losing focus.
+// A pop-up menu following the WAI-ARIA menu pattern, kept inside the window
+// and closed on an outside press, scroll, resize, or blur.
 //
-// Disabled items stay in the menu, and focusable, so a keyboard or screen
-// reader user learns they exist; a hint can say why they do not apply.
-//
-// A menu whose items say whether they are `checked` is a choice of one,
-// such as a format: its items are radio items, the checked one is marked
-// and takes focus when it opens. `pickerButton` opens one; it stands in
-// for a native select, whose list the system draws in its own theme
-// rather than the app's.
+// Disabled items stay focusable so keyboard and screen reader users learn
+// they exist. A menu of `checked` items is a single choice; `pickerButton`
+// opens one in place of a native select.
 
 import { h, show } from './dom.js';
 import { icon } from './icons.js';

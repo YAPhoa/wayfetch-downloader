@@ -1,11 +1,8 @@
-//! The shared web UI as the window's assets.
+//! The shared web UI, embedded from `ui/src` at compile time.
 //!
-//! `tauri.conf.json` embeds `ui/src` as it is, the same files `wayfetchd`
-//! serves, at compile time; nothing is loaded from a development server or
-//! the network. The only difference is the page: the browser's
-//! `index.html` boots the sign-in shell over HTTP, so the window's page,
-//! and the page any unknown path falls back to (such as `/jobs/job-3`
-//! after a reload), is the desktop bootstrap in `shell/desktop.html`.
+//! Only the entry page differs from `wayfetchd`'s: the window boots
+//! `shell/desktop.html`, also used as the fallback for unknown paths after a
+//! reload.
 
 use std::borrow::Cow;
 

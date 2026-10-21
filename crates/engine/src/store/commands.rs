@@ -1,11 +1,8 @@
-//! Durable, idempotent client commands (architecture brief sections 6.2
-//! and 11.1; test T46).
+//! Durable, idempotent client commands.
 //!
-//! A command, its outbox events, and its idempotency record commit in one
-//! transaction, and the result is returned only after that commit. A retry
-//! under the same key replays the stored result without changing anything;
-//! the same key with a different command is rejected. A command that fails
-//! is rolled back and leaves no record, so its key can be retried.
+//! A command commits with its events and idempotency record, and a retry
+//! with the same key replays the stored result. A failed command leaves no
+//! record, so its key can be retried.
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::id::{JobId, PackageId, RootId, SourceLinkId};
@@ -22,8 +19,8 @@ use wayfetch_protocol::{
 use super::links::{self, Unusable};
 use super::operations::{self, OperationState};
 use super::{
-    Store, StoreError, accounts, deletions, extractions, files, jobs, key, outbox, renames, roots,
-    sql,
+    OrCorrupt, Store, StoreError, accounts, deletions, extractions, files, jobs, key, outbox,
+    renames, roots, sql,
 };
 
 /// What the coordinator knows about destinations when a command runs.
@@ -267,8 +264,7 @@ pub(super) fn record_as(
     result: &CommandResult,
     now: UtcTimestamp,
 ) -> Result<(), StoreError> {
-    let result =
-        serde_json::to_string(result).map_err(|_| StoreError::Corrupt("command result"))?;
+    let result = serde_json::to_string(result).or_corrupt("command result")?;
     tx.execute(
         "INSERT INTO commands (idempotency_key, fingerprint, result, created_at) \
          VALUES (?1, ?2, ?3, ?4)",
@@ -288,12 +284,10 @@ fn stored(tx: &Transaction<'_>, key: &str) -> Result<Option<IdempotencyRecord>, 
     else {
         return Ok(None);
     };
-    let fingerprint: [u8; 32] = fingerprint
-        .try_into()
-        .map_err(|_| StoreError::Corrupt("command fingerprint"))?;
+    let fingerprint: [u8; 32] = fingerprint.try_into().or_corrupt("command fingerprint")?;
     Ok(Some(IdempotencyRecord {
         fingerprint: CommandFingerprint::from_bytes(fingerprint),
-        result: serde_json::from_str(&result).map_err(|_| StoreError::Corrupt("command result"))?,
+        result: serde_json::from_str(&result).or_corrupt("command result")?,
     }))
 }
 
@@ -326,8 +320,7 @@ fn submit(
             tx.last_insert_rowid()
         }
     };
-    let accepted =
-        u32::try_from(items.as_slice().len()).map_err(|_| StoreError::Corrupt("input count"))?;
+    let accepted = u32::try_from(items.as_slice().len()).or_corrupt("input count")?;
     tx.execute(
         "INSERT INTO input_batches (package_id, input_count, root_id, created_at) \
          VALUES (?1, ?2, ?3, ?4)",
@@ -344,7 +337,7 @@ fn submit(
     for (ordinal, item) in items.as_slice().iter().enumerate() {
         insert.execute(params![
             sql(batch)?,
-            i64::try_from(ordinal).map_err(|_| StoreError::Corrupt("ordinal"))?,
+            i64::try_from(ordinal).or_corrupt("ordinal")?,
             item.as_url().as_str()
         ])?;
     }
@@ -374,16 +367,11 @@ fn request(
     })
 }
 
-/// Starts a failed or fully stopped cancelled job again under a new
-/// generation, keeping its source, destination, and collected link. Its
-/// newest retained staging file is reserved for that generation in the same
-/// transaction, so the attempt can continue its verified saved data; the
-/// failure and any earlier restart reason are cleared. A failure whose
-/// retry deadline is still ahead is refused with that deadline, and left
-/// as it is. A job whose provider operation has an unknown outcome is
-/// refused unless the user confirmed repeating it (`repeat`), which may
-/// repeat work at the provider; the next attempt then looks for the
-/// outcome once more before asking the provider again.
+/// Starts a failed or stopped cancelled job again under a new generation,
+/// reserving its newest staging file so the attempt continues its saved
+/// data. A retry deadline still ahead is refused, and so is a provider
+/// operation with an unknown outcome unless the user confirmed repeating
+/// it (`repeat`).
 fn retry(
     tx: &Transaction<'_>,
     id: JobId,

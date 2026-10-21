@@ -1,29 +1,11 @@
-//! `wayfetchd`: the headless Wayfetch Downloader daemon (architecture
-//! brief sections 4.1, 4.3 and 8.5).
+//! `wayfetchd`: the headless daemon. It owns the runtime, the engine, the
+//! listener, and signals, and serves the engine and the bundled web UI
+//! through `wayfetch-api`.
 //!
-//! A thin host: it owns the Tokio runtime, the engine's lifecycle, the
-//! listener, and process signals, and serves the engine through the
-//! authenticated HTTP/SSE adapter in `wayfetch-api`. Jobs belong to the
-//! engine, not to connections: a client that disconnects, crashes, or
-//! never reads its event stream changes nothing about downloads. `SIGINT`
-//! or `SIGTERM` drains the API and shuts the engine down gracefully,
-//! keeping unfinished jobs for the next start.
-//!
-//! With `--auth-dir` and a browser origin, browsers sign in as the local
-//! owner, created on first start with a setup secret from an owner-only
-//! file; `wayfetchd reset-owner` removes the owner so the next start
-//! offers setup again.
-//!
-//! The web UI in `ui/src` is compiled into the binary and served at `/`
-//! from the same origin as the API; it needs nothing at run time beyond
-//! this process.
-//!
-//! `wayfetchd ready` asks a running daemon whether it is ready, for a
-//! container health check: it starts no engine and reads no token.
-//!
-//! `--config FILE` reads settings from a TOML file at startup; its
-//! `[server]` section holds the listener and browser settings, which only
-//! this host has (see `wayfetch_host::config`).
+//! Jobs belong to the engine, not to connections, and `SIGINT` or `SIGTERM`
+//! keeps unfinished jobs for the next start. Subcommands cover `run`,
+//! `init-root`, `ready` (a health check), and `reset-owner`; `--config`
+//! reads a TOML file (see `wayfetch_host::config`).
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -230,11 +212,11 @@ struct RunArgs {
     token_file: Option<PathBuf>,
     #[command(flatten)]
     browser: BrowserArgs,
-    /// On the first start, when the state directory does not exist yet,
-    /// also initialize the download root, as `init-root` would. Later
-    /// starts never do, so a download root whose mount goes missing
-    /// afterwards is still refused. For a container whose download root is
-    /// a mount Compose checks.
+    /// Also initialize the download root, as `init-root` would, unless the
+    /// state directory has recorded it before: on the first start, or a
+    /// retry after it failed. A recorded root is never initialized again,
+    /// so one whose mount goes missing is still refused. For a container
+    /// whose download root is a mount Compose checks.
     #[arg(long)]
     init_root_on_first_start: bool,
     /// Print one JSON object per line instead of text.
