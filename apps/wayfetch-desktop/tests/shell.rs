@@ -1916,6 +1916,46 @@ async fn a_link_automatically_downloads_through_a_matching_account_in_the_window
     }
 }
 
+/// WebKitGTK lays out the toolbar differently from Chromium, so the shared
+/// toolbar must keep its place across views at the narrow breakpoints here too.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs an X display and WebKitWebDriver"]
+async fn switching_queue_tabs_keeps_toolbar_geometry() {
+    let dirs = Dirs::new().await;
+    let shell = Shell::launch(&dirs).await;
+    shell
+        .collect(
+            "https://example.test/queued.bin",
+            "Collected 1 link for review.",
+        )
+        .await;
+    let geometry = "const bar = [...document.querySelectorAll('.queue-toolbar')]
+                      .find((el) => el.offsetParent !== null);
+                    return ['.views', '.tool-group', '.search'].map((css) => {
+                      const r = bar.querySelector(css).getBoundingClientRect();
+                      return { x: r.x, width: r.width };
+                    });";
+    let mut moved = Vec::new();
+    for width in [1100, 721, 720, 640] {
+        shell.client.set_window_size(width, 720).await.unwrap();
+        let links = shell.js(geometry).await;
+        shell
+            .js("document.querySelector('.links-page [data-key=\"view-downloads\"]').click();")
+            .await;
+        shell.wait_for("location.pathname === '/'").await;
+        let downloads = shell.js(geometry).await;
+        if links != downloads {
+            moved.push((width, links, downloads));
+        }
+        shell
+            .js("document.querySelector('.downloads-view [data-key=\"view-links\"]').click();")
+            .await;
+        shell.wait_for("location.pathname === '/links'").await;
+    }
+    shell.close().await;
+    assert!(moved.is_empty(), "toolbar moved: {moved:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs an X display and WebKitWebDriver"]
 async fn the_default_window_fits_downloads_and_links() {
