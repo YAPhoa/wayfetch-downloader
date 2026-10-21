@@ -11,6 +11,7 @@ mod installed;
 mod ipc;
 mod picker;
 mod subscriptions;
+mod updater;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -216,6 +217,13 @@ fn run_on(
     // The desktop app has no listener, so a `[server]` section is refused.
     let (settings, _) = args.load::<NoServer>()?;
     let state_dir = settings.state_dir().to_path_buf();
+    let mut context = tauri::generate_context!();
+    // A build that installs updates gets each newer release ready.
+    let updates = updater::Updates::supported(context.config()).then(updater::Updates::default);
+    let settings = match &updates {
+        Some(updates) => settings.installer(Arc::new(updates.clone())),
+        None => settings,
+    };
     // Signals first, so one during startup still stops gracefully; the
     // engine before any window, so a refused state directory shows none.
     let (mut signals, started) = runtime.block_on(async {
@@ -243,14 +251,18 @@ fn run_on(
         Arc::new(move |open, ended| notify(&notices, Notice::Subscriptions { open, ended }))
     };
     let subscriptions = Subscriptions::new(on_change);
-    let mut context = tauri::generate_context!();
     let embedded = context.assets;
     context.assets = Box::new(assets::DesktopAssets(embedded));
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    if updates.is_some() {
+        builder = builder.plugin(updater::plugin());
+    }
+    let app = builder
         .manage(Desktop {
             engine: owner.handle(),
             subscriptions: subscriptions.clone(),
             picker: picker::Picker::default(),
+            updates: updates.clone(),
         })
         .invoke_handler(tauri::generate_handler![
             ipc::hello,
@@ -273,6 +285,8 @@ fn run_on(
             ipc::subscribe,
             ipc::acknowledge,
             ipc::unsubscribe,
+            ipc::download_update,
+            ipc::restart_to_update,
         ])
         .on_page_load(|webview, payload| {
             // The page that held these subscriptions is going away.
@@ -292,6 +306,10 @@ fn run_on(
     };
 
     let handle = app.handle().clone();
+    if let Some(updates) = &updates {
+        updates.attach(handle.clone());
+    }
+    let env = app.env();
     {
         let notices = notices.clone();
         runtime.spawn(async move {
@@ -320,10 +338,18 @@ fn run_on(
     });
     // The window is gone, and with it every renderer.
     subscriptions.close_all();
+    if let Some(updates) = &updates {
+        updates.stop();
+    }
     let report = runtime.block_on(owner.shutdown(ShutdownRequest::default()));
     let stopped = stopped(&report);
     let clean = matches!(stopped, Notice::Stopped { clean: true, .. });
     notify(notices, stopped);
+    // An update was installed: start the new version, now that this one
+    // has released the state directory.
+    if updates.is_some_and(|updates| updates.relaunching()) {
+        updater::relaunch(&env);
+    }
     Ok(if clean {
         ExitCode::SUCCESS
     } else {

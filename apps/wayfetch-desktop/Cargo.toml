@@ -28,6 +28,13 @@ dirs = "7.0.0"
 # desktop's own handler (xdg-open) with the path as one argument;
 # never a shell command line (see src/ipc.rs).
 opener = { version = "0.9.0", default-features = false }
+# Downloads, verifies, and installs a newer release's package, used from
+# the host only (see src/updater.rs); no AppImage support, so no zip.
+tauri-plugin-updater = { version = "2.10.1", default-features = false, features = ["rustls-tls"] }
+# Compares the release's package version with the one the check found.
+semver = "1.0.28"
+# Ends a package download as the app stops.
+tokio-util.workspace = true
 
 [features]
 # Replaces the folder dialog with a scripted answer, for the real-window

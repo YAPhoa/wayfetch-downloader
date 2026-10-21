@@ -51,6 +51,9 @@ struct Dirs {
     browser: bool,
     /// Further arguments to `run`.
     args: Vec<std::ffi::OsString>,
+    /// Where update checks go: by default nowhere, so an automatic check
+    /// never reaches GitHub.
+    updates: String,
 }
 
 impl Dirs {
@@ -64,6 +67,7 @@ impl Dirs {
             tokens: tmp.path().join("tokens"),
             browser: false,
             args: Vec::new(),
+            updates: "http://127.0.0.1:9/".into(),
             tmp,
         };
         std::fs::create_dir(&dirs.root).unwrap();
@@ -188,6 +192,7 @@ impl Daemon {
             command.arg("--root").arg(root);
         }
         command.args(&dirs.args);
+        command.args(["--updates-endpoint", &dirs.updates]);
         if dirs.browser {
             command
                 .arg("--auth-dir")
@@ -286,8 +291,7 @@ async fn the_complete_workflow_over_http() {
         "/github/releases",
         Resource::new(latest.to_string().into_bytes().into()),
     );
-    dirs.args
-        .extend(["--updates-endpoint".into(), server.url("/github/").into()]);
+    dirs.updates = server.url("/github/");
     let daemon = Daemon::start(&dirs).await;
     let client = daemon.owner();
 
@@ -297,6 +301,11 @@ async fn the_complete_workflow_over_http() {
     assert_eq!(hello["limits"]["max_submit_items"], 1000);
     assert_eq!(hello["version"], env!("CARGO_PKG_VERSION"));
     client.serves_the_ui().await;
+
+    // Nothing is checked before asked, or before the first automatic check.
+    let (status, check) = client.get("/v1/updates").await;
+    assert_eq!(status, StatusCode::OK, "{check}");
+    assert_eq!(check["outcome"], json!({ "kind": "not_checked" }));
 
     // Checking for updates finds the newer release and its page.
     let (status, check) = client.post("/v1/updates/check", &json!({})).await;
@@ -310,6 +319,8 @@ async fn the_complete_workflow_over_http() {
             "url": server.url("/github/releases/tag/v99.0.0"),
         })
     );
+    assert!(check["checked_at"].is_u64(), "{check}");
+    assert!(check.get("install").is_none(), "{check}");
 
     // Submit, inspect, list, and publish the exact bytes.
     let small = body(MIB);

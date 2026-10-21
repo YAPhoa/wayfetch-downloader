@@ -24,6 +24,8 @@ const COMMANDS: &[&str] = &[
     "subscribe",
     "acknowledge",
     "unsubscribe",
+    "download_update",
+    "restart_to_update",
 ];
 
 fn main() {

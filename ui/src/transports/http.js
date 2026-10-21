@@ -250,6 +250,11 @@ export class HttpClient {
     return this.request('GET', '/v1/accounts');
   }
 
+  /** What the server's last update check found. */
+  updates() {
+    return this.request('GET', '/v1/updates');
+  }
+
   /** Asks the server whether a newer release is published. */
   checkForUpdates() {
     return this.request('POST', '/v1/updates/check');
