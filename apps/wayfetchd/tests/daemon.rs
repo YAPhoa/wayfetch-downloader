@@ -652,6 +652,38 @@ fn folders_at(path: &std::path::Path) -> String {
     format!("{}?{}", url.path(), url.query().unwrap())
 }
 
+/// Marks `folder` as another Wayfetch profile's download folder, in the
+/// layout of this version and of earlier ones, with a partial download of
+/// its own. Returns every file written, with its contents.
+fn mark_for_another_profile(folder: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    const THEIRS: &str = "0d3a7c1e-5b2f-4c8a-9e61-7f0b2d4a6c13";
+    let private = folder.join(".wayfetch");
+    let marker = format!(r#"{{"instance":"{THEIRS}","root":1}}"#).into_bytes();
+    let files = [
+        (private.join("root.json"), marker.clone()),
+        (private.join("roots").join(format!("{THEIRS}.json")), marker),
+        (
+            private.join("staging/1.g1.part"),
+            b"legacy partial".to_vec(),
+        ),
+        (
+            private.join("staging").join(THEIRS).join("1.g1.part"),
+            b"their partial".to_vec(),
+        ),
+    ];
+    for (path, bytes) in &files {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    files.into()
+}
+
+fn assert_untouched(files: &[(std::path::PathBuf, Vec<u8>)]) {
+    for (path, bytes) in files {
+        assert_eq!(&std::fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
     let server = Server::https().await;
@@ -688,9 +720,25 @@ async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
     let (status, _) = client.get("/v1/folders?path=relative").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
+    // A folder another Wayfetch profile uses can be added too, and what
+    // that profile keeps there is left alone; a missing one is refused
+    // in so many words, and not created.
+    let theirs = mark_for_another_profile(&parent.join("films"));
+    let missing = json!({ "path": parent.join("unplugged") });
+    let (status, error) = client.post("/v1/roots", &missing).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("the folder is missing"),
+        "{error}"
+    );
+    assert!(!parent.join("unplugged").exists());
     let (status, root) = client.post("/v1/roots", &add).await;
     assert_eq!(status, StatusCode::OK, "{root}");
     assert_eq!(root["available"], true);
+    assert_untouched(&theirs);
     let (_, settings) = client.get("/v1/settings").await;
     assert!(
         settings["roots"]
@@ -737,6 +785,7 @@ async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
         "{settings}"
     );
     assert!(parent.join("films/kept.bin").exists());
+    assert_untouched(&theirs);
     // Once another folder is the default, the operator's goes too, and
     // stays gone across a restart until it is added again.
     let (_, root) = client.post("/v1/roots", &add).await;
@@ -767,6 +816,7 @@ async fn the_owner_adds_a_server_folder_by_browsing_to_it() {
             .any(|r| r["id"] == configured["id"]),
         "{settings}"
     );
+    assert_untouched(&theirs);
     // The daemon's own state cannot become a destination.
     let (status, error) = client
         .post("/v1/roots", &json!({ "path": dirs.state }))
@@ -1457,9 +1507,13 @@ async fn a_stuck_readiness_check_neither_piles_up_nor_holds_up_exit() {
     let (status, _) = anonymous.get("/v1/ready").await;
     assert_eq!(status, StatusCode::OK);
 
-    // The root's sentinel becomes a FIFO nobody writes to: opening it
+    // The root's marker becomes a FIFO nobody writes to: opening it
     // blocks, as a read on a hung mount would.
-    let sentinel = dirs.root.join(".wayfetch").join("root.json");
+    let sentinel = dirs
+        .root
+        .join(".wayfetch")
+        .join("roots")
+        .join(format!("{}.json", daemon.instance));
     std::fs::remove_file(&sentinel).unwrap();
     let made = std::process::Command::new("mkfifo")
         .arg(&sentinel)

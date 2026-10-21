@@ -1044,7 +1044,8 @@ fn sweep(f: &mut Fixture) -> crate::cleanup::Swept {
 }
 
 fn staged(f: &Fixture, job: JobId, generation: Generation) -> std::path::PathBuf {
-    crate::fs::staging_path(f.root_dir.path(), &format!("{job}.g{generation}.part"))
+    let name = crate::fs::own_name(&f.root, &format!("{job}.g{generation}.part"));
+    crate::fs::staging_path(f.root_dir.path(), &name)
 }
 
 #[test]
@@ -1187,9 +1188,15 @@ fn files_no_record_names_are_never_removed() {
     // not.
     let (reused, reused_gen) = transferring(&mut f, BootEpoch::INITIAL);
     restart_from_zero(&mut f, reused);
-    let unknown = crate::fs::staging_path(f.root_dir.path(), "job-999.g1.part");
+    let unknown = crate::fs::staging_path(
+        f.root_dir.path(),
+        &crate::fs::own_name(&f.root, "job-999.g1.part"),
+    );
     std::fs::write(&unknown, b"").unwrap();
-    let other = crate::fs::staging_path(f.root_dir.path(), "notes.txt");
+    let other = crate::fs::staging_path(
+        f.root_dir.path(),
+        &crate::fs::own_name(&f.root, "notes.txt"),
+    );
     std::fs::write(&other, b"").unwrap();
 
     let mut f = f.reopen();

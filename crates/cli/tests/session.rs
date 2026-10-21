@@ -95,7 +95,15 @@ impl Dirs {
 
     /// Lengths of the partials in the root's staging directory.
     fn partials(&self) -> Vec<u64> {
-        std::fs::read_dir(self.root.join(".wayfetch/staging"))
+        let staging = self.root.join(".wayfetch/staging");
+        let [own] = &std::fs::read_dir(staging)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("one engine's staging folder")
+        };
+        std::fs::read_dir(own)
             .unwrap()
             .map(|e| e.unwrap().metadata().unwrap().len())
             .collect()

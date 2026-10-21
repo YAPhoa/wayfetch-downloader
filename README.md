@@ -64,7 +64,9 @@ wayfetch-downloader/
 
 ```sh
 # 1. Mark an existing directory as a download root (done once per root so an
-#    unmounted filesystem is never mistaken for an empty directory)
+#    unmounted filesystem is never mistaken for an empty directory). Other
+#    Wayfetch profiles may use the same folder; each keeps its own marker and
+#    temporary files under .wayfetch/ there.
 wayfetch init-root --state-dir /srv/wayfetch/state /srv/downloads
 
 # 2. Start a foreground session (or pass --config /srv/wayfetch/wayfetch.toml)
