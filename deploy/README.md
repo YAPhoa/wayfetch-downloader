@@ -46,7 +46,9 @@ The root [`Dockerfile`](../Dockerfile) builds `wayfetchd` with the toolchain pin
 
 ### Quick start
 
-Compose builds the image (`wayfetch:local`) from this repository the first time. The image includes the web UI; no separate frontend container is needed. To run a published image instead, set `WAYFETCH_IMAGE` in `deploy/.env` to `ghcr.io/yaphoa/wayfetch-downloader:<version>` (Linux x86-64) or pin an immutable `ghcr.io/yaphoa/wayfetch-downloader@sha256:…` digest. This layout needs `v0.1.1` or newer; `v0.1.0` expects the earlier three-folder layout.
+Compose pulls `ghcr.io/yaphoa/wayfetch-downloader:v0.1.1` (Linux x86-64). The image includes the web UI; no separate frontend container is needed. Set `WAYFETCH_IMAGE` in `deploy/.env` to select another compatible version or pin an immutable `ghcr.io/yaphoa/wayfetch-downloader@sha256:…` digest. This layout needs `v0.1.1` or newer; `v0.1.0` expects the earlier three-folder layout.
+
+To build locally, set `WAYFETCH_IMAGE=wayfetch:local` in `deploy/.env`, then run `docker compose -f deploy/compose.yaml build` before `up -d`. Rebuild after updating the source.
 
 The **Container image** GitHub Actions workflow builds and runs the Compose
 integration tests before publishing. Published stable releases also update
@@ -77,7 +79,7 @@ cp deploy/.env.example deploy/.env
 nano deploy/.env        # WAYFETCH_DATA and WAYFETCH_DOWNLOADS
 ```
 
-**3. Start it** (the first time, this builds the image, which takes a while):
+**3. Start it** (the first time, this downloads the image):
 
 ```sh
 docker compose -f deploy/compose.yaml up -d
@@ -96,6 +98,23 @@ On its first start, Wayfetch writes a small marker into the downloads folder. On
 | `auth/` | The browser owner account, when browser sign-in is turned on |
 
 Back up the whole folder: the account key is needed to read the accounts saved in `state/`.
+
+### Upgrading from 0.1.0
+
+Stop the old container before moving its data, and keep a backup of the state, token, credential key, and browser-auth folders together. The database upgrades automatically to schema 2 on first start; 0.1.0 cannot reopen the upgraded database. To roll back, restore the backup with the old image and configuration.
+
+The container's data paths changed:
+
+| Old host path | New host path |
+|---|---|
+| `WAYFETCH_STATE` (the entire directory) | `WAYFETCH_DATA/state` |
+| `WAYFETCH_TOKENS/api-tokens` | `WAYFETCH_DATA/api-tokens` |
+| `WAYFETCH_TOKENS/credential-key`, if present | `WAYFETCH_DATA/credential-key` |
+| `WAYFETCH_TOKENS/auth`, if enabled | `WAYFETCH_DATA/auth` |
+
+Choose an empty `WAYFETCH_DATA` folder and move the existing data into that layout, preserving ownership and private permissions. Keep `WAYFETCH_DOWNLOADS` pointing at the same downloads folder, including its hidden `.wayfetch` directory. Set `WAYFETCH_DATA` in `deploy/.env`; `WAYFETCH_STATE` and `WAYFETCH_TOKENS` are no longer used. If you override the container command or use a TOML configuration, update its state, token, key, and auth paths to `/data/...` too. Then run `docker compose -f deploy/compose.yaml up -d` and check that the service becomes healthy.
+
+Desktop installations keep their existing profile location and only need the database upgrade; the container folder moves do not apply to them.
 
 ### Using the API
 
