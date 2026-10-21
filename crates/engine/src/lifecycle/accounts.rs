@@ -1,15 +1,10 @@
-//! The coordinator's account work: authorizations waiting for a person's
-//! approval, single-flight status checks, and the vault (architecture
-//! brief sections 7.3 and 8.3, ADR-24).
+//! The coordinator's account work: pending sign-ins, single-flight status
+//! checks, and the vault (ADR-24).
 //!
-//! Provider calls run in engine tasks of their own and never inside a
-//! database transaction; their results come back to the coordinator as
-//! internal messages, which store them only if the account's credentials
-//! are still the generation the work started from. Everything is bounded:
-//! at most [`MAX_PENDING`] authorizations start or wait at once, finished
-//! ones are kept briefly for clients to read, at most [`MAX_CHECKS`]
-//! accounts are checked at once, each by one provider call however many
-//! clients asked, and every provider call has a deadline.
+//! Provider calls run as their own tasks with deadlines and never inside a
+//! transaction. Their results are stored only if the account's credentials
+//! have not changed meanwhile. Pending sign-ins and concurrent checks are
+//! bounded.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

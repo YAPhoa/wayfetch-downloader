@@ -1,11 +1,7 @@
-//! Preferences users change at run time, resolved against the operator's
-//! policy (architecture brief section 11.3).
+//! User preferences resolved against the operator's policy.
 //!
-//! A value comes from, in order: the built-in default, the operator's
-//! configured default, and the user's saved preference, unless the
-//! operator fixed it. A saved preference the policy no longer permits is
-//! kept and reported as a conflict, and the nearest permitted value runs
-//! instead, so the engine never runs outside the operator's restriction.
+//! A saved value the policy no longer permits is kept and reported as a
+//! conflict, and the nearest permitted value runs instead.
 
 use wayfetch_protocol::command::{PreferenceChange, SpeedLimitChange};
 use wayfetch_protocol::query::{BoundedSetting, SettingSource, SpeedLimit, SpeedLimitSetting};

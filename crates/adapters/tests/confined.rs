@@ -1,10 +1,6 @@
-//! Confined helper runs (architecture brief section 9.3), with this test
-//! program as the launcher: like a host's `main`, its own `main` calls
-//! `enter_if_asked` first, so it has its own small harness.
-//!
-//! Shell scripts show what a confined run can and cannot reach; 7-Zip
-//! itself is tested too when `WAYFETCH_TEST_7ZIP` names it (7-Zip 25.01
-//! or newer), and skipped otherwise.
+//! Confined helper runs, with this test program as the launcher, so it has
+//! its own small harness. 7-Zip itself is tested when `WAYFETCH_TEST_7ZIP`
+//! names it.
 
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt;

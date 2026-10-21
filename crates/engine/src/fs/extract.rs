@@ -1,7 +1,6 @@
-//! The filesystem side of unpacking an archive (architecture brief
-//! sections 9.3 to 9.5): a private folder per attempt under
-//! `.wayfetch/extract/<instance>/` in the archive's root, apart from other
-//! profiles sharing the root, checking what was unpacked
+//! The filesystem side of unpacking an archive: a private folder per
+//! attempt under `.wayfetch/extract/<instance>/` in the archive's root,
+//! apart from other profiles sharing the root, checking what was unpacked
 //! there, and moving it next to the archive without replacing anything.
 
 use std::io;

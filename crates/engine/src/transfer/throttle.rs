@@ -1,42 +1,11 @@
-//! One shared budget for the bodies of every download an engine runs: the
-//! total download speed limit (architecture brief section 10.3).
+//! The total download speed limit, shared by every download body an engine
+//! writes.
 //!
-//! [`Bandwidth`] is a token bucket counted exactly, in byte-nanoseconds,
-//! against tokio's monotonic clock. A writer holding a body chunk asks
-//! [`Bandwidth::admit`] how much of it it may write now; the next chunk is
-//! read only once the whole chunk is admitted and written, so a throttled
-//! body is consumed no faster than the limit (backpressure, not delayed
-//! accounting).
-//!
-//! * **Turns.** Writers wait their turn in FIFO order on an async mutex,
-//!   so no transfer starves. The writer at the head waits until the bucket
-//!   holds no debt, then is granted at most one [quantum] of its chunk and
-//!   leaves the head. A chunk larger than a quantum, or than the burst, is
-//!   written in several grants, so nothing waits for capacity that cannot
-//!   exist. Turns are equal, bytes per turn need not be: a body that
-//!   yields small chunks takes small turns.
-//! * **Bound.** A grant is made only without debt and is at most one
-//!   quantum Q, so the balance never falls below −Q, and never rises above
-//!   the [burst] B. Bytes admitted in any window of length T are therefore
-//!   at most B + Q + rate·T. Q = clamp(rate/8, 256 B, 64 KiB) and
-//!   B = clamp(rate/4, Q, 16 MiB). Outside the limiter, each transfer
-//!   holds at most one transport chunk (the read buffer) it has read but
-//!   not yet been granted, plus whatever the HTTP client and the kernel
-//!   buffer before the body is polled again.
-//! * **Changes.** [`Bandwidth::set`] credits the old rate up to now, then
-//!   switches: credit is kept up to the new burst, debt (bytes admitted
-//!   ahead of schedule) is repaid at the new rate, and moving from
-//!   Unlimited starts with an empty bucket. No change adds credit, however
-//!   often it is made. The writer waiting at the head is woken to
-//!   recompute its wait.
-//! * **Cancellation.** A wait is an ordinary future: dropping it (a pause,
-//!   cancel, or shutdown) releases the turn and takes nothing from the
-//!   bucket, which is charged only in the same step that grants.
-//!
-//! The limit covers download bodies only, not protocol overhead, the
-//! engine's own requests, or API and UI traffic. Waiting here is never
-//! remote inactivity: the writer's idle-read deadline covers reading the
-//! body, not waiting for a grant.
+//! [`Bandwidth`] is an exact token bucket. Writers take FIFO turns and are
+//! granted at most one quantum per turn, so no transfer starves and bursts
+//! stay bounded. Changing the limit never adds credit, and dropping a wait
+//! takes nothing from the bucket. Waiting for a grant does not count as
+//! remote inactivity.
 
 use std::num::NonZeroU64;
 use std::sync::{Mutex, MutexGuard, PoisonError};

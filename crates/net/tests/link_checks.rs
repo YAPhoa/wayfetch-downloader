@@ -1,8 +1,5 @@
-//! Collected links checked over real sockets (link crawler stage 1): a
-//! typed page's address is read once, the files on it are collected beside
-//! it with their names and sizes, and one of them goes through the existing
-//! download queue to a published file. Missing files, addresses the egress
-//! policy refuses, and links to other pages are reported, never followed.
+//! Collected links checked over real sockets: a page is read once, the files
+//! on it are collected, and links to other pages are never followed.
 
 #[path = "../../engine/tests/support/mod.rs"]
 mod engine_support;

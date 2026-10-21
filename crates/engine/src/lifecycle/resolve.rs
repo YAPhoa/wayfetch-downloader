@@ -1,27 +1,11 @@
-//! The coordinator's provider work for downloads: turning a job's
-//! original link into a download link through the account the user chose
-//! (architecture brief sections 6.5 and 7.3, ADR-09, ADR-24; test T12).
+//! Turning a job's link into a download link through the account the user
+//! chose (ADR-09, ADR-24).
 //!
-//! * One provider call per account at a time. Status checks and link
-//!   requests of an account share its lane, so a provider that rotates
-//!   refresh tokens never sees the same one twice, and each call reads the
-//!   credentials the previous call left. Refreshed credentials are stored
-//!   only while the account's credentials are still the generation the
-//!   call read.
-//! * A request for a link is recorded as an intent before it is sent, and
-//!   its outcome before any transfer starts. A lost answer is never sent
-//!   again: the provider's own record is read instead, and without
-//!   evidence the job fails as ambiguous until the user confirms a repeat.
-//! * A generated link is sealed with the vault's key and reused, across
-//!   pauses, restarts, and retries, until the download host refuses it.
-//! * Results are applied only if the job is still at the generation that
-//!   asked, its account is still enabled, and the account was not signed
-//!   in again meanwhile; a cancelled or removed job's outcome is recorded,
-//!   never used. A link is released only once its outcome is committed.
-//! * The provider's record is the account's history, not a record of
-//!   operations: an entry is taken as a lost answer's outcome only if it is
-//!   the one entry for exactly the original link since the intent, and no
-//!   other operation through the account may have made it.
+//! Calls to one account run one at a time. A link request is recorded as an
+//! intent before it is sent, and a lost answer is never resent: the
+//! provider's history is checked instead, and without clear evidence the job
+//! waits for the user to confirm a repeat. Results apply only if the job,
+//! its generation, and its account are unchanged.
 
 use std::collections::VecDeque;
 use std::time::Duration;

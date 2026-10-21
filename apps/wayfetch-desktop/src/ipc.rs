@@ -1,46 +1,11 @@
-//! The renderer's IPC commands: a thin translation to the engine's
-//! transport-neutral facade, like `wayfetch-api`'s routes for HTTP
-//! (architecture brief sections 4.3 and 4.7, ADR-33).
+//! The renderer's IPC commands: a thin translation to the engine facade,
+//! like `wayfetch-api`'s HTTP routes (ADR-33).
 //!
-//! | Command | Engine operation |
-//! |---|---|
-//! | `hello` | handshake: instance, boot epoch, protocol, head, limits |
-//! | `query` | a [`Query`]: list, inspect, or count jobs, settings, a job's link, collected links, accounts, a sign-in |
-//! | `submit` | [`SubmitRequest`] as a submit command |
-//! | `job_command` | [`JobCommandRequest`]: pause, resume, cancel, retry, rename, remove, or cancel unpacking |
-//! | `extract` | [`ExtractRequest`]: unpack a downloaded archive, with its password if given |
-//! | `collect_links` | [`CollectRequest`]: collect links for review |
-//! | `links_command` | [`LinksCommandRequest`]: start, remove, or move collected links |
-//! | `update_settings` | [`UpdateSettingsRequest`]: change the default destination or a preference |
-//! | `remove_root` | [`RemoveRootRequest`]: stop offering a folder that is not the default |
-//! | `change_plugin` | [`ChangePluginRequest`]: turn a plugin on or off, update it, or remove its installed copy |
-//! | `authorize_account` | [`AuthorizeAccountRequest`]: starts signing a provider account in |
-//! | `cancel_authorization` | stops a sign-in still waiting for approval |
-//! | `account_command` | [`AccountCommandRequest`]: enable, disable, or remove an account |
-//! | `refresh_account` | checks an account with its provider |
-//! | `choose_download_folder` | the native folder dialog; the chosen folder becomes a permitted destination |
-//! | `open_file` | opens a finished job's file with this computer's default application |
-//! | `reveal_file` | opens the folder holding a finished job's file |
-//! | `subscribe` | an event subscription, delivered on a channel |
-//! | `acknowledge` | the renderer has handled a subscription's items |
-//! | `unsubscribe` | ends a subscription |
-//!
-//! These are the only commands the renderer can call: the build declares
-//! them, and the window's capability grants them and no Tauri plugin, so
-//! the renderer has no filesystem, database, shell, or network access.
-//! Downloads go only to roots the engine permits: configured ones, and
-//! folders the user picked in the host's native dialog. The renderer never
-//! sends a path; it chooses among roots by ID, and names a job to open,
-//! whose file the engine locates and checks is still the one it published.
-//!
-//! Arguments and results are the protocol's own JSON, the same the HTTP
-//! API carries, and errors are [`ProtocolError`]s, so idempotency,
-//! revision conflicts, wrong-instance refusals, and resynchronization
-//! behave as they do over HTTP. The window belongs to the person signed in
-//! to this computer's session, so the host grants it the local owner's
-//! permissions (section 4.6), the `accounts` permission among them;
-//! nothing from the renderer can widen them. No command takes or returns a
-//! provider credential.
+//! These are the only commands the window may call; it gets no Tauri plugin,
+//! filesystem, shell, or network access, and never sends a path. Arguments,
+//! results, and errors are the protocol's own JSON, so behavior matches
+//! HTTP. The window acts with the local owner's permissions, and no command
+//! carries a provider credential.
 
 use std::path::{Path, PathBuf};
 

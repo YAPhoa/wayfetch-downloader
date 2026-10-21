@@ -1,19 +1,10 @@
-// Download services Wayfetch may work with: the catalogue for the Accounts
-// & services section of Settings, and its search. The services themselves
-// are data, in `ui/src/data/services.json`: adding one is an edit there,
-// checked when it is read, with no change to the code.
+// The catalogue of download services for Settings > Accounts & services, and
+// its search. Services are data in `ui/src/data/services.json`, so adding
+// one needs no code change.
 //
-// The catalogue only describes services. It never enables a download
-// route: whether Wayfetch can sign in to a service is the engine's to say,
-// from the integrations it reports, and the section shows every other
-// entry as not available. Signing in and downloading are separate: an
-// integration may sign accounts in before downloads can go through them. The domains listed are for finding a service by a
-// link or its address; they are not the engine's link matching, and they
-// say nothing about which hosts a multi-host service covers, which comes
-// from the service itself once integrated.
-//
-// Each service has a stable ID that a later integration keeps, and one
-// entry however many domains it answers on.
+// The catalogue only describes services: whether Wayfetch can sign in to one
+// is the engine's to say, and the domains listed are for search only, not
+// link matching.
 
 import { openDialog } from './dialog.js';
 import { h, show } from './dom.js';

@@ -1,11 +1,8 @@
-//! Unpacking downloaded archives: which archive downloads wait for their
-//! other volumes, wait for their turn, are being unpacked, and how each
-//! attempt ended (architecture brief section 9).
+//! Archive extractions: waiting for volumes or a turn, running, and how each
+//! attempt ended.
 //!
-//! Each attempt runs under a new generation; its result is recorded only
-//! while the row is still at that attempt, so a cancelled or replaced
-//! attempt cannot overwrite a later state. Every change announces the
-//! archive's job with `job_changed`.
+//! Each attempt runs under a new generation, so a cancelled or replaced
+//! attempt cannot overwrite a later state.
 
 use std::str::FromStr;
 

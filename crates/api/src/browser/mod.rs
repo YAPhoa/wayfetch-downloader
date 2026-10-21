@@ -1,27 +1,11 @@
-//! Browser access: the local owner account, sign-in, sessions, and
-//! protection from other sites (architecture brief sections 8.5 and 8.6).
+//! Browser access: the local owner account, sign-in, sessions, and CSRF and
+//! origin checks.
 //!
-//! A server installation creates its own owner account: at startup, while
-//! none exists, a single-use setup secret valid for 15 minutes is written
-//! to an owner-only file in the operator's auth directory, and whoever can
-//! read that file completes setup in the browser with it, choosing the
-//! owner's name and password. Afterwards the owner signs in with them.
-//!
-//! A signed-in browser holds an opaque session cookie (`HttpOnly`,
-//! `SameSite=Strict`, `Secure`, host-only) and is granted every
-//! permission, like the operator's own token. Requests made with the
-//! cookie must address and come from a configured origin, and every
-//! state-changing one must repeat the session's CSRF token in the
-//! `X-CSRF-Token` header. Cookies without `Secure` exist only in the
-//! loopback development profile, where every origin is plain-HTTP
-//! loopback and the listener itself is loopback-only.
-//!
-//! Sign-in and setup attempts share one rate limit, and password hashing
-//! runs one at a time, so guessing is slow and cannot exhaust memory or
-//! CPU. Failures say only that authentication failed.
-//!
-//! Bearer tokens are unaffected: a request with an `Authorization` header
-//! is judged by its token alone, whatever cookies it carries.
+//! The owner is created once with a single-use setup secret from an
+//! owner-only file. A signed-in browser holds a strict session cookie, and
+//! every state-changing request repeats the session's CSRF token. Sign-in
+//! attempts are rate limited. Bearer tokens are judged on their own,
+//! whatever cookies a request carries.
 
 mod origin;
 mod owner;

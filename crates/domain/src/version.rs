@@ -1,9 +1,8 @@
 //! Revisions and generations.
 //!
 //! Identity is stable; a [`Revision`] orders concurrent edits to one record;
-//! a [`Generation`] invalidates stale work (architecture brief section 6.1).
-//! A [`BootEpoch`] numbers engine starts. All start at 1 and only move
-//! forward.
+//! a [`Generation`] invalidates stale work. A [`BootEpoch`] numbers engine
+//! starts. All start at 1 and only move forward.
 
 use std::fmt;
 use std::num::NonZeroU64;

@@ -1,20 +1,10 @@
-//! Commands: durable, idempotent mutations (architecture brief sections 4.6,
-//! 7.2 and 11.1).
+//! Commands: durable, idempotent mutations.
 //!
-//! Every command travels in a [`CommandEnvelope`] carrying a client-chosen
-//! idempotency key and the target instance. The engine stores the key with
-//! the command's [`CommandFingerprint`] and its result in the same
-//! transaction as the state change, and reports success only after that
-//! commit. A retried envelope with the same key and fingerprint replays the
-//! stored result; the same key with a different fingerprint is
-//! [`crate::ErrorCode::IdempotencyConflict`] (test T46).
-//!
-//! Commands that edit a job carry the revision the client last saw, and
-//! conflict if the job has changed since.
-//!
-//! The principal is never part of the payload. The host adapter (HTTP or
-//! desktop IPC) authenticates the caller and the engine checks
-//! [`Command::required_permission`].
+//! Each command travels in a [`CommandEnvelope`] with an idempotency key and
+//! target instance; a retry with the same key replays the stored result, and
+//! a different command under the same key conflicts. Edits carry the
+//! revision the client saw. Permissions come from the host, never the
+//! payload.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

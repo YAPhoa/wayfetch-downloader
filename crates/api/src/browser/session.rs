@@ -1,17 +1,9 @@
-//! Owner sessions: opaque random tokens held in memory only.
+//! Owner sessions: random tokens kept in memory only, as digests.
 //!
-//! The cookie carries a 256-bit random token that means nothing by itself;
-//! the server keeps only its SHA-256 digest, with the session's CSRF token
-//! and its times. A session ends when it has been idle for [`IDLE`], when
-//! it is [`LIFETIME`] old, when its owner signs out, or when the process
-//! stops: sessions are never written to disk, so a restart signs every
-//! browser out. At most [`MAX_SESSIONS`] exist; a new one beyond that
-//! replaces the least recently used.
-//!
-//! Whatever ends a session also ends what was opened with it: every event
-//! stream holds the session's [`SessionEnd`], which completes when the
-//! session is revoked, expires, or is replaced, and at the latest when it
-//! would expire unused, so a stream never outlives its session.
+//! A session ends when idle for [`IDLE`], at [`LIFETIME`], on sign-out, or
+//! on restart, and the oldest is replaced beyond [`MAX_SESSIONS`]. Event
+//! streams hold the session's [`SessionEnd`], so a stream never outlives its
+//! session.
 
 use std::collections::HashMap;
 use std::io;

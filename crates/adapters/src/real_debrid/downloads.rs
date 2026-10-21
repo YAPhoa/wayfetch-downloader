@@ -1,26 +1,11 @@
-//! Downloading through a Real-Debrid account: generating a download link
-//! for a hoster link, and reading the account's record of generated links
-//! (<https://api.real-debrid.com/>, sections "unrestrict" and "downloads").
+//! Downloading through a Real-Debrid account: generating a link, checking a
+//! link, and reading the account's list of generated links.
 //!
-//! `POST /unrestrict/link` is not idempotent, so it is sent once per call:
-//! a lost answer is reported as ambiguous for the engine to reconcile, never
-//! resent. Only a 401 before Real-Debrid processed anything (an expired
-//! access token) is answered by refreshing and sending once more. The
-//! engine reconciles with `GET /downloads`, the account's list of generated
-//! links, newest first. That list is the account's history, not a record
-//! of operations, so an entry is accepted only if it names exactly the
-//! original link, is dated no earlier than the intent, and is the only one
-//! that might be this request's; anything less certain is unknown. Torrents, folders, passwords, Remote traffic, and
-//! multi-result links are not used.
-//!
-//! A link check asks `POST /unrestrict/check`, which needs no sign-in and
-//! generates nothing: whether Real-Debrid can download the link, with the
-//! file's name and size.
-//!
-//! The generated link is checked before the engine sees it: HTTPS (plain
-//! HTTP only to a loopback test server), without credentials, of bounded
-//! length. Real-Debrid's file name and size are hints; a size of 0 means
-//! unknown.
+//! `POST /unrestrict/link` is not idempotent, so it is sent once; a lost
+//! answer is reported as ambiguous and the engine reconciles it from `GET
+//! /downloads`, accepting only one exact, recent match. Generated links must
+//! be HTTPS without credentials, and Real-Debrid's name and size are only
+//! hints.
 
 use std::time::Duration;
 

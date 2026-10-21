@@ -1,16 +1,6 @@
-//! The engine downloading over real sockets through its public API: submit
-//! a direct link, stream it over HTTPS into staging, interrupt the engine,
-//! restart it, resume from the durable bytes, and publish (architecture
-//! brief sections 7.5 to 7.7 and 14.3).
-//!
-//! Brief tests exercised here end to end: T01 (sequential file and valid
-//! empty file), T02 and T23 (resume from durable checkpoints after a
-//! restart), T03 (`200` to a range request), T04 (`416` with complete and
-//! incomplete coverage), T05 (representation changed during resume), T06
-//! (resume redirected to another origin or another resource on the same
-//! origin), T08 (truncated body), T09
-//! (stalled headers and body), the egress policy (section 8.2), and the
-//! total download speed limit shared by concurrent transfers.
+//! The engine downloading over real sockets through its public API: HTTPS
+//! transfers, resume after a restart and its refusals, failures that must
+//! not publish, the egress policy, and the shared speed limit.
 
 #[path = "../../engine/tests/support/mod.rs"]
 mod engine_support;

@@ -543,9 +543,9 @@ impl Store {
 
     /// Moves a job to `to` on behalf of work that holds generation
     /// `presented`. A stale generation is rejected, so a late worker from a
-    /// cancelled, reset, or pre-restart run cannot change the job (T17,
-    /// T27). Parked stages (waiting, blocked, input needed, failed) need the
-    /// failure that explains them.
+    /// cancelled, reset, or pre-restart run cannot change the job. Parked
+    /// stages (waiting, blocked, input needed, failed) need the failure that
+    /// explains them.
     pub fn advance_job(
         &mut self,
         id: JobId,

@@ -1,7 +1,6 @@
-//! Driving an engine through its public API in tests: a state directory
-//! and download root, an engine started with a given transport, and
-//! commands and queries as a host would send them. Shared by the engine's
-//! own tests and the HTTP crate's tests over real sockets.
+//! Driving an engine through its public API in tests: a state directory and
+//! root, an engine on a given transport, and commands and queries as a host
+//! sends them.
 
 #![allow(dead_code, reason = "each test file uses part of the support")]
 

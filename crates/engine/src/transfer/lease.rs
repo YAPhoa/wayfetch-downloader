@@ -1,5 +1,4 @@
-//! Transfer offers, one-use leases, and request replay rules (section 6.5,
-//! ADR-09; tests T11 and T12).
+//! Transfer offers, one-use leases, and request replay rules (ADR-09).
 
 use std::num::NonZeroU16;
 
@@ -77,7 +76,7 @@ impl Parallelism {
 /// What identifies the bytes of one representation, as reported by the
 /// server it came from. Two values are equivalent only within one offer's
 /// candidate (provider, account, route): a matching ETag from another CDN
-/// does not make the bytes interchangeable (rule 7.5.5, T06).
+/// does not make the bytes interchangeable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Representation {
     /// Complete length in bytes, if known.
@@ -90,8 +89,8 @@ pub struct Representation {
     /// An opaque identity of the resource that served it, after redirects,
     /// as the transport reports it. Validators identify representations of
     /// one resource only: the same entity tag from another resource, even
-    /// on the same server, does not make its bytes equivalent (rule 7.5.5,
-    /// RFC 9110 section 8.8.3).
+    /// on the same server, does not make its bytes equivalent (RFC 9110
+    /// section 8.8.3).
     pub resource: Option<String>,
 }
 
@@ -99,7 +98,7 @@ impl Representation {
     /// Whether the identity is strong enough to combine bytes from more
     /// than one response: a strong ETag, or a modification time with a
     /// known length. Without it a transfer restarts rather than mixing old
-    /// and new bytes (rule 7.5.4).
+    /// and new bytes.
     pub fn is_trustworthy(&self) -> bool {
         self.strong_etag.is_some() || (self.last_modified.is_some() && self.length.is_some())
     }
@@ -114,7 +113,7 @@ impl Representation {
     }
 }
 
-/// What an adapter's resolve step hands the engine (section 6.5).
+/// What an adapter's resolve step hands the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferOffer {
     /// The resource, provider, account, and route the offer is bound to.
@@ -168,9 +167,9 @@ impl LeaseError {
 }
 
 /// An offer issued to one attempt of one job generation. Starting a
-/// transfer consumes it, so it is used at most once (section 6.5). That is
-/// a local guarantee: it says nothing about how often a remote provider
-/// saw the request.
+/// transfer consumes it, so it is used at most once. That is a local
+/// guarantee: it says nothing about how often a remote provider saw the
+/// request.
 #[derive(Debug)]
 pub struct TransferLease {
     offer: TransferOffer,
@@ -246,7 +245,7 @@ pub enum Replay {
     /// The adapter must decide.
     AskAdapter,
     /// This offer cannot serve it; resolve a new one. For a consumptive
-    /// request that may mean reconciling an ambiguous outcome first (T12).
+    /// request that may mean reconciling an ambiguous outcome first.
     Reresolve,
     /// Not allowed; keep the current connections.
     Denied,
@@ -281,10 +280,10 @@ impl Transfer {
         self.lease.attempt
     }
 
-    /// Applies the replay and resume rules to another request (section
-    /// 6.5). An open response is never cloned; a request is never repeated
-    /// against an expired offer; bytes from several responses are combined
-    /// only under a trustworthy, unchanged representation.
+    /// Applies the replay and resume rules to another request. An open
+    /// response is never cloned; a request is never repeated against an
+    /// expired offer; bytes from several responses are combined only under
+    /// a trustworthy, unchanged representation.
     pub fn authorize(&self, purpose: RequestPurpose, now: UtcTimestamp) -> Replay {
         let offer = self.offer();
         if offer.expired(now) || matches!(offer.source, LeaseSource::OpenResponse(_)) {
@@ -322,8 +321,7 @@ impl Transfer {
 
     /// Records the representation a response reported. The first response
     /// establishes it, checked against what the offer promised; every later
-    /// one must match exactly, or its bytes must not join the partial
-    /// (rules 7.5.4 and 7.5.5, T05).
+    /// one must match exactly, or its bytes must not join the partial.
     pub fn observe(&mut self, seen: Representation) -> Result<(), RepresentationChanged> {
         match &self.observed {
             Some(established) if *established != seen => Err(RepresentationChanged),

@@ -1,37 +1,12 @@
-//! Where downloads may be saved: the destination roots a client may
-//! choose, and the default for new jobs (architecture brief sections 4.7
-//! and 8.6, ADR-17 and ADR-29).
+//! Where downloads may be saved: the permitted roots and the default for new
+//! jobs (ADR-17, ADR-29).
 //!
-//! * A root is permitted while the operator configures its path, or after
-//!   it was registered on its user's explicit request: a folder chosen in
-//!   the desktop app's native picker, or a server folder the owner chose in
-//!   the browser after listing folders ([`browse`]). Jobs and settings name
-//!   roots only by ID. A folder holding the state directory is refused.
-//! * Each root's ID is allocated by the store and written into this
-//!   profile's marker in the folder ([`initialize_root`]). A configured
-//!   path the store has not seen is identified from that marker, so a root
-//!   earlier versions marked keeps its ID; one without it waits until the
-//!   operator initializes it, and is retried as work arrives.
-//! * A folder is not owned by one profile. Other Wayfetch profiles' markers
-//!   and files in it neither stop this one from using it nor are touched
-//!   by it; only the state directory belongs to one engine.
-//! * Each job records its root when it is submitted, so changing the
-//!   default never moves a job. A job submitted while the operator's
-//!   download root is configured but not identified yet (an unmounted
-//!   drive) belongs to that root and waits for it, never taking a default
-//!   chosen later. A job whose root is no longer permitted is blocked
-//!   rather than redirected.
-//! * Identifying, probing, and registering roots never run on the
-//!   coordinator or while the store is held, since a hung mount would
-//!   stall every request. Checks
-//!   run on blocking threads with a deadline, at most one per path at a
-//!   time ([`Probes`]), so a hung mount costs one blocked thread and is
-//!   reported as not responding. An availability check asked for while
-//!   another of the same root runs shares its answer, so clients reading
-//!   the settings at once, as they do after a change, see the same. Registering a folder runs as its own
-//!   task ([`register`]) that uses the store only between its filesystem
-//!   steps. Filesystem work cannot be interrupted, so it holds the state
-//!   directory until it ends, and shutdown waits for it or reports it.
+//! A root is permitted while configured, or after the user registered it
+//! explicitly. Jobs and settings name roots by ID, and a job keeps its root:
+//! an unmounted or no longer permitted root blocks it rather than
+//! redirecting it. Folders may be shared by several profiles. Filesystem
+//! checks run off the coordinator with deadlines ([`Probes`]), so a hung
+//! mount stalls only requests about it.
 
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -201,17 +176,10 @@ pub(crate) fn initialize(
     )
 }
 
-/// Registers the existing directory `path` as a root the user chose, as
-/// [`initialize`] does, but with each filesystem step on a blocking thread
-/// and the store used only between them, so a hung folder delays only
-/// this registration. A folder still being checked or registered is
-/// refused as busy.
-///
-/// A filesystem step cannot be interrupted, so the registration waits for
-/// it, holding the state directory, and starts nothing after `cancel`
-/// fires: no other engine can open the directory while a step may still
-/// write to the folder. The state directory itself, or a folder inside
-/// it, is refused.
+/// Registers the existing directory `path` as a root the user chose, like
+/// [`initialize`] but with filesystem steps on blocking threads, so a hung
+/// folder delays only this registration. A folder already being checked is
+/// refused as busy, and so is the state directory or a folder inside it.
 pub(crate) async fn register(
     store: &StoreClient,
     probes: &Probes,

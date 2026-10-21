@@ -1,22 +1,9 @@
-//! Schema migrations.
+//! Schema migrations: numbered SQL files under `store/migrations/`, applied
+//! in order by [`rusqlite_migration`].
 //!
-//! Policy:
-//!
-//! * Migrations are numbered SQL files under `store/migrations/`, applied in
-//!   order with [`rusqlite_migration`], which records progress in SQLite's
-//!   `user_version`. Each runs in its own transaction.
-//! * They are forward-only and append-only once released: a released
-//!   migration is never edited, because existing state directories have
-//!   already applied it. A change is a new file. Version 0.1, the first
-//!   release, starts from a single migration holding the whole schema;
-//!   state directories of development builds before it are refused as
-//!   newer, like any unknown version.
-//! * An engine refuses to open a database whose version is newer than it
-//!   knows ([`super::StoreError::SchemaTooNew`]), so a downgrade cannot write
-//!   through a schema it does not understand. Rolling back a release means
-//!   restoring a matching backup of the state directory.
-//! * A migration must keep stored identifiers, revisions, generations, event
-//!   positions, and idempotency records valid.
+//! Released migrations are never edited; a change is a new file. An engine
+//! refuses a database newer than it knows
+//! ([`super::StoreError::SchemaTooNew`]).
 
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations, SchemaVersion};

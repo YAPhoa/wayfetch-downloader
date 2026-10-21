@@ -1,63 +1,15 @@
-//! Destination roots, private staging, and publication (architecture brief
-//! sections 7.6 and 7.7, ADR-16, ADR-17, ADR-29).
+//! Destination roots, private staging, and crash-safe publication (ADR-16,
+//! ADR-17, ADR-29).
 //!
-//! # Roots are capabilities
+//! A [`Root`] is an open directory handle reached only through
+//! [`RelativePath`]s, so nothing escapes it. It must carry this profile's
+//! marker, so an unmounted folder fails closed instead of being written
+//! into. Each job generation writes to its own staging file, reopened after
+//! a restart only by its recorded identity. Publication and renames use
+//! no-clobber hard links between store intents, so a crash never overwrites
+//! a file Wayfetch does not own.
 //!
-//! An operator configures roots by path, and the engine's store gives each
-//! a stable [`RootId`] that its marker in the folder records. The engine opens a
-//! [`Root`] once and from then on reaches files only through that open
-//! directory handle with [`RelativePath`]s, using `cap-std`, which resolves
-//! every path inside the handle: `..`, absolute paths, and symlinks that
-//! lead outside the root fail instead of escaping it. Destination strings
-//! from adapters or clients are never joined onto a host path.
-//!
-//! A root must carry this profile's marker, written by [`Root::initialize`].
-//! Opening fails closed when it is missing or names another root, so an
-//! unmounted bind mount is never mistaken for an empty destination and
-//! nothing is written into the directory underneath (T30). A folder is not
-//! owned by one profile: others may use it at once, each with its own
-//! marker and staging folder, and none touches the others' (see the root
-//! module).
-//! [`Root::verify`] repeats the check by path before publication, which
-//! also catches a mount replaced after the root was opened.
-//!
-//! # Staging
-//!
-//! Each job generation writes to its own private file under
-//! `.wayfetch/staging/<instance>/` in the destination root, created exclusively and
-//! never reused by another generation, so the final rename stays on one
-//! filesystem. The file's identity (device and inode) is recorded with the
-//! store's staging record. After a restart a partial is reopened only by
-//! that record, and a missing, replaced, or shrunk file is a reconciliation
-//! failure, never a reason to append blindly (T28). A file no generation
-//! can reopen is removed by [`Root::remove_staging`] only while its name
-//! still holds the recorded file; see the engine's cleanup module.
-//!
-//! # Publication
-//!
-//! [`Root::publish`] gives the synchronized staging file its final name
-//! with a hard link, which fails instead of replacing an existing name on
-//! every platform (a plain rename would replace it), synchronizes the
-//! directory, then removes the staging name (ADR-16). The store
-//! records a publication intent before and completes it after. After a
-//! crash, [`Root::reconcile_publication`] compares both names with the
-//! recorded identity and never deletes or overwrites a file it does not own
-//! (T24, T31).
-//!
-//! [`Root::rename_published`] renames a published file the same way: a
-//! no-clobber hard link to the new name in the same folder, checked and
-//! synchronized before the old name is removed, between a rename record
-//! and its completion in the store, with [`Root::reconcile_rename`] for a
-//! crash in between.
-//!
-//! # Platform support
-//!
-//! File identity and directory synchronization are implemented for Unix.
-//! Elsewhere staging fails with [`FsError::Unsupported`] until the desktop
-//! work adds them. Publication needs hard links in the destination root;
-//! filesystems without them, and destinations that cross a mount point
-//! below the root, are reported as unavailable rather than copied (T32 is
-//! later work).
+//! Unix only for now; elsewhere staging reports [`FsError::Unsupported`].
 
 mod extract;
 mod path;
@@ -189,9 +141,9 @@ impl FsError {
         move |source| Self::Io { op, source }
     }
 
-    /// The failure to record for this error (failure matrix, section 7.4).
+    /// The failure to record for this error.
     /// Access refusals are told apart from unavailable destinations, and a
-    /// damaged partial restarts rather than blocking the root (T29, T30).
+    /// damaged partial restarts rather than blocking the root.
     pub fn failure_code(&self) -> FailureCode {
         match self {
             Self::Io { source, .. } if source.kind() == io::ErrorKind::PermissionDenied => {

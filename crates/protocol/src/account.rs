@@ -1,12 +1,7 @@
-//! Provider accounts and their authorization, as clients see them
-//! (architecture brief sections 6.1, 7.3, 8.3 to 8.5, ADR-24).
+//! Provider accounts and their sign-in, as clients see them (ADR-24).
 //!
-//! An account's credentials never cross this boundary in either direction:
-//! a client starts an authorization with the provider, the person approves
-//! it on the provider's own site, and the engine receives and keeps the
-//! credentials. Clients see only redacted metadata: the service, an alias,
-//! whether the account is enabled, and what the provider last said about
-//! it. Every account query and command needs [`Permission::Accounts`],
+//! Credentials never cross this boundary; clients see only redacted
+//! metadata. Every account query and command needs [`Permission::Accounts`],
 //! which no other permission implies.
 //!
 //! [`Permission::Accounts`]: crate::Permission::Accounts

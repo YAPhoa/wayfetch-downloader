@@ -1,28 +1,10 @@
-//! Provider integrations for the Wayfetch Downloader engine (architecture
-//! brief sections 3.11 and 6.4, ADR-08).
+//! Provider integrations and helper-program plugins for the engine (ADR-08).
 //!
-//! Each integration speaks one provider's protocol through the engine's
-//! seams and keeps no state of its own: the engine owns accounts, stored
-//! credentials, pending authorizations, and when to call. Requests go
-//! through the host's [`wayfetch_engine::accounts::provider::ApiClient`],
-//! so the network policy is enforced in one place.
-//!
-//! Adding a provider takes one module implementing
-//! [`AccountProvider`] on [`common`], and one entry in [`INTEGRATIONS`].
-//! The engine, its protocol, both hosts, and the UI need no change: the UI
-//! offers sign-in for exactly the services [`providers`] returns.
-//!
-//! * [`common`]: endpoints, bounded requests, and answer checks.
-//! * [`real_debrid`]: Real-Debrid account sign-in, status, and downloads
-//!   through an account.
-//! * [`youtube`]: recognizing YouTube video links, and reading them as
-//!   media through [`ytdlp`].
-//! * [`plugin`]: the helper programs integrations run; [`ytdlp`] reads
-//!   videos, [`ffmpeg`] joins and converts their streams, and
-//!   [`sevenzip`] unpacks downloaded archives, confined by [`confine`].
-//! * [`plugins`]: turning plugins on and off, updating them from their
-//!   signed releases ([`release`]), and removing copies Wayfetch
-//!   installed.
+//! Integrations keep no state of their own and reach the network only
+//! through the engine's [`wayfetch_engine::accounts::provider::ApiClient`].
+//! Adding a provider takes one module implementing [`AccountProvider`] and
+//! one entry in [`INTEGRATIONS`]; the UI offers whatever [`providers`]
+//! returns.
 
 use std::sync::Arc;
 
