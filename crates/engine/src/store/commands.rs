@@ -22,8 +22,8 @@ use wayfetch_protocol::{
 use super::links::{self, Unusable};
 use super::operations::{self, OperationState};
 use super::{
-    Store, StoreError, accounts, deletions, extractions, files, jobs, key, outbox, renames, roots,
-    sql,
+    OrCorrupt, Store, StoreError, accounts, deletions, extractions, files, jobs, key, outbox,
+    renames, roots, sql,
 };
 
 /// What the coordinator knows about destinations when a command runs.
@@ -267,8 +267,7 @@ pub(super) fn record_as(
     result: &CommandResult,
     now: UtcTimestamp,
 ) -> Result<(), StoreError> {
-    let result =
-        serde_json::to_string(result).map_err(|_| StoreError::Corrupt("command result"))?;
+    let result = serde_json::to_string(result).or_corrupt("command result")?;
     tx.execute(
         "INSERT INTO commands (idempotency_key, fingerprint, result, created_at) \
          VALUES (?1, ?2, ?3, ?4)",
@@ -288,12 +287,10 @@ fn stored(tx: &Transaction<'_>, key: &str) -> Result<Option<IdempotencyRecord>, 
     else {
         return Ok(None);
     };
-    let fingerprint: [u8; 32] = fingerprint
-        .try_into()
-        .map_err(|_| StoreError::Corrupt("command fingerprint"))?;
+    let fingerprint: [u8; 32] = fingerprint.try_into().or_corrupt("command fingerprint")?;
     Ok(Some(IdempotencyRecord {
         fingerprint: CommandFingerprint::from_bytes(fingerprint),
-        result: serde_json::from_str(&result).map_err(|_| StoreError::Corrupt("command result"))?,
+        result: serde_json::from_str(&result).or_corrupt("command result")?,
     }))
 }
 
@@ -326,8 +323,7 @@ fn submit(
             tx.last_insert_rowid()
         }
     };
-    let accepted =
-        u32::try_from(items.as_slice().len()).map_err(|_| StoreError::Corrupt("input count"))?;
+    let accepted = u32::try_from(items.as_slice().len()).or_corrupt("input count")?;
     tx.execute(
         "INSERT INTO input_batches (package_id, input_count, root_id, created_at) \
          VALUES (?1, ?2, ?3, ?4)",
@@ -344,7 +340,7 @@ fn submit(
     for (ordinal, item) in items.as_slice().iter().enumerate() {
         insert.execute(params![
             sql(batch)?,
-            i64::try_from(ordinal).map_err(|_| StoreError::Corrupt("ordinal"))?,
+            i64::try_from(ordinal).or_corrupt("ordinal")?,
             item.as_url().as_str()
         ])?;
     }

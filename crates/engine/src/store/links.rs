@@ -26,7 +26,7 @@ use wayfetch_protocol::media::MediaChoice;
 use wayfetch_protocol::query::{CollectedLink, JobRoute, LinkCheck, LinkPage, PageSize};
 use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 
-use super::{Store, StoreError, crawl, jobs, key, media, outbox, sql};
+use super::{OrCorrupt, Store, StoreError, crawl, jobs, key, media, outbox, sql};
 use crate::crawl::extract::Entry;
 use crate::crawl::looks_like_file;
 
@@ -92,7 +92,7 @@ pub(super) fn collect(
             |r| r.get(0),
         )
         .map_err(StoreError::from)?;
-    let listed = usize::try_from(listed).map_err(|_| StoreError::Corrupt("link count"))?;
+    let listed = usize::try_from(listed).or_corrupt("link count")?;
     if listed + plan.links.len() > MAX_COLLECTED_LINKS {
         return Err(ProtocolError::new(
             ErrorCode::LimitExceeded,
@@ -115,7 +115,7 @@ pub(super) fn collect(
     )
     .map_err(StoreError::from)?;
     let package = tx.last_insert_rowid();
-    let count = u32::try_from(plan.links.len()).map_err(|_| StoreError::Corrupt("input count"))?;
+    let count = u32::try_from(plan.links.len()).or_corrupt("input count")?;
     let analyze = mode == CollectMode::Analyze;
     tx.execute(
         "INSERT INTO input_batches (package_id, input_count, root_id, created_at, mode) \
@@ -140,7 +140,7 @@ pub(super) fn collect(
         .map_err(StoreError::from)?;
     let mut invalid = 0u32;
     for (position, link) in plan.links.iter().enumerate() {
-        let ordinal = i64::try_from(position).map_err(|_| StoreError::Corrupt("ordinal"))?;
+        let ordinal = i64::try_from(position).or_corrupt("ordinal")?;
         let service = match link.entry {
             Entry::Valid(_) => link.media.as_ref().map(ProviderId::as_str),
             Entry::Invalid { .. } => None,
@@ -454,8 +454,7 @@ pub(super) fn start(
         // automatically and no account took it.
         let media = match (&row.media.service, automatic, route) {
             (Some(service), true, None) => Some(jobs::NewMedia {
-                service: ProviderId::new(service.clone())
-                    .map_err(|_| StoreError::Corrupt("media service"))?,
+                service: ProviderId::new(service.clone()).or_corrupt("media service")?,
                 choice: media::decode_choice(row.media.choice.as_deref())?,
                 title: media::decode_info(row.media.info.as_deref())?.map(|i| i.title),
             }),
@@ -593,7 +592,7 @@ pub(super) fn check(
             )
             .map_err(StoreError::from)?;
         }
-        let url = Url::parse(&row.url).map_err(|_| StoreError::Corrupt("source URL"))?;
+        let url = Url::parse(&row.url).or_corrupt("source URL")?;
         crawl::enqueue(tx, id, &url, row.media.service.as_deref(), now)?;
         Ok(Ok(AppliedLink {
             link: link.link,
@@ -625,9 +624,7 @@ pub(super) fn relocate(
         }
         let mut revision = row.revision;
         if row.root != Some(destination) {
-            revision = revision
-                .next()
-                .map_err(|_| StoreError::Corrupt("link revision"))?;
+            revision = revision.next().or_corrupt("link revision")?;
             tx.execute(
                 "UPDATE source_links SET root_id = ?1, revision = ?2, problem = \
                  CASE WHEN invalid = 1 THEN problem END WHERE id = ?3",
@@ -681,9 +678,7 @@ pub(super) fn choose_media(
         }
         let mut revision = row.revision;
         if media::decode_choice(row.media.choice.as_deref())? != choice {
-            revision = revision
-                .next()
-                .map_err(|_| StoreError::Corrupt("link revision"))?;
+            revision = revision.next().or_corrupt("link revision")?;
             tx.execute(
                 "UPDATE source_links SET media_choice = ?1, revision = ?2 WHERE id = ?3",
                 params![
@@ -815,7 +810,7 @@ impl Listed {
             reason: self
                 .reason
                 .filter(|_| checked)
-                .map(|r| r.parse().map_err(|_| StoreError::Corrupt("check reason")))
+                .map(|r| r.parse().or_corrupt("check reason"))
                 .transpose()?,
             check_detail: self
                 .detail
@@ -827,7 +822,7 @@ impl Listed {
                 .filter(|_| checked)
                 .map(u64::try_from)
                 .transpose()
-                .map_err(|_| StoreError::Corrupt("file size"))?,
+                .or_corrupt("file size")?,
             found_on: self.page.as_deref().map(crawl::shown_page),
             found: self.found.filter(|_| checked),
             skipped: self.skipped.filter(|_| checked),
@@ -836,7 +831,7 @@ impl Listed {
                 .filter(|_| checked)
                 .map(ProviderId::new)
                 .transpose()
-                .map_err(|_| StoreError::Corrupt("checking provider"))?,
+                .or_corrupt("checking provider")?,
             media: self.media.summary(converter)?.map(Box::new),
         })
     }
@@ -885,7 +880,7 @@ pub(super) fn list(
         [after],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    let count = |n: i64| u64::try_from(n).map_err(|_| StoreError::Corrupt("link count"));
+    let count = |n: i64| u64::try_from(n).or_corrupt("link count");
     Ok(LinkPage {
         items,
         next_after,
@@ -927,10 +922,7 @@ impl Store {
                  AND NOT EXISTS(SELECT 1 FROM jobs WHERE source_link_id = source_links.id)",
                 [sql_id], |r| r.get(0)).optional()?;
             if let Some(raw) = raw {
-                urls.push((
-                    *id,
-                    Url::parse(&raw).map_err(|_| StoreError::Corrupt("source URL"))?,
-                ));
+                urls.push((*id, Url::parse(&raw).or_corrupt("source URL")?));
             }
         }
         Ok(urls)

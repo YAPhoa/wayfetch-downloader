@@ -18,7 +18,7 @@ use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Generation;
 use wayfetch_protocol::query::JobRoute;
 
-use super::{Store, StoreError, jobs, key, sql};
+use super::{OrCorrupt, Store, StoreError, jobs, key, sql};
 use crate::accounts::vault::{REFERENCE_BYTES, Reference};
 
 /// The open states, as the schema's index names them.
@@ -191,7 +191,7 @@ pub(super) fn decode_route(
 ) -> Result<Option<JobRoute>, StoreError> {
     match (service, account) {
         (Some(service), Some(account)) => Ok(Some(JobRoute {
-            service: ProviderId::new(&service).map_err(|_| StoreError::Corrupt("job route"))?,
+            service: ProviderId::new(&service).or_corrupt("job route")?,
             account: key(account)?,
         })),
         (None, None) => Ok(None),
@@ -245,7 +245,7 @@ impl Store {
                 now.unix_millis()
             ],
         )?;
-        let operation = open(&tx, job)?.ok_or(StoreError::Corrupt("provider operation"))?;
+        let operation = open(&tx, job)?.or_corrupt("provider operation")?;
         tx.commit()?;
         Ok(operation)
     }

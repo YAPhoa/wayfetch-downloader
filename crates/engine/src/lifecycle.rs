@@ -583,9 +583,7 @@ impl EngineHandle {
 
     /// The connection handshake.
     pub async fn hello(&self) -> Result<Hello, ProtocolError> {
-        let (reply, response) = oneshot::channel();
-        self.send(Request::Hello(reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(Request::Hello).await
     }
 
     /// Runs a command durably. Success is returned only after the command
@@ -609,9 +607,8 @@ impl EngineHandle {
             }
             authorize(required, granted)?;
         }
-        let (reply, response) = oneshot::channel();
-        self.send(Request::Execute(Box::new(envelope), reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::Execute(Box::new(envelope), reply))
+            .await
     }
 
     /// Answers a read query.
@@ -621,9 +618,7 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<QueryResult, ProtocolError> {
         authorize(query.required_permission(), granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::Query(query, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::Query(query, reply)).await
     }
 
     /// Subscribes to durable events after `request.after`. A cursor from
@@ -636,9 +631,7 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<Subscription, ProtocolError> {
         authorize(Permission::Read, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::Subscribe(request, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::Subscribe(request, reply)).await
     }
 
     /// Permits the existing directory `path` as a destination on the
@@ -653,9 +646,7 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<RootSummary, ProtocolError> {
         authorize(Permission::Control, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::RegisterRoot(path, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::RegisterRoot(path, reply)).await
     }
 
     /// The folders inside the folder at `path` on the engine's host (the
@@ -667,9 +658,7 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<FolderListing, ProtocolError> {
         authorize(Permission::Control, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::BrowseFolders(path, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::BrowseFolders(path, reply)).await
     }
 
     /// Where a listed, complete job's file is on this computer, after
@@ -684,9 +673,7 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<PathBuf, ProtocolError> {
         authorize(Permission::Read, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::PublishedPath(job, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::PublishedPath(job, reply)).await
     }
 
     /// Checks an account with its provider now, refreshing its credentials
@@ -699,9 +686,8 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<AccountSummary, ProtocolError> {
         authorize(Permission::Accounts, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::RefreshAccount(account, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::RefreshAccount(account, reply))
+            .await
     }
 
     /// Cancels a sign-in still waiting for the person's approval, and
@@ -712,9 +698,8 @@ impl EngineHandle {
         granted: &[Permission],
     ) -> Result<Authorization, ProtocolError> {
         authorize(Permission::Accounts, granted)?;
-        let (reply, response) = oneshot::channel();
-        self.send(Request::CancelAuthorization(id, reply))?;
-        response.await.map_err(|_| shutting_down())?
+        self.ask(|reply| Request::CancelAuthorization(id, reply))
+            .await
     }
 
     /// Unpacks a complete archive download ([`Command::Extract`]), with
@@ -730,8 +715,18 @@ impl EngineHandle {
         for required in envelope.command.required_permissions() {
             authorize(required, granted)?;
         }
+        self.ask(|reply| Request::Extract(Box::new(envelope), password, reply))
+            .await
+    }
+
+    /// Sends the request `make` builds around a reply channel and waits for
+    /// the coordinator's answer.
+    async fn ask<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, ProtocolError>>) -> Request,
+    ) -> Result<T, ProtocolError> {
         let (reply, response) = oneshot::channel();
-        self.send(Request::Extract(Box::new(envelope), password, reply))?;
+        self.send(make(reply))?;
         response.await.map_err(|_| shutting_down())?
     }
 
@@ -748,7 +743,7 @@ impl EngineHandle {
     }
 }
 
-fn shutting_down() -> ProtocolError {
+pub(crate) fn shutting_down() -> ProtocolError {
     ProtocolError::new(ErrorCode::ShuttingDown, "engine is not running")
 }
 

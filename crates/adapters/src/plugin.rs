@@ -449,6 +449,13 @@ struct Active {
 }
 
 impl Plugin {
+    /// The program at `path`, if found and checked, as a plugin Wayfetch
+    /// does not update.
+    pub async fn detect(describe: Describe, check: Check, path: Option<PathBuf>) -> Arc<Self> {
+        let found = Program::detect(describe, path, &check).await;
+        Arc::new(Self::new(describe, check, found, false))
+    }
+
     /// The plugin, using `found` (at a configured path or on `PATH`) until
     /// a copy is installed; `updatable` if Wayfetch can install releases
     /// of it.

@@ -15,7 +15,7 @@ use wayfetch_protocol::event::EventKind;
 use wayfetch_protocol::query::SpeedLimit;
 use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 
-use super::{Store, StoreError, key, outbox, sql};
+use super::{OrCorrupt, Store, StoreError, key, outbox, sql};
 
 /// A recorded root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,9 +191,7 @@ fn stored_speed_limit(limit: SpeedLimit) -> Result<i64, StoreError> {
     match limit {
         SpeedLimit::Unlimited => Ok(0),
         SpeedLimit::BytesPerSecond(0) => Err(StoreError::Corrupt("download_speed_limit")),
-        SpeedLimit::BytesPerSecond(rate) => {
-            i64::try_from(rate).map_err(|_| StoreError::Corrupt("download_speed_limit"))
-        }
+        SpeedLimit::BytesPerSecond(rate) => i64::try_from(rate).or_corrupt("download_speed_limit"),
     }
 }
 
@@ -230,7 +228,7 @@ fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
         revision: key(revision)?,
         default_root: root.map(key).transpose()?,
         max_active_downloads: max_active
-            .map(|v| u64::try_from(v).map_err(|_| StoreError::Corrupt("max_active_downloads")))
+            .map(|v| u64::try_from(v).or_corrupt("max_active_downloads"))
             .transpose()?,
         download_speed_limit: speed.map(read_speed_limit).transpose()?,
         extract_archives: extract,
@@ -258,10 +256,7 @@ fn next_revision(
     saved: &SavedSettings,
     now: UtcTimestamp,
 ) -> Result<Revision, ProtocolError> {
-    let next = saved
-        .revision
-        .next()
-        .map_err(|_| StoreError::Corrupt("settings revision"))?;
+    let next = saved.revision.next().or_corrupt("settings revision")?;
     outbox::append(tx, &EventKind::SettingsChanged { revision: next }, now)?;
     Ok(next)
 }
@@ -341,7 +336,7 @@ pub(super) fn update_settings(
     let next = next_revision(tx, &saved, now)?;
     let max_active = wanted
         .max_active_downloads
-        .map(|v| i64::try_from(v).map_err(|_| StoreError::Corrupt("max_active_downloads")))
+        .map(|v| i64::try_from(v).or_corrupt("max_active_downloads"))
         .transpose()?;
     let speed = wanted
         .download_speed_limit
