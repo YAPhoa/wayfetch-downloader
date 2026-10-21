@@ -1,16 +1,9 @@
-//! Starting the installed app from the desktop's app menu, which passes no
-//! arguments (architecture brief section 11.7, "standalone mode").
+//! Starting the installed app from the desktop's app menu, with no
+//! arguments.
 //!
-//! The state directory and the download root are the platform's own
-//! folders: on Linux `$XDG_DATA_HOME/wayfetch-downloader` and the XDG
-//! download folder. The download root is initialized only on a first start,
-//! when the state directory does not exist yet; afterwards a missing root
-//! is reported like any unusable root, never initialized again, so a drive
-//! that is not mounted is not mistaken for an empty folder. The person
-//! can choose other folders in Settings.
-//!
-//! Nobody reads the terminal of an app started from a menu, so a failure
-//! to start is also shown in a message box.
+//! It uses the platform's data and download folders. The download folder is
+//! initialized only on the first start, so a later missing drive is reported
+//! rather than replaced. Start failures are also shown in a message box.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

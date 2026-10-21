@@ -1,24 +1,9 @@
-// The Settings page: how many downloads run at once and how fast they may
-// download together, where new downloads are saved, accounts with
-// download services, the plugins video links use, and how the list looks.
-// Only what Wayfetch supports today can be changed here. A menu of
-// sections sits beside the selected section, as in a desktop app's
-// preferences.
+// The Settings page (`/settings` and `/settings/<section>`), with a section
+// menu as in a desktop app's preferences.
 //
-// Downloads and Download folders are the engine's settings, shared by
-// every client: each is saved with Save at the revision shown, within the
-// limits of the server's configuration, which the page explains. A draft
-// survives a failed save and a change made elsewhere, which every client
-// hears of; a section with an unsaved draft is marked, and leaving
-// Settings asks first. In a browser the folders are on the server, among
-// those its operator allowed; the desktop app can also add a folder
-// through its native dialog. A folder the user added can be removed
-// again, which only stops offering it: its files stay. Theme and row
-// density are this device's own and apply at once.
-//
-// Routes: `/settings` shows the first section; `/settings/<section>` shows
-// that one. The page is part of the Downloads workspace, which keeps
-// following the engine while it is shown.
+// Engine settings are saved at the revision shown, and an unsaved draft
+// survives a failed save or a change made elsewhere; leaving with a draft
+// asks first. Theme and row density belong to this device and apply at once.
 
 import { theme } from '../theme.js';
 import { WayfetchError, idempotencyKey } from '../client/contract.js';

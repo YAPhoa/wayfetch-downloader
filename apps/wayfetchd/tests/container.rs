@@ -1,13 +1,5 @@
-//! The `wayfetchd` image run through `deploy/compose.yaml`, with every
-//! restriction it documents: a configured non-root UID/GID, a read-only
-//! root filesystem, no capabilities, and separate state, download, and
-//! token mounts. The image serves its bundled web UI and runs its bundled
-//! plugins, 7-Zip among them, which unpacks a downloaded archive beside
-//! it. A fixture download survives the container's removal and
-//! recreation and resumes from its durable bytes; `docker compose stop`
-//! shuts down gracefully; a second container cannot take a state directory
-//! in use; and a root that was never initialized, or a host path that does
-//! not exist, is refused rather than written into.
+//! The `wayfetchd` image run through `deploy/compose.yaml` with every
+//! restriction it documents.
 //!
 //! These tests need Docker with the Compose plugin, so they are ignored by
 //! default:
@@ -16,9 +8,7 @@
 //! cargo test --locked -p wayfetchd --test container -- --ignored
 //! ```
 //!
-//! They build `wayfetch:local` with `docker build`, unless
-//! `WAYFETCH_IMAGE` names an image to test instead. The fixture server
-//! listens on the host's Docker bridge address, which containers reach.
+//! They build `wayfetch:local` unless `WAYFETCH_IMAGE` names another image.
 
 mod common;
 #[path = "../../../crates/engine/tests/support/mod.rs"]

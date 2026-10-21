@@ -1,26 +1,9 @@
-//! Unpacking downloaded archives (architecture brief sections 3.12 and 9,
-//! ADR-18 and ADR-19).
+//! Unpacking downloaded archives (ADR-18, ADR-19).
 //!
-//! The engine owns the workflow: which downloads are archives ([`names`]),
-//! when a set of volumes is ready, one extraction at a time, where its
-//! output goes, its private staging folder, the checks before and after,
-//! publishing the result next to the archive, cancelling, and restarting
-//! after a crash. An [`Extractor`], such as the 7-Zip plugin, only lists
-//! and unpacks, as a separate program the engine can stop at any moment.
-//!
-//! An extraction never changes or removes its archive. Its output is
-//! written into a new private folder under the root's `.wayfetch`
-//! directory, checked to hold only plain files and folders within the
-//! extraction's budget, and only then moved next to the archive under a
-//! free name. A failed, cancelled, or interrupted extraction leaves
-//! nothing but its private folder, which is removed.
-//!
-//! Hostile names are refused from the listing, the output is checked
-//! again after unpacking, and its size is watched while it is written. The
-//! extractor itself must also be confined to the archive's volumes and the
-//! private folder (section 9.3), as the 7-Zip plugin is: the engine cannot
-//! confine it, so an extractor that cannot be confined reports itself not
-//! ready, and nothing is unpacked.
+//! The engine owns the workflow and an [`Extractor`] only lists and unpacks.
+//! Output goes to a private folder, is checked, and only then moves next to
+//! the archive, which is never changed. An extractor that cannot be confined
+//! reports itself not ready, and nothing is unpacked.
 
 pub mod names;
 

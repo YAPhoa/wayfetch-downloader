@@ -1,17 +1,10 @@
-//! The authenticated HTTP/SSE adapter for the Wayfetch Downloader engine
-//! (architecture brief sections 4.3, 8.5 and 11.1, ADR-21 and ADR-28).
+//! The authenticated HTTP/SSE adapter for the engine (ADR-21, ADR-28).
 //!
-//! It translates HTTP into the engine's transport-neutral commands,
-//! queries, and subscriptions and nothing more: validation, idempotency,
-//! revision checks, authorization of each operation, and event replay all
-//! happen in the engine, exactly as for every other host. The adapter owns
-//! what is specific to HTTP: bearer-token authentication, browser sign-in
-//! and sessions with their origin and CSRF checks, request and connection
-//! bounds, server-sent events, and a graceful drain.
-//!
-//! Nothing a client does with a connection reaches job execution. A closed
-//! connection or event stream ends only that connection; accepted jobs
-//! keep running until a command says otherwise.
+//! It translates HTTP into engine commands, queries, and subscriptions;
+//! validation, idempotency, and authorization stay in the engine. It owns
+//! only what is HTTP-specific: tokens, browser sessions, request bounds,
+//! server-sent events, and a graceful drain. A closed connection never
+//! affects jobs.
 
 mod auth;
 mod browser;

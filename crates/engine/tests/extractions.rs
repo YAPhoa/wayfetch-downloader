@@ -1,10 +1,6 @@
 //! Unpacking downloaded archives through the public engine API, with an
-//! in-process extractor (ADR-18, ADR-19): a finished archive
-//! is unpacked into a new folder beside it and kept; a multi-part set
-//! waits for its last part; a protected archive asks for its password;
-//! hostile listings and output are refused and leave nothing behind; and
-//! cancelling, restarting, and the setting behave as the UI expects.
-//! 7-Zip itself is tested in `wayfetch-adapters`.
+//! in-process extractor (ADR-18, ADR-19). 7-Zip itself is tested in
+//! `wayfetch-adapters`.
 
 mod support;
 

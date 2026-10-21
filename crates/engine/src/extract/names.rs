@@ -1,5 +1,5 @@
 //! Which downloaded files are archives, and which belong to one set of
-//! volumes, judged by their names (architecture brief section 9.2).
+//! volumes, judged by their names.
 //!
 //! Names are classified conservatively: only the patterns below count, and
 //! a set is never assumed complete from names alone. The extractor still

@@ -1,7 +1,6 @@
 //! Downloading through a Real-Debrid account against a local stand-in for
-//! its API, through the real HTTP transport: generating a link, refreshing
-//! for it, every refusal, a lost answer, and reading the account's record.
-//! Fixture-tested only: nothing here reaches Real-Debrid.
+//! its API, through the real HTTP transport. Nothing here reaches
+//! Real-Debrid.
 
 mod support;
 

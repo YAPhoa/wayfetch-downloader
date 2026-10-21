@@ -1,20 +1,9 @@
-//! Opening, initializing, and verifying a destination root (ADR-17,
-//! ADR-29).
+//! Opening, initializing, and verifying a destination root (ADR-17, ADR-29).
 //!
-//! A destination folder is shared: any number of Wayfetch profiles (state
-//! directories) may save into it at once. Each profile marks the folder
-//! with its own marker, `.wayfetch/roots/<instance>.json`, naming the root
-//! ID its store gave the folder, and keeps its private files under
-//! `.wayfetch/staging/<instance>/`. Another profile's marker or files never
-//! stop a profile from using the folder, and are never read, changed, or
-//! removed by it.
-//!
-//! Earlier versions wrote a single marker, `.wayfetch/root.json`, and staged
-//! directly in `.wayfetch/staging/`. Such a marker still identifies the
-//! folder for the profile it names and is ignored by every other one; it is
-//! never rewritten or removed. Staging files recorded under the old layout
-//! are still reopened, published, and cleaned up by the profile that
-//! recorded them, while new ones go in the profile's own folder.
+//! A folder may be shared by several profiles. Each keeps its own marker,
+//! `.wayfetch/roots/<instance>.json`, and staging folder, and never touches
+//! another's. The single marker and staging folder of earlier versions are
+//! still honored for the profile they name.
 
 use std::io;
 use std::path::{Path, PathBuf};

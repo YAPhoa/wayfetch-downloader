@@ -1,18 +1,10 @@
-//! `wayfetch-desktop`: the Wayfetch Downloader desktop host (architecture
-//! brief sections 4.1, 4.7 and 11.7, ADR-31 to ADR-34).
+//! `wayfetch-desktop`: the desktop host. Like `wayfetchd` but with a window
+//! instead of a listener (ADR-31 to ADR-34).
 //!
-//! A thin host, like `wayfetchd` but with a window instead of a listener:
-//! it owns the Tokio runtime, the engine's lifecycle, and process signals,
-//! embeds `wayfetch-engine` in this process, and shows the shared web UI in
-//! a system WebView that reaches the engine only through the explicit IPC
-//! commands in [`ipc`]. It starts no daemon and opens no listening socket.
-//!
-//! The engine starts before the window opens, so a state directory that
-//! another engine owns is refused with no window shown. Closing the window
-//! stops the engine gracefully and exits; unfinished jobs continue on the
-//! next start. Reloading the page, or losing its event subscriptions, only
-//! stops watching: jobs keep running while the host does. `SIGINT` or
-//! `SIGTERM` closes the window the same way.
+//! The engine runs in this process and the shared UI reaches it only through
+//! the IPC commands in [`ipc`]; no daemon or listening socket is started.
+//! Closing the window or a signal shuts the engine down gracefully, and
+//! unfinished jobs continue on the next start.
 
 mod assets;
 mod installed;

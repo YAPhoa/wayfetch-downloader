@@ -1,25 +1,10 @@
-//! Bearer-token authentication with scoped permissions (architecture brief
-//! sections 4.6 and 8.5).
+//! Bearer-token authentication with scoped permissions.
 //!
-//! The host authenticates; the engine authorizes. A request's bearer token
-//! is looked up here and the permissions it was issued with are handed to
-//! the engine, which checks each command, query, and subscription against
-//! them. No request payload can name its own permissions.
-//!
-//! Tokens come from an operator-owned file, one per line:
-//!
-//! ```text
-//! # comment
-//! <token> read,submit,control
-//! <token> read
-//! ```
-//!
-//! Only SHA-256 digests of the tokens are kept in memory and compared. On
-//! Unix, a file other users can read or write is refused.
-//!
-//! When browser access is configured, a request without an
-//! `Authorization` header may instead present an owner session cookie;
-//! see [`crate::browser`].
+//! The host authenticates and the engine authorizes: a token's permissions
+//! come from the operator's token file (`<token> read,submit,control` per
+//! line), never from the request. Only token digests are kept, and a file
+//! other users can read is refused. Browsers may use an owner session
+//! instead ([`crate::browser`]).
 
 use std::collections::HashMap;
 use std::io::{self, Write};

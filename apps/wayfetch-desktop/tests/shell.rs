@@ -1,33 +1,10 @@
-//! The real desktop shell against a local fixture server (architecture
-//! brief sections 11.6 and 11.7, gate G1a): the built `wayfetch-desktop`
-//! opens its window in the system WebView, driven through WebKitWebDriver
-//! as a person would, and closed with `WM_DELETE_WINDOW` as a window
-//! manager does.
+//! The real desktop window against a local fixture server, driven through
+//! WebKitWebDriver as a person would.
 //!
-//! Covered: a download submitted and observed through the shared UI;
-//! pause, resume, cancel, and retry over IPC; a renderer reload mid-transfer;
-//! graceful close, relaunch on the same state directory, recovery, and the
-//! final bytes; a second engine refused; stale revisions, wrong-instance
-//! commands, idempotency, resynchronization, a stalled renderer's
-//! subscription ending, and the per-renderer subscription limit and its
-//! cleanup on reload; with the `scripted-picker` feature, a folder chosen
-//! in the host's dialog becoming the destination of new downloads, also
-//! from the Settings page while a download keeps running; the Settings
-//! page and each row's menu, which opens a finished file or its
-//! folder through the host (a recording `xdg-open` stands in for the
-//! desktop's), renames, and removes from the list; links collected for
-//! review on the Add links page fetching nothing, outliving a relaunch, and only the chosen
-//! ones starting, with the row menu from the keyboard and a narrow
-//! window; that the page loads
-//! only bundled assets; that the host starts no daemon and listens on
-//! no TCP port; and a provider account signed in against a local stand-in
-//! for Real-Debrid, with its key beside the state directory, then shown,
-//! checked, disabled, signed in again, and removed; and a collected link
-//! downloaded through that account, chosen when starting it.
-//!
-//! These tests need an X display (`DISPLAY`, for example from `xvfb-run`)
-//! and `WebKitWebDriver` on `PATH`, so they are ignored by default; see
-//! apps/wayfetch-desktop/README.md.
+//! These tests cover what only the desktop host does: IPC, the host's
+//! dialogs and file opening, relaunch and recovery, and starting no daemon
+//! or listener. They need an X display and `WebKitWebDriver` on `PATH`, so
+//! they are ignored by default; see apps/wayfetch-desktop/README.md.
 
 #![cfg(target_os = "linux")]
 

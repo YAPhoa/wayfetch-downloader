@@ -137,7 +137,7 @@ validated_string!(
 
 validated_string!(
     /// A resolver or provider identity, distinct from the resource's original
-    /// host (architecture brief section 3.4). Same syntax as [`Namespace`].
+    /// host. Same syntax as [`Namespace`].
     ProviderId,
     |v| slug("provider id")(v)
 );
@@ -155,7 +155,7 @@ pub const CANONICAL_KEY_MAX_LEN: usize = 1024;
 validated_string!(
     /// An adapter-defined canonical key for a resource within its namespace.
     /// Compared byte for byte; the adapter owns its normalization. Not a URL
-    /// to fetch: a signed URL is a request, not an identity (section 6.1).
+    /// to fetch: a signed URL is a request, not an identity.
     CanonicalKey,
     |v| bounded_text("canonical key", CANONICAL_KEY_MAX_LEN)(v)
 );

@@ -1,17 +1,10 @@
 //! Event subscriptions with bounded replay and a bounded live window
-//! (architecture brief section 7.8, ADR-28; tests T47 and T66).
+//! (ADR-28).
 //!
-//! A subscription replays at most [`crate::config::Limits::event_buffer`]
-//! retained events, then follows the coordinator's live broadcast, whose
-//! ring holds the same number. Memory therefore stays bounded whatever the
-//! number of events or subscribers: a client further behind is told to
-//! resynchronize ([`ResyncReason::Lagged`]) instead of being buffered for.
-//! Subscriptions never affect job execution, and dropping one is enough to
-//! end it.
-//!
-//! Live progress samples ([`crate::progress`]) are interleaved with the
-//! events. Only the newest set is ever held, so they never make a
-//! subscription lag: one that falls behind skips samples.
+//! A subscriber too far behind is told to resynchronize instead of being
+//! buffered for. Progress samples are interleaved, keeping only the newest
+//! set, so they never cause lag. Dropping a subscription ends it and never
+//! affects jobs.
 
 use std::collections::VecDeque;
 

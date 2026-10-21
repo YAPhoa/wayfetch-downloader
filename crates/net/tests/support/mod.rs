@@ -1,11 +1,6 @@
-//! A deterministic local HTTP/HTTPS server for transfer tests (architecture
-//! brief section 13.2, "local protocol server").
-//!
-//! It speaks just enough HTTP/1.1, over a raw socket, to misbehave on
-//! purpose: ignore ranges or validators, stall or drop mid-body, send
-//! malformed framing, or hang up after reading a request. Every request is
-//! logged, so tests count exactly what reached the server. HTTPS uses a CA
-//! and certificate generated per server; nothing secret is committed.
+//! A deterministic local HTTP/HTTPS server for transfer tests. It speaks
+//! just enough HTTP/1.1 to misbehave on purpose, logs every request, and
+//! generates its TLS certificates per server.
 
 #![allow(dead_code, reason = "each test file uses part of the fixture")]
 

@@ -1,20 +1,10 @@
-// The Downloads workspace: a toolbar to add links, switch between the
-// Downloads and Links views, act on the ticked downloads (or else the one
-// in the details), and open Settings; state filters; a table of one page
-// of jobs, each with a box to tick and a menu of what can be done with it
-// (with the ticked ones, when it is one of them), which the Name, Host,
-// State and Size headers sort, reverse, then return to the engine's order
-// (amounts that change during a transfer do not sort); an inspector for the
-// selected job; and a status bar. It talks to the engine only through a
-// `WayfetchClient`, so any transport can host it.
+// The Downloads workspace: toolbar, state filters, a sortable table of one
+// page of jobs, the details inspector, and the status bar. It talks to the
+// engine only through a `WayfetchClient`, so any transport can host it.
 //
-// Adding links, on a page of its own, collects them on the Links page
-// for review; nothing downloads until they are started there.
-//
-// Routes: `/` lists jobs; `/jobs/<id>` also selects one; `/links` shows
-// the collected links; `/add` the Add links page; `/settings` and its
-// sections the Settings page. Add links and Settings take the place of
-// either view, while the workspace keeps following the engine.
+// Routes: `/` and `/jobs/<id>`; the Links, Add links, and Settings pages
+// take the place of the table while the workspace keeps following the
+// engine.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { JobFeed } from '../client/feed.js';
@@ -928,12 +918,9 @@ export class Downloads {
   }
 
   /**
-   * Sends one command for `job` at the revision shown, then re-reads it.
-   * Resolves to whether the engine accepted it; a refusal is shown in the
-   * notice line, or passed to `refused` if given. While the engine has not
-   * answered, the job takes no other command from this view, so a second
-   * click cannot send a second request.
-   * `extract` unpacks an archive, with `password` if given.
+   * Sends one command for `job` at the revision shown, then re-reads it,
+   * resolving to whether the engine accepted it. Until the engine answers,
+   * the job takes no other command, so a double click sends one request.
    * @param {JobSummary} job
    * @param {JobAction | 'extract'} action
    * @param {{
@@ -993,13 +980,9 @@ export class Downloads {
   }
 
   /**
-   * Starts a failed or cancelled job again, and says what that does: it
-   * continues the saved data when the server still offers the same file.
-   * A refusal because the job changed meanwhile is explained from its
-   * state once re-read.
-   * A download whose provider request may have gone through without its
-   * answer arriving is retried only once the user accepts that the
-   * provider may do that work again.
+   * Starts a failed or cancelled job again, continuing its saved data when
+   * the server still offers the same file. A lost provider answer is
+   * retried only once the user accepts the provider may repeat the work.
    * @param {JobSummary} job
    * @param {boolean} [repeat] the user accepted repeating it
    */

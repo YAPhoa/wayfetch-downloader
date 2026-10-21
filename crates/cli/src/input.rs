@@ -1,12 +1,7 @@
-//! Bounded line input from standard input.
-//!
-//! A dedicated thread reads standard input, because a blocking read cannot
-//! be cancelled and would otherwise hold up the runtime's shutdown while a
-//! terminal waits for a line. Lines are split by [`LinesCodec`] with a
-//! length limit: an overlong line is discarded up to its newline and
-//! reported, never buffered whole. The channel to the session is bounded,
-//! so a session busy with a command makes the reader wait instead of
-//! queueing input.
+//! Bounded line input from standard input, read on its own thread so a
+//! pending read cannot hold up shutdown. Overlong lines are discarded and
+//! reported, and the bounded channel makes the reader wait for a busy
+//! session.
 
 use std::io::{self, Read};
 

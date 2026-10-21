@@ -1,19 +1,9 @@
 //! File-job state: desired state, observed stage, revision, and generation.
 //!
-//! The desired state records what the user asked for; the observed stage
-//! records what the engine is actually doing (architecture brief section
-//! 7.1). A pause or cancel request is accepted immediately, but an active
-//! stage only leaves once the coordinator reports that work has stopped, so
-//! the job shows as pausing or stopping in between.
-//!
-//! Two counters guard concurrent change:
-//!
-//! * the [`Revision`] advances on every accepted change, and user requests
-//!   must present the revision they last saw;
-//! * the [`Generation`] advances whenever in-flight work must be invalidated
-//!   (cancel, retry, restart from scratch, and recovery after an engine
-//!   restart). Stage reports must present the current generation, so a late
-//!   result from old work is rejected (tests T17 and T27).
+//! The desired state is what the user asked for; the stage is what the
+//! engine is doing, so a pause shows as pausing until work stops. The
+//! [`Revision`] guards user edits, and the [`Generation`] rejects late
+//! results from invalidated work.
 
 use std::fmt;
 use std::str::FromStr;

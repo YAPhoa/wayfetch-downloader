@@ -1,6 +1,5 @@
 //! A response body as the engine's [`ChunkSource`]: chunks never exceed
-//! the engine's read buffer, and only one is resident at a time (sections
-//! 7.5 and 10.3; T09).
+//! the engine's read buffer, and only one is resident at a time.
 
 use std::io;
 

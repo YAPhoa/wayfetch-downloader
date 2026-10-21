@@ -1,5 +1,5 @@
-//! Checking a response against the byte range that was requested (section
-//! 7.5, ADR-14; tests T02 to T04 and T08).
+//! Checking a response against the byte range that was requested
+//! (ADR-14).
 //!
 //! The HTTP layer parses status and headers; this module decides what the
 //! parsed framing allows, so the rules hold whichever client produced it.
@@ -35,7 +35,7 @@ pub enum Framing {
 pub enum Plan {
     /// Write the body from `start`. With a known end, the body must be
     /// exactly that long: fewer bytes are a truncation, more an
-    /// overflow (rule 7.5.7).
+    /// overflow.
     Write {
         /// Where the body goes; an open end means "until the body ends".
         start: u64,
@@ -46,13 +46,13 @@ pub enum Plan {
     },
     /// The server ignored the range and sent the whole representation. It
     /// must never be appended to the partial; restart from zero in a new
-    /// generation or fail, as the offer's policy says (rule 7.5.2, T03).
+    /// generation or fail, as the offer's policy says.
     RestartFromZero {
         /// The representation's length, if known.
         length: Option<u64>,
     },
     /// `416` is not completion: compare durable coverage with the complete
-    /// length, and finish only with [`is_complete`] (rule 7.5.3, T04).
+    /// length, and finish only with [`is_complete`].
     Reconcile {
         /// Complete length, if the server sent it.
         complete: Option<u64>,
@@ -161,7 +161,7 @@ pub fn plan(
 }
 
 /// Whether durable `coverage` is exactly the whole artifact `0..size`. File
-/// length never stands in for coverage (T25); an empty artifact needs no
+/// length never stands in for coverage; an empty artifact needs no
 /// coverage.
 pub fn is_complete<'a>(coverage: impl IntoIterator<Item = &'a Range<u64>>, size: u64) -> bool {
     let mut ranges = coverage.into_iter();
@@ -194,7 +194,7 @@ mod tests {
                 complete: None
             })
         );
-        // A valid empty file is a write of nothing, not an error (T01).
+        // A valid empty file is a write of nothing, not an error.
         assert_eq!(
             plan(None, Framing::Full { length: Some(0) }, None),
             Ok(Plan::Write {

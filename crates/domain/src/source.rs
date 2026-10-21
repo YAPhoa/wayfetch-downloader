@@ -4,7 +4,7 @@
 //! and visibility scope, never by a raw URL or filename (ADR-10). A download
 //! candidate additionally names the provider, account, and egress route that
 //! will serve it, so quotas, credentials, and cooldowns never collapse into a
-//! single `host` field (architecture brief section 3.4).
+//! single `host` field.
 
 use crate::id::{AccountId, ResourceId, RouteId};
 use crate::name::{CanonicalKey, HostName, Namespace, ProviderId, Variant};

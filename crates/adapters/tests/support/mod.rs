@@ -1,9 +1,7 @@
-//! A local stand-in for Real-Debrid's API over plain HTTP on `127.0.0.1`,
-//! following the documented device flow, `GET /rest/1.0/user`,
-//! `POST /rest/1.0/unrestrict/link`, and `GET /rest/1.0/downloads`, and
-//! serving the files its generated links name. Every value it hands out
-//! is synthetic; each answer can be overridden to misbehave on purpose,
-//! and every request is logged.
+//! A local stand-in for Real-Debrid's API on `127.0.0.1`: the device flow,
+//! user status, link generation, the downloads list, and the generated
+//! files. Every value is synthetic, any answer can be overridden to
+//! misbehave, and every request is logged.
 
 #![allow(dead_code, reason = "each test file uses part of the fixture")]
 

@@ -1,11 +1,6 @@
 //! Media downloads through the public engine API, with an in-process media
-//! service, video host, and converter (ADR-27): a collected
-//! media link is checked in the background and shows its title and
-//! formats; the person's choice is kept and made; the engine downloads
-//! every stream itself, end to end in one staging file, continues it with
-//! fresh links after a pause, starts again when the formats changed, and
-//! converts only through the converter. yt-dlp and ffmpeg themselves are
-//! tested in `wayfetch-adapters`.
+//! service, video host, and converter (ADR-27). yt-dlp and ffmpeg themselves
+//! are tested in `wayfetch-adapters`.
 
 mod support;
 

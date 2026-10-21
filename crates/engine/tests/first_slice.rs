@@ -1,17 +1,7 @@
-//! The first end-to-end slice (architecture brief section 14.3) through the
-//! public engine API: submit one direct link, persist the job, download it
-//! into owned staging, verify, publish, restart the engine, and list the
-//! completed artifact.
-//!
-//! Bytes come from an in-process [`Transport`]; `wayfetch-net` runs the
-//! same path over real sockets. Brief tests exercised here at the
-//! engine level: T01 (sequential file), T02 and T23 (resume from durable
-//! checkpoints after a restart), T03 (`200` to a range request), T05
-//! (representation changed during resume), T09 (stalled headers and body),
-//! T27 (cancelled generation), and T47 (bounded subscriber replay). The
-//! last tests cover destination roots and the default for new jobs,
-//! renaming and removing finished jobs, and links collected for review
-//! before they are started.
+//! Direct downloads through the public engine API, with an in-process
+//! [`Transport`]: submitting, resuming, publishing, limits, destination
+//! roots, renaming and removing, collected links, and retries.
+//! `wayfetch-net` runs the transfer paths over real sockets.
 
 mod support;
 
@@ -633,7 +623,7 @@ async fn pause_keeps_durable_bytes_and_cancel_retires_the_generation() {
     // The cancelled job stays cancelled and published nothing.
     assert_eq!(job(&owner, cancelled).await.stage, JobStage::Cancelled);
     assert!(!env.root.join("cancelled.bin").exists());
-    // Cancelling retains its partial (section 7.2), across a restart too.
+    // Cancelling retains its partial, across a restart too.
     assert_eq!(env.staging_files(), 1);
     shutdown(owner).await;
     let owner = env.start().await;

@@ -1,4 +1,4 @@
-//! Generation-private staging files (section 7.6, tests T27 and T28).
+//! Generation-private staging files.
 
 use std::fs::File;
 use std::io;
@@ -44,7 +44,7 @@ impl StagingFile {
     }
 
     /// Current file length. Not coverage: a preallocated or sparse file is
-    /// longer than its written data (T25).
+    /// longer than its written data.
     pub fn file_len(&self) -> io::Result<u64> {
         Ok(self.file.metadata()?.len())
     }
@@ -191,7 +191,7 @@ impl Root {
     /// `durable_end`, after checking that it is still the file that was
     /// created and still holds every durable byte. A missing, replaced, or
     /// shrunk file is a reconciliation failure: its partial must restart,
-    /// never be appended to (T28).
+    /// never be appended to.
     ///
     /// Content changed in place by something else cannot be detected here;
     /// verification of the finished file catches it.
@@ -248,22 +248,14 @@ pub enum Removal {
 }
 
 impl Root {
-    /// Removes the recorded staging file `record`, after checking that its
-    /// name still holds the very file that was created: a regular file
-    /// with the recorded identity. Anything else is left in place. Whether
-    /// this removed the name or found it already gone, perhaps removed by
-    /// a pass a crash interrupted before its directory sync, the directory
-    /// is synchronized before this returns, so a record deleted afterwards
-    /// never outlives a name a crash could bring back.
+    /// Removes the recorded staging file `record` if its name still holds
+    /// the file with the recorded identity; anything else is left in
+    /// place. The directory is synced before returning, so the record can
+    /// be deleted safely afterwards. Files no record names are never
+    /// removed, and the directory is never scanned.
     ///
-    /// Only a recorded identity proves the engine created a file, so the
-    /// staging directory is never scanned. Other profiles' files, and a
-    /// file that no record names (a crash between creating and registering
-    /// it), are never removed: a name alone does not prove the file is
-    /// this engine's.
-    ///
-    /// The check and the removal are two steps; a file swapped in between
-    /// by something else with write access to the private staging
+    /// The check and the removal are two steps, so a file swapped in
+    /// between by something with write access to the private staging
     /// directory would be removed.
     pub fn remove_staging(&self, record: &StagingRecord) -> Result<Removal, FsError> {
         let (dir, name) = match self.locate(record) {
