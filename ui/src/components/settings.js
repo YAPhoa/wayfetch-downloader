@@ -41,6 +41,7 @@ import { toolbar } from './toolbar.js';
  *   density: () => Density,
  *   setDensity: (density: Density) => void,
  *   onSettings: (settings: Settings) => void,
+ *   onUpdates: (check: import('../client/contract.js').UpdateCheck) => void,
  *   onSignedOut: () => void,
  *   navigate: (path: string) => void,
  *   back: () => void,
@@ -483,6 +484,9 @@ export class SettingsPage {
         client: this.context.client,
         hello: this.context.hello,
         onSignedOut: this.context.onSignedOut,
+        onSettings: this.context.onSettings,
+        onChanged: (refresh) => this.refreshers.push(refresh),
+        onUpdates: this.context.onUpdates,
       }),
     };
     show(

@@ -532,19 +532,34 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await pane.getByRole('radio', { name: 'Comfortable' }).check();
   expect(await page.evaluate(() => document.documentElement.dataset.density)).toBe('comfortable');
   await pane.getByRole('radio', { name: 'Compact' }).check();
-  // About shows the version, and checks for a newer release only when
-  // asked, linking to its page.
+  // About shows the version, and checks for a newer release when asked,
+  // linking to its page; the Settings button then carries a dot.
   await sections.getByRole('link', { name: 'About' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/settings/about`);
   await expect(pane.locator('[data-key="app-version"]')).toHaveText(/^\d+\.\d+\.\d+/);
   await expect(pane.getByRole('link', { name: 'YAPhoa' })).toHaveAttribute('href', 'https://github.com/YAPhoa');
   await expect(pane.locator('[data-key="update-status"]')).toBeHidden();
+  await expect(pane.locator('[data-key="update-detail"]')).toHaveText('Not checked yet');
   await pane.getByRole('button', { name: 'Check for updates' }).click();
   await expect(pane.locator('[data-key="update-status"]')).toHaveText('99.0.0 available');
+  await expect(pane.locator('[data-key="update-detail"]')).toHaveText(/^Last checked Today, /);
   await expect(pane.getByRole('link', { name: 'Get 99.0.0' })).toHaveAttribute(
     'href',
     `${fixture.base}/pages/releases/tag/v99.0.0`,
   );
+  await expect(page.locator('[data-key="open-settings"].has-update')).not.toHaveCount(0);
+  // Checking automatically is on by default, and turning it off is saved.
+  const automaticOn = pane.getByRole('radio', { name: 'On' });
+  const automaticOff = pane.getByRole('radio', { name: 'Off' });
+  await expect(automaticOn).toBeChecked();
+  await automaticOff.check();
+  await expect(automaticOff).toBeEnabled();
+  await page.reload();
+  await expect(automaticOff).toBeChecked();
+  await automaticOn.check();
+  await expect(automaticOn).toBeEnabled();
+  await page.reload();
+  await expect(automaticOn).toBeChecked();
   await expectFitsWindow(page);
   await page.goBack();
   await expect(displayLink).toHaveAttribute('aria-current', 'page');

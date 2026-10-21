@@ -111,6 +111,9 @@ impl Dirs {
             // Only the fixture's loopback address is reachable.
             "--allow-network",
             "127.0.0.1/32",
+            // Update checks go nowhere.
+            "--updates-endpoint",
+            "http://127.0.0.1:9/",
         ]
         .map(String::from)
         .into_iter()
@@ -954,6 +957,21 @@ async fn ipc_keeps_the_protocol_semantics() {
         ))
         .await;
 
+    // A build without the release signing key reports update checks and
+    // installs nothing.
+    let updates = shell
+        .ipc(
+            "const status = await client.updates();
+             const restart = await client.restartToUpdate().catch((e) => e.code);
+             return { status, restart };",
+        )
+        .await;
+    assert_eq!(
+        updates["status"]["outcome"]["kind"], "not_checked",
+        "{updates}"
+    );
+    assert!(updates["status"].get("install").is_none(), "{updates}");
+    assert_eq!(updates["restart"], "not_applicable", "{updates}");
     let printed = shell.close().await;
     assert!(
         printed

@@ -429,7 +429,9 @@ export class Daemon {
         '--dev-insecure-loopback',
         '--allow-network', '127.0.0.1/32',
         ...(this.realDebrid ? ['--provider-endpoint', `real-debrid=${this.realDebrid}`] : []),
-        ...(this.updates ? ['--updates-endpoint', this.updates] : []),
+        // Nowhere by default, so an automatic check never reaches GitHub.
+        '--updates-endpoint',
+        this.updates ?? 'http://127.0.0.1:9/',
         ...(this.plugins ? ['--config', config] : []),
         '--json',
       ],

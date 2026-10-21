@@ -847,7 +847,7 @@ impl Store {
             Query::Settings {}
             | Query::Accounts {}
             | Query::Authorization { .. }
-            | Query::Updates {} => {
+            | Query::Updates { .. } => {
                 return Err(ProtocolError::new(
                     wayfetch_protocol::ErrorCode::Internal,
                     "settings, accounts, and updates are answered by the coordinator",
