@@ -17,7 +17,7 @@
 // needs signing in again shows that command beside the menu.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
-import { openDialog } from './dialog.js';
+import { confirmDialog, openDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { icon } from './icons.js';
 import { Menu, rowMenuHandlers } from './menu.js';
@@ -432,32 +432,10 @@ export function accountsSection(context) {
    * @param {string} label
    */
   const confirmRemove = async (account, label) => {
-    const dialog = openDialog(
-      { title: 'Remove account', className: 'confirm' },
-      h(
-        'p',
-        null,
-        `Remove ${label}? Wayfetch forgets this account and deletes its stored sign-in. `,
-        'The account itself stays at the service.',
-      ),
-      h(
-        'div',
-        { class: 'dialog-actions' },
-        h('button', { type: 'button', 'data-key': 'remove-cancel', onclick: () => dialog.close() }, 'Cancel'),
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'primary',
-            'data-key': 'remove-confirm',
-            onclick: () => {
-              dialog.close();
-              void command(account, 'remove');
-            },
-          },
-          'Remove',
-        ),
-      ),
+    confirmDialog(
+      { title: 'Remove account', confirm: 'Remove', onConfirm: () => void command(account, 'remove') },
+      `Remove ${label}? Wayfetch forgets this account and deletes its stored sign-in. `,
+      'The account itself stays at the service.',
     );
   };
 
