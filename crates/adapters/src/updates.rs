@@ -1,6 +1,6 @@
-//! The project's releases on GitHub, for update checks: the newest
-//! published release, which GitHub reports without drafts or pre-releases,
-//! compared with the running version.
+//! The project's releases on GitHub, for update checks: the highest
+//! version among the newest published releases, pre-releases included
+//! (every release so far is one), compared with the running version.
 
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ pub const OFFICIAL_API: &str = "https://api.github.com/repos/YAPhoa/wayfetch-dow
 /// Where every release is listed.
 pub const RELEASES_PAGE: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases");
 
-/// Largest answer read: a release with long notes and many files.
+/// Largest answer read: a page of releases with long notes and many files.
 const MAX_BODY: usize = 1024 * 1024;
 
 /// The fields of GitHub's release object used here.
@@ -28,6 +28,9 @@ const MAX_BODY: usize = 1024 * 1024;
 struct Release {
     tag_name: String,
     html_url: String,
+    /// Only the repository's owners see drafts; skipped all the same.
+    #[serde(default)]
+    draft: bool,
 }
 
 /// The newest release on GitHub, through the host's client.
@@ -45,11 +48,13 @@ impl GitHubReleases {
     }
 
     async fn outcome(&self, current: &str) -> Result<UpdateOutcome, ProviderError> {
-        let url = self.api.endpoint().url("releases/latest");
+        // The newest 30 releases, newest first. `releases/latest` would
+        // leave out pre-releases.
+        let url = self.api.endpoint().url("releases");
         let response = self.api.call(ApiMethod::Get, url, None, None).await?;
         match response.status {
             200 => {}
-            // Nothing is published yet.
+            // No such repository, as for a stand-in with nothing yet.
             404 => return Ok(UpdateOutcome::UpToDate),
             403 | 429 => {
                 return Err(ProviderError::Unavailable(
@@ -62,9 +67,16 @@ impl GitHubReleases {
                 )));
             }
         }
-        let release: Release = self.api.parse(&response, "the latest release")?;
-        let newest = parse_version(&release.tag_name)
-            .ok_or_else(|| self.api.malformed("the latest release: its version"))?;
+        let releases: Vec<Release> = self.api.parse(&response, "the releases")?;
+        // Tags that are not versions, such as `nightly`, are never offered.
+        let Some((newest, release)) = releases
+            .into_iter()
+            .filter(|release| !release.draft)
+            .filter_map(|release| Some((parse_version(&release.tag_name)?, release)))
+            .max_by(|(a, _), (b, _)| a.cmp(b))
+        else {
+            return Ok(UpdateOutcome::UpToDate);
+        };
         let running = parse_version(current).ok_or_else(|| {
             ProviderError::Malformed(format!("this version {current} is unreadable"))
         })?;
@@ -74,7 +86,7 @@ impl GitHubReleases {
         let url = Url::parse(&release.html_url)
             .ok()
             .filter(|url| self.api.endpoint().allows_page(url))
-            .ok_or_else(|| self.api.malformed("the latest release: its page"))?;
+            .ok_or_else(|| self.api.malformed("the newest release: its page"))?;
         Ok(UpdateOutcome::Available {
             version: newest.to_string(),
             url: url.into(),
@@ -152,12 +164,19 @@ mod tests {
         assert_eq!(releases.releases(), RELEASES_PAGE);
         assert_eq!(
             *client.asked.lock().unwrap(),
-            ["https://api.github.com/repos/YAPhoa/wayfetch-downloader/releases/latest"]
+            ["https://api.github.com/repos/YAPhoa/wayfetch-downloader/releases"]
         );
         outcome
     }
 
-    const NEWER: &str = r#"{"tag_name":"v0.2.0","html_url":"https://github.com/YAPhoa/wayfetch-downloader/releases/tag/v0.2.0","draft":false}"#;
+    /// Pre-releases, as every release so far is, newest first, with a
+    /// tag that is not a version, and a draft only an owner would see.
+    const NEWER: &str = r#"[
+        {"tag_name":"nightly","html_url":"https://github.com/YAPhoa/wayfetch-downloader/releases/tag/nightly","prerelease":true},
+        {"tag_name":"v9.0.0","html_url":"https://github.com/YAPhoa/wayfetch-downloader/releases/tag/v9.0.0","draft":true},
+        {"tag_name":"v0.2.0","html_url":"https://github.com/YAPhoa/wayfetch-downloader/releases/tag/v0.2.0","prerelease":true},
+        {"tag_name":"v0.1.1","html_url":"https://github.com/YAPhoa/wayfetch-downloader/releases/tag/v0.1.1","prerelease":true}
+    ]"#;
 
     #[test]
     fn the_api_and_page_belong_to_the_repository() {
@@ -171,7 +190,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_newer_release_is_offered_with_its_page() {
+    async fn the_highest_newer_release_is_offered_with_its_page() {
         assert_eq!(
             check(Ok((200, NEWER)), "0.1.0").await,
             UpdateOutcome::Available {
@@ -189,11 +208,10 @@ mod tests {
                 UpdateOutcome::UpToDate
             );
         }
-        // Nothing published yet.
-        assert_eq!(
-            check(Ok((404, r#"{"message":"Not Found"}"#)), "0.1.0").await,
-            UpdateOutcome::UpToDate
-        );
+        // Nothing published yet, or no such repository.
+        for answer in [(200, "[]"), (404, r#"{"message":"Not Found"}"#)] {
+            assert_eq!(check(Ok(answer), "0.1.0").await, UpdateOutcome::UpToDate);
+        }
     }
 
     #[tokio::test]
@@ -202,7 +220,7 @@ mod tests {
             UpdateOutcome::Unavailable { problem } => problem.as_str().to_owned(),
             other => panic!("unexpected {other:?}"),
         };
-        let cases: [(Answer, &str); 6] = [
+        let cases: [(Answer, &str); 5] = [
             (
                 Err(ApiErrorKind::Unreachable),
                 "GitHub could not be reached",
@@ -213,14 +231,7 @@ mod tests {
             (
                 Ok((
                     200,
-                    r#"{"tag_name":"nightly","html_url":"https://github.com/"}"#,
-                )),
-                "its version",
-            ),
-            (
-                Ok((
-                    200,
-                    r#"{"tag_name":"v9.0.0","html_url":"http://github.com/x"}"#,
+                    r#"[{"tag_name":"v9.0.0","html_url":"http://github.com/x"}]"#,
                 )),
                 "its page",
             ),
