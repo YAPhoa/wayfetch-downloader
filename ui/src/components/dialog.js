@@ -56,3 +56,35 @@ export function openDialog({ title, className = '', closeLabel = 'Close', onclos
   dialog.showModal();
   return dialog;
 }
+
+/**
+ * A confirmation with Cancel and a primary `confirm` button, which closes
+ * the dialog and runs `onConfirm`.
+ * @param {{ title: string, confirm: string, onConfirm: () => void }} options
+ * @param {...import('./dom.js').Children} message
+ */
+export function confirmDialog({ title, confirm, onConfirm }, ...message) {
+  const dialog = openDialog(
+    { title, className: 'confirm' },
+    h('p', null, ...message),
+    h(
+      'div',
+      { class: 'dialog-actions' },
+      h('button', { type: 'button', 'data-key': 'remove-cancel', onclick: () => dialog.close() }, 'Cancel'),
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'primary',
+          'data-key': 'remove-confirm',
+          onclick: () => {
+            dialog.close();
+            onConfirm();
+          },
+        },
+        confirm,
+      ),
+    ),
+  );
+  return dialog;
+}
