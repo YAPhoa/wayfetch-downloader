@@ -11,6 +11,7 @@ import { openDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { browseServerFolders } from './folders.js';
 import { icon } from './icons.js';
+import { aboutSection } from './about.js';
 import { accountsSection } from './accounts.js';
 import { pluginsSection } from './plugins.js';
 import { toolbar } from './toolbar.js';
@@ -29,7 +30,7 @@ import { toolbar } from './toolbar.js';
  * @typedef {Pick<import('../client/contract.js').SettingsChange, 'maxActiveDownloads' | 'downloadSpeedLimit' | 'extractArchives'>} Change
  * @typedef {'KiB' | 'MiB'} RateUnit
  * @typedef {'compact' | 'comfortable'} Density
- * @typedef {'downloads' | 'folder' | 'display' | 'accounts' | 'plugins'} Section
+ * @typedef {'downloads' | 'folder' | 'display' | 'accounts' | 'plugins' | 'about'} Section
  */
 
 /**
@@ -49,7 +50,7 @@ import { toolbar } from './toolbar.js';
 
 /**
  * The sections, in menu order.
- * @type {{ id: Section, label: string, about: string, icon: 'brand' | 'folder' | 'display' | 'accounts' | 'plugins' }[]}
+ * @type {{ id: Section, label: string, about: string, icon: 'brand' | 'folder' | 'display' | 'accounts' | 'plugins' | 'about' }[]}
  */
 export const SECTIONS = [
   { id: 'downloads', label: 'Downloads', about: 'How downloads run.', icon: 'brand' },
@@ -67,6 +68,7 @@ export const SECTIONS = [
     icon: 'plugins',
   },
   { id: 'display', label: 'Display', about: 'Appearance and downloads list layout.', icon: 'display' },
+  { id: 'about', label: 'About', about: '', icon: 'about' },
 ];
 
 /** The path of Settings, which shows its first section. */
@@ -477,6 +479,11 @@ export class SettingsPage {
         onSignedOut: this.context.onSignedOut,
         onChanged: (refresh) => this.refreshers.push(refresh),
       }),
+      about: aboutSection({
+        client: this.context.client,
+        hello: this.context.hello,
+        onSignedOut: this.context.onSignedOut,
+      }),
     };
     show(
       this.content,
@@ -484,7 +491,7 @@ export class SettingsPage {
         h(
           'section',
           { class: 'settings-panel', 'data-section': id, 'aria-labelledby': `settings-${id}`, hidden: true },
-          h('header', { class: 'settings-head' }, h('h2', { id: `settings-${id}` }, label), h('p', { class: 'hint' }, about)),
+          h('header', { class: 'settings-head' }, h('h2', { id: `settings-${id}` }, label), about ? h('p', { class: 'hint' }, about) : null),
           panels[id],
         ),
       ),

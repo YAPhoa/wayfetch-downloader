@@ -32,6 +32,7 @@ pub mod state_dir;
 mod store;
 pub mod subscription;
 pub mod transfer;
+pub mod updates;
 
 pub use config::{
     ConfigError, EngineConfig, IntegerPolicy, Limits, Policy, Preference, SpeedLimitPolicy,

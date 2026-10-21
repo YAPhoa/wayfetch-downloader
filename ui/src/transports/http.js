@@ -250,6 +250,11 @@ export class HttpClient {
     return this.request('GET', '/v1/accounts');
   }
 
+  /** Asks the server whether a newer release is published. */
+  checkForUpdates() {
+    return this.request('POST', '/v1/updates/check');
+  }
+
   /**
    * @param {Args<'authorizeAccount'>[0]} request
    */

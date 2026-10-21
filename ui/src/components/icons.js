@@ -13,6 +13,7 @@ export const ICONS = {
   display: 'M2 3h10M2 7h10M2 11h10',
   accounts: 'M7 1.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5M2.5 12.5c.4-2.6 2.2-4 4.5-4s4.1 1.4 4.5 4',
   plugins: 'M5.5 1.5v3h-3v3h3v5h3v-5h3v-3h-3v-3z',
+  about: 'M7 1.5a5.5 5.5 0 1 0 0 11a5.5 5.5 0 1 0 0-11M7 6.5v3.5M7 4.25h.01',
   more: 'M3 7h.01M7 7h.01M11 7h.01',
   brand: 'M7 1.5v7.5M4 6l3 3 3-3M2.5 12h9',
   add: 'M7 2v10M2 7h10',
@@ -24,6 +25,7 @@ export const ICONS = {
   down: 'M7 2.5v9M3.5 8L7 11.5 10.5 8',
   chevron: 'M4 5.5l3 3 3-3',
   check: 'M2.5 7.5l3 3 6-6.5',
+  external: 'M8.5 2.5h3v3M11.5 2.5L6.5 7.5M10 8.5v3H2.5V4h3',
   search: 'M6 2.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7M8.6 8.6l3 3',
 };
 

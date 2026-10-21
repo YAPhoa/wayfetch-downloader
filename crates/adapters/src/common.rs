@@ -89,6 +89,7 @@ pub struct Api {
     /// The provider's name, for messages.
     name: &'static str,
     endpoint: Endpoint,
+    max_body: usize,
 }
 
 impl std::fmt::Debug for Api {
@@ -107,7 +108,14 @@ impl Api {
             client,
             name,
             endpoint,
+            max_body: MAX_BODY,
         }
+    }
+
+    /// The same API, accepting bodies of up to `max_body` bytes.
+    pub fn with_max_body(mut self, max_body: usize) -> Self {
+        self.max_body = max_body;
+        self
     }
 
     /// Where the API is.
@@ -131,7 +139,7 @@ impl Api {
             bearer: bearer.map(Secret::from_text),
             form,
             deadline: REQUEST_DEADLINE,
-            max_body: MAX_BODY,
+            max_body: self.max_body,
         };
         self.client.send(&request).await
     }
