@@ -331,7 +331,7 @@ export function aboutSection(context) {
           'div',
           { class: 'setting-row' },
           h('div', { class: 'setting-text' }, h('span', { class: 'setting-name' }, 'Updates'), detail),
-          h('div', { class: 'update-actions' }, badge, action, button),
+          h('div', { class: 'update-actions' }, action, badge, button),
         ),
         h(
           'div',

@@ -1192,7 +1192,7 @@ th[aria-sort] button.sort { color: var(--ink); }
 .group-foot:not(:has(> :not(:empty))) { display: none; }
 .group-foot button { white-space: nowrap; }
 
-/* Settings > About: the result of an update check as a badge beside the
+/* Settings > About: the result of an update check as a badge, after its link and before the
    button, with any detail under the row's hint. */
 .update-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; }
 .update-status {
