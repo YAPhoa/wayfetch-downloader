@@ -22,6 +22,7 @@
     "allow-reveal-file",
     "allow-subscribe",
     "allow-acknowledge",
-    "allow-unsubscribe"
+    "allow-unsubscribe",
+    "allow-restart-to-update"
   ]
 }

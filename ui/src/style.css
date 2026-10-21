@@ -1215,7 +1215,21 @@ th[aria-sort] button.sort { color: var(--ink); }
 @media (prefers-reduced-motion: reduce) { .icon-button.busy .icon { animation: none; } }
 .update-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .update-detail.problem { color: var(--bad); }
+.update-actions .primary { min-height: 30px; padding: 0 12px; white-space: nowrap; }
 .about a { display: inline-flex; align-items: center; gap: 4px; }
+/* A dot on the Settings gear while a newer release is available. */
+.settings-button .gear { position: relative; display: inline-flex; }
+.settings-button.has-update .gear::after {
+  content: '';
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--run);
+  box-shadow: 0 0 0 2px var(--surface);
+}
 .about .address { overflow-wrap: anywhere; user-select: all; }
 
 /* One setting per row: its name and purpose, then the control. */

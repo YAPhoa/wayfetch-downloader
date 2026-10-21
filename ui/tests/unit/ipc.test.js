@@ -211,10 +211,14 @@ test('account commands carry no credentials, only the protocol JSON', async () =
   assert.deepEqual(core.calledWith('refresh_account'), [{ account: 'acct-1' }]);
 });
 
-test('update checks are an engine query', async () => {
-  const core = new FakeCore({ query: () => ({ type: 'updates' }) });
-  await new DesktopIpcClient(core).checkForUpdates();
-  assert.deepEqual(core.calledWith('query'), [{ query: { type: 'updates' } }]);
+test('update checks are an engine query, and installing is a host command', async () => {
+  const core = new FakeCore({ query: () => ({ type: 'updates' }), restart_to_update: () => null });
+  const client = new DesktopIpcClient(core);
+  await client.updates();
+  await client.checkForUpdates();
+  await client.restartToUpdate();
+  assert.deepEqual(core.calledWith('query'), [{ query: { type: 'updates' } }, { query: { type: 'updates', check: true } }]);
+  assert.deepEqual(core.calledWith('restart_to_update'), [undefined]);
 });
 
 test('collected starts preserve automatic default and explicit route overrides over IPC', async () => {

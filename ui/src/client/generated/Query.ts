@@ -48,4 +48,8 @@ link: SourceLinkId, } | { "type": "accounts", } | { "type": "authorization",
 /**
  * The authorization.
  */
-id: AuthorizationId, } | { "type": "updates", };
+id: AuthorizationId, } | { "type": "updates", 
+/**
+ * Check now rather than answer with the last check.
+ */
+check?: boolean, };

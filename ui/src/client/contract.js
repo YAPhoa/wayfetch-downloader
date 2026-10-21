@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 0, minor: 2 });
+export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -78,6 +78,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 2 });
  * @typedef {import('./generated/AccountCommandRequest.js').AccountCommandRequest} AccountCommandRequest
  * @typedef {import('./generated/UpdateCheck.js').UpdateCheck} UpdateCheck
  * @typedef {import('./generated/UpdateOutcome.js').UpdateOutcome} UpdateOutcome
+ * @typedef {import('./generated/UpdateInstall.js').UpdateInstall} UpdateInstall
  * @typedef {Exclude<JobAction, 'rename' | 'remove' | 'delete_files' | 'cancel_extraction'>} StateAction The
  *   actions that change whether a job runs.
  */
@@ -164,7 +165,9 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 2 });
  *     expectedRevision: number,
  *   }) => Promise<CommandResult>,
  *   refreshAccount: (account: AccountId) => Promise<AccountSummary>,
+ *   updates: () => Promise<UpdateCheck>,
  *   checkForUpdates: () => Promise<UpdateCheck>,
+ *   restartToUpdate?: () => Promise<void>,
  *   subscribe: (after: EventCursor | null, sink: StreamSink) => Subscription,
  *   chooseDownloadFolder?: () => Promise<RootSummary | null>,
  *   openFile?: (job: JobId) => Promise<void>,
@@ -185,6 +188,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 2 });
  *   maxActiveDownloads?: PreferenceChange,
  *   downloadSpeedLimit?: SpeedLimitChange,
  *   extractArchives?: boolean,
+ *   automaticUpdates?: boolean,
  * }} SettingsChange
  */
 
@@ -249,6 +253,7 @@ export function settingsRequest({
   maxActiveDownloads,
   downloadSpeedLimit,
   extractArchives,
+  automaticUpdates,
 }) {
   /** @type {UpdateSettingsRequest} */
   const request = { idempotency_key: idempotencyKey, target, expected_revision: expectedRevision };
@@ -256,6 +261,7 @@ export function settingsRequest({
   if (maxActiveDownloads !== undefined) request.max_active_downloads = maxActiveDownloads;
   if (downloadSpeedLimit !== undefined) request.download_speed_limit = downloadSpeedLimit;
   if (extractArchives !== undefined) request.extract_archives = extractArchives;
+  if (automaticUpdates !== undefined) request.automatic_updates = automaticUpdates;
   return request;
 }
 

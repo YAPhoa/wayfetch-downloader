@@ -65,6 +65,11 @@ import { toolbar } from './toolbar.js';
 /** Jobs per page. */
 export const PAGE_SIZE = 50;
 
+/** When the last update check is first read, in ms: just after the engine's first automatic check. */
+const UPDATES_FIRST = 75_000;
+/** How often it is read again, in ms. */
+const UPDATES_EVERY = 30 * 60_000;
+
 /** @type {Record<StateAction, string>} */
 const ACTION_LABELS = { pause: 'Pause', resume: 'Resume', cancel: 'Cancel', retry: 'Retry' };
 
@@ -221,6 +226,10 @@ export class Downloads {
   constructor(client, { onSignedOut, account = null }) {
     this.client = client;
     this.onSignedOut = onSignedOut;
+    /** @type {HTMLElement[]} Each page's Settings button, marked while a newer release waits. */
+    this.settingsButtons = [];
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    this.updatesTimer = undefined;
     this.feed = new JobFeed(client, {
       pageSize: PAGE_SIZE,
       onChange: () => this.schedule(),
@@ -386,6 +395,7 @@ export class Downloads {
         this.settings = settings;
         this.schedule();
       },
+      onUpdates: (check) => this.showUpdates(check),
       onSignedOut: () => this.signedOut(),
       navigate: (path) => this.navigate(path),
       back: () => this.navigate(this.viewPath),
@@ -467,6 +477,38 @@ export class Downloads {
     this.feed.start();
     this.route();
     this.loadSettings();
+    this.readUpdates(UPDATES_FIRST);
+  }
+
+  /**
+   * Reads the last update check after `wait` ms, and then every
+   * {@link UPDATES_EVERY} ms, to mark the Settings button.
+   * @param {number} wait
+   */
+  readUpdates(wait) {
+    clearTimeout(this.updatesTimer);
+    this.updatesTimer = setTimeout(() => {
+      if (!this.active) return;
+      this.client.updates().then(
+        (check) => this.showUpdates(check),
+        // The About section says why.
+        () => {},
+      );
+      this.readUpdates(UPDATES_EVERY);
+    }, wait);
+  }
+
+  /**
+   * Marks each Settings button while a newer release is available.
+   * @param {import('../client/contract.js').UpdateCheck} check
+   */
+  showUpdates(check) {
+    const { outcome } = check;
+    const title = outcome.kind === 'available' ? `Wayfetch ${outcome.version} is available` : '';
+    for (const button of this.settingsButtons) {
+      button.classList.toggle('has-update', Boolean(title));
+      button.title = title;
+    }
   }
 
   /** Reads the permitted folders, for adding links, the Links page, and the inspector. */
@@ -502,6 +544,7 @@ export class Downloads {
   /** Stops following the engine; downloads continue. */
   stop() {
     this.active = false;
+    clearTimeout(this.updatesTimer);
     window.removeEventListener('popstate', this.onPopState);
     document.removeEventListener('keydown', this.onKey);
     this.feed.stop();
@@ -718,7 +761,7 @@ export class Downloads {
 
   /** Opens Settings, at the end of each page's toolbar but its own. */
   settingsButton() {
-    return h(
+    const button = h(
       'button',
       {
         type: 'button',
@@ -726,9 +769,11 @@ export class Downloads {
         'data-key': 'open-settings',
         onclick: () => this.openSettings(),
       },
-      icon('settings'),
+      h('span', { class: 'gear' }, icon('settings')),
       'Settings',
     );
+    this.settingsButtons.push(button);
+    return button;
   }
 
   downloadsToolbar() {

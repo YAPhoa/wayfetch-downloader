@@ -30,6 +30,7 @@ use wayfetch_engine::protocol::{
 
 use crate::picker::Picker;
 use crate::subscriptions::{SubscriptionId, Subscriptions};
+use crate::updater::Updates;
 
 /// What the local owner may do.
 const GRANTED: &[Permission] = Permission::ALL;
@@ -42,6 +43,8 @@ pub struct Desktop {
     pub subscriptions: Subscriptions,
     /// The native folder dialog.
     pub picker: Picker,
+    /// The newer release's installation, in a build that installs updates.
+    pub updates: Option<Updates>,
 }
 
 type IpcResult<T> = Result<T, ProtocolError>;
@@ -320,6 +323,19 @@ pub fn acknowledge(
 #[tauri::command]
 pub fn unsubscribe(webview: Webview, desktop: State<'_, Desktop>, subscription: SubscriptionId) {
     desktop.subscriptions.close(webview.label(), subscription);
+}
+
+/// Installs the newer release that is ready, which asks for the
+/// administrator's password, then restarts into it.
+#[tauri::command]
+pub async fn restart_to_update(desktop: State<'_, Desktop>) -> IpcResult<()> {
+    match &desktop.updates {
+        Some(updates) => updates.restart_to_update().await,
+        None => Err(ProtocolError::new(
+            ErrorCode::NotApplicable,
+            "this app does not install updates",
+        )),
+    }
 }
 
 /// Decodes an argument with the protocol's validation. Limits the

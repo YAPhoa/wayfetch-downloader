@@ -40,4 +40,8 @@ plugins: Array<PluginSummary>,
 /**
  * Whether downloaded archives are unpacked as they finish.
  */
-extract_archives: boolean, };
+extract_archives: boolean, 
+/**
+ * Whether the engine checks for a newer release on its own.
+ */
+automatic_updates: boolean, };

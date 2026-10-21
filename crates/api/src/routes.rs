@@ -301,13 +301,23 @@ pub async fn refresh_account(
     Ok(Json(app.engine.refresh_account(id, &grant.0).await?))
 }
 
+/// What the last update check found, without checking.
+pub async fn updates(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+) -> ApiResult<QueryResult> {
+    let query = Query::Updates { check: false };
+    Ok(Json(app.engine.query(query, &grant.0).await?))
+}
+
 /// Asks GitHub whether a newer release is published. A POST, since it
 /// sends a request beyond this server.
 pub async fn check_for_updates(
     State(app): State<AppState>,
     Extension(grant): Extension<Grant>,
 ) -> ApiResult<QueryResult> {
-    Ok(Json(app.engine.query(Query::Updates {}, &grant.0).await?))
+    let query = Query::Updates { check: true };
+    Ok(Json(app.engine.query(query, &grant.0).await?))
 }
 
 async fn execute(

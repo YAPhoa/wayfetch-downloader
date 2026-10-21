@@ -635,6 +635,7 @@ fn max_active(
             max_active_downloads: Some(change),
             download_speed_limit: None,
             extract_archives: None,
+            automatic_updates: None,
         },
     )
 }
@@ -795,6 +796,7 @@ async fn the_operator_policy_bounds_and_locks_the_download_limit() {
                     max_active_downloads: None,
                     download_speed_limit: None,
                     extract_archives: None,
+                    automatic_updates: None,
                 },
             ),
             ALL,
@@ -845,6 +847,7 @@ fn speed_limit(
             max_active_downloads: None,
             download_speed_limit: Some(change),
             extract_archives: None,
+            automatic_updates: None,
         },
     )
 }
@@ -1143,6 +1146,7 @@ async fn the_operator_policy_caps_the_speed_limit_and_unlimited_cannot_bypass_it
                 max_active_downloads: Some(PreferenceChange::Set(max_active)),
                 download_speed_limit: Some(SpeedLimitChange::Set(speed)),
                 extract_archives: None,
+                automatic_updates: None,
             },
         )
     };
@@ -1547,6 +1551,7 @@ fn choose(owner: &EngineOwner, revision: Revision, root: RootId) -> CommandEnvel
             max_active_downloads: None,
             download_speed_limit: None,
             extract_archives: None,
+            automatic_updates: None,
         },
     )
 }

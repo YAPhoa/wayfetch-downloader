@@ -4,7 +4,7 @@ import type { DiagnosticText } from "./DiagnosticText.js";
 /**
  * What an update check found.
  */
-export type UpdateOutcome = { "kind": "available", 
+export type UpdateOutcome = { "kind": "not_checked" } | { "kind": "available", 
 /**
  * Its version, such as `0.2.0`.
  */

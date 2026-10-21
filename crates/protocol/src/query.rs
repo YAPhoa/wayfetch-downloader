@@ -161,9 +161,15 @@ pub enum Query {
         /// The authorization.
         id: AuthorizationId,
     },
-    /// Whether a newer release of the application is published. The only
-    /// query that contacts the project's release listing.
-    Updates {},
+    /// What is known about newer releases of the application. With
+    /// `check`, the project's release listing is read first, which no
+    /// other query does.
+    Updates {
+        /// Check now rather than answer with the last check.
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+        check: bool,
+    },
 }
 
 impl Query {
@@ -177,7 +183,7 @@ impl Query {
             | Self::CountJobs { .. }
             | Self::Settings {}
             | Self::ListLinks { .. }
-            | Self::Updates {} => Permission::Read,
+            | Self::Updates { .. } => Permission::Read,
         }
     }
 }
@@ -443,6 +449,9 @@ pub struct Settings {
     pub plugins: Vec<PluginSummary>,
     /// Whether downloaded archives are unpacked as they finish.
     pub extract_archives: bool,
+    /// Whether the engine checks for a newer release on its own.
+    #[serde(default)]
+    pub automatic_updates: bool,
 }
 
 /// An engine preference with a whole-number value, as the operator's
@@ -938,6 +947,7 @@ mod tests {
                 fallback_version: Some("2026.07.04".into()),
             }],
             extract_archives: true,
+            automatic_updates: true,
         });
         assert_eq!(
             serde_json::to_value(&settings).unwrap(),
@@ -963,6 +973,7 @@ mod tests {
                     "fallback_version": "2026.07.04",
                 }],
                 "extract_archives": true,
+                "automatic_updates": true,
             })
         );
         // A 4.0 engine's plugins carry none of 4.1's fields: each is on,

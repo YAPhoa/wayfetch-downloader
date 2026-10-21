@@ -43,6 +43,11 @@ jobs:
           rustup toolchain install
           cargo install tauri-cli --version 2.12.3 --locked
       - name: Build the packages
+        # The key signs the packages for installed apps' updater; without
+        # it the packages are built unsigned and no latest.json is written.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: deploy/desktop-release.sh
       - uses: actions/attest-build-provenance@v3
         with:
@@ -54,9 +59,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          cd target/release/bundle
+          # The signatures and latest.json exist when the signing key does.
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" \
-            target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm \
-            target/release/bundle/SHA256SUMS
+            deb/*.deb rpm/*.rpm SHA256SUMS \
+            $(ls deb/*.sig rpm/*.sig latest.json 2>/dev/null)
       - name: Keep the packages of a manual run
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v5
@@ -65,4 +72,6 @@ jobs:
           path: |
             target/release/bundle/deb/*.deb
             target/release/bundle/rpm/*.rpm
+            target/release/bundle/*/*.sig
             target/release/bundle/SHA256SUMS
+            target/release/bundle/latest.json

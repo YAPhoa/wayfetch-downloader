@@ -8,7 +8,7 @@ use semver::Version;
 use serde::Deserialize;
 use url::Url;
 use wayfetch_engine::accounts::provider::{ApiClient, ApiMethod, ProviderError};
-use wayfetch_engine::protocol::update::{UpdateCheck, UpdateOutcome};
+use wayfetch_engine::protocol::update::UpdateOutcome;
 use wayfetch_engine::transfer::writer::BoxFuture;
 use wayfetch_engine::updates::UpdateSource;
 
@@ -88,19 +88,17 @@ fn parse_version(text: &str) -> Option<Version> {
 }
 
 impl UpdateSource for GitHubReleases {
-    fn check<'a>(&'a self, current: &'a str) -> BoxFuture<'a, UpdateCheck> {
+    fn releases(&self) -> &str {
+        RELEASES_PAGE
+    }
+
+    fn check<'a>(&'a self, current: &'a str) -> BoxFuture<'a, UpdateOutcome> {
         Box::pin(async move {
-            let outcome =
-                self.outcome(current)
-                    .await
-                    .unwrap_or_else(|e| UpdateOutcome::Unavailable {
-                        problem: e.to_string().into(),
-                    });
-            UpdateCheck {
-                current: current.to_owned(),
-                releases: RELEASES_PAGE.to_owned(),
-                outcome,
-            }
+            self.outcome(current)
+                .await
+                .unwrap_or_else(|e| UpdateOutcome::Unavailable {
+                    problem: e.to_string().into(),
+                })
         })
     }
 }
@@ -150,14 +148,13 @@ mod tests {
             asked: Mutex::default(),
         });
         let releases = GitHubReleases::new(client.clone(), Endpoint::official(OFFICIAL_API));
-        let check = releases.check(current).await;
-        assert_eq!(check.current, current);
-        assert_eq!(check.releases, RELEASES_PAGE);
+        let outcome = releases.check(current).await;
+        assert_eq!(releases.releases(), RELEASES_PAGE);
         assert_eq!(
             *client.asked.lock().unwrap(),
             ["https://api.github.com/repos/YAPhoa/wayfetch-downloader/releases/latest"]
         );
-        check.outcome
+        outcome
     }
 
     const NEWER: &str = r#"{"tag_name":"v0.2.0","html_url":"https://github.com/YAPhoa/wayfetch-downloader/releases/tag/v0.2.0","draft":false}"#;

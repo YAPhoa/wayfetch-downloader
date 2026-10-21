@@ -278,6 +278,7 @@ impl EngineBuilder {
             Probes::new(supervisor.guard()),
             Probes::new(supervisor.guard()),
         );
+        let updates = Updates::new(self.update_source, saved.automatic_updates);
         let coordinator = Coordinator {
             identity,
             inbox,
@@ -313,9 +314,12 @@ impl EngineBuilder {
                 self.plugin_control,
             ),
             extractions: extract::Extractions::new(self.extractor, saved.extract_archives),
-            updates: Updates::new(self.update_source),
+            updates: updates.clone(),
         };
         owner.supervisor.spawn(coordinator.run());
+        owner
+            .supervisor
+            .spawn(updates.run(owner.supervisor.cancel.clone()));
         owner
             .supervisor
             .spawn(progress.sample(owner.supervisor.cancel.clone()));
@@ -1271,9 +1275,9 @@ impl Coordinator {
             Request::Query(Query::Settings {}, reply) => self.settings(reply).await,
             Request::Query(Query::Accounts {}, reply) => self.list_accounts(reply).await,
             Request::Query(Query::Authorization { id }, reply) => self.authorization(id, reply),
-            Request::Query(Query::Updates {}, reply) => {
+            Request::Query(Query::Updates { check }, reply) => {
                 let cancel = self.supervisor.cancel.clone();
-                self.answer(reply, self.updates.clone().check(cancel));
+                self.answer(reply, self.updates.clone().answer(check, cancel));
             }
             Request::RefreshAccount(account, reply) => self.refresh_account(account, reply).await,
             Request::Extract(envelope, password, reply) => {
@@ -1438,6 +1442,7 @@ impl Coordinator {
             self.speed_limit = saved.download_speed_limit;
             self.bandwidth.set(self.download_speed_limit().value);
             self.extractions.automatic = saved.extract_archives;
+            self.updates.set_automatic(saved.automatic_updates);
         }
         // Only the run the request named stops, even when an exact replay
         // answers with the first request's result after a later run began.
@@ -1630,6 +1635,7 @@ impl Coordinator {
                 max_active_downloads,
                 download_speed_limit,
                 extract_archives,
+                automatic_updates,
                 ..
             } => {
                 if self.replays(envelope).await? {
@@ -1639,6 +1645,7 @@ impl Coordinator {
                     && max_active_downloads.is_none()
                     && download_speed_limit.is_none()
                     && extract_archives.is_none()
+                    && automatic_updates.is_none()
                 {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidRequest,
@@ -1792,6 +1799,7 @@ impl Coordinator {
         let mut plugins = self.media.plugins();
         plugins.extend(self.extractions.plugin());
         let extract_archives = self.extractions.automatic;
+        let automatic_updates = self.updates.automatic();
         self.supervisor.spawn(async move {
             let mut checks = tokio::task::JoinSet::new();
             for (i, root) in destinations.all().into_iter().enumerate() {
@@ -1807,6 +1815,7 @@ impl Coordinator {
                 download_speed_limit,
                 plugins,
                 extract_archives,
+                automatic_updates,
             );
             let _ = reply.send(Ok(QueryResult::Settings(settings)));
         });

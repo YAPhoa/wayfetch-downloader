@@ -103,6 +103,11 @@ class FakeClient {
   }
 
   /** @returns {Promise<import('../../src/client/contract.js').UpdateCheck>} */
+  async updates() {
+    throw new Error('not used');
+  }
+
+  /** @returns {Promise<import('../../src/client/contract.js').UpdateCheck>} */
   async checkForUpdates() {
     throw new Error('not used');
   }

@@ -7,6 +7,7 @@
 //! implicitly.
 
 pub mod config;
+mod install;
 mod signals;
 mod terminal;
 
@@ -32,7 +33,10 @@ use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner};
 use wayfetch_net::ipnet::IpNet;
 use wayfetch_net::{CertificateDer, HttpConfig, HttpTransport};
 
+use crate::install::Installing;
+
 pub use config::{Loaded, NoServer};
+pub use install::Installer;
 pub use signals::Signals;
 pub use terminal::{Closed, DRAIN, Message, Printer, Terminal};
 /// Called first thing in each host's `main`: a host is also the launcher
@@ -182,6 +186,7 @@ pub struct EngineSettings {
     root: PathBuf,
     provider_endpoints: Vec<(String, String)>,
     updates_endpoint: Option<String>,
+    installer: Option<Arc<dyn Installer>>,
     plugins: PluginPaths,
 }
 
@@ -199,6 +204,13 @@ impl EngineSettings {
     /// The engine's state directory.
     pub fn state_dir(&self) -> &Path {
         &self.config.state_dir
+    }
+
+    /// Has `installer` get each newer release that a check finds ready to
+    /// install: for a host that installs updates itself.
+    pub fn installer(mut self, installer: Arc<dyn Installer>) -> Self {
+        self.installer = Some(installer);
+        self
     }
 }
 
@@ -285,6 +297,7 @@ impl EngineArgs {
             root,
             provider_endpoints: self.provider_endpoints.clone(),
             updates_endpoint: self.updates_endpoint.clone(),
+            installer: None,
             plugins,
         })
     }
@@ -373,6 +386,7 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
         root,
         provider_endpoints,
         updates_endpoint,
+        installer,
         plugins,
     } = settings;
     let transport =
@@ -426,7 +440,13 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
         .converter(Arc::new(Ffmpeg::new(plugin(ffmpeg::PLUGIN))))
         .extractor(Arc::new(SevenZip::new(plugin(sevenzip::PLUGIN))))
         .plugin_control(control.clone())
-        .update_source(Arc::new(GitHubReleases::new(transport, releases)));
+        .update_source(match installer {
+            Some(installer) => Arc::new(Installing {
+                source: GitHubReleases::new(transport, releases),
+                installer,
+            }),
+            None => Arc::new(GitHubReleases::new(transport, releases)),
+        });
     for provider in providers {
         builder = builder.account_provider(provider);
     }

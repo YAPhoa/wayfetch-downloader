@@ -123,6 +123,7 @@ impl Store {
                 max_active_downloads,
                 download_speed_limit,
                 extract_archives,
+                automatic_updates,
             } => roots::update_settings(
                 &tx,
                 *expected_revision,
@@ -130,6 +131,7 @@ impl Store {
                 *max_active_downloads,
                 *download_speed_limit,
                 *extract_archives,
+                *automatic_updates,
                 now,
             )?,
             Command::Extract {
