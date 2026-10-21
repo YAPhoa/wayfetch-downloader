@@ -30,7 +30,7 @@ use wayfetch_protocol::{
 
 use crate::destinations::{Claims, Destinations, PROBE_TIMEOUT, Probes, Slot};
 use crate::fs::{FsError, RenameCheck, Root};
-use crate::lifecycle::StoreClient;
+use crate::lifecycle::{StoreClient, shutting_down};
 use crate::store::{DeleteStart, RenameIntent, RenameStart, Store, StoreError};
 
 fn now() -> UtcTimestamp {
@@ -91,10 +91,6 @@ pub(crate) struct Files {
     pub(crate) instance: InstanceId,
     /// Once cancelled, no further step starts.
     pub(crate) cancel: CancellationToken,
-}
-
-fn shutting_down() -> ProtocolError {
-    ProtocolError::new(ErrorCode::ShuttingDown, "engine is not running")
 }
 
 impl Files {

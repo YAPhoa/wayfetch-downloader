@@ -12,7 +12,7 @@ use wayfetch_domain::job::{JobError, JobStage, Outcome};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{BootEpoch, Generation};
 
-use super::{Store, StoreError, jobs, key, progress, sql};
+use super::{OrCorrupt, Store, StoreError, jobs, key, progress, sql};
 use crate::fs::{FileIdentity, RelativePath, Removal, StagingRecord};
 use crate::lifecycle::SoleAttempt;
 use crate::transfer::lease::Representation;
@@ -210,7 +210,7 @@ fn hand_over(
          WHERE job_id = ?2 AND generation = ?3 AND state = 'intended'",
         params![sql(generation)?, sql(job)?, previous],
     )?;
-    staging(tx, job, generation)?.ok_or(StoreError::Corrupt("staging file"))
+    staging(tx, job, generation)?.or_corrupt("staging file")
 }
 
 /// Loads `id` and checks it is at `generation` in one of `stages`.
@@ -316,7 +316,7 @@ impl Store {
                     length: length
                         .map(u64::try_from)
                         .transpose()
-                        .map_err(|_| StoreError::Corrupt("representation length"))?,
+                        .or_corrupt("representation length")?,
                     strong_etag: etag,
                     last_modified: modified.map(UtcTimestamp::from_unix_millis),
                     resource,
@@ -367,7 +367,7 @@ impl Store {
             .length
             .map(i64::try_from)
             .transpose()
-            .map_err(|_| StoreError::Corrupt("representation length"))?;
+            .or_corrupt("representation length")?;
         let updated = tx.execute(
             "UPDATE staging_files SET representation_known = 1, representation_length = ?1, \
              representation_etag = ?2, representation_modified = ?3, suggested_name = ?6, \
@@ -517,7 +517,7 @@ impl Store {
                 "durable coverage is not the whole artifact",
             ));
         }
-        let size_sql = i64::try_from(size).map_err(|_| StoreError::Corrupt("size"))?;
+        let size_sql = i64::try_from(size).or_corrupt("size")?;
         let reserved: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM publications WHERE root_id = ?1 AND target_key = ?2) \
              OR EXISTS (SELECT 1 FROM renames WHERE root_id = ?1 AND target_key = ?2)",
@@ -574,9 +574,8 @@ impl Store {
         row.map(|(staging, target, size)| {
             Ok(PublicationIntent {
                 staging: staging.decode()?,
-                target: RelativePath::new(&target)
-                    .map_err(|_| StoreError::Corrupt("publication target"))?,
-                size: u64::try_from(size).map_err(|_| StoreError::Corrupt("size"))?,
+                target: RelativePath::new(&target).or_corrupt("publication target")?,
+                size: u64::try_from(size).or_corrupt("size")?,
             })
         })
         .transpose()

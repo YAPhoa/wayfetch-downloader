@@ -15,7 +15,7 @@ use wayfetch_engine::media::{Container, Conversion, Converter, MediaError, Part,
 use wayfetch_engine::protocol::media::{PluginRole, PluginSummary};
 use wayfetch_engine::transfer::writer::BoxFuture;
 
-use crate::plugin::{Check, Describe, Limits, Plugin, Program};
+use crate::plugin::{Check, Describe, Limits, Plugin};
 
 /// The plugin.
 pub const PLUGIN: Describe = Describe {
@@ -56,8 +56,7 @@ impl Ffmpeg {
 
     /// ffmpeg at `path`, if found, checked by asking its version.
     pub async fn detect(path: Option<PathBuf>) -> Self {
-        let program = Program::detect(PLUGIN, path, &Self::check()).await;
-        Self::new(Arc::new(Plugin::new(PLUGIN, Self::check(), program, false)))
+        Self::new(Plugin::detect(PLUGIN, Self::check(), path).await)
     }
 
     /// The plugin.

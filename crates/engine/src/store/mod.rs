@@ -285,6 +285,23 @@ fn check_sqlite_version(version: i32) -> Result<(), StoreError> {
     }
 }
 
+/// Reads a stored value back, or reports the record as corrupt.
+trait OrCorrupt<T> {
+    fn or_corrupt(self, what: &'static str) -> Result<T, StoreError>;
+}
+
+impl<T, E> OrCorrupt<T> for Result<T, E> {
+    fn or_corrupt(self, what: &'static str) -> Result<T, StoreError> {
+        self.map_err(|_| StoreError::Corrupt(what))
+    }
+}
+
+impl<T> OrCorrupt<T> for Option<T> {
+    fn or_corrupt(self, what: &'static str) -> Result<T, StoreError> {
+        self.ok_or(StoreError::Corrupt(what))
+    }
+}
+
 /// A positive 64-bit domain value stored as an SQLite integer.
 trait Key: Copy {
     const WHAT: &'static str;

@@ -19,7 +19,7 @@ use wayfetch_protocol::command::{InputUrl, MAX_COLLECTED_LINKS};
 use wayfetch_protocol::event::EventKind;
 use wayfetch_protocol::query::CheckReason;
 
-use super::{Store, StoreError, key, outbox, sql};
+use super::{OrCorrupt, Store, StoreError, key, outbox, sql};
 use crate::crawl::Checked;
 use crate::transfer::transport::Reach;
 
@@ -167,14 +167,14 @@ impl Store {
             tasks.push(Task {
                 id,
                 link: key(link)?,
-                url: Url::parse(&url).map_err(|_| StoreError::Corrupt("source URL"))?,
+                url: Url::parse(&url).or_corrupt("source URL")?,
                 queue,
                 analyze,
                 reach: reach(public_only),
                 media: media
                     .map(ProviderId::new)
                     .transpose()
-                    .map_err(|_| StoreError::Corrupt("media service"))?,
+                    .or_corrupt("media service")?,
             });
         }
         tx.commit()?;
@@ -267,7 +267,7 @@ impl Store {
                     .map(|p| DiagnosticText::new(p).as_str().to_owned()),
                 size.map(i64::try_from)
                     .transpose()
-                    .map_err(|_| StoreError::Corrupt("file size"))?,
+                    .or_corrupt("file size")?,
                 name,
                 collected,
                 collected.map(|_| found.skipped),

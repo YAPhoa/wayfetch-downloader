@@ -21,7 +21,7 @@ use wayfetch_engine::media::{
 };
 use wayfetch_engine::protocol::media::{AudioFormat, MediaChoice, PluginRole};
 
-use crate::plugin::{Check, Describe, Limits, Plugin, Program, RunError, last_line};
+use crate::plugin::{Check, Describe, Limits, Plugin, RunError, last_line};
 
 /// The plugin.
 pub const PLUGIN: Describe = Describe {
@@ -83,9 +83,7 @@ impl YtDlp {
         cache_dir: Option<PathBuf>,
         js_runtimes: Option<String>,
     ) -> Self {
-        let check = Self::check(cache_dir.as_deref());
-        let program = Program::detect(PLUGIN, path, &check).await;
-        let plugin = Arc::new(Plugin::new(PLUGIN, check, program, false));
+        let plugin = Plugin::detect(PLUGIN, Self::check(cache_dir.as_deref()), path).await;
         Self::new(plugin, cache_dir, js_runtimes)
     }
 
