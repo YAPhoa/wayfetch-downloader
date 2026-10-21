@@ -25,6 +25,7 @@ export const ICONS = {
   down: 'M7 2.5v9M3.5 8L7 11.5 10.5 8',
   chevron: 'M4 5.5l3 3 3-3',
   check: 'M2.5 7.5l3 3 6-6.5',
+  external: 'M8.5 2.5h3v3M11.5 2.5L6.5 7.5M10 8.5v3H2.5V4h3',
   search: 'M6 2.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7M8.6 8.6l3 3',
 };
 

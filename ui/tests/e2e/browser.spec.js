@@ -537,9 +537,11 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await sections.getByRole('link', { name: 'About' }).click();
   await expect(page).toHaveURL(`${daemon.origin}/settings/about`);
   await expect(pane.locator('[data-key="app-version"]')).toHaveText(/^\d+\.\d+\.\d+/);
+  await expect(pane.getByRole('link', { name: 'YAPhoa' })).toHaveAttribute('href', 'https://github.com/YAPhoa');
+  await expect(pane.locator('[data-key="update-status"]')).toBeHidden();
   await pane.getByRole('button', { name: 'Check for updates' }).click();
-  await expect(pane.locator('[data-key="update-message"]')).toHaveText('Version 99.0.0 is available. View release');
-  await expect(pane.getByRole('link', { name: 'View release' })).toHaveAttribute(
+  await expect(pane.locator('[data-key="update-status"]')).toHaveText('99.0.0 available');
+  await expect(pane.getByRole('link', { name: 'Get 99.0.0' })).toHaveAttribute(
     'href',
     `${fixture.base}/pages/releases/tag/v99.0.0`,
   );

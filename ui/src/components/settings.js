@@ -68,7 +68,7 @@ export const SECTIONS = [
     icon: 'plugins',
   },
   { id: 'display', label: 'Display', about: 'Appearance and downloads list layout.', icon: 'display' },
-  { id: 'about', label: 'About', about: 'This version of Wayfetch, and newer releases.', icon: 'about' },
+  { id: 'about', label: 'About', about: '', icon: 'about' },
 ];
 
 /** The path of Settings, which shows its first section. */
@@ -491,7 +491,7 @@ export class SettingsPage {
         h(
           'section',
           { class: 'settings-panel', 'data-section': id, 'aria-labelledby': `settings-${id}`, hidden: true },
-          h('header', { class: 'settings-head' }, h('h2', { id: `settings-${id}` }, label), h('p', { class: 'hint' }, about)),
+          h('header', { class: 'settings-head' }, h('h2', { id: `settings-${id}` }, label), about ? h('p', { class: 'hint' }, about) : null),
           panels[id],
         ),
       ),

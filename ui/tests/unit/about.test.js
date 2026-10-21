@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { updateMessage } from '../../src/components/about.js';
+import { updateStatus } from '../../src/components/about.js';
 
 const RELEASES = 'https://github.com/YAPhoa/wayfetch-downloader/releases';
 
@@ -10,27 +10,33 @@ const RELEASES = 'https://github.com/YAPhoa/wayfetch-downloader/releases';
  */
 const check = (outcome) => ({ current: '0.1.0', releases: RELEASES, outcome });
 
-test('a newer release links to its page', () => {
+test('a newer release shows a badge and links to its page', () => {
   const url = `${RELEASES}/tag/v0.2.0`;
-  assert.deepEqual(updateMessage(check({ kind: 'available', version: '0.2.0', url })), {
-    text: 'Version 0.2.0 is available.',
-    tone: '',
-    link: { href: url, label: 'View release' },
+  assert.deepEqual(updateStatus(check({ kind: 'available', version: '0.2.0', url })), {
+    badge: '0.2.0 available',
+    icon: 'up',
+    tone: 'run',
+    detail: '',
+    link: { href: url, label: 'Get 0.2.0' },
   });
 });
 
-test('no newer release needs nothing more', () => {
-  assert.deepEqual(updateMessage(check({ kind: 'up_to_date' })), {
-    text: 'Wayfetch is up to date.',
-    tone: '',
+test('no newer release shows a check mark and nothing more', () => {
+  assert.deepEqual(updateStatus(check({ kind: 'up_to_date' })), {
+    badge: 'Up to date',
+    icon: 'check',
+    tone: 'ok',
+    detail: '',
     link: null,
   });
 });
 
 test('a failed check says why and links every release', () => {
-  assert.deepEqual(updateMessage(check({ kind: 'unavailable', problem: 'GitHub could not be reached' })), {
-    text: 'Could not check for updates: GitHub could not be reached.',
-    tone: 'error',
+  assert.deepEqual(updateStatus(check({ kind: 'unavailable', problem: 'GitHub could not be reached' })), {
+    badge: 'Check failed',
+    icon: 'cancel',
+    tone: 'bad',
+    detail: 'GitHub could not be reached.',
     link: { href: RELEASES, label: 'All releases' },
   });
 });

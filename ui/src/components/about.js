@@ -3,6 +3,7 @@
 
 import { WayfetchError } from '../client/contract.js';
 import { h, show } from './dom.js';
+import { icon } from './icons.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -15,26 +16,40 @@ import { h, show } from './dom.js';
  * }} AboutContext
  */
 
+/** Who makes Wayfetch, shown under About. */
+export const AUTHOR = Object.freeze({ name: 'YAPhoa', url: 'https://github.com/YAPhoa' });
+
 /**
- * What a check found, in plain words, and the page to go to, if any.
+ * How a check's result is shown: a status badge with its icon and tone,
+ * a detail line if there is more to say, and the page to go to, if any.
  * @param {UpdateCheck} check
- * @returns {{ text: string, tone: '' | 'error', link: { href: string, label: string } | null }}
+ * @returns {{
+ *   badge: string,
+ *   icon: import('./icons.js').IconName,
+ *   tone: 'ok' | 'run' | 'bad',
+ *   detail: string,
+ *   link: { href: string, label: string } | null,
+ * }}
  */
-export function updateMessage(check) {
+export function updateStatus(check) {
   const { outcome } = check;
   switch (outcome.kind) {
     case 'available':
       return {
-        text: `Version ${outcome.version} is available.`,
-        tone: '',
-        link: { href: outcome.url, label: 'View release' },
+        badge: `${outcome.version} available`,
+        icon: 'up',
+        tone: 'run',
+        detail: '',
+        link: { href: outcome.url, label: `Get ${outcome.version}` },
       };
     case 'up_to_date':
-      return { text: 'Wayfetch is up to date.', tone: '', link: null };
+      return { badge: 'Up to date', icon: 'check', tone: 'ok', detail: '', link: null };
     case 'unavailable':
       return {
-        text: `Could not check for updates: ${outcome.problem}.`,
-        tone: 'error',
+        badge: 'Check failed',
+        icon: 'cancel',
+        tone: 'bad',
+        detail: `${outcome.problem}.`,
         link: { href: check.releases, label: 'All releases' },
       };
   }
@@ -51,57 +66,69 @@ function explain(error) {
     case 'unavailable':
       return 'The engine cannot be reached. Try again shortly.';
     default:
-      return `Could not check for updates: ${error.message}.`;
+      return `${error.message.charAt(0).toUpperCase()}${error.message.slice(1)}.`;
   }
+}
+
+/**
+ * A link that opens outside Wayfetch. The desktop app shows the address to
+ * open in a browser instead, so its window never leaves Wayfetch.
+ * @param {WayfetchClient} client
+ * @param {string} href
+ * @param {string} label
+ * @param {Record<string, string>} [props]
+ */
+function outsideLink(client, href, label, props = {}) {
+  if (client.local) return h('span', { ...props, class: 'address' }, href.replace(/^https:\/\//, ''));
+  return h('a', { ...props, href, target: '_blank', rel: 'noopener noreferrer' }, label, icon('external'));
 }
 
 /** @param {AboutContext} context */
 export function aboutSection(context) {
   const { client } = context;
-  const message = h('p', { class: 'message', role: 'status', 'data-key': 'update-message' });
+  const badge = h('span', { class: 'update-status', role: 'status', 'data-key': 'update-status' });
+  const detail = h('span', { class: 'update-detail', 'data-key': 'update-detail' });
+  const action = h('span', { class: 'update-link' });
   const button = h(
     'button',
     { type: 'button', 'data-key': 'check-for-updates', onclick: () => void check() },
+    icon('retry'),
     'Check for updates',
   );
 
   /**
-   * Shows `text`, then the link to `href`. The desktop app shows the
-   * address to open in a browser, so its window never leaves Wayfetch.
+   * Shows the badge, its detail line, and the link, if any.
    * @param {string} text
-   * @param {'' | 'error'} tone
+   * @param {import('./icons.js').IconName} name
+   * @param {string} tone
+   * @param {string} [more]
    * @param {{ href: string, label: string } | null} [link]
    */
-  const say = (text, tone, link = null) => {
-    message.className = tone ? `message ${tone}` : 'message';
-    if (!link) {
-      show(message, text);
-    } else if (client.local) {
-      show(message, `${text} Open `, h('span', { class: 'address', 'data-key': 'update-link' }, link.href), ' in your browser.');
-    } else {
-      const anchor = h('a', { href: link.href, target: '_blank', rel: 'noopener noreferrer', 'data-key': 'update-link' }, link.label);
-      show(message, `${text} `, anchor);
-    }
+  const showStatus = (text, name, tone, more = '', link = null) => {
+    badge.className = `update-status tone-${tone}`;
+    show(badge, icon(name), h('span', null, text));
+    show(detail, more);
+    show(action, ...(link ? [outsideLink(client, link.href, link.label, { 'data-key': 'update-link' })] : []));
   };
 
   const check = async () => {
     button.disabled = true;
-    say('Checking…', '');
+    showStatus('Checking…', 'retry', 'calm');
     try {
-      const { text, tone, link } = updateMessage(await client.checkForUpdates());
-      say(text, tone, link);
+      const status = updateStatus(await client.checkForUpdates());
+      showStatus(status.badge, status.icon, status.tone, status.detail, status.link);
     } catch (error) {
       if (error instanceof WayfetchError && error.code === 'unauthenticated') {
         context.onSignedOut();
         return;
       }
-      say(error instanceof WayfetchError ? explain(error) : String(error), 'error');
+      showStatus('Check failed', 'cancel', 'bad', error instanceof WayfetchError ? explain(error) : String(error));
     } finally {
       button.disabled = false;
     }
   };
 
-  const version = h('span', { 'data-key': 'app-version' }, context.hello()?.version ?? '');
+  const version = h('span', { class: 'tag current', 'data-key': 'app-version' }, context.hello()?.version ?? '');
   // Settings opened straight from its address can come before the handshake.
   if (!version.textContent) {
     client.hello().then(
@@ -109,22 +136,23 @@ export function aboutSection(context) {
       () => (version.textContent = 'Unknown'),
     );
   }
+  /**
+   * @param {string} name
+   * @param {...(Node | string)} value
+   */
+  const row = (name, ...value) =>
+    h('div', { class: 'setting-row' }, h('div', { class: 'setting-text' }, h('span', { class: 'setting-name' }, name)), ...value);
   return h(
     'div',
     { class: 'settings-section' },
     h(
       'div',
-      { class: 'settings-group' },
-      h('div', { class: 'group-head' }, h('span', { class: 'group-title' }, 'Wayfetch Downloader')),
+      { class: 'settings-group about' },
       h(
         'div',
         { class: 'group-rows' },
-        h(
-          'div',
-          { class: 'setting-row' },
-          h('div', { class: 'setting-text' }, h('span', { class: 'setting-name' }, 'Version')),
-          version,
-        ),
+        row('Version', version),
+        row('Author', outsideLink(client, AUTHOR.url, AUTHOR.name, { 'data-key': 'author' })),
         h(
           'div',
           { class: 'setting-row' },
@@ -132,12 +160,12 @@ export function aboutSection(context) {
             'div',
             { class: 'setting-text' },
             h('span', { class: 'setting-name' }, 'Updates'),
-            h('span', { class: 'hint' }, 'Asks GitHub for the newest release. Nothing is sent until you check.'),
+            h('span', { class: 'hint' }, 'Checks GitHub only when you ask.'),
+            detail,
           ),
-          button,
+          h('div', { class: 'update-actions' }, badge, action, button),
         ),
       ),
-      h('div', { class: 'group-foot' }, message),
     ),
   );
 }

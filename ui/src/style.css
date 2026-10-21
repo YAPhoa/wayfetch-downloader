@@ -1192,6 +1192,26 @@ th[aria-sort] button.sort { color: var(--ink); }
 .group-foot:not(:has(> :not(:empty))) { display: none; }
 .group-foot button { white-space: nowrap; }
 
+/* Settings > About: the result of an update check as a badge beside the
+   button, with any detail under the row's hint. */
+.update-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.update-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.update-status:empty, .update-detail:empty, .update-link:empty { display: none; }
+.update-detail { color: var(--bad); font-size: 13px; }
+.about a { display: inline-flex; align-items: center; gap: 4px; }
+.about .address { overflow-wrap: anywhere; user-select: all; }
+
 /* One setting per row: its name and purpose, then the control. */
 
 .setting-row {
