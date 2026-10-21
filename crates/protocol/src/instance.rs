@@ -58,7 +58,7 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     /// The version this crate implements.
-    pub const CURRENT: Self = Self { major: 0, minor: 1 };
+    pub const CURRENT: Self = Self { major: 0, minor: 2 };
 
     /// Whether an engine speaking `self` can serve a client speaking
     /// `client`: same major version, and the client needs nothing newer than
@@ -111,6 +111,8 @@ pub struct Hello {
     pub boot_epoch: BootEpoch,
     /// The protocol version the engine speaks.
     pub protocol: ProtocolVersion,
+    /// The application's version, such as `0.1.0`.
+    pub version: String,
     /// The newest durable event at the time of the handshake.
     pub head: EventCursor,
     /// Request size limits.

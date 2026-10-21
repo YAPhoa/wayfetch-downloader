@@ -195,6 +195,7 @@ impl Api {
             .route("/v1/roots", post(routes::add_root))
             .route("/v1/roots/remove", post(routes::remove_root))
             .route("/v1/plugins/change", post(routes::change_plugin))
+            .route("/v1/updates/check", post(routes::check_for_updates))
             .merge(account_routes())
             .route("/v1/events", get(routes::events))
             .route_layer(middleware::from_fn_with_state(

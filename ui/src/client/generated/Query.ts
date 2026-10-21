@@ -48,4 +48,4 @@ link: SourceLinkId, } | { "type": "accounts", } | { "type": "authorization",
 /**
  * The authorization.
  */
-id: AuthorizationId, };
+id: AuthorizationId, } | { "type": "updates", };

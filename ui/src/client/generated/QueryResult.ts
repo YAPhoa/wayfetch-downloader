@@ -9,6 +9,7 @@ import type { LinkPage } from "./LinkPage.js";
 import type { Page } from "./Page.js";
 import type { Settings } from "./Settings.js";
 import type { SourceLinkId } from "./SourceLinkId.js";
+import type { UpdateCheck } from "./UpdateCheck.js";
 
 /**
  * A query's answer.
@@ -38,4 +39,4 @@ link: SourceLinkId,
  * The entry exactly as it was collected; for an invalid one, less
  * any credentials it held.
  */
-url: string, } | { "type": "accounts" } & Accounts | { "type": "authorization" } & Authorization;
+url: string, } | { "type": "accounts" } & Accounts | { "type": "authorization" } & Authorization | { "type": "updates" } & UpdateCheck;

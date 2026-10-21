@@ -17,11 +17,13 @@ use std::time::Duration;
 
 use clap::Args;
 use serde::de::{DeserializeOwned, IgnoredAny};
+use wayfetch_adapters::Endpoint;
 use wayfetch_adapters::ffmpeg::{self, Ffmpeg};
 use wayfetch_adapters::plugin::{Describe, find_in, find_on_path};
 use wayfetch_adapters::plugins::{Plugins, Spec};
 use wayfetch_adapters::release;
 use wayfetch_adapters::sevenzip::{self, SevenZip};
+use wayfetch_adapters::updates::{self, GitHubReleases};
 use wayfetch_adapters::youtube::YouTube;
 use wayfetch_adapters::ytdlp::{self, YtDlp};
 use wayfetch_engine::fs::Root;
@@ -134,6 +136,10 @@ pub struct EngineArgs {
         hide = true
     )]
     pub provider_endpoints: Vec<(String, String)>,
+    /// Another address serving GitHub's API for this repository's
+    /// releases, for testing update checks against a local stand-in.
+    #[arg(long, value_name = "URL", hide = true)]
+    pub updates_endpoint: Option<String>,
     /// A folder of plugin programs shipped with the application, used
     /// where the configuration names none and before `PATH`: `yt-dlp`,
     /// `ffmpeg`, and `deno`, which yt-dlp is then told to run. Set by an
@@ -175,6 +181,7 @@ pub struct EngineSettings {
     http: HttpConfig,
     root: PathBuf,
     provider_endpoints: Vec<(String, String)>,
+    updates_endpoint: Option<String>,
     plugins: PluginPaths,
 }
 
@@ -282,6 +289,7 @@ impl EngineArgs {
             http,
             root,
             provider_endpoints: self.provider_endpoints.clone(),
+            updates_endpoint: self.updates_endpoint.clone(),
             plugins,
         })
     }
@@ -389,11 +397,16 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
         http,
         root,
         provider_endpoints,
+        updates_endpoint,
         plugins,
     } = settings;
     let transport =
         Arc::new(HttpTransport::new(http).map_err(|e| format!("cannot configure HTTP: {e}"))?);
     let providers = wayfetch_adapters::providers(transport.clone(), &provider_endpoints)?;
+    let releases = match updates_endpoint {
+        Some(url) => Endpoint::custom(&url)?,
+        None => Endpoint::official(updates::OFFICIAL_API),
+    };
     // yt-dlp keeps the player code it read in the state directory, so
     // checks after the first are faster.
     let cache = config.state_dir.join("cache").join("yt-dlp");
@@ -433,11 +446,12 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
     );
     let mut builder = EngineBuilder::new(config, tokio::runtime::Handle::current())
         .transport(transport.clone())
-        .inspector(transport)
+        .inspector(transport.clone())
         .media_service(Arc::new(YouTube::new(Arc::new(ytdlp))))
         .converter(Arc::new(Ffmpeg::new(plugin(ffmpeg::PLUGIN))))
         .extractor(Arc::new(SevenZip::new(plugin(sevenzip::PLUGIN))))
-        .plugin_control(control.clone());
+        .plugin_control(control.clone())
+        .update_source(Arc::new(GitHubReleases::new(transport, releases)));
     for provider in providers {
         builder = builder.account_provider(provider);
     }

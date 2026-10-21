@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
+export const PROTOCOL = Object.freeze({ major: 0, minor: 2 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -76,6 +76,8 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
  * @typedef {import('./generated/ChangePluginRequest.js').ChangePluginRequest} ChangePluginRequest
  * @typedef {import('./generated/AuthorizeAccountRequest.js').AuthorizeAccountRequest} AuthorizeAccountRequest
  * @typedef {import('./generated/AccountCommandRequest.js').AccountCommandRequest} AccountCommandRequest
+ * @typedef {import('./generated/UpdateCheck.js').UpdateCheck} UpdateCheck
+ * @typedef {import('./generated/UpdateOutcome.js').UpdateOutcome} UpdateOutcome
  * @typedef {Exclude<JobAction, 'rename' | 'remove' | 'delete_files' | 'cancel_extraction'>} StateAction The
  *   actions that change whether a job runs.
  */
@@ -162,6 +164,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
  *     expectedRevision: number,
  *   }) => Promise<CommandResult>,
  *   refreshAccount: (account: AccountId) => Promise<AccountSummary>,
+ *   checkForUpdates: () => Promise<UpdateCheck>,
  *   subscribe: (after: EventCursor | null, sink: StreamSink) => Subscription,
  *   chooseDownloadFolder?: () => Promise<RootSummary | null>,
  *   openFile?: (job: JobId) => Promise<void>,
