@@ -227,6 +227,12 @@ export class DesktopIpcClient {
     return this.call('query', { query });
   }
 
+  checkForUpdates() {
+    /** @type {Query} */
+    const query = { type: 'updates' };
+    return this.call('query', { query });
+  }
+
   /**
    * @param {Args<'authorizeAccount'>[0]} request
    */

@@ -301,6 +301,15 @@ pub async fn refresh_account(
     Ok(Json(app.engine.refresh_account(id, &grant.0).await?))
 }
 
+/// Asks GitHub whether a newer release is published. A POST, since it
+/// sends a request beyond this server.
+pub async fn check_for_updates(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+) -> ApiResult<QueryResult> {
+    Ok(Json(app.engine.query(Query::Updates {}, &grant.0).await?))
+}
+
 async fn execute(
     app: &AppState,
     grant: &Grant,

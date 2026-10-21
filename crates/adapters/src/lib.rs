@@ -18,6 +18,7 @@ pub mod plugins;
 pub mod real_debrid;
 pub mod release;
 pub mod sevenzip;
+pub mod updates;
 pub mod youtube;
 pub mod ytdlp;
 

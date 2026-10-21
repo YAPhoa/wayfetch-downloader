@@ -22,6 +22,10 @@ boot_epoch: BootEpoch,
  */
 protocol: ProtocolVersion, 
 /**
+ * The application's version, such as `0.1.0`.
+ */
+version: string, 
+/**
  * The newest durable event at the time of the handshake.
  */
 head: EventCursor, 

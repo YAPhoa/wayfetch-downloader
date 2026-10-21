@@ -39,7 +39,15 @@ let daemon;
 test.beforeAll(async () => {
   fixture = await new Fixture().start();
   realDebrid = await new RealDebridFixture().start();
-  daemon = await new Daemon(await freePort(), { realDebrid: realDebrid.base }).init();
+  // GitHub's answer for the newest release, from the same stand-in.
+  fixture.page(
+    'releases/latest',
+    JSON.stringify({ tag_name: 'v99.0.0', html_url: `${fixture.base}/pages/releases/tag/v99.0.0` }),
+  );
+  daemon = await new Daemon(await freePort(), {
+    realDebrid: realDebrid.base,
+    updates: `${fixture.base}/pages/`,
+  }).init();
   await daemon.start();
 });
 
@@ -479,6 +487,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
     'Accounts & services',
     'Plugins',
     'Display',
+    'About',
   ]);
   const pane = page.locator('.settings-content');
   await expect(pane.getByLabel('Maximum simultaneous downloads')).toHaveValue('4');
@@ -523,6 +532,20 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await pane.getByRole('radio', { name: 'Comfortable' }).check();
   expect(await page.evaluate(() => document.documentElement.dataset.density)).toBe('comfortable');
   await pane.getByRole('radio', { name: 'Compact' }).check();
+  // About shows the version, and checks for a newer release only when
+  // asked, linking to its page.
+  await sections.getByRole('link', { name: 'About' }).click();
+  await expect(page).toHaveURL(`${daemon.origin}/settings/about`);
+  await expect(pane.locator('[data-key="app-version"]')).toHaveText(/^\d+\.\d+\.\d+/);
+  await pane.getByRole('button', { name: 'Check for updates' }).click();
+  await expect(pane.locator('[data-key="update-message"]')).toHaveText('Version 99.0.0 is available. View release');
+  await expect(pane.getByRole('link', { name: 'View release' })).toHaveAttribute(
+    'href',
+    `${fixture.base}/pages/releases/tag/v99.0.0`,
+  );
+  await expectFitsWindow(page);
+  await page.goBack();
+  await expect(displayLink).toHaveAttribute('aria-current', 'page');
   // From the keyboard: arrows move along the sections, Enter opens one,
   // and focus is drawn.
   await folderLink.focus();

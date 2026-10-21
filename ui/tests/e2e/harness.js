@@ -374,17 +374,18 @@ export async function freePort() {
  * A `wayfetchd` with its own state directory, download root, a second
  * permitted folder, token file (with the credential key beside it), and auth directory,
  * serving browsers on a fixed loopback port across restarts, with
- * Real-Debrid's API at `realDebrid` and the plugins at `plugins` if
- * given.
+ * Real-Debrid's API at `realDebrid`, GitHub's API for releases at
+ * `updates`, and the plugins at `plugins` if given.
  */
 export class Daemon {
   /**
    * @param {number} port
-   * @param {{ realDebrid?: string, plugins?: { ytDlp?: string, ffmpeg?: string, sevenZip?: string } }} [options]
+   * @param {{ realDebrid?: string, updates?: string, plugins?: { ytDlp?: string, ffmpeg?: string, sevenZip?: string } }} [options]
    */
   constructor(port, options = {}) {
     this.port = port;
     this.realDebrid = options.realDebrid;
+    this.updates = options.updates;
     this.plugins = options.plugins;
     this.origin = `http://127.0.0.1:${port}`;
     /** @type {import('node:child_process').ChildProcess | null} */
@@ -428,6 +429,7 @@ export class Daemon {
         '--dev-insecure-loopback',
         '--allow-network', '127.0.0.1/32',
         ...(this.realDebrid ? ['--provider-endpoint', `real-debrid=${this.realDebrid}`] : []),
+        ...(this.updates ? ['--updates-endpoint', this.updates] : []),
         ...(this.plugins ? ['--config', config] : []),
         '--json',
       ],
