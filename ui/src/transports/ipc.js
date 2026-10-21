@@ -227,10 +227,33 @@ export class DesktopIpcClient {
     return this.call('query', { query });
   }
 
-  checkForUpdates() {
+  updates() {
     /** @type {Query} */
     const query = { type: 'updates' };
     return this.call('query', { query });
+  }
+
+  checkForUpdates() {
+    /** @type {Query} */
+    const query = { type: 'updates', check: true };
+    return this.call('query', { query });
+  }
+
+  /**
+   * Downloads the newer release the last check found, in the background.
+   * @returns {Promise<void>}
+   */
+  downloadUpdate() {
+    return this.call('download_update');
+  }
+
+  /**
+   * Installs the newer release the app downloaded, which asks for the
+   * administrator's password, then restarts into it.
+   * @returns {Promise<void>}
+   */
+  restartToUpdate() {
+    return this.call('restart_to_update');
   }
 
   /**
