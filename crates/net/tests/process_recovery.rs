@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use engine_support::{KIB, body, complete, jobs, settled, shutdown, staging_files};
+use engine_support::{KIB, body, complete, jobs, settled, shutdown, staging_dir, staging_files};
 use support::{Resource, Server, config_trusting, https_env};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -295,7 +295,7 @@ const SIGKILL: i32 = 9;
 
 /// Lengths of the staging files in `root`.
 fn staging_lengths(root: &Path) -> Vec<u64> {
-    std::fs::read_dir(root.join(".wayfetch/staging"))
+    std::fs::read_dir(staging_dir(root))
         .map(|entries| {
             entries
                 .map(|e| e.unwrap().metadata().unwrap().len())
@@ -622,7 +622,7 @@ async fn a_file_left_unregistered_by_a_kill_is_never_removed() {
     child.kill(&env.state).await;
     // The file the killed engine created but never recorded is replaced
     // before the next start; only a record could prove it the engine's.
-    let staging = env.root.join(".wayfetch/staging");
+    let staging = staging_dir(&env.root);
     let [left] = &std::fs::read_dir(&staging)
         .unwrap()
         .map(|e| e.unwrap().path())

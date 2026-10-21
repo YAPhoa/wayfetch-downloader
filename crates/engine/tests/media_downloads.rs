@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use support::{ALL, KIB, body, complete, envelope, job, shutdown, wait_for};
+use support::{ALL, KIB, body, complete, envelope, job, shutdown, staging_dir, wait_for};
 use url::Url;
 use wayfetch_engine::media::{
     Container, Conversion, Converter, MediaError, MediaInfo, MediaPlan, MediaService, MediaStream,
@@ -770,7 +770,7 @@ async fn without_a_converter_only_single_streams_are_offered_and_kept_as_they_ar
 
 /// The conversion outputs in the staging directory.
 fn outputs(env: &Env) -> Vec<String> {
-    std::fs::read_dir(env.root.join(".wayfetch/staging"))
+    std::fs::read_dir(staging_dir(&env.root))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .filter(|name| name.ends_with(".media"))
