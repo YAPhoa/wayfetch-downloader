@@ -1,19 +1,10 @@
 // The desktop transport: `WayfetchClient` over the desktop host's IPC
-// commands, for the shared UI in the desktop window (architecture brief
-// sections 4.7 and 11.7, ADR-33).
+// commands (ADR-33).
 //
-// Arguments and answers are the protocol's JSON, as over HTTP, and the
-// host's refusals are the protocol's errors, so the views behave the same
-// in both shells. There is no sign-in: the window belongs to the person
-// using this computer, and the host decides what it may do. Being local,
-// this client can also show the host's folder dialog and open a finished
-// job's file or folder; each names a job, never a path.
-//
-// Event subscriptions arrive on a Tauri channel. The host sends a bounded
-// number of items ahead of this client's acknowledgements, so a page that
-// stops reading never makes the host queue without bound; `null` says the
-// stream ended, after which the feed resumes from its cursor as it does
-// after a lost HTTP stream.
+// Arguments, answers, and errors are the protocol's JSON, as over HTTP.
+// There is no sign-in: the window belongs to the local user. Events arrive
+// on a Tauri channel with acknowledgements, so a page that stops reading
+// never makes the host queue without bound.
 
 import { WayfetchError, extractRequest, jobCommandRequest, settingsRequest } from '../client/contract.js';
 

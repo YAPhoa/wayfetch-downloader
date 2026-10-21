@@ -1,20 +1,9 @@
-// The Add links page: paste links, text holding them, or a page's HTML,
-// and choose where they will be saved. Collecting puts them on the Links
-// page for review, where they are checked: a file's server is asked for
-// its name and size, and a page's address is read once for the files on
-// it, unless reading pages is turned off. Nothing downloads until links
-// are started there. In pasted HTML only links to files and videos are
-// collected; the page it came from, if given, resolves relative links.
+// The Add links page (`/add`): paste links, text, or a page's HTML and
+// choose where they will be saved. Collected links go to the Links page for
+// review; nothing downloads until they are started there.
 //
-// The text stays when collecting fails, and when the page is left
-// without collecting, which sends nothing; it goes once the links are
-// collected. A retry of the same text to the same folder reuses its
-// idempotency key, so a request that timed out after the engine took it
-// is not collected twice. The folders are read afresh each time the page
-// opens; left at the default, the engine saves the links where new
-// downloads go when it collects them.
-//
-// Route: `/add`.
+// The text stays until it is collected, and a retry of the same text reuses
+// its idempotency key, so a request that timed out is not collected twice.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { count, textProblem } from '../client/links.js';

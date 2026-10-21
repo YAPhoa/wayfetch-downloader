@@ -1,8 +1,5 @@
-//! The ffmpeg converter against the ffmpeg on `PATH`, with synthetic
-//! media it generates itself: a picture stream and a sound stream laid end
-//! to end in one file, as the engine's staging file holds them, are joined
-//! into MP4 and converted to MP3. Run with `--ignored` where ffmpeg and
-//! ffprobe are installed.
+//! The ffmpeg converter against the ffmpeg on `PATH`, with synthetic media.
+//! Run with `--ignored` where ffmpeg and ffprobe are installed.
 
 #![cfg(unix)]
 

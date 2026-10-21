@@ -1,24 +1,9 @@
-//! Removal of staging files no job generation can reopen (architecture
-//! brief section 7.6).
+//! Removal of staging files no job generation can reopen.
 //!
-//! The store says which files are abandoned: a newer generation of the job
-//! registered its own file, or the job went back to the queue to start from
-//! zero. A file the job may still continue (a paused, blocked, failed, or
-//! cancelled job's newest partial, or one a restart may adopt) is never
-//! abandoned, and neither is one an unfinished publication names.
-//!
-//! Each abandoned file is removed only if its name still holds the recorded
-//! file, and the record is deleted only after the removal is durable. A
-//! name holding anything else is left in place and its record kept, marked
-//! so later passes leave it alone. Every step can
-//! be interrupted: a pass after a crash finds the record with or without
-//! its file and finishes the job, so cleanup is safe to repeat.
-//!
-//! Only a recorded identity proves the engine created a file, so a file no
-//! record names is never removed, whatever its name. A crash between
-//! creating a staging file and registering it leaves such a file in place;
-//! a download whose registration is refused removes its own file, whose
-//! identity it still holds.
+//! The store says which files are abandoned. Each is removed only while its
+//! name still holds the recorded file, and its record only after the removal
+//! is durable, so a pass is safe to repeat after a crash. A file no record
+//! names is never removed.
 
 use std::sync::Arc;
 

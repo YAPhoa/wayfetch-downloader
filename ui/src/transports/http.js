@@ -1,6 +1,5 @@
 // The browser transport: `WayfetchClient` over the daemon's `/v1` HTTP API
-// and server-sent events, authenticated by the owner's session cookie
-// (architecture brief sections 8.5 and 11.1).
+// and server-sent events, authenticated by the owner's session cookie.
 //
 // The CSRF token is held in memory only and re-read from the session after
 // a reload. A response that says the session is gone calls

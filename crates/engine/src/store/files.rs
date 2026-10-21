@@ -1,6 +1,5 @@
 //! Staging-file records, adoption after a restart or a manual retry, and
-//! publication intents (sections 7.6 and 7.7, ADR-16, ADR-17; tests T24,
-//! T27, T28, T31).
+//! publication intents (ADR-16, ADR-17).
 //!
 //! The store never touches files. The filesystem side ([`crate::fs`])
 //! creates, validates, links, and reconciles them; these records say which
@@ -138,7 +137,7 @@ pub(super) fn staging(
 /// generation may still reopen as abandoned: none can any more. Called when
 /// a newer generation registers its own file, which is then the only one
 /// the job can continue, and when the job goes back to the queue under a
-/// new generation, which starts from zero (section 7.6).
+/// new generation, which starts from zero.
 pub(super) fn abandon_staging(
     tx: &Transaction<'_>,
     job: JobId,
@@ -403,7 +402,7 @@ impl Store {
     ///
     /// Only a file from an earlier engine start (`epoch`) can be adopted:
     /// no writer of this process can still hold it, so the new generation
-    /// is its only writer (section 7.6).
+    /// is its only writer.
     pub fn adopt_staging(
         &mut self,
         job: JobId,
@@ -442,12 +441,8 @@ impl Store {
     /// generation, before that attempt sends a request. The caller has
     /// reopened and validated the file first.
     ///
-    /// The file may come from this engine start, so its boot epoch proves
-    /// nothing. Two things together do instead: the retry reserved the
-    /// file for exactly this generation in its own transaction, and
-    /// `attempt` shows the coordinator admitted this job only after every
-    /// earlier task of it ended, so no writer of this process still holds
-    /// the file (section 7.6).
+    /// The boot epoch proves nothing here; the retry's reservation and
+    /// `attempt` together show no earlier writer still holds the file.
     pub fn adopt_retained(
         &mut self,
         job: JobId,
@@ -490,9 +485,9 @@ impl Store {
     /// Records the intent to publish the job generation's staging file at
     /// `target` as an artifact of `size` bytes, reserving the target. The
     /// job must be publishing, and durable coverage must be exactly
-    /// `0..size`: file length is never accepted in place of coverage (T25).
-    /// A target whose case-folded name is already reserved in the root, by
-    /// a publication or a rename, is refused with
+    /// `0..size`: file length is never accepted in place of coverage. A
+    /// target whose case-folded name is already reserved in the root, by a
+    /// publication or a rename, is refused with
     /// [`StoreError::TargetReserved`].
     pub fn begin_publication(
         &mut self,

@@ -1,15 +1,7 @@
-//! The `/v1/auth` routes, for browsers only:
+//! The browser-only `/v1/auth` routes: session, setup, login, and logout.
 //!
-//! | Route | Purpose |
-//! |---|---|
-//! | `GET /v1/auth/session` | whether setup is pending; the session's owner and CSRF token |
-//! | `POST /v1/auth/setup` | create the owner with the setup secret, and sign in |
-//! | `POST /v1/auth/login` | sign in |
-//! | `POST /v1/auth/logout` | sign out (needs the CSRF token) |
-//!
-//! Each checks the request's `Host` and `Origin` first. Responses,
-//! errors included, are never cached ([`no_store`]). Without browser access configured, each answers
-//! `not_found`.
+//! Each checks `Host` and `Origin` first, responses are never cached, and
+//! every route answers `not_found` when browser access is not configured.
 
 use std::sync::Arc;
 

@@ -1,34 +1,10 @@
-//! Encryption of stored provider credentials (architecture brief section
-//! 8.4, ADR-24).
+//! Encryption of stored provider credentials (ADR-24).
 //!
-//! Credentials are sealed with ChaCha20-Poly1305 (`ring`) under a key kept
-//! in a file outside the state directory, so the database, its WAL, and a
-//! copy of the state directory hold only ciphertext. Each record has a
-//! fresh random 96-bit nonce, and its associated data binds the record
-//! format, the account's opaque secret reference, and the service, so a
-//! record moved to another account or service fails to open.
-//!
-//! The key file holds 32 random bytes as 64 hexadecimal digits. The two
-//! keys in use are derived from it with HMAC-SHA-256 under fixed labels:
-//! one encrypts, and one yields the key check the database stores, which
-//! tells a wrong key from a right one without decrypting anything and
-//! reveals nothing about the key.
-//!
-//! Provisioning and restart:
-//!
-//! * No key file configured: accounts cannot be added
-//!   ([`VaultState::NotConfigured`]).
-//! * Configured, and the database never stored a key check: the vault is
-//!   uninitialized. Adding the first account reads the file, or creates it
-//!   owner-only if it does not exist, and stores its check.
-//! * The database stores a check: the file must exist, be owner-only, and
-//!   hold the key with that check. Anything else locks the vault
-//!   ([`VaultState::Locked`]) with the reason; the engine never generates
-//!   a replacement, which would make the stored credentials unreadable.
-//!   Downloads without an account are not affected.
-//!
-//! Rotating the key, and recovering from losing it, are not supported:
-//! with the key gone, the accounts must be removed and signed in again.
+//! Records are sealed with ChaCha20-Poly1305 under a key file kept outside
+//! the state directory, and bound to their account and service. The database
+//! stores only a key check. A missing, exposed, or wrong key locks the vault
+//! instead of being replaced, since a new key would make the stored
+//! credentials unreadable.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};

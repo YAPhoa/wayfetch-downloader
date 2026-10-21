@@ -1,4 +1,4 @@
-//! Durable event outbox (architecture brief section 7.8, ADR-28).
+//! Durable event outbox (ADR-28).
 //!
 //! Events are appended inside the transaction that makes the change they
 //! describe, so an event exists exactly when its change committed. Positions

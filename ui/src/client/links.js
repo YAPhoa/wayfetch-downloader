@@ -64,14 +64,9 @@ export function linkName(link) {
 }
 
 /**
- * What a link's status column says. Collected links are checked in the
- * background: a file's server is asked for its name and size, never its
- * content, and a page typed or analyzed is read once for the files on
- * it, which are listed beside it. A video link's service reads its title
- * and formats instead. A link an account would download is checked by
- * that account's provider; when the provider cannot tell, it is not a
- * failure, since starting goes through the account anyway. A started
- * link stays listed, added to Downloads, until removed.
+ * What a link's status column says. A link an account would download is
+ * checked by that account's provider, and the provider not knowing is not
+ * a failure, since starting goes through the account anyway.
  * @param {CollectedLink} link
  * @param {(service: string) => string} [serviceName] A service's display name.
  * @returns {{ label: string, tone: Tone, detail: string | null }}

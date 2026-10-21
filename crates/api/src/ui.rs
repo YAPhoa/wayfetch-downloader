@@ -1,19 +1,8 @@
-//! The bundled web UI (architecture brief section 11.2, ADR-32): static
-//! files the host hands over, served from the API's own origin.
+//! The bundled web UI, served from the API's own origin (ADR-32).
 //!
-//! Every file is served below `/assets/<version>/`, where the version is a
-//! digest of all the files, so each release's assets can be cached forever
-//! without an old page ever mixing them with a new release's. The entry
-//! page, `index.html`, is served for `/` and every other browser path
-//! outside `/v1/` and `/assets/`, so a reload of any view works; it is
-//! revalidated on every load, so an upgrade reaches open browsers on their
-//! next reload instead of an old page issuing requests to a new server.
-//! The entry page names its assets with the placeholder `{{assets}}`,
-//! replaced by `/assets/<version>`.
-//!
-//! Responses forbid every script, style, and connection beyond this
-//! origin, framing, and HTML parsing of strings in scripts (Trusted
-//! Types), so text from downloads can only ever be shown as text.
+//! Assets live under a digest-versioned path so they can be cached forever,
+//! while `index.html` is revalidated on every load. A strict CSP with
+//! Trusted Types keeps text from downloads as text.
 
 use std::borrow::Cow;
 use std::collections::HashMap;

@@ -1,17 +1,10 @@
-//! The native folder picker behind "Choose folder…" (architecture brief
-//! section 8.6): the only way a path reaches the engine from the desktop
-//! UI. The renderer cannot name a path; it can only ask the host to show
-//! the dialog, and the host hands the chosen folder to the engine, which
-//! validates and initializes it like `init-root`.
+//! The native folder picker, the only way a path reaches the engine from the
+//! desktop UI.
 //!
-//! The dialog is `rfd`'s GTK dialog, created on the main thread and awaited
-//! elsewhere, as Tauri's own dialog plugin does, without registering the
-//! plugin's IPC commands. One dialog is open at a time.
-//!
-//! With the `scripted-picker` feature, for the real-window tests only, the
-//! dialog is replaced by the contents of the file named in
-//! `WAYFETCH_DESKTOP_PICKER`: a folder's path, or nothing for a cancelled
-//! dialog.
+//! The renderer can only ask for the dialog; the host passes the chosen
+//! folder to the engine to validate. With the test-only `scripted-picker`
+//! feature, the folder comes from the file named in
+//! `WAYFETCH_DESKTOP_PICKER`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

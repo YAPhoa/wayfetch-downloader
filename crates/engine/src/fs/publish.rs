@@ -1,5 +1,5 @@
 //! No-clobber publication, renaming published files, and their crash
-//! reconciliation (section 7.7, tests T24 and T31).
+//! reconciliation.
 
 use std::io;
 use std::path::PathBuf;
@@ -52,12 +52,9 @@ impl Root {
     /// `size` bytes, creating missing parent directories. The caller has
     /// recorded a publication intent for that size first.
     ///
-    /// Bytes past `size` (uncertified data or preallocation) are cut off
-    /// while the file is still private; a file shorter than `size` is
-    /// refused. The file is synchronized, hard-linked to the target name,
-    /// which fails rather than replacing anything there, checked to be the
-    /// staged file at `size` bytes, the target directory is synchronized,
-    /// and then the staging name is removed. Any crash leaves a state
+    /// Extra bytes are cut off while the file is private, then it is
+    /// synced, hard-linked to the target (never replacing anything there),
+    /// checked, and the staging name removed. Any crash leaves a state
     /// [`Root::reconcile_publication`] can classify.
     pub fn publish(
         &self,
@@ -170,13 +167,10 @@ impl Root {
     /// Gives the published file `file` the name `to` in the same folder.
     /// The caller has recorded the rename first.
     ///
-    /// The file must still be the one published, at its published size;
-    /// anything else at the old name was put there outside Wayfetch and is
-    /// left alone. The new name is hard-linked, which fails rather than
-    /// replacing a file there, checked to be the published file, and the
-    /// folder synchronized; only then is the old name removed, if it still
-    /// holds the file, and the folder synchronized again. Any crash leaves
-    /// a state [`Root::reconcile_rename`] can classify.
+    /// Only the file Wayfetch published is moved. The new name is
+    /// hard-linked without replacing anything and checked before the old
+    /// name is removed, so any crash leaves a state
+    /// [`Root::reconcile_rename`] can classify.
     pub fn rename_published(&self, file: &PublishedFile, to: &RelativePath) -> Result<(), FsError> {
         let (dir, from_name, to_name) = self.rename_names(file, to)?;
         if !is_staged(file_at(&dir, from_name)?, &file.identity, file.size) {

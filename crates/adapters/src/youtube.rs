@@ -1,12 +1,8 @@
-//! YouTube: recognizing video links, and the media service that reads
-//! them through yt-dlp ([`crate::ytdlp`]).
+//! YouTube: recognizing video links without the network, and reading them
+//! through [`crate::ytdlp`].
 //!
-//! Recognition is pure: it reads only the parsed URL, never the network,
-//! so automatic routing can claim a YouTube link before anything is asked
-//! of YouTube. A recognized link names one video by its ID; the original
-//! link is kept separately as the source, and yt-dlp is only ever given
-//! the video's canonical watch page, so a playlist or tracking parameter
-//! never changes what it reads.
+//! yt-dlp is only given the canonical watch page for the video ID, so
+//! playlist or tracking parameters never change what it reads.
 
 use std::sync::Arc;
 

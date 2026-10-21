@@ -1,24 +1,10 @@
-//! 7-Zip as the archive extractor (ADR-18, ADR-19): lists and unpacks
-//! ZIP, 7z, RAR (multi-part included), and tar archives for the engine's
-//! extraction workflow ([`wayfetch_engine::extract`]).
+//! 7-Zip as the archive extractor (ADR-18, ADR-19) for ZIP, 7z, RAR, and tar
+//! archives.
 //!
-//! Every run is confined ([`Confinement`]): it may read only the archive's
-//! volumes, write only in the private folder it unpacks into, open no
-//! socket, and map at most [`MEMORY_BYTES`]; a system that cannot confine
-//! it reports 7-Zip not working, so nothing is unpacked unconfined.
-//!
-//! A password is written to 7-Zip's standard input, never its command
-//! line; without one, `-p` with no value tells 7-Zip there is none, so it
-//! never waits for one. Dangerous links are refused by 7-Zip itself
-//! (`-snld0`), its unpacking memory is capped below the confinement's
-//! (`-smemx`), so a hungry archive is refused with a message rather than
-//! failing midway, and the engine checks the listing before and the files
-//! after. A compressed tar is decompressed by one 7-Zip run straight into
-//! another that unpacks the tar, so the tar itself is never written to
-//! disk: the first may only read the archive, the second only write.
-//!
-//! 7-Zip releases before 25.01 handle links unsafely (CVE-2025-11001,
-//! CVE-2025-11002, CVE-2025-55188), so they are not used.
+//! Every run is confined ([`Confinement`]), takes passwords on standard
+//! input, refuses dangerous links, and caps its memory. Compressed tars are
+//! piped between two runs so the tar is never written. Releases before 25.01
+//! are refused for their unsafe link handling.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

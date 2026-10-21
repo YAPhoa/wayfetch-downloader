@@ -1,13 +1,9 @@
-//! Provider operations: the durable record of asking a provider to
-//! generate a download link (architecture brief sections 6.2 and 6.5,
-//! ADR-09; test T12).
+//! Provider operations: the durable record of asking a provider for a
+//! download link (ADR-09).
 //!
-//! The intent is committed before the request is sent, and the outcome
-//! before any transfer starts, so a crash, lost answer, or late reply is
-//! never repeated blindly. A job has at most one open operation (the
-//! schema's unique index): every attempt, pause, restart, and replayed
-//! command of the job reuses it. A generated link is stored sealed with
-//! the vault's key; this module never sees it in the clear.
+//! The intent commits before the request is sent and the outcome before any
+//! transfer, so nothing is repeated blindly. A job has at most one open
+//! operation, and generated links are stored sealed.
 
 use std::str::FromStr;
 

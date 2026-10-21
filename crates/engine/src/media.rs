@@ -1,23 +1,10 @@
-//! The seams between the engine and media services: links to a video page
-//! that resolve into one or more streams, such as YouTube watch pages
-//! (architecture brief ADR-27).
+//! The seams to media services such as YouTube (ADR-27).
 //!
-//! * A [`MediaService`] recognizes its links without the network, checks
-//!   one (title and formats) in the background after it is collected, and
-//!   resolves one into the streams for a [`MediaChoice`] when its download
-//!   starts. Each resolve answers fresh stream links: they expire, so none
-//!   is stored.
-//! * A [`Converter`] joins a video stream with its sound, or converts
-//!   sound to MP3, reading the downloaded streams from the staging file and
-//!   writing a second staging file the engine created.
-//!
-//! The engine still downloads every stream itself, through the transport,
-//! with its checkpoints, speed limit, and network policy; the streams of a
-//! download are laid end to end in its one staging file, so resume and
-//! cleanup work as for any download. A stream's identity is the media
-//! service's description of what was chosen (video, format, and length),
-//! not its expiring URL, so a download continues after its links expire
-//! as long as the service still serves the same formats.
+//! A [`MediaService`] recognizes, checks, and resolves its links; stream
+//! links expire, so they are resolved fresh and never stored. A
+//! [`Converter`] joins or converts the downloaded streams. The engine still
+//! downloads every stream itself, end to end in one staging file, so resume,
+//! limits, and cleanup work as for any download.
 
 use std::any::Any;
 use std::future::Future;

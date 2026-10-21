@@ -1,7 +1,7 @@
-// The contract between the UI's views and a Wayfetch engine (architecture
-// brief sections 4.7 and 11.2, ADR-33). Views use only `WayfetchClient`,
-// never `fetch` or desktop IPC, so the browser and the desktop shell run
-// the same views over different transports.
+// The contract between the UI's views and a Wayfetch engine (ADR-33).
+// Views use only `WayfetchClient`, never `fetch` or desktop IPC, so the
+// browser and the desktop shell run the same views over different
+// transports.
 //
 // The data types are `wayfetch-protocol`'s JSON. A transport passes engine
 // JSON through unchanged and reports failures as `WayfetchError` with the
@@ -85,18 +85,10 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
  * What views need from an engine. Every method rejects with a
  * `WayfetchError`.
  *
- * `permissions` is what this client may do, so views offer only what the
- * engine will allow; the engine still decides. `local` says whether the
- * engine's paths are on the computer showing the page (the desktop app)
- * or on a server. Only a local host can open files and show the folder
- * dialog, so only its client has `chooseDownloadFolder`, `openFile`, and
- * `revealFile`; each takes a job or nothing, never a path. A server's
- * client instead has `browseFolders` and `addFolder`, which list the
- * server's folders and add one the owner chose as a download folder.
- *
- * The account methods need the `accounts` permission. None takes or
- * returns a provider credential: signing in happens on the provider's
- * site, and the engine keeps what the provider issues.
+ * `permissions` lets views offer only what the engine will allow; the
+ * engine still decides. A `local` client (the desktop app) can show the
+ * folder dialog and open files by job; a server's client can browse and
+ * add server folders instead. No method carries a provider credential.
  * @typedef {{
  *   permissions: readonly Permission[],
  *   local: boolean,

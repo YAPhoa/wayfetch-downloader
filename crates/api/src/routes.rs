@@ -1,42 +1,9 @@
-//! The `/v1` routes: thin translations between HTTP and the engine's
-//! transport-neutral commands, queries, and subscriptions.
+//! The `/v1` handlers: thin translations between HTTP and the engine's
+//! commands, queries, and subscriptions.
 //!
-//! | Route | Engine operation |
-//! |---|---|
-//! | `GET /v1/capabilities` | handshake: instance, boot epoch, protocol, head, limits |
-//! | `POST /v1/inputs` | [`Command::Submit`] |
-//! | `GET /v1/jobs` | [`Query::ListJobs`] |
-//! | `GET /v1/jobs/{id}` | [`Query::InspectJob`] |
-//! | `GET /v1/job-counts` | [`Query::CountJobs`] |
-//! | `POST /v1/jobs/{id}/commands` | [`Command::Pause`], [`Command::Resume`], [`Command::Cancel`], [`Command::Rename`], [`Command::Remove`], [`Command::CancelExtraction`] |
-//! | `POST /v1/jobs/{id}/extract` | [`EngineHandle::extract`]: unpacks a downloaded archive, with its password if given |
-//! | `GET /v1/jobs/{id}/source` | [`Query::JobSource`] |
-//! | `GET /v1/staging/links` | [`Query::ListLinks`]: links collected for review |
-//! | `POST /v1/staging/links` | [`Command::CollectLinks`] |
-//! | `POST /v1/staging/commands` | [`Command::StartLinks`], [`Command::RemoveLinks`], [`Command::MoveLinks`] |
-//! | `GET /v1/staging/links/{id}/source` | [`Query::LinkSource`] |
-//! | `GET /v1/settings` | [`Query::Settings`]: the default destination, the roots to choose from, and preferences |
-//! | `PUT /v1/settings` | [`Command::UpdateSettings`] |
-//! | `GET /v1/folders` | [`EngineHandle::browse_folders`]: folders on the server, to choose one to add |
-//! | `POST /v1/roots` | [`EngineHandle::register_root`]: permits a server folder as a destination |
-//! | `POST /v1/roots/remove` | [`EngineHandle::execute`]: stops offering a folder that is not the default |
-//! | `POST /v1/plugins/change` | [`EngineHandle::execute`]: turns a plugin on or off, updates it, or removes its installed copy |
-//! | `GET /v1/accounts` | [`Query::Accounts`]: the vault, the services Wayfetch can sign in to, and the accounts added |
-//! | `POST /v1/accounts/authorizations` | [`Command::AuthorizeAccount`]: starts signing an account in |
-//! | `GET /v1/accounts/authorizations/{id}` | [`Query::Authorization`] |
-//! | `POST /v1/accounts/authorizations/{id}/cancel` | [`EngineHandle::cancel_authorization`] |
-//! | `POST /v1/accounts/{id}/commands` | [`Command::SetAccountEnabled`], [`Command::RemoveAccount`] |
-//! | `POST /v1/accounts/{id}/refresh` | [`EngineHandle::refresh_account`]: checks it with its provider |
-//! | `GET /v1/events` | subscription, as server-sent events |
-//! | `GET /v1/ready` | readiness: lifecycle phase, a handshake, the host's check |
-//!
-//! Every account route needs the `accounts` permission, which no other
-//! permission implies. No route takes or returns a provider credential.
-//!
-//! Responses carry the protocol's own result and error types, so the JSON
-//! is the same that desktop IPC carries. Commands name an idempotency key
-//! and the target instance in their body, as in a
-//! [`wayfetch_engine::protocol::CommandEnvelope`].
+//! Bodies use the protocol's own JSON, the same desktop IPC carries. Account
+//! routes need the `accounts` permission, and no route takes or returns a
+//! provider credential.
 
 use std::convert::Infallible;
 use std::str::FromStr;
@@ -506,20 +473,12 @@ pub struct EventParams {
     after: Option<String>,
 }
 
-/// The event stream (architecture brief sections 4.7 and 7.8).
+/// The event stream, as SSE events named after their [`StreamItem`] type.
 ///
-/// Each item is an SSE event named after its [`StreamItem`] type, with the
-/// item's JSON as data. Durable events carry their cursor as the event ID,
-/// `<instance>:<position>`, so a reconnecting client sends it back as
-/// `Last-Event-ID` and gets only what it missed. A `resync` event ends the
-/// stream: the client re-queries and subscribes from the new snapshot.
-///
-/// A stream opened with a browser session ends when the session does:
-/// on sign-out, expiry, or replacement.
-///
-/// The stream is pulled only as fast as the client reads, and the engine's
-/// bounded ring decides when a slow client must resynchronize, so no
-/// client grows memory. Closing the stream affects nothing but the stream.
+/// Durable events carry `<instance>:<position>` as their ID, so a client
+/// reconnects with `Last-Event-ID`; a `resync` event ends the stream. A
+/// stream opened with a browser session ends with the session, and a slow
+/// client is told to resynchronize rather than buffered for.
 pub async fn events(
     State(app): State<AppState>,
     Extension(grant): Extension<Grant>,

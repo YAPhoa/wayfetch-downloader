@@ -1,28 +1,10 @@
-// Keeps a bounded, current view of jobs over any `WayfetchClient`
-// (architecture brief sections 4.7 and 7.8): a snapshot, then the event
-// stream from the snapshot's cursor.
+// Keeps a bounded, current view of jobs over any `WayfetchClient`: a
+// snapshot, then the event stream from its cursor.
 //
-// - Only one page of jobs and one inspected job are held, never the whole
-//   queue, and only events about those are applied.
-// - Each held job remembers the event position its copy reflects, so a
-//   replayed or older event never overwrites a newer copy.
-// - When a stream ends, the feed reconnects with backoff, after a fresh
-//   handshake, and resumes from its cursor; a `resync` makes it take a new
-//   snapshot instead. A handshake refused as `unauthenticated` stops the
-//   feed with that status, so the shell can ask the user to sign in again.
-// - Progress samples are shown only for the current boot epoch, the
-//   job's current generation, and while it is transferring; a job that
-//   stops transferring drops its sample, so a paused row never shows a
-//   speed. Samples carry the bytes received between durable checkpoints,
-//   so no held job is re-read on a timer.
-// - Job counts per stage come with the snapshot and are read again after
-//   job events, at most one read at a time and one per `READ_DELAY`, so a
-//   burst of events costs one count. While the list is filtered by stage, a
-//   job entering or leaving the filter makes the page be read again the
-//   same way, since its rows may shift.
-//
-// Nothing here affects downloads: stopping the feed, or losing the page
-// that holds it, only stops watching.
+// Only one page of jobs and one inspected job are held, and each remembers
+// the event position it reflects, so an older event never overwrites a newer
+// copy. A lost stream reconnects with backoff; `resync` takes a new
+// snapshot. Stopping the feed only stops watching.
 
 import { WayfetchError, serves } from './contract.js';
 

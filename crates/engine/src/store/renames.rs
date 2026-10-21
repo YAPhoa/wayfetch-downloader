@@ -1,14 +1,9 @@
 //! Renaming published files (ADR-16, ADR-17).
 //!
-//! A rename is recorded before the file gets its new name and finished
-//! after, like a publication: [`Store::begin_rename`] checks the request
-//! and reserves the new name, the filesystem links it
-//! ([`crate::fs::Root::rename_published`]), and [`Store::finish_rename`]
-//! records it on the publication with the job's new revision and the
-//! command's idempotency record. The record keeps the command's key and
-//! fingerprint, so a rename a crash interrupted is finished after the
-//! restart ([`crate::fs::Root::reconcile_rename`]) with the same result a
-//! retry then replays.
+//! Like a publication, a rename is recorded before the filesystem link and
+//! finished after, with the command's idempotency record, so a rename
+//! interrupted by a crash is completed after restart with the result a retry
+//! replays.
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::id::{JobId, RootId};

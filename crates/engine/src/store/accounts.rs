@@ -1,18 +1,9 @@
-//! Provider accounts and their sealed credentials (architecture brief
-//! sections 6.1, 7.3, 8.4, ADR-24).
+//! Provider accounts and their sealed credentials (ADR-24).
 //!
-//! Only redacted metadata is stored in the clear. Credentials arrive here
-//! already sealed by the vault, and leave sealed; this module never sees a
-//! key or a plaintext secret.
-//!
-//! Two counters guard an account. `revision` is what a client presents to
-//! change it. `credential_generation` advances whenever its credentials
-//! change, and work that read older credentials (a status check, a
-//! refresh, a sign-in that started before another finished) can only store
-//! its result while the generation it read is current, so a late answer
-//! never restores obsolete credentials or status. `sign_in` advances
-//! only when the account is signed in again, so a link generated with an
-//! earlier sign-in is never used, while a refresh keeps links usable.
+//! Only redacted metadata is stored in the clear; credentials arrive and
+//! leave sealed. `revision` guards client edits, `credential_generation`
+//! keeps a late answer from restoring older credentials, and `sign_in`
+//! retires links generated before the account was signed in again.
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use wayfetch_domain::id::AccountId;

@@ -1,13 +1,9 @@
-//! Official signed releases of a plugin, which Settings installs in place
-//! of the copy found (ADR-26 amendment).
+//! Official signed releases of a plugin, which Settings installs in place of
+//! the copy found.
 //!
-//! A release publishes a checksum manifest and a detached OpenPGP
-//! signature of it. The signature must verify against the signing key
-//! pinned here, through the `pgp` crate; then the manifest's digest for
-//! the one file chosen for this system must match the downloaded bytes.
-//! Either failing refuses the release: there is no fallback to the
-//! checksums alone. Files are fetched through the host's transport, so
-//! the egress policy and TLS settings apply to every redirect.
+//! The checksum manifest must verify against the pinned OpenPGP key, and the
+//! chosen file must match its digest; either failing refuses the release.
+//! Downloads go through the host's transport and egress policy.
 
 use std::collections::BTreeMap;
 use std::path::Path;

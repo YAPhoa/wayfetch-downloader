@@ -1,25 +1,11 @@
-//! Hard-kill recovery over real sockets (architecture brief section 13.2,
-//! "crash-injection harness"): an engine runs in a child process against
-//! the local HTTPS fixture and is killed with `SIGKILL` while streaming, at
-//! each checkpoint step, and at each publication step. An engine restarted
-//! on the same state directory must take it over, resume only from the
-//! durable bytes, complete the interrupted publication, and publish exactly
-//! the served bytes without overwriting anything.
+//! Hard-kill recovery: an engine in a child process is killed with `SIGKILL`
+//! at named steps, then restarted on the same state directory, which must
+//! resume from durable bytes only and never overwrite a file it does not
+//! own.
 //!
-//! Brief tests exercised here: T23 (crash before and after the file sync
-//! and the checkpoint commit), T24 (crash before and after the link and the
-//! completion commit), T26 (the killed engine held the state directory
-//! until it died, and nothing had to clean its lock up), and T31 (a file
-//! that took the target name meanwhile is never overwritten). Repeated
-//! kills while recovery abandons a partial and while cleanup removes it
-//! show that cleanup is safe to interrupt and repeat (section 7.6). Kills
-//! while a manual retry hands a failed job's partial to its next attempt,
-//! and while that attempt publishes, show the saved data is kept and the
-//! file published once.
-//!
-//! The child is this test binary running [`child_engine`]. It stops at a
-//! named boundary of the engine's `failpoints` feature and reports it, so
-//! every kill lands on a known step rather than on a timer.
+//! The child is this test binary running [`child_engine`], stopping at a
+//! named boundary of the engine's `failpoints` feature, so every kill lands
+//! on a known step.
 
 #![cfg(unix)]
 

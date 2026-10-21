@@ -335,7 +335,7 @@ fn restart_moves_active_jobs_to_recovery_under_a_new_generation() {
     assert_ne!(after.generation, before.generation);
     assert_eq!(f.summary(queued).stage, JobStage::Queued);
 
-    // Work authorized before the restart is retired (T27).
+    // Work authorized before the restart is retired.
     assert!(
         f.store
             .advance_job(active, JobStage::Verifying, before.generation, None, NOW)
@@ -364,7 +364,7 @@ fn checkpoints_track_synchronized_coverage_not_file_length() {
     f.advance(job, JobStage::Transferring).unwrap();
     f.register(job, BootEpoch::INITIAL);
 
-    // A hole between ranges is not coverage (T25).
+    // A hole between ranges is not coverage.
     assert_eq!(
         f.checkpoint(job, generation, &[(0, 10), (20, 30)]).unwrap(),
         20
@@ -587,7 +587,7 @@ fn publication_reserves_its_target_and_completes_the_job() {
     assert_eq!(intent.size, 5);
     assert_eq!(&intent.staging, f.files[&(job, generation)].record());
 
-    // A sibling job cannot reserve the same name, even in another case (T31).
+    // A sibling job cannot reserve the same name, even in another case.
     let (sibling, sibling_gen) = transferring(&mut f, BootEpoch::INITIAL);
     finished(&mut f, sibling, sibling_gen, b"other");
     assert!(matches!(
@@ -663,7 +663,7 @@ fn restart_during_publication_reconciles_from_the_intent() {
         .begin_publication(job, generation, &path("a.bin"), 4, NOW)
         .unwrap();
 
-    // Crash after the intent committed, before the link (T24).
+    // Crash after the intent committed, before the link.
     let mut f = f.reopen();
     f.store.recover_after_restart(NOW).unwrap();
     let current = f.summary(job).generation;
@@ -753,7 +753,7 @@ fn only_a_previous_starts_file_is_adopted() {
     assert_eq!((partial.record, partial.durable_end), (adopted.clone(), 6));
     assert_eq!(f.summary(job).bytes_done, 6);
 
-    // The new generation continues the coverage; the old one cannot (T27).
+    // The new generation continues the coverage; the old one cannot.
     f.advance(job, JobStage::Transferring).unwrap();
     let file = f.root.reopen_staging(&adopted, 6).unwrap();
     let synced = file.sync_ranges(vec![6..10]).unwrap();
@@ -1066,8 +1066,7 @@ fn only_files_no_generation_can_reopen_are_removed() {
     f.advance(newer, JobStage::Resolving).unwrap();
     f.advance(newer, JobStage::Transferring).unwrap();
     let new_gen = f.register(newer, BootEpoch::INITIAL);
-    // A paused job resumes its own file; a cancelled job keeps its data
-    // (section 7.2).
+    // A paused job resumes its own file; a cancelled job keeps its data.
     let (paused, paused_gen) = transferring(&mut f, BootEpoch::INITIAL);
     stop(&mut f, paused, false);
     let (cancelled, cancelled_gen) = transferring(&mut f, BootEpoch::INITIAL);

@@ -1,11 +1,8 @@
-//! Which destinations requests may reach (architecture brief section 8.2).
+//! Which destinations requests may reach.
 //!
-//! Every URL, the first and every redirect target, is checked before a
-//! connection is attempted: HTTP(S) only, no embedded credentials, a bounded
-//! length, and a literal address only if the policy permits it. Host names
-//! are resolved by [`PolicyResolver`], which hands the connector only the
-//! permitted addresses, so no second, unchecked resolution can reach a
-//! loopback, private, link-local, or metadata-service address.
+//! Every URL and redirect target is checked before connecting, and
+//! [`PolicyResolver`] hands the connector only permitted addresses, so no
+//! second resolution can reach a loopback, private, or metadata address.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, LazyLock};

@@ -1,21 +1,10 @@
-//! The seams between the engine's account service and the code that knows
-//! a provider's API (architecture brief sections 3.11, 6.4, 8.3, ADR-08,
-//! ADR-15).
+//! The seams between the engine's account service and a provider's API
+//! (ADR-08, ADR-15).
 //!
-//! * An [`AccountProvider`] speaks one provider's authorization protocol:
-//!   it starts a device authorization, polls it, and checks stored
-//!   credentials, refreshing them when the provider allows. It keeps no
-//!   state: the engine owns pending authorizations, stored credentials,
-//!   revisions, and single-flight coordination, and hands the provider only
-//!   the secret each call needs.
-//! * An [`ApiClient`] sends a provider's metadata requests (section 6.5's
-//!   policies for metadata, not transfers): one bounded request, a whole
-//!   bounded body, no redirects followed, no decompression. The host
-//!   supplies the real one (`wayfetch-net`), so egress, TLS, and proxy
-//!   policies stay in one place and tests run against fixtures.
-//!
-//! Errors carry no secret: providers build them from status codes and the
-//! provider's own error codes, never from a request or a raw body.
+//! An [`AccountProvider`] speaks one provider's sign-in protocol and keeps
+//! no state; the engine owns accounts, credentials, and coordination. An
+//! [`ApiClient`] sends one bounded metadata request under the host's network
+//! policy. Errors never carry a secret.
 
 use std::time::Duration;
 
@@ -190,7 +179,7 @@ impl Checked {
 }
 
 /// Why a provider call failed, in the categories the account's status
-/// distinguishes (section 8.3). Messages name no secret.
+/// distinguishes. Messages name no secret.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProviderError {
     /// The provider refused the credentials: they are invalid, revoked, or

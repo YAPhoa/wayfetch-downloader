@@ -1,20 +1,9 @@
-// Settings > Accounts & services: the accounts the user added, and
-// signing one in (architecture brief section 8.3, ADR-24).
+// Settings > Accounts & services: the accounts added, and signing one in
+// (ADR-24).
 //
-// Signing in happens on the service's own site: the engine asks the
-// service for a short code, the person enters it there and approves
-// Wayfetch, and the engine keeps what the service then issues. No page
-// here asks for a password, token, or key, and nothing the service issues
-// ever reaches the page, so nothing secret can end up in the page's
-// storage, its address, or a form field.
-//
-// Listing reads what the engine last stored and contacts no service;
-// "Check" asks the service now. Each change is sent at the revision shown,
-// and a change made elsewhere meanwhile reloads the list.
-//
-// A row's commands are in its menu, opened from its button or by
-// right-clicking the row, as in the downloads table. Only an account that
-// needs signing in again shows that command beside the menu.
+// Signing in happens on the service's own site, so no page here asks for or
+// ever receives a password, token, or key. Changes are sent at the revision
+// shown.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { openDialog } from './dialog.js';

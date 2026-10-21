@@ -3,8 +3,7 @@
 //!
 //! The browser posts them over HTTP and the desktop shell passes them over
 //! IPC, so both transports validate inputs, report a bad item by its
-//! position, and build the same envelope (architecture brief section 4.7,
-//! test T62).
+//! position, and build the same envelope.
 
 use serde::Deserialize;
 use wayfetch_domain::id::{AccountId, JobId, PackageId, RootId};

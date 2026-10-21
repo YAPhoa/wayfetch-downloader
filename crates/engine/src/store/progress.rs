@@ -1,25 +1,8 @@
-//! Durable transfer progress (architecture brief section 7.6, ADR-16;
-//! tests T23, T25, T27).
+//! Durable transfer progress (ADR-16).
 //!
-//! The rule: **the durable range map never outruns durable file data.**
-//!
-//! * A checkpoint can only be built by [`StagingFile::sync_ranges`], which
-//!   synchronizes the partial file first. A sync error is a failure, never
-//!   progress. The database commits afterwards, so a crash in between
-//!   leaves bytes on disk that the map does not trust, never the reverse.
-//! * Ranges are half-open byte intervals of the partial owned by one job
-//!   generation. A checkpoint from any other generation is rejected, so a
-//!   late writer from a cancelled or pre-restart run cannot claim coverage.
-//! * New ranges must not overlap ranges already durable or each other: each
-//!   byte is acknowledged once, by the writer that owns it. Adjacent ranges
-//!   are merged when stored.
-//! * Coverage is the set of committed ranges. File length is never used as
-//!   coverage, so a sparse or preallocated file with holes is not mistaken
-//!   for a complete one.
-//!
-//! * The synced file must be the staging file registered for that job
-//!   generation, matched by root, name, and file identity, so bytes written
-//!   to any other file cannot be certified.
+//! The durable range map never outruns durable file data: a checkpoint comes
+//! only from a synced staging file of the same job generation, ranges never
+//! overlap, and file length is never taken as coverage.
 
 use rangemap::RangeSet;
 use rusqlite::Transaction;

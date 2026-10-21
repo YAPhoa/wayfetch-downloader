@@ -1,10 +1,6 @@
-// The Plugins section of Settings: the programs Wayfetch runs for video
-// links, such as yt-dlp, which reads YouTube's titles and formats, and
-// ffmpeg, which joins a video with its sound and makes MP3 files. Each
-// shows the version it reports and whether it can be used. Each row's
-// menu turns its plugin off or on, checks for a newer official release of
-// one Wayfetch can update and installs it, and removes a copy Wayfetch
-// installed, going back to the copy included with Wayfetch, if any.
+// Settings > Plugins: the programs Wayfetch runs for video links, such as
+// yt-dlp and ffmpeg, with their versions and state. Each row's menu turns a
+// plugin on or off, updates it, or removes the copy Wayfetch installed.
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { pluginStatus, pluginUse } from '../client/media.js';

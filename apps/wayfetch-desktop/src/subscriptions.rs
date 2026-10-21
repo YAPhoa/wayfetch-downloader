@@ -1,20 +1,10 @@
-//! Event subscriptions delivered to renderers, bounded per renderer and in
-//! flight (architecture brief sections 4.7 and 7.8, ADR-28).
+//! Event subscriptions delivered to renderers, with flow control Tauri
+//! channels lack.
 //!
-//! Tauri delivers channel messages without flow control, so a renderer
-//! that stops reading would otherwise make the host queue messages for it
-//! without bound. Each subscription therefore sends at most [`WINDOW`]
-//! items the renderer has not acknowledged, then stops pulling from the
-//! engine; the engine's own bounded ring then decides when it must
-//! resynchronize. A renderer that acknowledges nothing for
-//! [`ACK_TIMEOUT`] while items wait is treated as gone: its subscription
-//! ends and frees its slot.
-//!
-//! A renderer holds at most [`MAX_PER_RENDERER`] subscriptions. A reload,
-//! navigation, or crash of the page closes all of them (the host calls
-//! [`Subscriptions::close_renderer`] when a page starts loading), so the
-//! new page starts from its own snapshot and cursor. None of this affects
-//! jobs: a subscription only watches.
+//! Each subscription keeps at most [`WINDOW`] unacknowledged items in flight
+//! and ends after [`ACK_TIMEOUT`] without acknowledgement. A renderer holds
+//! at most [`MAX_PER_RENDERER`], and a page load closes them all.
+//! Subscriptions only watch; they never affect jobs.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
