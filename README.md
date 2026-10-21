@@ -120,10 +120,10 @@ cp deploy/.env.example deploy/.env      # then set the two folders
 docker compose -f deploy/compose.yaml up -d
 ```
 
-Compose builds the image from this repository the first time. To run a
-published image instead, set `WAYFETCH_IMAGE` in `deploy/.env` to
-`ghcr.io/yaphoa/wayfetch-downloader:<version>` (Linux x86-64, `v0.1.1` or
-newer) or an immutable digest.
+Compose pulls `ghcr.io/yaphoa/wayfetch-downloader:v0.1.1` (Linux x86-64).
+Set `WAYFETCH_IMAGE` in `deploy/.env` to select another compatible version
+or an immutable digest. Existing 0.1.0 container installations must follow
+the [storage migration steps](deploy/README.md#upgrading-from-010).
 
 See [**`deploy/README.md`**](deploy/README.md) for full container operations, `wayfetch.toml` configuration policies, SSH port forwarding, and Caddy/Nginx reverse-proxy configurations.
 
