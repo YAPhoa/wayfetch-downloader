@@ -24,7 +24,7 @@ Install `wayfetch-downloader_VERSION_amd64.deb` (`sudo apt install ./FILE.deb`) 
 
 ### Building the packages
 
-[`deploy/desktop-release.sh`](../../deploy/desktop-release.sh) builds both packages and their `SHA256SUMS` in `target/release/bundle/` with the Tauri CLI. It needs the prerequisites below, Python 3 with pip, and `cargo install tauri-cli --version 2.12.3 --locked`. Build on the oldest distribution the packages should run on, since they need its glibc or newer. The release workflow ([`.github/workflows/desktop-release.yml`](../../.github/workflows/desktop-release.yml)) does this on Ubuntu 22.04 for a `vX.Y.Z` tag matching the workspace version (`v0.1.0` for the current `0.1.0`) and attaches the packages to a draft GitHub release; publishing the draft is a manual step.
+[`deploy/desktop-release.sh`](../../deploy/desktop-release.sh) builds both packages and their `SHA256SUMS` in `target/release/bundle/` with the Tauri CLI. It needs the prerequisites below, Python 3 with pip, and `cargo install tauri-cli --version 2.12.3 --locked`. Build on the oldest distribution the packages should run on, since they need its glibc or newer. The release workflow ([`.github/workflows/desktop-release.yml`](../../.github/workflows/desktop-release.yml)) does this on Ubuntu 22.04 for a `vX.Y.Z` tag matching the workspace version (`v0.1.1` for the current `0.1.1`) and attaches the packages to a draft GitHub release; publishing the draft is a manual step.
 
 ### Prerequisites (Debian / Ubuntu)
 

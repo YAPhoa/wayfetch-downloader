@@ -212,6 +212,14 @@ struct RunArgs {
     token_file: Option<PathBuf>,
     #[command(flatten)]
     browser: BrowserArgs,
+    /// Also initialize the download root, as `init-root` would, unless the
+    /// state directory records that it finished initializing: on the first
+    /// start, or a retry after an attempt failed partway. A finished root
+    /// is never initialized again, so one whose mount goes missing is still
+    /// refused. For a container whose download root is a mount Compose
+    /// checks.
+    #[arg(long)]
+    init_root_on_first_start: bool,
     /// Print one JSON object per line instead of text.
     #[arg(long)]
     json: bool,
@@ -242,6 +250,8 @@ enum Notice {
     SetupSecretIssued { path: PathBuf, valid_for_secs: u64 },
     /// Browsers may sign in from these origins.
     BrowserAccess { origins: Vec<String> },
+    /// The first start initialized the download root.
+    RootInitialized { path: PathBuf },
     /// The API is being served.
     Listening {
         address: SocketAddr,
@@ -287,6 +297,9 @@ impl Message for Notice {
             ),
             Self::BrowserAccess { origins } => {
                 format!("browser sign-in from {}", origins.join(", "))
+            }
+            Self::RootInitialized { path } => {
+                format!("first start: initialized download root {}", path.display())
             }
             Self::Listening { address, instance } => {
                 format!("wayfetchd serving http://{address}/v1 (instance {instance})")
@@ -399,6 +412,11 @@ async fn run(mut args: RunArgs, terminal: &Terminal) -> Result<ExitCode, String>
         .map(|config| BrowserAuth::open(config, address))
         .transpose()
         .map_err(|e| e.to_string())?;
+    if args.init_root_on_first_start && wayfetch_host::init_root_on_first_start(&settings)? {
+        print(&Notice::RootInitialized {
+            path: settings.root().to_owned(),
+        });
+    }
     let started = wayfetch_host::start_engine(settings).await?;
     let instance = started.owner.identity().instance;
     if let Some(reason) = started.root_problem() {

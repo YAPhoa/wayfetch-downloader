@@ -1,17 +1,46 @@
-# wayfetchd with least privilege (architecture brief section 11.4). Setup,
-# permissions, and networking are in deploy/README.md.
+# Wayfetch Downloader on a NAS or Linux server. Step-by-step setup is in
+# deploy/README.md.
 #
-# Every host path is required: nothing falls back to a directory inside
-# the container, and Compose refuses to start if a path does not exist.
+# You only need to set two folders, in a `.env` file beside this one (copy
+# .env.example) or by editing the lines marked "Your ...":
+#   WAYFETCH_DATA       Wayfetch's own data: job database, API token,
+#                       account key, browser sign-in. Back this folder up.
+#   WAYFETCH_DOWNLOADS  Where downloads are saved.
+# Both folders must already exist and belong to the user below; Compose
+# refuses to start otherwise, so an unmounted dataset is never written to.
+#
+# Then, from this folder: docker compose up -d
+# The first start builds the image (or pulls the one WAYFETCH_IMAGE names)
+# and marks the downloads folder as Wayfetch's; later starts refuse to save
+# into it if that mark is gone.
 services:
   wayfetchd:
-    image: ${WAYFETCH_IMAGE:-ghcr.io/yaphoa/wayfetch-downloader:v0.1.0}
+    image: ${WAYFETCH_IMAGE:-wayfetch:local}
     build:
       context: ..
       dockerfile: Dockerfile
-    # The owner of the three host directories. 568:568 is the TrueNAS
-    # SCALE apps identity.
+    # The user the container runs as, who must own both folders. 568:568 is
+    # the TrueNAS SCALE "apps" user.
     user: "${WAYFETCH_UID:-568}:${WAYFETCH_GID:-568}"
+    volumes:
+      # Your data folder.
+      - type: bind
+        source: ${WAYFETCH_DATA:?set WAYFETCH_DATA to the Wayfetch data folder (see deploy/.env.example)}
+        target: /data
+        bind: {create_host_path: false}
+      # Your downloads folder.
+      - type: bind
+        source: ${WAYFETCH_DOWNLOADS:?set WAYFETCH_DOWNLOADS to the downloads folder (see deploy/.env.example)}
+        target: /downloads
+        bind: {create_host_path: false}
+    # Only this machine can reach port 7878 unless WAYFETCH_PUBLISH says
+    # otherwise. The API has no TLS of its own; read deploy/README.md before
+    # opening it to the network.
+    ports:
+      - "${WAYFETCH_PUBLISH:-127.0.0.1:7878}:7878"
+    restart: unless-stopped
+
+    # Least privilege; nothing below needs changing.
     # Forwards signals and reaps children, so wayfetchd is not PID 1.
     init: true
     read_only: true
@@ -20,25 +49,7 @@ services:
     tmpfs:
       - /tmp:size=16m,mode=1777
     pids_limit: 128
-    volumes:
-      - type: bind
-        source: ${WAYFETCH_STATE:?set WAYFETCH_STATE to the state directory}
-        target: /state
-        bind: {create_host_path: false}
-      - type: bind
-        source: ${WAYFETCH_DOWNLOADS:?set WAYFETCH_DOWNLOADS to the download root}
-        target: /downloads
-        bind: {create_host_path: false}
-      - type: bind
-        source: ${WAYFETCH_TOKENS:?set WAYFETCH_TOKENS to the API token directory}
-        target: /tokens
-        bind: {create_host_path: false}
-    # Loopback of the host only. The API has no TLS of its own; see the
-    # deploy/README.md before publishing it anywhere else.
-    ports:
-      - "${WAYFETCH_PUBLISH:-127.0.0.1:7878}:7878"
     # On SIGTERM wayfetchd drains the API for up to 5 s, then gives engine
     # tasks up to 30 s to stop; the grace period covers both before Docker
     # sends SIGKILL.
     stop_grace_period: 45s
-    restart: unless-stopped

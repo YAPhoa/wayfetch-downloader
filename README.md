@@ -13,7 +13,7 @@ A Rust download manager built around one reusable download engine (`wayfetch-eng
 
 ## Version
 
-The current release is **0.1.0**, the first one. The workspace crates, the desktop packages, and the release tag (`v0.1.0`) share this version. The engine protocol is `0.1` and the state schema starts from a single migration; before 1.0 every minor release may change both incompatibly, so clients must match the engine's 0.x protocol version, and state directories from development builds before 0.1 are refused rather than upgraded.
+The current release is **0.1.1**. The workspace crates, the desktop packages, and the release tag (`v0.1.1`) share this version. The engine protocol is `0.1` and the state schema starts from a single migration; before 1.0 every minor release may change both incompatibly, so clients must match the engine's 0.x protocol version, and state directories from development builds before 0.1 are refused rather than upgraded.
 
 ## Core Capabilities
 
@@ -109,23 +109,21 @@ See [**`apps/wayfetchd/README.md`**](apps/wayfetchd/README.md) for the complete 
 
 The root `Dockerfile` packages `wayfetchd` alongside pinned, hash-verified copies of `yt-dlp`, `yt-dlp-ejs`, `deno`, and static `ffmpeg` on a distroless Debian 12 base (no shell or package manager). [`deploy/compose.yaml`](deploy/compose.yaml) runs it with a read-only root filesystem, `cap_drop: [ALL]`, `no-new-privileges`, a 128-process limit, and TrueNAS SCALE's `568:568` default UID/GID:
 
-```sh
-export WAYFETCH_STATE=/srv/wayfetch/state \
-       WAYFETCH_TOKENS=/srv/wayfetch/tokens \
-       WAYFETCH_DOWNLOADS=/srv/downloads
-mkdir -p "$WAYFETCH_STATE" "$WAYFETCH_TOKENS"
-sudo chown 568:568 "$WAYFETCH_STATE" "$WAYFETCH_TOKENS" "$WAYFETCH_DOWNLOADS"
-sudo chmod 700 "$WAYFETCH_STATE" "$WAYFETCH_TOKENS"
+It needs two host folders: `WAYFETCH_DATA` for Wayfetch's own data and `WAYFETCH_DOWNLOADS` for downloads, set in `deploy/.env` (copy [`deploy/.env.example`](deploy/.env.example)):
 
-docker compose -f deploy/compose.yaml pull
-docker compose -f deploy/compose.yaml run --rm wayfetchd init-root --state-dir /state /downloads
-docker compose -f deploy/compose.yaml up -d --no-build
+```sh
+sudo mkdir -p /mnt/tank/apps/wayfetch
+sudo chown 568:568 /mnt/tank/apps/wayfetch /mnt/tank/downloads
+sudo chmod 700 /mnt/tank/apps/wayfetch
+cp deploy/.env.example deploy/.env      # then set the two folders
+
+docker compose -f deploy/compose.yaml up -d
 ```
 
-Compose pulls `ghcr.io/yaphoa/wayfetch-downloader:v0.1.0` (Linux x86-64).
-Override `WAYFETCH_IMAGE` to select another tag or an immutable digest.
-For a local build, set `WAYFETCH_IMAGE=wayfetch:local` and run
-`docker compose -f deploy/compose.yaml build` instead of `pull`.
+Compose builds the image from this repository the first time. To run a
+published image instead, set `WAYFETCH_IMAGE` in `deploy/.env` to
+`ghcr.io/yaphoa/wayfetch-downloader:<version>` (Linux x86-64, `v0.1.1` or
+newer) or an immutable digest.
 
 See [**`deploy/README.md`**](deploy/README.md) for full container operations, `wayfetch.toml` configuration policies, SSH port forwarding, and Caddy/Nginx reverse-proxy configurations.
 
