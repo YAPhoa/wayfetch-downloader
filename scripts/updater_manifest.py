@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Write the desktop app's update manifest, latest.json, for a release.
 
-The desktop app reads it from the newest published release
-(releases/latest/download/latest.json) and installs the package for how it
+The desktop app reads it from the release its update check found
+(releases/download/TAG/latest.json, pre-releases included), refuses it
+unless its version is that release's, and installs the package for how it
 was installed, .deb or .rpm, after checking the package's signature. Each
 package needs its .sig file beside it, which `cargo tauri build` writes
 when TAURI_SIGNING_PRIVATE_KEY is set.

@@ -338,6 +338,9 @@ fn run_on(
     });
     // The window is gone, and with it every renderer.
     subscriptions.close_all();
+    if let Some(updates) = &updates {
+        updates.stop();
+    }
     let report = runtime.block_on(owner.shutdown(ShutdownRequest::default()));
     let stopped = stopped(&report);
     let clean = matches!(stopped, Notice::Stopped { clean: true, .. });

@@ -37,10 +37,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
-      "endpoints": [
-        "https://github.com/YAPhoa/wayfetch-downloader/releases/latest/download/latest.json"
-      ]
+      "pubkey": ""
     }
   },
   "bundle": {

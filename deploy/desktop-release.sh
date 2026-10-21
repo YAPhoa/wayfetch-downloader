@@ -12,8 +12,8 @@
 #
 # With TAURI_SIGNING_PRIVATE_KEY (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD)
 # set, also signs each package for the app's updater (a .sig beside it)
-# and writes latest.json, which installed apps read from the newest
-# published release.
+# and writes latest.json, which installed apps read from the release
+# their update check found.
 set -eu
 cd "$(dirname "$0")/.."
 rm -rf target/desktop-plugins target/release/bundle

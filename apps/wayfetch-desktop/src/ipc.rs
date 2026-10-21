@@ -339,10 +339,10 @@ pub async fn download_update(desktop: State<'_, Desktop>) -> IpcResult<()> {
     let query = Query::Updates { check: false };
     match desktop.engine.query(query, GRANTED).await? {
         QueryResult::Updates(UpdateCheck {
-            outcome: UpdateOutcome::Available { version, .. },
+            outcome: UpdateOutcome::Available { version, url },
             ..
         }) => {
-            updates.download_update(&version);
+            updates.download_update(&version, &url);
             Ok(())
         }
         _ => Err(ProtocolError::new(

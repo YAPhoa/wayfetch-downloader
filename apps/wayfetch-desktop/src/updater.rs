@@ -5,16 +5,21 @@
 //! the system asks for the password then.
 //!
 //! The updater runs from here only; the window gets none of its commands.
-//! It reads `latest.json` from the newest published release and checks
-//! the package's signature against the public key in `tauri.conf.json`. A
+//! It reads `latest.json` from the release the check found, pre-releases
+//! included, refuses one for any other version, and checks the package's
+//! signature against the public key in `tauri.conf.json`. A
 //! build without that key, or one not installed from a package, only
 //! links to the release.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Runtime, Url};
 use tauri_plugin_updater::{Error, Update, UpdaterExt};
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use wayfetch_engine::domain::name::DiagnosticText;
 use wayfetch_engine::protocol::update::UpdateInstall;
 use wayfetch_engine::protocol::{ErrorCode, ProtocolError};
@@ -32,6 +37,8 @@ struct Inner {
     state: Mutex<State>,
     /// Whether the app starts again once it has stopped.
     relaunch: AtomicBool,
+    /// Cancelled as the app stops, ending a download underway.
+    stop: CancellationToken,
 }
 
 #[derive(Default)]
@@ -158,8 +165,8 @@ impl Updates {
         Err(ProtocolError::new(ErrorCode::Internal, &problem))
     }
 
-    async fn download<R: Runtime>(self, app: AppHandle<R>, version: String) {
-        let problem = match self.fetch(&app, &version).await {
+    async fn download<R: Runtime>(self, app: AppHandle<R>, version: String, page: String) {
+        let problem = match self.fetch(&app, &version, &page).await {
             Ok(()) => return,
             Err(problem) => problem,
         };
@@ -169,30 +176,54 @@ impl Updates {
         }
     }
 
-    async fn fetch<R: Runtime>(&self, app: &AppHandle<R>, version: &str) -> Result<(), String> {
-        let update = app
-            .updater()
+    /// Reads the manifest of the release at `page`, which must be for
+    /// `version`, then downloads and verifies its package within [`LIMITS`].
+    async fn fetch<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        version: &str,
+        page: &str,
+    ) -> Result<(), String> {
+        let manifest = manifest_url(page).ok_or("the release's page is not a GitHub release")?;
+        let mut update = app
+            .updater_builder()
+            .endpoints(vec![manifest])
+            .map_err(|e| e.to_string())?
+            .timeout(MANIFEST_TIMEOUT)
+            // Whether the release is the one shown is checked below,
+            // with a clearer problem than "no update".
+            .version_comparator(|_, _| true)
+            .build()
             .map_err(|e| e.to_string())?
             .check()
             .await
             .map_err(|e| explain(&e))?
-            .ok_or("no package newer than this app was published")?;
-        let progress = self.0.clone();
-        let package = update
-            .download(
-                move |chunk, total| {
-                    if let State::Downloading {
-                        received, total: t, ..
-                    } = &mut *progress.state.lock().unwrap()
-                    {
-                        *received += chunk as u64;
-                        *t = total;
-                    }
-                },
-                || {},
-            )
-            .await
-            .map_err(|e| explain(&e))?;
+            .ok_or("this release has no package for this app")?;
+        if !same_version(&update.version, version) {
+            return Err(format!(
+                "the release's package is version {}, not {version}",
+                update.version
+            ));
+        }
+        // A backstop for the whole download; `bounded` says why first.
+        update.timeout = Some(LIMITS.deadline + LIMITS.stalled);
+        let watch = Arc::new(Watch::new(LIMITS.size));
+        let (progress, chunks) = (self.0.clone(), watch.clone());
+        let downloading = update.download(
+            move |chunk, total| {
+                if let State::Downloading {
+                    received, total: t, ..
+                } = &mut *progress.state.lock().unwrap()
+                {
+                    *received += chunk as u64;
+                    *t = total;
+                    chunks.chunk(*received, total);
+                }
+            },
+            || {},
+        );
+        let downloading = async { downloading.await.map_err(|e| explain(&e)) };
+        let package = bounded(downloading, &watch, LIMITS, &self.0.stop).await?;
         let mut state = self.0.state.lock().unwrap();
         if state.version() == Some(version) {
             *state = State::Ready {
@@ -202,6 +233,120 @@ impl Updates {
             };
         }
         Ok(())
+    }
+
+    /// Ends a download underway, as the app stops.
+    pub fn stop(&self) {
+        self.0.stop.cancel();
+    }
+}
+
+/// How long reading a release's manifest may take.
+const MANIFEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bounds on downloading a package, which the updater holds in memory
+/// until its signature is checked.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    /// The largest package taken; Wayfetch's are tens of megabytes.
+    size: u64,
+    /// How long a download may go without receiving anything.
+    stalled: Duration,
+    /// How long a whole download may take.
+    deadline: Duration,
+}
+
+const LIMITS: Limits = Limits {
+    size: 256 * 1024 * 1024,
+    stalled: Duration::from_secs(60),
+    deadline: Duration::from_secs(30 * 60),
+};
+
+/// Where the release whose page is `page` keeps its manifest:
+/// `…/releases/tag/v0.2.0` keeps it at `…/releases/download/v0.2.0/latest.json`.
+fn manifest_url(page: &str) -> Option<Url> {
+    let url = Url::parse(page).ok()?;
+    let (repository, tag) = url.path().rsplit_once("/releases/tag/")?;
+    if tag.is_empty() || tag.contains('/') {
+        return None;
+    }
+    let mut manifest = url.clone();
+    manifest.set_path(&format!("{repository}/releases/download/{tag}/latest.json"));
+    manifest.set_query(None);
+    manifest.set_fragment(None);
+    Some(manifest)
+}
+
+/// Whether two versions are the same, either written with a leading `v`.
+fn same_version(a: &str, b: &str) -> bool {
+    let parse = |text: &str| semver::Version::parse(text.strip_prefix('v').unwrap_or(text)).ok();
+    parse(a).is_some_and(|a| Some(a) == parse(b))
+}
+
+/// What a download has received, as its chunks arrive.
+#[derive(Debug)]
+struct Watch {
+    size: u64,
+    last: Mutex<Instant>,
+    oversized: AtomicBool,
+    wake: Notify,
+}
+
+impl Watch {
+    fn new(size: u64) -> Self {
+        Self {
+            size,
+            last: Mutex::new(Instant::now()),
+            oversized: AtomicBool::new(false),
+            wake: Notify::new(),
+        }
+    }
+
+    /// `received` bytes have arrived so far, of `total` if it was said.
+    fn chunk(&self, received: u64, total: Option<u64>) {
+        *self.last.lock().unwrap() = Instant::now();
+        if received > self.size || total.is_some_and(|total| total > self.size) {
+            self.oversized.store(true, Ordering::SeqCst);
+            self.wake.notify_one();
+        }
+    }
+}
+
+/// `work`, ended early when the package is too large, stops arriving, takes
+/// too long, or the app stops.
+async fn bounded<T>(
+    work: impl Future<Output = Result<T, String>>,
+    watch: &Watch,
+    limits: Limits,
+    stop: &CancellationToken,
+) -> Result<T, String> {
+    let deadline = Instant::now() + limits.deadline;
+    let watchdog = async {
+        loop {
+            let stalled = *watch.last.lock().unwrap() + limits.stalled;
+            tokio::select! {
+                () = watch.wake.notified() => {}
+                () = tokio::time::sleep_until(stalled.min(deadline).into()) => {}
+            }
+            if watch.oversized.load(Ordering::SeqCst) {
+                return format!(
+                    "the package is larger than {} MB, more than any Wayfetch release",
+                    limits.size / 1024 / 1024
+                );
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return "the download took too long; try again later".to_owned();
+            }
+            if now >= *watch.last.lock().unwrap() + limits.stalled {
+                return "the download stopped receiving data; try again later".to_owned();
+            }
+        }
+    };
+    tokio::select! {
+        result = work => result,
+        problem = watchdog => Err(problem),
+        () = stop.cancelled() => Err("the app stopped before the download finished".to_owned()),
     }
 }
 
@@ -222,9 +367,10 @@ fn explain(error: &Error) -> String {
 }
 
 impl Updates {
-    /// Starts downloading `version` in the background, unless it is already
-    /// on its way or ready. One that failed starts again.
-    pub fn download_update(&self, version: &str) {
+    /// Starts downloading `version`, the release at `page`, in the
+    /// background, unless it is already on its way or ready. One that
+    /// failed starts again.
+    pub fn download_update(&self, version: &str, page: &str) {
         let Some(app) = self.0.app.get().cloned() else {
             return;
         };
@@ -241,7 +387,11 @@ impl Updates {
                 total: None,
             };
         }
-        tauri::async_runtime::spawn(self.clone().download(app, version.to_owned()));
+        tauri::async_runtime::spawn(self.clone().download(
+            app,
+            version.to_owned(),
+            page.to_owned(),
+        ));
     }
 }
 
@@ -278,4 +428,118 @@ pub fn relaunch(env: &tauri::Env) {
 /// Lets the window's app reach the updater.
 pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R, tauri_plugin_updater::Config> {
     tauri_plugin_updater::Builder::new().build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SHORT: Limits = Limits {
+        size: 100,
+        stalled: Duration::from_millis(200),
+        deadline: Duration::from_secs(5),
+    };
+
+    #[test]
+    fn the_manifest_is_read_from_the_release_found() {
+        let page = "https://github.com/YAPhoa/wayfetch-downloader/releases/tag/v0.2.0-beta.1";
+        assert_eq!(
+            manifest_url(page).unwrap().as_str(),
+            "https://github.com/YAPhoa/wayfetch-downloader/releases/download/v0.2.0-beta.1/latest.json"
+        );
+        assert_eq!(
+            manifest_url("https://github.com/YAPhoa/wayfetch-downloader/releases"),
+            None
+        );
+        assert_eq!(manifest_url("https://github.com/o/r/releases/tag/"), None);
+        assert_eq!(manifest_url("not a page"), None);
+    }
+
+    #[test]
+    fn only_the_version_found_is_installed() {
+        assert!(same_version("0.2.0", "0.2.0"));
+        assert!(same_version("v0.2.0-beta.1", "0.2.0-beta.1"));
+        assert!(!same_version("0.1.1", "0.2.0"));
+        assert!(!same_version("0.2.0-beta.1", "0.2.0"));
+        assert!(!same_version("latest", "latest"));
+    }
+
+    #[tokio::test]
+    async fn a_download_that_keeps_arriving_finishes() {
+        let watch = Watch::new(SHORT.size);
+        let work = async {
+            for received in [40, 80] {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                watch.chunk(received, Some(80));
+            }
+            Ok("package")
+        };
+        let finished = bounded(work, &watch, SHORT, &CancellationToken::new()).await;
+        assert_eq!(finished, Ok("package"));
+    }
+
+    #[tokio::test]
+    async fn a_package_larger_than_any_release_is_refused() {
+        // Said up front, before anything is held.
+        let watch = Watch::new(SHORT.size);
+        let work = async {
+            watch.chunk(1, Some(1_000));
+            std::future::pending::<Result<(), String>>().await
+        };
+        let refused = bounded(work, &watch, SHORT, &CancellationToken::new()).await;
+        assert!(refused.unwrap_err().contains("larger than"));
+        // Or found out as it arrives.
+        let watch = Watch::new(SHORT.size);
+        let work = async {
+            watch.chunk(101, None);
+            std::future::pending::<Result<(), String>>().await
+        };
+        let refused = bounded(work, &watch, SHORT, &CancellationToken::new()).await;
+        assert!(refused.unwrap_err().contains("larger than"));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_or_slow_download_ends() {
+        let watch = Watch::new(SHORT.size);
+        let stalled = bounded(
+            std::future::pending::<Result<(), String>>(),
+            &watch,
+            SHORT,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(stalled.unwrap_err().contains("stopped receiving"));
+
+        let slow = Limits {
+            deadline: Duration::from_millis(300),
+            ..SHORT
+        };
+        let watch = Watch::new(slow.size);
+        let work = async {
+            // Never stalls, never finishes.
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                watch.chunk(1, None);
+            }
+        };
+        let ended = bounded(work, &watch, slow, &CancellationToken::new()).await;
+        assert_eq!(
+            ended,
+            Err::<(), _>("the download took too long; try again later".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_the_app_ends_a_download() {
+        let watch = Watch::new(SHORT.size);
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let ended = bounded(
+            std::future::pending::<Result<(), String>>(),
+            &watch,
+            SHORT,
+            &stop,
+        );
+        assert!(ended.await.unwrap_err().contains("app stopped"));
+    }
 }

@@ -64,6 +64,25 @@ mod tests {
                 if found == LATEST + 1 && supported == LATEST
         ));
     }
+
+    #[test]
+    fn a_released_database_upgrades_with_update_checks_on() {
+        // v0.1.1 shipped at schema version 2.
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(MIGRATIONS)
+            .to_version(&mut conn, 2)
+            .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
+        let automatic: i64 = conn
+            .query_row(
+                "SELECT automatic_update_checks FROM settings WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(automatic, 1);
+    }
+
     #[test]
     fn a_route_and_its_provider_operation_are_constrained() {
         let mut conn = Connection::open_in_memory().unwrap();
