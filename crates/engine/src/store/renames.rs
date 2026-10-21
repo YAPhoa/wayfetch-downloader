@@ -18,7 +18,7 @@ use wayfetch_protocol::{
 };
 
 use super::commands::{record, record_as, replayed};
-use super::{Store, StoreError, jobs, key, sql};
+use super::{OrCorrupt, Store, StoreError, jobs, key, sql};
 use crate::fs::{FileIdentity, PathError, PublishedFile, RelativePath};
 
 /// A rename recorded but not finished.
@@ -98,14 +98,13 @@ pub(super) fn published(
             id,
             key(root)?,
             PublishedFile {
-                path: RelativePath::new(&path)
-                    .map_err(|_| StoreError::Corrupt("publication target"))?,
+                path: RelativePath::new(&path).or_corrupt("publication target")?,
                 identity: FileIdentity {
                     device: device.cast_unsigned(),
                     inode: inode.cast_unsigned(),
                     birth_ns,
                 },
-                size: u64::try_from(size).map_err(|_| StoreError::Corrupt("size"))?,
+                size: u64::try_from(size).or_corrupt("size")?,
             },
         ))
     })
@@ -163,8 +162,7 @@ impl Store {
         if pending(&tx, *id)? {
             return Err(StoreError::Busy("the file is already being renamed").into());
         }
-        let (publication, root, file) =
-            published(&tx, *id)?.ok_or(StoreError::Corrupt("published file"))?;
+        let (publication, root, file) = published(&tx, *id)?.or_corrupt("published file")?;
         let to = renamed(&file.path, name)?;
         if to == file.path {
             let result = CommandResult::JobUpdated {
@@ -312,13 +310,12 @@ impl Store {
         rows.into_iter()
             .map(|(job, to)| {
                 let job = key(job)?;
-                let (_, root, file) =
-                    published(&tx, job)?.ok_or(StoreError::Corrupt("published file"))?;
+                let (_, root, file) = published(&tx, job)?.or_corrupt("published file")?;
                 Ok(RenameIntent {
                     job,
                     root,
                     file,
-                    to: RelativePath::new(&to).map_err(|_| StoreError::Corrupt("rename target"))?,
+                    to: RelativePath::new(&to).or_corrupt("rename target")?,
                 })
             })
             .collect()

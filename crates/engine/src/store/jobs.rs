@@ -20,7 +20,7 @@ use wayfetch_protocol::query::{
 };
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
-use super::{Store, StoreError, files, key, links, media, operations, outbox, sql};
+use super::{OrCorrupt, Store, StoreError, files, key, links, media, operations, outbox, sql};
 use crate::transfer::transport::Reach;
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
@@ -219,17 +219,16 @@ impl RawJob {
     }
 
     fn decode(self) -> Result<StoredJob, StoreError> {
-        let desired = DesiredState::from_str(&self.desired)
-            .map_err(|_| StoreError::Corrupt("desired state"))?;
-        let stage = JobStage::from_str(&self.stage).map_err(|_| StoreError::Corrupt("stage"))?;
+        let desired = DesiredState::from_str(&self.desired).or_corrupt("desired state")?;
+        let stage = JobStage::from_str(&self.stage).or_corrupt("stage")?;
         let state = JobState::restore(desired, stage, key(self.generation)?, key(self.revision)?)
-            .map_err(|_| StoreError::Corrupt("job state"))?;
-        let bytes = |v: i64| u64::try_from(v).map_err(|_| StoreError::Corrupt("byte count"));
+            .or_corrupt("job state")?;
+        let bytes = |v: i64| u64::try_from(v).or_corrupt("byte count");
         // Stored links were validated on submission, so each has a host.
         let original_host = url::Url::parse(&self.input_url)
             .ok()
             .and_then(|url| HostName::new(url.host_str()?).ok())
-            .ok_or(StoreError::Corrupt("source link"))?;
+            .or_corrupt("source link")?;
         let name = self
             .name
             .as_deref()
@@ -247,8 +246,7 @@ impl RawJob {
                 .failure_code
                 .map(|code| {
                     Ok::<_, StoreError>(FailureSummary {
-                        code: FailureCode::from_str(&code)
-                            .map_err(|_| StoreError::Corrupt("failure code"))?,
+                        code: FailureCode::from_str(&code).or_corrupt("failure code")?,
                         retry_at: self.failure_retry_at.map(UtcTimestamp::from_unix_millis),
                         message: self.failure_message.as_deref().map(DiagnosticText::new),
                     })
@@ -286,8 +284,7 @@ fn decode_media(
     service
         .map(|service| {
             Ok(JobMedia {
-                service: ProviderId::new(service)
-                    .map_err(|_| StoreError::Corrupt("media service"))?,
+                service: ProviderId::new(service).or_corrupt("media service")?,
                 choice: media::decode_choice(choice)?,
             })
         })
@@ -677,10 +674,9 @@ impl Store {
             }
             ready.push(Admission {
                 job: id,
-                stage: JobStage::from_str(&stage).map_err(|_| StoreError::Corrupt("stage"))?,
+                stage: JobStage::from_str(&stage).or_corrupt("stage")?,
                 generation: key(generation)?,
-                desired: DesiredState::from_str(&desired)
-                    .map_err(|_| StoreError::Corrupt("desired state"))?,
+                desired: DesiredState::from_str(&desired).or_corrupt("desired state")?,
                 url,
                 root: root.map(key).transpose()?,
                 route: operations::decode_route(service, account)?,
@@ -815,9 +811,7 @@ impl Store {
                 QueryResult::Jobs(Page {
                     items,
                     next_after,
-                    before: Some(
-                        u64::try_from(before).map_err(|_| StoreError::Corrupt("job count"))?,
-                    ),
+                    before: Some(u64::try_from(before).or_corrupt("job count")?),
                     as_of,
                 })
             }
@@ -835,8 +829,8 @@ impl Store {
                     .map(|row| {
                         let (stage, count) = row?;
                         Ok((
-                            JobStage::from_str(&stage).map_err(|_| StoreError::Corrupt("stage"))?,
-                            u64::try_from(count).map_err(|_| StoreError::Corrupt("count"))?,
+                            JobStage::from_str(&stage).or_corrupt("stage")?,
+                            u64::try_from(count).or_corrupt("count")?,
                         ))
                     })
                     .collect::<Result<_, StoreError>>()?;

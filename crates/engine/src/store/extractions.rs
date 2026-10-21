@@ -18,7 +18,7 @@ use wayfetch_domain::version::{Generation, Revision};
 use wayfetch_protocol::query::{ExtractionState, ExtractionSummary};
 use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 
-use super::{Store, StoreError, jobs, key, renames, sql};
+use super::{OrCorrupt, Store, StoreError, jobs, key, renames, sql};
 use crate::extract::{ArchiveName, Layout};
 use crate::fs::{PublishedFile, RelativePath};
 
@@ -35,8 +35,7 @@ pub(super) fn decode(
         return Ok(None);
     };
     Ok(Some(ExtractionSummary {
-        state: ExtractionState::from_str(&state)
-            .map_err(|_| StoreError::Corrupt("extraction state"))?,
+        state: ExtractionState::from_str(&state).or_corrupt("extraction state")?,
         generation: generation.map(key).transpose()?,
         output,
         problem: problem.as_deref().map(DiagnosticText::new),
@@ -87,8 +86,7 @@ fn row(tx: &Transaction<'_>, job: JobId) -> Result<Option<(ExtractionState, i64)
     .optional()?
     .map(|(state, generation)| {
         Ok((
-            ExtractionState::from_str(&state)
-                .map_err(|_| StoreError::Corrupt("extraction state"))?,
+            ExtractionState::from_str(&state).or_corrupt("extraction state")?,
             generation,
         ))
     })
