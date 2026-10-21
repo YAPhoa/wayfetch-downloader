@@ -77,13 +77,29 @@ impl Store {
         .transpose()
     }
 
-    /// Records the root a sentinel names, found at `path`. Refused if that
-    /// ID is recorded at another path: the root moved, or a sentinel was
+    /// Whether the root at `path` is recorded and finished initializing.
+    pub(crate) fn root_initialized(&mut self, path: &Path) -> Result<bool, StoreError> {
+        let path = path_text(path)?;
+        let tx = self.read()?;
+        Ok(tx
+            .query_row(
+                "SELECT initialized FROM roots WHERE path = ?1",
+                [path],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// Records the root a sentinel names, found at `path`: `initialized`
+    /// unless an initialization is still to finish it. Refused if that ID
+    /// is recorded at another path: the root moved, or a sentinel was
     /// copied, and either way the operator decides.
     pub(crate) fn adopt_root(
         &mut self,
         id: RootId,
         path: &Path,
+        initialized: bool,
         now: UtcTimestamp,
     ) -> Result<(), StoreError> {
         let text = path_text(path)?;
@@ -98,8 +114,9 @@ impl Store {
             Some(recorded) => return Err(StoreError::RootMoved { id, recorded }),
             None => {
                 tx.execute(
-                    "INSERT INTO roots (id, path, registered, created_at) VALUES (?1, ?2, 0, ?3)",
-                    params![sql(id)?, text, now.unix_millis()],
+                    "INSERT INTO roots (id, path, registered, initialized, created_at) \
+                     VALUES (?1, ?2, 0, ?3, ?4)",
+                    params![sql(id)?, text, initialized, now.unix_millis()],
                 )?;
             }
         }
@@ -117,12 +134,21 @@ impl Store {
         let text = path_text(path)?;
         let tx = self.write()?;
         tx.execute(
-            "INSERT INTO roots (path, registered, created_at) VALUES (?1, ?2, ?3)",
+            "INSERT INTO roots (path, registered, initialized, created_at) \
+             VALUES (?1, ?2, 0, ?3)",
             params![text, registered, now.unix_millis()],
         )?;
         let id = key(tx.last_insert_rowid())?;
         tx.commit()?;
         Ok(id)
+    }
+
+    /// Marks root `id` as initialized: its marker and folders are written.
+    pub(crate) fn root_was_initialized(&mut self, id: RootId) -> Result<(), StoreError> {
+        let tx = self.write()?;
+        tx.execute("UPDATE roots SET initialized = 1 WHERE id = ?1", [sql(id)?])?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Marks root `id` as registered on the user's request, which also
@@ -458,10 +484,15 @@ mod tests {
         // The root earlier versions marked as 1 is recorded from its
         // sentinel, and later IDs continue past it.
         store
-            .adopt_root(RootId::from_u64(1).unwrap(), Path::new("/legacy"), now())
+            .adopt_root(
+                RootId::from_u64(1).unwrap(),
+                Path::new("/legacy"),
+                true,
+                now(),
+            )
             .unwrap();
         store
-            .adopt_root(RootId::from_u64(9).unwrap(), Path::new("/b"), now())
+            .adopt_root(RootId::from_u64(9).unwrap(), Path::new("/b"), true, now())
             .unwrap();
         let next = store.allocate_root(Path::new("/c"), true, now()).unwrap();
         assert_eq!(next.get(), 10);
@@ -478,9 +509,9 @@ mod tests {
     fn a_sentinel_recorded_elsewhere_is_refused() {
         let (_dir, mut store) = store();
         let id = store.allocate_root(Path::new("/a"), false, now()).unwrap();
-        store.adopt_root(id, Path::new("/a"), now()).unwrap();
+        store.adopt_root(id, Path::new("/a"), true, now()).unwrap();
         assert!(matches!(
-            store.adopt_root(id, Path::new("/copy"), now()),
+            store.adopt_root(id, Path::new("/copy"), true, now()),
             Err(StoreError::RootMoved { recorded, .. }) if recorded == "/a"
         ));
         // One path holds one root.

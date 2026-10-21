@@ -44,12 +44,9 @@ The root [`Dockerfile`](../Dockerfile) builds `wayfetchd` with the toolchain pin
 - `cap_drop: [ALL]`, `no-new-privileges:true`, `pids_limit: 128`, and `init: true`
 - `stop_grace_period: 45s` (covering the 5s HTTP API drain plus 30s engine task shutdown before Docker sends `SIGKILL`)
 
-### 1. Choose the Image & Prepare Host Directories
+### Quick start
 
-Compose defaults to `ghcr.io/yaphoa/wayfetch-downloader:v0.1.0`. Published images
-currently support **Linux x86-64 (`amd64`)**. Set `WAYFETCH_IMAGE` to choose a
-different version or pin an immutable `ghcr.io/yaphoa/wayfetch-downloader@sha256:…`
-digest. The image includes the web UI; it needs no separate frontend container.
+Compose builds the image (`wayfetch:local`) from this repository the first time. The image includes the web UI; no separate frontend container is needed. To run a published image instead, set `WAYFETCH_IMAGE` in `deploy/.env` to `ghcr.io/yaphoa/wayfetch-downloader:<version>` (Linux x86-64) or pin an immutable `ghcr.io/yaphoa/wayfetch-downloader@sha256:…` digest. This layout needs `v0.1.1` or newer; `v0.1.0` expects the earlier three-folder layout.
 
 The **Container image** GitHub Actions workflow builds and runs the Compose
 integration tests before publishing. Published stable releases also update
@@ -63,46 +60,47 @@ GHCR packages initially default to private. A private package requires
 `docker login ghcr.io` with an account allowed to read it; public packages
 can be pulled without signing in.
 
-The container writes only to three explicit bind mounts (`/state`, `/downloads`, `/tokens`) with `create_host_path: false`—Compose refuses to start if a host directory is missing, preventing accidental writes to an unmounted dataset or container overlay.
+You need Docker with the Compose plugin, and two folders: one for Wayfetch's own data and one for downloads.
+
+**1. Create the data folder and give both folders to the container's user** (`1000:1000` unless you set `WAYFETCH_UID`/`WAYFETCH_GID`). Change ownership of these two folders only, never recursively across a whole media folder:
 
 ```sh
-# Prepare the three host directories (change ownership only on these directories,
-# never recursively across an entire media folder)
-export WAYFETCH_STATE=/srv/wayfetch/state \
-       WAYFETCH_TOKENS=/srv/wayfetch/tokens \
-       WAYFETCH_DOWNLOADS=/srv/downloads
-mkdir -p "$WAYFETCH_STATE" "$WAYFETCH_TOKENS"
-sudo chown 1000:1000 "$WAYFETCH_STATE" "$WAYFETCH_TOKENS" "$WAYFETCH_DOWNLOADS"
-sudo chmod 700 "$WAYFETCH_STATE" "$WAYFETCH_TOKENS"
+sudo mkdir -p /srv/wayfetch/data
+sudo chown 1000:1000 /srv/wayfetch/data /srv/wayfetch/downloads
+sudo chmod 700 /srv/wayfetch/data
 ```
 
-Save `WAYFETCH_STATE`, `WAYFETCH_TOKENS`, and `WAYFETCH_DOWNLOADS` in a `.env` file beside `deploy/compose.yaml` so you do not need to re-export them.
-
-Pull the prebuilt image after setting the paths:
+**2. Tell Compose where they are:** copy [`.env.example`](.env.example) to `deploy/.env` and set the two paths.
 
 ```sh
-docker compose -f deploy/compose.yaml pull
+cp deploy/.env.example deploy/.env
+nano deploy/.env        # WAYFETCH_DATA and WAYFETCH_DOWNLOADS
 ```
 
-To build locally instead, set and save `WAYFETCH_IMAGE=wayfetch:local`, then run
-`docker compose -f deploy/compose.yaml build`. Local builds use the same
-Dockerfile as GHCR publishing.
-
-### 2. Initialize the Download Root & Start
-
-Initializing the download root is an explicit one-time step so an unmounted drive or network share is never mistaken for an empty download directory:
+**3. Start it** (the first time, this builds the image, which takes a while):
 
 ```sh
-docker compose -f deploy/compose.yaml run --rm wayfetchd \
-    init-root --state-dir /state /downloads
-docker compose -f deploy/compose.yaml up -d --no-build
-docker compose -f deploy/compose.yaml ps          # becomes healthy once ready
+docker compose -f deploy/compose.yaml up -d
+docker compose -f deploy/compose.yaml ps          # "healthy" once ready
 ```
 
-On first start, `wayfetchd` creates `$WAYFETCH_TOKENS/api-tokens` (`mode 600`) with a single all-permissions token. Read it from the host to use the API:
+On its first start, Wayfetch writes a small marker into the downloads folder. On every later start it checks for that marker and refuses to save anything if it is missing, so an unmounted drive or network share is never mistaken for an empty folder. If that happens, mount the dataset again and restart; if you really moved downloads to a new, empty folder, mark it once with `docker compose -f deploy/compose.yaml run --rm wayfetchd init-root --state-dir /data/state /downloads`. Compose also refuses to start if either host folder is missing (`create_host_path: false`), so nothing is written into the container by mistake.
+
+### What lives in the data folder
+
+| Path in `WAYFETCH_DATA` | What it is |
+|---|---|
+| `state/` | The engine's database and partial downloads' bookkeeping |
+| `api-tokens` | API bearer tokens (`mode 600`), created on first start with one token holding every permission |
+| `credential-key` | Encrypts provider accounts (such as Real-Debrid); created when the first account is added |
+| `auth/` | The browser owner account, when browser sign-in is turned on |
+
+Back up the whole folder: the account key is needed to read the accounts saved in `state/`.
+
+### Using the API
 
 ```sh
-TOKEN=$(sudo awk '!/^#/ {print $1; exit}' "$WAYFETCH_TOKENS/api-tokens")
+TOKEN=$(sudo awk '!/^#/ {print $1; exit}' /srv/wayfetch/data/api-tokens)
 API=http://127.0.0.1:7878
 INSTANCE=$(curl -s -H "Authorization: Bearer $TOKEN" "$API/v1/capabilities" | jq -r .instance)
 
@@ -111,8 +109,6 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     "$API/v1/inputs"
 curl -s -H "Authorization: Bearer $TOKEN" "$API/v1/jobs"
 ```
-
-When the first provider account (such as Real-Debrid) is added, `wayfetchd` creates `$WAYFETCH_TOKENS/credential-key` (`mode 600`) beside the token file. Back up `credential-key` alongside `$WAYFETCH_STATE`.
 
 ---
 
@@ -134,17 +130,17 @@ ssh -N -L 7878:127.0.0.1:7878 user@server
 Browsers require HTTPS for `__Host-wayfetch-session` cookies. Place a TLS reverse proxy in front of `127.0.0.1:7878` and enable `--auth-dir` and `--browser-origin` in `compose.yaml`:
 
 ```yaml
-    command: ["run", "--state-dir", "/state", "--download-root", "/downloads",
-              "--token-file", "/tokens/api-tokens", "--listen", "0.0.0.0:7878",
-              "--auth-dir", "/tokens/auth",
+    command: ["run", "--state-dir", "/data/state", "--download-root", "/downloads",
+              "--token-file", "/data/api-tokens", "--listen", "0.0.0.0:7878",
+              "--init-root-on-first-start", "--auth-dir", "/data/auth",
               "--browser-origin", "https://wayfetch.example.lan"]
 ```
 
-Read the initial one-time setup secret from `$WAYFETCH_TOKENS/auth/setup-secret` within 15 minutes of startup. To reset a forgotten owner password later:
+Read the initial one-time setup secret from `$WAYFETCH_DATA/auth/setup-secret` within 15 minutes of startup. To reset a forgotten owner password later:
 
 ```sh
 docker compose -f deploy/compose.yaml stop
-docker compose -f deploy/compose.yaml run --rm wayfetchd reset-owner --auth-dir /tokens/auth
+docker compose -f deploy/compose.yaml run --rm wayfetchd reset-owner --auth-dir /data/auth
 docker compose -f deploy/compose.yaml start
 ```
 

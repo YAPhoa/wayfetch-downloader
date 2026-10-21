@@ -87,9 +87,8 @@ fn bridge_gateway() -> IpAddr {
 struct Stack {
     project: String,
     tmp: tempfile::TempDir,
-    state: PathBuf,
+    data: PathBuf,
     downloads: PathBuf,
-    tokens: PathBuf,
     uid: u32,
     gid: u32,
 }
@@ -112,14 +111,13 @@ impl Stack {
                 "wayfetch-test-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..12]
             ),
-            state: tmp.path().join("state"),
+            data: tmp.path().join("data"),
             downloads: tmp.path().join("downloads"),
-            tokens: tmp.path().join("tokens"),
             tmp,
             uid,
             gid,
         };
-        for dir in [&stack.state, &stack.downloads, &stack.tokens] {
+        for dir in [&stack.data, &stack.downloads] {
             std::fs::create_dir(dir).unwrap();
             std::os::unix::fs::chown(dir, Some(uid), Some(gid)).unwrap();
         }
@@ -174,9 +172,8 @@ impl Stack {
             .env("WAYFETCH_IMAGE", image())
             .env("WAYFETCH_UID", self.uid.to_string())
             .env("WAYFETCH_GID", self.gid.to_string())
-            .env("WAYFETCH_STATE", &self.state)
+            .env("WAYFETCH_DATA", &self.data)
             .env("WAYFETCH_DOWNLOADS", downloads)
-            .env("WAYFETCH_TOKENS", &self.tokens)
             // Any free port on the host's loopback.
             .env("WAYFETCH_PUBLISH", "127.0.0.1:0")
             .output()
@@ -197,24 +194,6 @@ impl Stack {
             self.logs()
         );
         lossy(&out.stdout).trim().to_owned()
-    }
-
-    fn init_root(&self) {
-        let out = self.ok(&[
-            "run",
-            "--rm",
-            "--no-deps",
-            "-T",
-            "wayfetchd",
-            "init-root",
-            "--state-dir",
-            "/state",
-            "/downloads",
-        ]);
-        assert!(
-            out.contains("initialized download root /downloads"),
-            "{out}"
-        );
     }
 
     /// Starts the service and waits until its API answers. Returns its
@@ -254,9 +233,9 @@ impl Stack {
         client
     }
 
-    /// The token the daemon generated in the token mount.
+    /// The token the daemon generated in the data mount.
     fn token(&self) -> String {
-        let text = std::fs::read_to_string(self.tokens.join("api-tokens")).unwrap();
+        let text = std::fs::read_to_string(self.data.join("api-tokens")).unwrap();
         let line = text.lines().find(|l| !l.starts_with('#')).unwrap();
         line.split_once(' ').unwrap().0.to_owned()
     }
@@ -332,7 +311,7 @@ impl Stack {
             "--no-deps",
             "-T",
             "--env",
-            "DENO_DIR=/state/cache/yt-dlp/deno",
+            "DENO_DIR=/data/state/cache/yt-dlp/deno",
             "--entrypoint",
             "/usr/local/bin/deno",
             "wayfetchd",
@@ -394,8 +373,13 @@ async fn a_recreated_container_resumes_and_publishes() {
     let server = Server::https_on(gateway).await;
     let data = stalled(&server, "/r.bin");
     let stack = Stack::new(&server, gateway);
-    stack.init_root();
+    // The first start initializes the download root by itself.
     let client = stack.up().await;
+    let logs = stack.logs();
+    assert!(
+        logs.contains("first start: initialized download root /downloads"),
+        "{logs}"
+    );
     stack.assert_restricted();
     client.serves_the_ui().await;
     stack.runs_its_plugins(&client).await;
@@ -478,7 +462,6 @@ async fn a_second_container_cannot_take_the_state_directory() {
     let gateway = bridge_gateway();
     let server = Server::https_on(gateway).await;
     let stack = Stack::new(&server, gateway);
-    stack.init_root();
     let client = stack.up().await;
 
     for args in [
@@ -491,7 +474,7 @@ async fn a_second_container_cannot_take_the_state_directory() {
             "wayfetchd",
             "init-root",
             "--state-dir",
-            "/state",
+            "/data/state",
             "/downloads",
         ],
     ] {
@@ -527,9 +510,17 @@ async fn a_missing_root_is_refused_not_written_into() {
     assert!(!missing.exists());
     stack.ok(&["down"]);
 
-    // An existing directory that was never initialized, such as an
-    // unmounted dataset's empty mount point: the daemon serves but is not
-    // ready, and a download waits instead of writing there.
+    // The first start initializes the download root it is given.
+    let first = stack.tmp.path().join("first");
+    std::fs::create_dir(&first).unwrap();
+    std::os::unix::fs::chown(&first, Some(stack.uid), Some(stack.gid)).unwrap();
+    let out = stack.compose_with(&first, &["up", "--detach", "--wait"]);
+    assert!(out.status.success(), "{out:?}{}", stack.logs());
+    stack.ok(&["stop"]);
+
+    // On a later start, an existing directory that was never initialized,
+    // such as an unmounted drive's empty mount point: the daemon serves
+    // but is not ready, and a download waits instead of writing there.
     let base = stack.start().await;
     let client = Client::new(&base, "", Some(&stack.token()));
     let anonymous = Client::new(&base, "", None);

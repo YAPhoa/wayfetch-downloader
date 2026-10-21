@@ -1489,6 +1489,56 @@ async fn readiness_needs_no_token_and_requires_a_usable_root() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_download_root_is_initialized_until_recorded_but_never_again() {
+    let server = Server::https().await;
+    let mut dirs = Dirs::new(&server);
+    dirs.args.push("--init-root-on-first-start".into());
+
+    // The first start fails because the root cannot be initialized yet; it
+    // is retried on the next start.
+    std::fs::remove_dir(&dirs.root).unwrap();
+    let out = Daemon::command(&dirs).output().await.unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot initialize"), "{stderr}");
+    std::fs::create_dir(&dirs.root).unwrap();
+
+    // The root is initialized, and the daemon is ready without `init-root`.
+    let daemon = Daemon::start(&dirs).await;
+    assert!(
+        daemon
+            .transcript
+            .iter()
+            .any(|l| l.contains("root_initialized")),
+        "{:?}",
+        daemon.transcript
+    );
+    let anonymous = Client::new(&daemon.base, &daemon.instance, None);
+    let (status, _) = anonymous.get("/v1/ready").await;
+    assert_eq!(status, StatusCode::OK);
+    daemon.stop("TERM").await;
+
+    // Later, the mount is gone and an empty folder is in its place: the
+    // state directory recorded the root, so nothing initializes or writes
+    // into it.
+    let moved = dirs.tmp.path().join("moved");
+    std::fs::rename(&dirs.root, &moved).unwrap();
+    std::fs::create_dir(&dirs.root).unwrap();
+    let daemon = Daemon::start(&dirs).await;
+    assert!(
+        !daemon
+            .transcript
+            .iter()
+            .any(|l| l.contains("root_initialized"))
+    );
+    let anonymous = Client::new(&daemon.base, &daemon.instance, None);
+    let (status, _) = anonymous.get("/v1/ready").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(std::fs::read_dir(&dirs.root).unwrap().count(), 0);
+    daemon.stop("TERM").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_stuck_readiness_check_neither_piles_up_nor_holds_up_exit() {
     let server = Server::https().await;
     let dirs = Dirs::ready(&server);

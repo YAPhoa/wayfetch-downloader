@@ -37,7 +37,7 @@ pub use config::{
     ConfigError, EngineConfig, IntegerPolicy, Limits, Policy, Preference, SpeedLimitPolicy,
     Timeouts,
 };
-pub use destinations::{RootError, initialize_root};
+pub use destinations::{RootError, initialize_new_root, initialize_root};
 #[cfg(feature = "failpoints")]
 pub use fail;
 pub use lifecycle::{
