@@ -30,7 +30,7 @@
 //! Rotating the key, and recovering from losing it, are not supported:
 //! with the key gone, the accounts must be removed and signed in again.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,6 +44,7 @@ use wayfetch_protocol::{ErrorCode, ProtocolError};
 use zeroize::Zeroizing;
 
 use super::Secret;
+use crate::fs::{create_private, is_private};
 
 /// Bytes of key material in the key file.
 const KEY_BYTES: usize = 32;
@@ -345,7 +346,10 @@ fn read_key(path: &Path) -> Result<Option<Keys>, String> {
             ));
         }
     };
-    if !is_private(&file).map_err(|e| format!("the credential key file {shown}: {e}"))? {
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("the credential key file {shown}: {e}"))?;
+    if !is_private(&metadata) {
         return Err(format!(
             "the credential key file {shown} is accessible to other users; make it owner-only (mode 600)"
         ));
@@ -397,35 +401,6 @@ fn decode_hex(text: &str) -> Option<Zeroizing<[u8; KEY_BYTES]>> {
         *byte = u8::try_from(value(pair[0])? << 4 | value(pair[1])?).ok()?;
     }
     Some(out)
-}
-
-#[cfg(unix)]
-fn create_private(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn create_private(path: &Path) -> io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).open(path)
-}
-
-/// Whether only the file's owner may read or write it.
-#[cfg(unix)]
-fn is_private(file: &File) -> io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(file.metadata()?.mode() & 0o077 == 0)
-}
-
-/// Other platforms' permissions are not checked here; the file still
-/// lives outside the state directory.
-#[cfg(not(unix))]
-fn is_private(_file: &File) -> io::Result<bool> {
-    Ok(true)
 }
 
 #[cfg(test)]

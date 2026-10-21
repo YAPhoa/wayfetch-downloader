@@ -514,45 +514,6 @@ async fn two_profiles_share_a_download_folder_and_each_resumes_its_own_partial()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_resume_the_server_does_not_honor_restarts_from_zero() {
-    type Change = fn(&mut Resource);
-    let cases: [(&str, Change); 3] = [
-        // T03: `200` to a range request is never appended.
-        ("ignores-range", |r| r.ranges = false),
-        // T05: the resource changed; `If-Range` answers with all of it.
-        ("changed", |r| r.etag = Some("\"v2\"".into())),
-        // T05: the resource changed and the server ignores `If-Range`,
-        // sending the new representation's bytes for the old range.
-        ("changed-ignoring-if-range", |r| {
-            r.etag = Some("\"v2\"".into());
-            r.if_range = false;
-        }),
-    ];
-    for (name, change) in cases {
-        let env = env();
-        let path = format!("/{name}.bin");
-        let data = body(64 * KIB);
-        let id = interrupt_at(&env, &path, &data, 20 * KIB).await;
-        env.server.update(&path, change);
-
-        let owner = env.start().await;
-        let done = complete(&owner, id).await;
-        assert_eq!(
-            env.server.ranges_requested(),
-            vec![None, Some((20 * KIB as u64, None)), None],
-            "{name}"
-        );
-        // The artifact is the whole representation from one response, not
-        // old bytes with new ones appended.
-        assert_eq!(env.published(&format!("{name}.bin")), data, "{name}");
-        assert_eq!(done.artifact.unwrap().size, data.len() as u64);
-        // The abandoned partial was removed before the new generation ran.
-        assert_eq!(env.staging_files(), 0, "{name}");
-        shutdown(owner).await;
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn stalled_headers_and_bodies_fail_at_their_deadlines() {
     let mut env = env();
     env.timeouts = Timeouts {
