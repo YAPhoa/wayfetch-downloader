@@ -69,6 +69,13 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 1 });
  * @typedef {import('./generated/ExtractionState.js').ExtractionState} ExtractionState
  * @typedef {import('./generated/ExtractRequest.js').ExtractRequest} ExtractRequest
  * @typedef {import('./generated/JobCommandRequest.js').JobCommandRequest} JobCommandRequest
+ * @typedef {import('./generated/SubmitRequest.js').SubmitRequest} SubmitRequest
+ * @typedef {import('./generated/CollectRequest.js').CollectRequest} CollectRequest
+ * @typedef {import('./generated/LinksCommandRequest.js').LinksCommandRequest} LinksCommandRequest
+ * @typedef {import('./generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
+ * @typedef {import('./generated/ChangePluginRequest.js').ChangePluginRequest} ChangePluginRequest
+ * @typedef {import('./generated/AuthorizeAccountRequest.js').AuthorizeAccountRequest} AuthorizeAccountRequest
+ * @typedef {import('./generated/AccountCommandRequest.js').AccountCommandRequest} AccountCommandRequest
  * @typedef {Exclude<JobAction, 'rename' | 'remove' | 'delete_files' | 'cancel_extraction'>} StateAction The
  *   actions that change whether a job runs.
  */
@@ -268,6 +275,64 @@ export function extractRequest({ idempotencyKey, target, expectedRevision, expec
   if (expectedGeneration !== undefined) request.expected_generation = expectedGeneration;
   if (password !== undefined) request.password = password;
   return request;
+}
+
+// The requests both transports send for each client method.
+
+/**
+ * The arguments of the client method `M`.
+ * @template {keyof WayfetchClient} M
+ * @typedef {Parameters<Extract<WayfetchClient[M], (...args: any[]) => unknown>>} Args
+ */
+
+/** @param {Args<'submit'>[0]} request @returns {SubmitRequest} */
+export function submitRequest({ idempotencyKey, target, items }) {
+  return { idempotency_key: idempotencyKey, target, items };
+}
+
+/** @param {Args<'collectLinks'>[0]} request @returns {CollectRequest} */
+export function collectRequest({ idempotencyKey, target, text, baseUrl, mode, destination }) {
+  /** @type {CollectRequest} */
+  const request = { idempotency_key: idempotencyKey, target, text };
+  if (baseUrl) request.base_url = baseUrl;
+  if (mode) request.mode = mode;
+  if (destination) request.destination = destination;
+  return request;
+}
+
+/** @param {Args<'linksCommand'>[0]} request @returns {LinksCommandRequest} */
+export function linksCommandRequest({ idempotencyKey, target, action, links, destination, account, routing, media }) {
+  /** @type {LinksCommandRequest} */
+  const request = { idempotency_key: idempotencyKey, target, action, links };
+  if (destination !== undefined) request.destination = destination;
+  if (account !== undefined) request.account = account;
+  if (routing !== undefined) request.routing = routing;
+  if (media !== undefined) request.media = media;
+  return request;
+}
+
+/** @param {Args<'removeRoot'>[0]} request @returns {RemoveRootRequest} */
+export function removeRootRequest({ idempotencyKey, target, expectedRevision, root }) {
+  return { idempotency_key: idempotencyKey, target, expected_revision: expectedRevision, root };
+}
+
+/** @param {Args<'changePlugin'>[0]} request @returns {ChangePluginRequest} */
+export function changePluginRequest({ idempotencyKey, target, plugin, change }) {
+  return { idempotency_key: idempotencyKey, target, plugin, change };
+}
+
+/** @param {Args<'authorizeAccount'>[0]} request @returns {AuthorizeAccountRequest} */
+export function authorizeAccountRequest({ idempotencyKey, target, service, account, alias }) {
+  /** @type {AuthorizeAccountRequest} */
+  const request = { idempotency_key: idempotencyKey, target, service };
+  if (account) request.account = account;
+  if (alias) request.alias = alias;
+  return request;
+}
+
+/** @param {Args<'accountCommand'>[1]} request @returns {AccountCommandRequest} */
+export function accountCommandRequest({ idempotencyKey, target, action, expectedRevision }) {
+  return { idempotency_key: idempotencyKey, target, action, expected_revision: expectedRevision };
 }
 
 /**

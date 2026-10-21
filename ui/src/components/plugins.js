@@ -8,7 +8,7 @@
 
 import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { pluginStatus, pluginUse } from '../client/media.js';
-import { openDialog } from './dialog.js';
+import { confirmDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { icon } from './icons.js';
 import { Menu, rowMenuHandlers } from './menu.js';
@@ -191,27 +191,9 @@ export function pluginsSection(context) {
     const after = plugin.fallback_version
       ? `Wayfetch goes back to ${plugin.name} ${plugin.fallback_version}, the copy it found before.`
       : `No other copy of ${plugin.name} was found, so what needs it stops working until it is updated again.`;
-    const dialog = openDialog(
-      { title: `Remove ${plugin.name}`, className: 'confirm' },
-      h('p', null, `Delete the copy of ${plugin.name} that Wayfetch installed? ${after}`),
-      h(
-        'div',
-        { class: 'dialog-actions' },
-        h('button', { type: 'button', 'data-key': 'remove-cancel', onclick: () => dialog.close() }, 'Cancel'),
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'primary',
-            'data-key': 'remove-confirm',
-            onclick: () => {
-              dialog.close();
-              void run(plugin, 'remove');
-            },
-          },
-          'Remove',
-        ),
-      ),
+    confirmDialog(
+      { title: `Remove ${plugin.name}`, confirm: 'Remove', onConfirm: () => void run(plugin, 'remove') },
+      `Delete the copy of ${plugin.name} that Wayfetch installed? ${after}`,
     );
   };
 
