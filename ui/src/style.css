@@ -1194,7 +1194,7 @@ th[aria-sort] button.sort { color: var(--ink); }
 
 /* Settings > About: the result of an update check as a badge beside the
    button, with any detail under the row's hint. */
-.update-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.update-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; }
 .update-status {
   display: inline-flex;
   align-items: center;
@@ -1207,8 +1207,14 @@ th[aria-sort] button.sort { color: var(--ink); }
   font-weight: 500;
   white-space: nowrap;
 }
-.update-status:empty, .update-detail:empty, .update-link:empty { display: none; }
-.update-detail { color: var(--bad); font-size: 13px; }
+.update-status:empty, .update-link:empty { display: none; }
+.icon-button { justify-content: center; width: 30px; min-height: 30px; padding: 0; border-color: transparent; background: transparent; }
+.icon-button:hover:not(:disabled), .icon-button:focus-visible { border-color: var(--control); }
+.icon-button.busy .icon { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .icon-button.busy .icon { animation: none; } }
+.update-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-detail.problem { color: var(--bad); }
 .about a { display: inline-flex; align-items: center; gap: 4px; }
 .about .address { overflow-wrap: anywhere; user-select: all; }
 

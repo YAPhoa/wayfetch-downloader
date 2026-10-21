@@ -16,6 +16,9 @@ import { icon } from './icons.js';
  * }} AboutContext
  */
 
+/** What the update status line says when there is nothing to report. */
+const IDLE = 'Checks GitHub only when you ask.';
+
 /** Who makes Wayfetch, shown under About. */
 export const AUTHOR = Object.freeze({ name: 'YAPhoa', url: 'https://github.com/YAPhoa' });
 
@@ -46,7 +49,7 @@ export function updateStatus(check) {
       return { badge: 'Up to date', icon: 'check', tone: 'ok', detail: '', link: null };
     case 'unavailable':
       return {
-        badge: 'Check failed',
+        badge: 'Failed',
         icon: 'cancel',
         tone: 'bad',
         detail: `${outcome.problem}.`,
@@ -87,13 +90,20 @@ function outsideLink(client, href, label, props = {}) {
 export function aboutSection(context) {
   const { client } = context;
   const badge = h('span', { class: 'update-status', role: 'status', 'data-key': 'update-status' });
-  const detail = h('span', { class: 'update-detail', 'data-key': 'update-detail' });
+  // One status line under the name, so a result never moves the row.
+  const detail = h('span', { class: 'hint update-detail', 'data-key': 'update-detail' }, IDLE);
   const action = h('span', { class: 'update-link' });
   const button = h(
     'button',
-    { type: 'button', 'data-key': 'check-for-updates', onclick: () => void check() },
+    {
+      type: 'button',
+      class: 'icon-button',
+      'aria-label': 'Check for updates',
+      title: 'Check for updates',
+      'data-key': 'check-for-updates',
+      onclick: () => void check(),
+    },
     icon('retry'),
-    'Check for updates',
   );
 
   /**
@@ -107,13 +117,16 @@ export function aboutSection(context) {
   const showStatus = (text, name, tone, more = '', link = null) => {
     badge.className = `update-status tone-${tone}`;
     show(badge, icon(name), h('span', null, text));
-    show(detail, more);
+    show(detail, more || IDLE);
+    detail.classList.toggle('problem', Boolean(more));
+    detail.title = more;
     show(action, ...(link ? [outsideLink(client, link.href, link.label, { 'data-key': 'update-link' })] : []));
   };
 
   const check = async () => {
     button.disabled = true;
-    showStatus('Checking…', 'retry', 'calm');
+    button.classList.add('busy');
+    showStatus('Checking…', 'more', 'calm');
     try {
       const status = updateStatus(await client.checkForUpdates());
       showStatus(status.badge, status.icon, status.tone, status.detail, status.link);
@@ -122,9 +135,10 @@ export function aboutSection(context) {
         context.onSignedOut();
         return;
       }
-      showStatus('Check failed', 'cancel', 'bad', error instanceof WayfetchError ? explain(error) : String(error));
+      showStatus('Failed', 'cancel', 'bad', error instanceof WayfetchError ? explain(error) : String(error));
     } finally {
       button.disabled = false;
+      button.classList.remove('busy');
     }
   };
 
@@ -160,7 +174,6 @@ export function aboutSection(context) {
             'div',
             { class: 'setting-text' },
             h('span', { class: 'setting-name' }, 'Updates'),
-            h('span', { class: 'hint' }, 'Checks GitHub only when you ask.'),
             detail,
           ),
           h('div', { class: 'update-actions' }, badge, action, button),

@@ -33,7 +33,7 @@ test('no newer release shows a check mark and nothing more', () => {
 
 test('a failed check says why and links every release', () => {
   assert.deepEqual(updateStatus(check({ kind: 'unavailable', problem: 'GitHub could not be reached' })), {
-    badge: 'Check failed',
+    badge: 'Failed',
     icon: 'cancel',
     tone: 'bad',
     detail: 'GitHub could not be reached.',
