@@ -589,6 +589,8 @@ export function filtersSection(context) {
       type: 'checkbox',
       role: 'switch',
       class: 'switch',
+      'aria-label': 'Filters enabled',
+      title: enabled ? 'Filters enabled' : 'Filters disabled',
       'data-key': 'filters-enabled',
       checked: enabled,
       disabled: !canChange,
@@ -628,8 +630,8 @@ export function filtersSection(context) {
           'div',
           { class: 'group-head' },
           h('span', { class: 'group-title' }, 'Filters'),
-          h('label', { class: 'switch-label' }, toggle, 'Enabled'),
           add,
+          toggle,
         ),
         h(
           'div',

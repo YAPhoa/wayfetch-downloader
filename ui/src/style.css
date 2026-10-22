@@ -1432,7 +1432,6 @@ th[aria-sort] button.sort { color: var(--ink); }
 /* Settings > Link filters: the link filters, and a filter's
    conditions, each switched on by its checkbox. */
 
-.group-head .switch-label { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); cursor: pointer; }
 /* A checkbox drawn as a switch: a track with a thumb that slides on. */
 input.switch {
   appearance: none;

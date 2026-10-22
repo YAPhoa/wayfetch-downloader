@@ -1206,7 +1206,7 @@ ${tiny}`, 'Collected 2 links for review.');
   await expect(page.locator('[data-key="links-screening"]')).toHaveCount(0);
   // Turned off, filters leave every link in.
   await page.goto(`${daemon.origin}/settings/filters`);
-  await filters.getByRole('switch', { name: 'Enabled' }).uncheck();
+  await filters.getByRole('switch', { name: 'Filters enabled' }).uncheck();
   await expect(filters.getByText('Filters disabled.')).toBeVisible();
   await page.goto(`${daemon.origin}/links`);
   await page.getByRole('checkbox', { name: 'Select all links shown' }).check();
