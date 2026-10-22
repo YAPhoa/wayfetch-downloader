@@ -119,15 +119,16 @@ All mutations require `"target"` (the `instance` UUID from `GET /v1/capabilities
 - **Page analysis (`analyze` mode)**: When a collected link is an HTML web page (and `mode` is `"analyze"`, the default), the engine reads up to 2 MiB of the page once and collects the file and video links found on it alongside the page entry (`found_on`), while counting and skipping links to other pages.
 - **Untrusted page egress rule**: Links extracted from pasted HTML, or discovered on a web page that was not itself served from a local/allowed private address, may connect **only to public IP addresses** during both checks and downloads—regardless of `network.allow_networks`.
 
-### Provider Accounts & Automatic Routing (Real-Debrid)
+### Provider Accounts & Automatic Routing
 
 - **Encrypted vault (`credential-key`)**: Provider tokens are encrypted with a 32-byte key (64 hex digits, `mode 600`) created automatically beside `--token-file` (or at `--credential-key FILE`) when the first account is added. The SQLite database never stores the key; keep `credential-key` backed up alongside the state directory. Once an account exists, `wayfetchd` never replaces a missing or mismatched key—accounts appear as `locked` until the key is restored or the accounts are removed.
-- **Device-code authorization**: `POST /v1/accounts/authorizations` initiates Real-Debrid's device flow, returning a user code and verification URL. No password or raw provider token ever passes through the Wayfetch API.
+- **Device-code authorization**: `POST /v1/accounts/authorizations` starts the provider's device flow, returning a user code and verification URL. No password or raw provider token ever passes through the Wayfetch API.
 - **Routing (`automatic`, `direct`, or explicit `account`)**:
   - Starting staged links without `"account"` defaults to `"routing": "automatic"` (requires `submit` + `provider_downloads`): the engine matches each link's hostname (exact domain or dot-boundary subdomain) against the provider's cached supported-domain list (5-minute TTL, 15-second negative cache) and selects the lowest-ID usable enabled account, or uses `Direct` for known non-matching hosts.
-  - Real-Debrid's own `real-debrid.com/d/<alphanumeric-id>` links are recognized locally and always require a usable Real-Debrid account (`real-debrid.download` CDN links remain direct-capable).
   - If a host matches a provider whose accounts are disabled, expired, or locked—or if host support cannot be verified—the link remains staged in `/links` with a clear actionable reason rather than silently falling back to a direct download.
-  - If a network failure loses Real-Debrid's response after link generation, the engine checks the account's recent downloads list; if no match is found, the job fails with `operation_ambiguous` and requires `"repeat_provider_operation": true` on retry.
+- **Real-Debrid specifics**:
+  - Its own `real-debrid.com/d/<alphanumeric-id>` links are recognized locally and always require a usable Real-Debrid account (`real-debrid.download` CDN links remain direct-capable).
+  - If a network failure loses the response after link generation, the engine checks the account's recent downloads list; if no match is found, the job fails with `operation_ambiguous` and requires `"repeat_provider_operation": true` on retry.
 
 ### Video Links, Archives & Plugins (`yt-dlp`, `ffmpeg` & 7-Zip)
 
