@@ -28,6 +28,12 @@ before?: number,
  */
 checking: number, 
 /**
+ * How many links, not counted in `total`, wait for their check
+ * before a link filter's size, check, or account condition decides
+ * whether they are listed.
+ */
+screening: number, 
+/**
  * The page reflects every durable event up to and including this
  * cursor.
  */

@@ -28,7 +28,7 @@ use wayfetch_engine::protocol::query::{FolderListing, JobFilter, PageSize, RootS
 use wayfetch_engine::protocol::request::{
     AccountCommandRequest, AddRootRequest, AuthorizeAccountRequest, ChangePluginRequest,
     CollectRequest, ExtractRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest,
-    SubmitRequest, UpdateSettingsRequest,
+    SubmitRequest, TryLinkFilterRequest, UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
     CommandEnvelope, ErrorCode, EventCursor, Hello, InstanceId, Query, QueryResult, StreamItem,
@@ -186,6 +186,18 @@ pub async fn update_settings(
     JsonBody(request): JsonBody<UpdateSettingsRequest>,
 ) -> ApiResult<CommandResult> {
     execute(&app, &grant, request.into_envelope()).await
+}
+
+/// What a link filter, saved or not, would do with a link. A POST, since
+/// the filter is a body; it changes nothing.
+pub async fn try_link_filter(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    JsonBody(request): JsonBody<TryLinkFilterRequest>,
+) -> ApiResult<QueryResult> {
+    Ok(Json(
+        app.engine.query(request.into_query(), &grant.0).await?,
+    ))
 }
 
 /// The query string of `GET /v1/folders`.

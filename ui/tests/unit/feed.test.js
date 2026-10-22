@@ -87,6 +87,11 @@ class FakeClient {
     throw new Error('not used');
   }
 
+  /** @returns {Promise<import('../../src/client/contract.js').FilterTrial>} */
+  async tryLinkFilter() {
+    throw new Error('not used');
+  }
+
   /** @returns {Promise<import('../../src/client/contract.js').CommandResult>} */
   async removeRoot() {
     throw new Error('not used');

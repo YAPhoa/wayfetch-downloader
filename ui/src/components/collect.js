@@ -61,12 +61,13 @@ function notCollected(error) {
 
 /**
  * What to say once links are collected.
- * @param {{ collected: number, invalid: number, repeated?: number, skipped?: number }} result
+ * @param {{ collected: number, invalid: number, repeated?: number, skipped?: number, filtered?: number }} result
  */
-export function collectedText({ collected, invalid, repeated = 0, skipped = 0 }) {
+export function collectedText({ collected, invalid, repeated = 0, skipped = 0, filtered = 0 }) {
   const parts = [`Collected ${count(collected, 'link')} for review.`];
   if (repeated > 0) parts.push(`${count(repeated, 'repeated link')} collected once.`);
   if (skipped > 0) parts.push(`${count(skipped, 'link')} to other web pages left out.`);
+  if (filtered > 0) parts.push(`${count(filtered, 'link')} left out by your link filters.`);
   if (invalid > 0) {
     parts.push(`${count(invalid, 'entry is', 'entries are')} not a valid link; ${invalid === 1 ? 'it is' : 'they are'} marked below.`);
   }

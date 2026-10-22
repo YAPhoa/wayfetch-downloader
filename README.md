@@ -13,7 +13,7 @@ A Rust download manager built around one reusable download engine (`wayfetch-eng
 
 ## Version
 
-The current release is **0.1.2**. The workspace crates, desktop packages, and release tag (`v0.1.2`) share this version. The engine protocol is `0.3` and the state schema is version 3. Existing 0.1.1 databases upgrade automatically; back up the state directory before upgrading, since older binaries cannot reopen the migrated database. Before 1.0, clients must match the engine's 0.x protocol version. State directories from development builds before 0.1 are refused rather than upgraded.
+The current release is **0.1.2**. The workspace crates, desktop packages, and release tag (`v0.1.2`) share this version. The engine protocol is `0.4` and the state schema is version 4. Existing 0.1.1 databases upgrade automatically; back up the state directory before upgrading, since older binaries cannot reopen the migrated database. Before 1.0, clients must match the engine's 0.x protocol version. State directories from development builds before 0.1 are refused rather than upgraded.
 
 ## Core Capabilities
 

@@ -12,10 +12,12 @@ use wayfetch_domain::name::{DiagnosticText, ProviderId};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_protocol::command::{InputUrl, MAX_COLLECTED_LINKS};
 use wayfetch_protocol::event::EventKind;
+use wayfetch_protocol::filter::{CheckOutcome, LinkOrigin, LinkRoute};
 use wayfetch_protocol::query::CheckReason;
 
-use super::{OrCorrupt, Store, StoreError, key, outbox, sql};
+use super::{OrCorrupt, Store, StoreError, key, links, outbox, roots, sql};
 use crate::crawl::Checked;
+use crate::link_filter::{Answer, Link, Verdict};
 use crate::transfer::transport::Reach;
 
 /// What requests for a link may reach, from its `public_only` column: a
@@ -192,8 +194,10 @@ impl Store {
     /// link's check: the link's new state as `shown`, with the provider that
     /// answered when its own server's answer is `origin` instead, and, for a page that was read,
     /// the links found on it, collected beside it with checks of their
-    /// own. Links already in its batch are not collected again; once the
-    /// Links list is full, the rest are left out and the page says so.
+    /// own. Links already in its batch are not collected again; links a
+    /// link filter matches, and those once the Links list is full, are
+    /// left out and the page says so. A link held back for this check is
+    /// then listed or dropped, as its filters' conditions say.
     pub(crate) fn record_link_check(
         &mut self,
         task: i64,
@@ -209,15 +213,15 @@ impl Store {
             return Ok(());
         }
         let id = sql(link)?;
-        let (state, reason, problem, size, name): (
-            &str,
+        let (outcome, reason, problem, size, name): (
+            CheckOutcome,
             Option<CheckReason>,
             Option<String>,
             Option<u64>,
             Option<&str>,
         ) = match checked {
             Checked::File { name, size } => (
-                "online",
+                CheckOutcome::Online,
                 None,
                 None,
                 *size,
@@ -225,31 +229,52 @@ impl Store {
                 name.as_deref()
                     .filter(|n| crate::download::file_name(n).is_some()),
             ),
-            Checked::Page { .. } => ("page", None, None, None, None),
-            Checked::Offline(reason, message) => {
-                ("offline", Some(*reason), Some(message.clone()), None, None)
-            }
-            Checked::Unknown(reason, message) => {
-                ("unknown", Some(*reason), Some(message.clone()), None, None)
-            }
+            Checked::Page { .. } => (CheckOutcome::Page, None, None, None, None),
+            Checked::Offline(reason, message) => (
+                CheckOutcome::Offline,
+                Some(*reason),
+                Some(message.clone()),
+                None,
+                None,
+            ),
+            Checked::Unknown(reason, message) => (
+                CheckOutcome::Unknown,
+                Some(*reason),
+                Some(message.clone()),
+                None,
+                None,
+            ),
         };
-        let (mut collected, mut left_out) = (None, 0u32);
+        let state = match outcome {
+            CheckOutcome::Online => "online",
+            CheckOutcome::Offline => "offline",
+            CheckOutcome::Unknown => "unknown",
+            CheckOutcome::Page => "page",
+        };
+        let (mut collected, mut left_out, mut filtered) = (None, 0u32, 0u32);
         if let Checked::Page {
             links: Some(_),
             local,
         } = origin
         {
-            let (n, out) = collect_children(&tx, id, &found.children, !local, now)?;
-            collected = Some(n);
-            left_out = out;
+            let children = collect_children(&tx, id, &found.children, !local, now)?;
+            collected = Some(children.found);
+            (left_out, filtered) = (children.left_out, children.filtered);
         }
-        let problem = match (problem.filter(|p| !p.is_empty()), left_out) {
-            (problem, 0) => problem,
-            (_, out) => Some(format!(
-                "{out} more links on this page were not collected: the Links list holds at \
-                 most {MAX_COLLECTED_LINKS}."
-            )),
-        };
+        let mut notes: Vec<String> = problem.filter(|p| !p.is_empty()).into_iter().collect();
+        if left_out > 0 {
+            notes = vec![format!(
+                "{left_out} more links on this page were not collected: the Links list holds \
+                 at most {MAX_COLLECTED_LINKS}."
+            )];
+        }
+        if filtered > 0 {
+            let links = if filtered == 1 { "link" } else { "links" };
+            notes.push(format!(
+                "Your link filters left out {filtered} {links} on this page."
+            ));
+        }
+        let problem = (!notes.is_empty()).then(|| notes.join(" "));
         tx.execute(
             "UPDATE source_links SET check_state = ?1, check_reason = ?2, check_problem = ?3, \
              size = ?4, observed_name = ?5, found = ?6, skipped = ?7, checked_via = ?9, \
@@ -271,28 +296,50 @@ impl Store {
                 matches!(origin, Checked::Page { .. }),
             ],
         )?;
+        let answer = Answer {
+            size,
+            check: outcome,
+            route: if via.is_some() {
+                LinkRoute::Account
+            } else {
+                LinkRoute::Direct
+            },
+        };
+        links::settle(&tx, id, &answer)?;
         outbox::append(&tx, &EventKind::LinksChanged, now)?;
         tx.commit()?;
         Ok(())
     }
 }
 
+/// How the links found on a page were collected.
+struct Collected {
+    /// Listed beside it, or held back for their checks.
+    found: u32,
+    /// Left out because the Links list was full.
+    left_out: u32,
+    /// Left out by a link filter.
+    filtered: u32,
+}
+
 /// Collects `children` of page `parent` into its batch, each with a check,
-/// and returns how many are listed beside it and how many the full Links
-/// list left out. A link already in the batch counts as found, not again.
-/// With `public_only`, their requests reach public addresses only.
+/// unless a link filter leaves it out. A link already in the batch counts
+/// as found, not again. With `public_only`, their requests reach public
+/// addresses only.
 fn collect_children(
     tx: &Transaction<'_>,
     parent: i64,
     children: &[Child],
     public_only: bool,
     now: UtcTimestamp,
-) -> Result<(u32, u32), StoreError> {
-    let (batch, root): (i64, Option<i64>) = tx.query_row(
-        "SELECT batch_id, root_id FROM source_links WHERE id = ?1",
+) -> Result<Collected, StoreError> {
+    let (batch, root, page): (i64, Option<i64>, String) = tx.query_row(
+        "SELECT batch_id, root_id, input_url FROM source_links WHERE id = ?1",
         [parent],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
+    let page = Url::parse(&page).or_corrupt("source URL")?;
+    let filters = roots::active_filters(tx)?;
     let listed: i64 = tx.query_row(
         "SELECT COUNT(*) FROM source_links WHERE listed = 1",
         [],
@@ -306,7 +353,7 @@ fn collect_children(
         [batch],
         |r| r.get(0),
     )?;
-    let (mut found, mut left_out) = (0u32, 0u32);
+    let (mut found, mut left_out, mut filtered) = (0u32, 0u32, 0u32);
     for child in children {
         let url = child.url.as_url();
         let known: Option<i64> = tx
@@ -320,6 +367,17 @@ fn collect_children(
             found += 1;
             continue;
         }
+        let verdict = filters.judge(&Link {
+            url,
+            origin: LinkOrigin::AnalyzedPage,
+            found_on: Some(&page),
+            media: child.media.is_some(),
+            checked: true,
+        });
+        if verdict == Verdict::Drop {
+            filtered += 1;
+            continue;
+        }
         if room == 0 {
             left_out += 1;
             continue;
@@ -329,9 +387,9 @@ fn collect_children(
         let media = child.media.as_ref().map(ProviderId::as_str);
         tx.execute(
             "INSERT INTO source_links (batch_id, ordinal, input_url, held, listed, root_id, \
-             parent_id, public_only, media_service, media_state) \
+             parent_id, public_only, media_service, media_state, screen) \
              VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6, ?7, CASE WHEN ?7 IS NULL THEN NULL \
-             ELSE 'pending' END)",
+             ELSE 'pending' END, ?8)",
             params![
                 batch,
                 ordinal,
@@ -339,13 +397,18 @@ fn collect_children(
                 root,
                 parent,
                 public_only,
-                media
+                media,
+                links::screen(&verdict)?,
             ],
         )?;
         enqueue(tx, tx.last_insert_rowid(), url, media, now)?;
         found += 1;
     }
-    Ok((found, left_out))
+    Ok(Collected {
+        found,
+        left_out,
+        filtered,
+    })
 }
 
 /// The page a link was found on, as a list shows it: without its query or
@@ -685,6 +748,199 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM source_links", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 1, "the page and its last link are gone");
+    }
+
+    impl Fixture {
+        /// Saves `filters` as the link filters.
+        fn filter(&mut self, filters: serde_json::Value) {
+            let revision = self.store.settings().unwrap().revision;
+            let command = Command::UpdateSettings {
+                expected_revision: revision,
+                default_root: None,
+                max_active_downloads: None,
+                download_speed_limit: None,
+                extract_archives: None,
+                automatic_update_checks: None,
+                link_filters: Some(
+                    serde_json::from_value(serde_json::json!({
+                        "enabled": true, "filters": filters,
+                    }))
+                    .unwrap(),
+                ),
+            };
+            self.execute(command, &CommandContext::default());
+        }
+
+        /// The rows of links, listed or not.
+        fn rows(&mut self) -> Vec<(String, bool)> {
+            let tx = self.store.read().unwrap();
+            tx.prepare("SELECT input_url, screen IS NULL FROM source_links ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+
+        /// Records that check `task` found a file of `size` bytes.
+        fn found_file(&mut self, task: &Task, size: u64) {
+            let file = Checked::File {
+                name: None,
+                size: Some(size),
+            };
+            self.store
+                .record_link_check(
+                    task.id,
+                    task.link,
+                    (&file, None),
+                    None,
+                    &Found::default(),
+                    NOW,
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn link_filters_leave_links_out_as_they_are_collected_or_once_checked() {
+        let mut f = Fixture::new();
+        f.filter(serde_json::json!([
+            { "name": "Ads", "enabled": true,
+              "link": { "op": "contains", "pattern": "ads.example" } },
+            { "name": "Small archives", "enabled": true,
+              "file_type": { "op": "is", "kinds": ["archive"] },
+              "size": { "op": "is", "max": 1000 } },
+        ]));
+        let plan = CollectPlan {
+            links: [
+                "https://ads.example/x.zip",
+                "https://a.example/small.zip",
+                "https://b.example/big.zip",
+                PAGE,
+            ]
+            .iter()
+            .map(|l| Collecting {
+                entry: Entry::parse(l),
+                media: None,
+            })
+            .collect(),
+            ..CollectPlan::default()
+        };
+        let context = CommandContext {
+            collect: plan,
+            ..CommandContext::default()
+        };
+        let collect = |page: &str| Command::CollectLinks {
+            text: CollectText::try_from(page.to_owned()).unwrap(),
+            base_url: None,
+            mode: CollectMode::Analyze,
+            destination: None,
+        };
+        let CommandResult::LinksCollected {
+            collected,
+            filtered,
+            ..
+        } = f.execute(collect("(planned)"), &context)
+        else {
+            panic!()
+        };
+        assert_eq!((collected, filtered), (3, 1));
+        // The archives wait off the list for their size.
+        let page = match f.store.query(
+            &Query::ListLinks {
+                after: None,
+                page_size: PageSize::DEFAULT,
+            },
+            f.instance,
+        ) {
+            Ok(QueryResult::Links(page)) => page,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!((page.items.len(), page.total, page.screening), (1, 1, 2));
+        let tasks = f.store.take_checks(3, &[], true).unwrap();
+        let [small, big] = &tasks[..] else {
+            panic!("{tasks:?}")
+        };
+        f.found_file(small, 10);
+        f.found_file(big, 5000);
+        let page_task = &f.store.take_checks(1, &[], true).unwrap()[0];
+        // A page's links pass the same filters.
+        let child = |url: &str| Child {
+            url: InputUrl::parse(url).unwrap(),
+            media: None,
+        };
+        let found = Found {
+            children: vec![
+                child("https://ads.example/y.zip"),
+                child("https://c.example/z.mkv"),
+            ],
+            skipped: 0,
+        };
+        let read = Checked::Page {
+            links: Some(Vec::new()),
+            local: false,
+        };
+        f.store
+            .record_link_check(
+                page_task.id,
+                page_task.link,
+                (&read, None),
+                None,
+                &found,
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(
+            f.rows(),
+            [
+                ("https://b.example/big.zip".to_owned(), true),
+                (PAGE.to_owned(), true),
+                ("https://c.example/z.mkv".to_owned(), true),
+            ]
+        );
+        let (links, _) = f.links();
+        assert_eq!(links[1].found, Some(1));
+        assert_eq!(
+            links[1].check_detail.as_ref().unwrap().as_str(),
+            "Your link filters left out 1 link on this page."
+        );
+
+        // Text whose every link a filter matches is refused.
+        let only_ads = CommandContext {
+            collect: CollectPlan {
+                links: vec![Collecting {
+                    entry: Entry::parse("https://ads.example/z.zip"),
+                    media: None,
+                }],
+                ..CollectPlan::default()
+            },
+            ..CommandContext::default()
+        };
+        let envelope = CommandEnvelope {
+            idempotency_key: IdempotencyKey::generate(),
+            target: f.instance,
+            command: collect("(planned again)"),
+        };
+        let error = f
+            .store
+            .execute(&envelope, f.instance, &only_ads, NOW)
+            .unwrap_err();
+        assert!(error.message.as_str().contains("left out all 1 links"));
+    }
+
+    #[test]
+    fn a_link_held_for_its_check_is_listed_when_no_condition_holds() {
+        let mut f = Fixture::new();
+        f.filter(serde_json::json!([
+            { "name": "Offline", "enabled": true,
+              "check": { "op": "is", "values": ["offline"] } },
+        ]));
+        // Not checked, so no check can match: listed at once.
+        f.collect(&[PAGE, FILE], CollectMode::SupportedOnly, false);
+        assert_eq!(f.links().0.len(), 1);
+        let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
+        f.found_file(&task, 1);
+        assert_eq!(f.links().0.len(), 2);
     }
 
     #[test]

@@ -13,10 +13,12 @@ use wayfetch_domain::name::{DiagnosticText, ProviderId};
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Generation;
 use wayfetch_protocol::event::EventKind;
+use wayfetch_protocol::filter::{CheckOutcome, LinkRoute};
 use wayfetch_protocol::media::{LinkMedia, MediaChoice, MediaState};
 
 use super::{OrCorrupt, Store, StoreError, files, key, outbox, sql};
 use crate::fs::{FileIdentity, StagingRecord};
+use crate::link_filter::Answer;
 use crate::media::MediaInfo;
 
 /// What an unavailable option needs while the converter is missing.
@@ -209,6 +211,16 @@ impl Store {
             ],
         )?;
         if changed == 1 {
+            let answer = Answer {
+                size: None,
+                check: if state == "ready" {
+                    CheckOutcome::Online
+                } else {
+                    CheckOutcome::Unknown
+                },
+                route: LinkRoute::Media,
+            };
+            super::links::settle(&tx, sql(link)?, &answer)?;
             outbox::append(&tx, &EventKind::LinksChanged, now)?;
         }
         tx.commit()?;

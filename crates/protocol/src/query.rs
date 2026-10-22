@@ -14,9 +14,10 @@ use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{Generation, Revision};
 
 use crate::account::{Accounts, Authorization, AuthorizationId};
-use crate::command::Permission;
+use crate::command::{InputUrl, Permission};
 use crate::error::{ErrorCode, ProtocolError};
 use crate::event::EventCursor;
+use crate::filter::{FilterTrial, LinkFilters, LinkRule};
 use crate::media::{JobMedia, LinkMedia, PluginSummary};
 use crate::update::UpdateCheck;
 
@@ -170,6 +171,15 @@ pub enum Query {
         #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
         check: bool,
     },
+    /// What `filter` would do with `link` if it were pasted as text now.
+    /// Changes nothing.
+    TryLinkFilter {
+        /// The filter, saved or not.
+        filter: Box<LinkRule>,
+        /// The link to try it on.
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
+        link: InputUrl,
+    },
 }
 
 impl Query {
@@ -183,7 +193,8 @@ impl Query {
             | Self::CountJobs { .. }
             | Self::Settings {}
             | Self::ListLinks { .. }
-            | Self::Updates { .. } => Permission::Read,
+            | Self::Updates { .. }
+            | Self::TryLinkFilter { .. } => Permission::Read,
         }
     }
 }
@@ -452,6 +463,10 @@ pub struct Settings {
     /// Whether the engine checks for a newer release on its own.
     #[serde(default)]
     pub automatic_update_checks: bool,
+    /// The link filters, which keep matching links out of the collected
+    /// list.
+    #[serde(default)]
+    pub link_filters: LinkFilters,
 }
 
 /// An engine preference with a whole-number value, as the operator's
@@ -715,6 +730,11 @@ pub struct LinkPage {
     /// How many of them are waiting for, or in, a check.
     #[serde(default)]
     pub checking: u64,
+    /// How many links, not counted in `total`, wait for their check
+    /// before a link filter's size, check, or account condition decides
+    /// whether they are listed.
+    #[serde(default)]
+    pub screening: u64,
     /// The page reflects every durable event up to and including this
     /// cursor.
     pub as_of: EventCursor,
@@ -761,6 +781,11 @@ pub enum QueryResult {
     Authorization(Authorization),
     /// Answer to [`Query::Updates`].
     Updates(UpdateCheck),
+    /// Answer to [`Query::TryLinkFilter`].
+    LinkFilterTried {
+        /// What the filter would do.
+        outcome: FilterTrial,
+    },
 }
 
 #[cfg(test)]
@@ -948,6 +973,7 @@ mod tests {
             }],
             extract_archives: true,
             automatic_update_checks: true,
+            link_filters: LinkFilters::default(),
         });
         assert_eq!(
             serde_json::to_value(&settings).unwrap(),
@@ -974,6 +1000,7 @@ mod tests {
                 }],
                 "extract_archives": true,
                 "automatic_update_checks": true,
+                "link_filters": {"enabled": true, "filters": []},
             })
         );
         // A 4.0 engine's plugins carry none of 4.1's fields: each is on,

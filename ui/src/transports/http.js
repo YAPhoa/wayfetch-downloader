@@ -210,6 +210,15 @@ export class HttpClient {
   updateSettings(change) {
     return this.request('PUT', '/v1/settings', { body: settingsRequest(change) });
   }
+
+  /**
+   * @param {Args<'tryLinkFilter'>[0]} filter
+   * @param {string} link
+   */
+  async tryLinkFilter(filter, link) {
+    const result = await this.request('POST', '/v1/link-filters/try', { body: { filter, link } });
+    return result.outcome;
+  }
   /**
    * Stops offering a download folder the user added; its files stay.
    * @param {Args<'removeRoot'>[0]} request

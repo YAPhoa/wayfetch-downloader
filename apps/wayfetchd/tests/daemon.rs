@@ -504,6 +504,75 @@ async fn the_default_destination_is_chosen_among_server_folders() {
     daemon.stop("TERM").await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn link_filters_are_saved_tried_and_applied_when_links_are_collected() {
+    let server = Server::https().await;
+    let dirs = Dirs::ready(&server);
+    let daemon = Daemon::start(&dirs).await;
+    let client = daemon.owner();
+    let (_, settings) = client.get("/v1/settings").await;
+    assert_eq!(
+        settings["link_filters"],
+        json!({"enabled": true, "filters": []})
+    );
+    let ads = json!({
+        "name": "Ads", "enabled": true,
+        "link": {"op": "contains", "pattern": "ads.example"},
+    });
+    // Anyone who reads settings may try a filter; it changes nothing.
+    let reader = daemon.client(READER_TOKEN);
+    let trial = json!({"filter": ads, "link": "https://ads.example/x.zip"});
+    let (status, tried) = reader.post("/v1/link-filters/try", &trial).await;
+    assert_eq!(status, StatusCode::OK, "{tried}");
+    assert_eq!(
+        tried,
+        json!({"type": "link_filter_tried", "outcome": "left_out"})
+    );
+
+    let save = |revision: &Value, filter: &Value| {
+        client.command(json!({
+            "expected_revision": revision,
+            "link_filters": {"enabled": true, "filters": [filter]},
+        }))
+    };
+    let invalid = json!({
+        "name": "Broken", "enabled": false,
+        "file_name": {"op": "is", "pattern": "(", "regex": true},
+    });
+    let (status, error) = client
+        .put("/v1/settings", &save(&settings["revision"], &invalid))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(error["message"].as_str().unwrap().contains("\"Broken\""));
+    let (status, saved) = client
+        .put("/v1/settings", &save(&settings["revision"], &ads))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, settings) = client.get("/v1/settings").await;
+    assert_eq!(settings["link_filters"]["filters"][0]["name"], "Ads");
+
+    let text = format!("https://ads.example/x.zip\n{}", server.url("/a.bin"));
+    let (status, collected) = client
+        .post("/v1/staging/links", &client.command(json!({"text": text})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{collected}");
+    assert_eq!(
+        (
+            collected["collected"].clone(),
+            collected["filtered"].clone()
+        ),
+        (json!(1), json!(1))
+    );
+    let (status, refused) = client
+        .post(
+            "/v1/staging/links",
+            &client.command(json!({"text": "https://ads.example/y.zip"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    daemon.stop("TERM").await;
+}
+
 /// A configuration file for `dirs`: storage and the token file in the
 /// file, by paths relative to it, and `policy` as `[downloads.max_active]`.
 fn configure(dirs: &Dirs, policy: &str) -> PathBuf {

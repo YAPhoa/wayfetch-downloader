@@ -2,6 +2,7 @@
 import type { Accounts } from "./Accounts.js";
 import type { Authorization } from "./Authorization.js";
 import type { EventCursor } from "./EventCursor.js";
+import type { FilterTrial } from "./FilterTrial.js";
 import type { JobCounts } from "./JobCounts.js";
 import type { JobId } from "./JobId.js";
 import type { JobSummary } from "./JobSummary.js";
@@ -39,4 +40,8 @@ link: SourceLinkId,
  * The entry exactly as it was collected; for an invalid one, less
  * any credentials it held.
  */
-url: string, } | { "type": "accounts" } & Accounts | { "type": "authorization" } & Authorization | { "type": "updates" } & UpdateCheck;
+url: string, } | { "type": "accounts" } & Accounts | { "type": "authorization" } & Authorization | { "type": "updates" } & UpdateCheck | { "type": "link_filter_tried", 
+/**
+ * What the filter would do.
+ */
+outcome: FilterTrial, };

@@ -124,6 +124,7 @@ impl Store {
                 download_speed_limit,
                 extract_archives,
                 automatic_update_checks,
+                link_filters,
             } => roots::update_settings(
                 &tx,
                 *expected_revision,
@@ -132,6 +133,7 @@ impl Store {
                 *download_speed_limit,
                 *extract_archives,
                 *automatic_update_checks,
+                link_filters.as_ref(),
                 now,
             )?,
             Command::Extract {
