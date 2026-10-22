@@ -50,6 +50,7 @@
   --calm: #5f6878;
   --note-warn: #fbebd9;
   --note-bad: #fbe4e1;
+  --note-ok: #def2e4;
   --focus: #3b6fd1;
   /* Download rows: alternate rows shaded; selected beats hovered. Their
      rules stay visible against every row shade. */
@@ -103,6 +104,7 @@
   --calm: #a0aab8;
   --note-warn: #33261a;
   --note-bad: #3a1f1d;
+  --note-ok: #17301f;
   --focus: #7da6ee;
   --row-line: #343d4a;
   --row-alternate: #151b23;
@@ -1460,4 +1462,34 @@ th[aria-sort] button.sort { color: var(--ink); }
 .filter-try input { flex: 1; min-width: 0; }
 @media (max-width: 560px) {
   .condition { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* What the last change in a settings section did: a banner over the
+   bottom of the window that fades out. */
+.flash {
+  position: fixed;
+  left: 50%;
+  bottom: 44px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 10px 16px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.18);
+  transform: translateX(-50%);
+  animation: flash-in 180ms ease-out;
+  transition: opacity 400ms ease, transform 400ms ease;
+}
+.flash[hidden] { display: none; }
+.flash.ok { color: var(--ok); background: var(--note-ok); }
+.flash.bad { color: var(--bad); background: var(--note-bad); }
+.flash span { color: var(--ink); }
+.flash .icon { flex: none; }
+.flash.leaving { opacity: 0; transform: translate(-50%, 8px); }
+@keyframes flash-in { from { opacity: 0; transform: translate(-50%, 8px); } }
+@media (prefers-reduced-motion: reduce) {
+  .flash { animation: none; transition: none; }
 }

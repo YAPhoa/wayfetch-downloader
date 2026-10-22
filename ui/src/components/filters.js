@@ -367,7 +367,30 @@ function editFilter(context, rule, onSave) {
 export function filtersSection(context) {
   const { client } = context;
   const section = h('div', { class: 'settings-section' });
-  const message = h('p', { class: 'message', role: 'status', 'data-key': 'filters-message' });
+  // What the last change did, as a banner that fades; refusals stay
+  // longer, so they can be read.
+  const banner = h('div', { class: 'flash', 'data-key': 'filters-message', hidden: true });
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let fading;
+  /**
+   * @param {string} text
+   * @param {'ok' | 'bad'} [tone]
+   */
+  const say = (text, tone = 'ok') => {
+    clearTimeout(fading);
+    banner.hidden = !text;
+    if (!text) return;
+    banner.className = `flash ${tone}`;
+    banner.setAttribute('role', tone === 'bad' ? 'alert' : 'status');
+    show(banner, icon(tone === 'bad' ? 'cancel' : 'check'), h('span', null, text));
+    fading = setTimeout(
+      () => {
+        banner.classList.add('leaving');
+        fading = setTimeout(() => (banner.hidden = true), 400);
+      },
+      tone === 'bad' ? 8000 : 2500,
+    );
+  };
   const canChange = client.permissions.includes('control');
   /** @type {Settings | null} */
   let current = null;
@@ -411,8 +434,8 @@ export function filtersSection(context) {
         return error.message;
       }
       const text = error instanceof WayfetchError ? notSaved(error) : String(error);
-      if (error instanceof WayfetchError && error.code === 'revision_conflict') await reload(text);
-      else show(message, text);
+      if (error instanceof WayfetchError && error.code === 'revision_conflict') await reload(text, 'bad');
+      else say(text, 'bad');
       return text;
     }
   };
@@ -555,8 +578,9 @@ export function filtersSection(context) {
    * Shows `settings`' filters, saying `said`.
    * @param {Settings} settings
    * @param {string} said
+   * @param {'ok' | 'bad'} [tone]
    */
-  const render = (settings, said) => {
+  const render = (settings, said, tone = 'ok') => {
     const focused = focusedKey(section);
     menu.close(false);
     current = settings;
@@ -592,7 +616,7 @@ export function filtersSection(context) {
             ),
           ]
         : filters.map((rule, index) => filterRow(rule, index, filters.length));
-    show(message, said || (!canChange ? 'You may not change settings.' : ''));
+    if (said) say(said, tone);
     show(
       section,
       h(
@@ -624,25 +648,29 @@ export function filtersSection(context) {
             h('tbody', null, rows),
           ),
         ),
-        h('div', { class: 'group-foot' }, message),
       ),
       h(
         'p',
         { class: 'hint' },
         'Filters apply as links are added or found on an analyzed page, before they reach the Links list. ' +
-          'Links already in the list stay. A link any enabled filter matches is left out.',
+          'Links already in the list stay. A link any enabled filter matches is left out.' +
+          (canChange ? '' : ' You may not change settings.'),
       ),
       menu.element,
+      banner,
     );
     refocus(section, focused);
   };
 
-  /** @param {string} said */
-  const reload = async (said = '') => {
+  /**
+   * @param {string} [said]
+   * @param {'ok' | 'bad'} [tone]
+   */
+  const reload = async (said = '', tone = /** @type {'ok' | 'bad'} */ ('ok')) => {
     try {
       const settings = await client.settings();
       context.onSettings(settings);
-      render(settings, said);
+      render(settings, said, tone);
     } catch (error) {
       if (error instanceof WayfetchError && error.code === 'unauthenticated') {
         context.onSignedOut();
