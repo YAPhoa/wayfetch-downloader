@@ -5,6 +5,7 @@ import type { DiagnosticText } from "./DiagnosticText.js";
 import type { DisplayState } from "./DisplayState.js";
 import type { ExtractionSummary } from "./ExtractionSummary.js";
 import type { FailureSummary } from "./FailureSummary.js";
+import type { FileCheck } from "./FileCheck.js";
 import type { Generation } from "./Generation.js";
 import type { HostName } from "./HostName.js";
 import type { JobId } from "./JobId.js";
@@ -106,4 +107,9 @@ media?: JobMedia,
  * multi-part archive: whether and where it was unpacked. Boxed, as
  * most jobs have none.
  */
-extraction?: ExtractionSummary, };
+extraction?: ExtractionSummary, 
+/**
+ * For a complete download that a checksum names: whether its file
+ * matched. Boxed, as most jobs have none.
+ */
+check?: FileCheck, };

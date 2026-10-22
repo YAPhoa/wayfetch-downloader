@@ -43,6 +43,7 @@ use wayfetch_protocol::{
 };
 
 mod accounts;
+mod checks;
 mod crawl;
 mod extract;
 mod media;
@@ -278,6 +279,7 @@ impl EngineBuilder {
             Probes::new(supervisor.guard()),
             Probes::new(supervisor.guard()),
         );
+        let hashing = crate::checksum::Hashing::new(supervisor.guard());
         let updates = Updates::new(self.update_source, saved.automatic_update_checks);
         let coordinator = Coordinator {
             identity,
@@ -314,6 +316,11 @@ impl EngineBuilder {
                 self.plugin_control,
             ),
             extractions: extract::Extractions::new(self.extractor, saved.extract_archives),
+            file_checks: checks::FileChecks::new(
+                saved.check_files,
+                saved.redownload_failed_checks,
+                hashing,
+            ),
             updates: updates.clone(),
         };
         owner.supervisor.spawn(coordinator.run());
@@ -1024,6 +1031,8 @@ enum Internal {
     Resolved(Box<resolve::Resolved>),
     /// An extraction attempt ended.
     Extracted(JobId),
+    /// Reading a checksum file, checking a file, or replacing one ended.
+    FileCheckEnded(JobId, checks::Ended),
     /// A link's check ended: its check, link, the link as collected, and
     /// what it found.
     Checked(
@@ -1148,6 +1157,8 @@ struct Coordinator {
     media: media::MediaServices,
     /// The archive extractor and the extraction running.
     extractions: extract::Extractions,
+    /// Checks of complete downloads and replacements of failed ones.
+    file_checks: checks::FileChecks,
     /// Update checks, when a client asks.
     updates: Updates,
 }
@@ -1267,6 +1278,14 @@ impl Coordinator {
                     }
                 ) {
                     self.start_routing(envelope, reply).await;
+                } else if let Command::Retry { job, .. } = envelope.command
+                    && self
+                        .with_store(move |store| store.failed_check(job))
+                        .await
+                        .unwrap_or(false)
+                {
+                    self.refresh_destinations().await;
+                    self.retry_replacement(envelope, reply);
                 } else {
                     self.execute_command(envelope, reply, Default::default())
                         .await;
@@ -1443,6 +1462,8 @@ impl Coordinator {
             self.bandwidth.set(self.download_speed_limit().value);
             self.extractions.automatic = saved.extract_archives;
             self.updates.set_automatic(saved.automatic_update_checks);
+            self.file_checks.on = saved.check_files;
+            self.file_checks.redownload = saved.redownload_failed_checks;
         }
         // Only the run the request named stops, even when an exact replay
         // answers with the first request's result after a later run began.
@@ -1494,12 +1515,14 @@ impl Coordinator {
                 // The download may have replaced its partial, or the job
                 // may have been queued to start from zero.
                 self.clean_staging();
+                self.plan_checks(job).await;
                 self.plan_extractions(job).await;
                 for (envelope, reply) in self.stopping_removals.remove(&job).unwrap_or_default() {
                     self.remove(envelope, reply).await;
                 }
             }
             Internal::Extracted(job) => self.extracted(job),
+            Internal::FileCheckEnded(job, ended) => self.file_check_ended(job, ended).await,
             // `changed` below admits.
             Internal::Admit => {}
             Internal::Identified(found) => {
@@ -1636,6 +1659,8 @@ impl Coordinator {
                 download_speed_limit,
                 extract_archives,
                 automatic_update_checks,
+                check_files,
+                redownload_failed_checks,
                 ..
             } => {
                 if self.replays(envelope).await? {
@@ -1646,6 +1671,8 @@ impl Coordinator {
                     && download_speed_limit.is_none()
                     && extract_archives.is_none()
                     && automatic_update_checks.is_none()
+                    && check_files.is_none()
+                    && redownload_failed_checks.is_none()
                 {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidRequest,
@@ -1798,8 +1825,12 @@ impl Coordinator {
         let download_speed_limit = self.download_speed_limit();
         let mut plugins = self.media.plugins();
         plugins.extend(self.extractions.plugin());
-        let extract_archives = self.extractions.automatic;
-        let automatic_update_checks = self.updates.automatic();
+        let switches = destinations::Switches {
+            extract_archives: self.extractions.automatic,
+            automatic_update_checks: self.updates.automatic(),
+            check_files: self.file_checks.on,
+            redownload_failed_checks: self.file_checks.redownload,
+        };
         self.supervisor.spawn(async move {
             let mut checks = tokio::task::JoinSet::new();
             for (i, root) in destinations.all().into_iter().enumerate() {
@@ -1814,8 +1845,7 @@ impl Coordinator {
                 max_active_downloads,
                 download_speed_limit,
                 plugins,
-                extract_archives,
-                automatic_update_checks,
+                switches,
             );
             let _ = reply.send(Ok(QueryResult::Settings(settings)));
         });
@@ -2001,8 +2031,10 @@ impl Coordinator {
     /// events, and prune history when due.
     async fn changed(&mut self) {
         self.admit().await;
+        self.recheck_extractions().await;
         self.admit_extraction().await;
         self.run_checks().await;
+        self.run_file_checks().await;
         self.publish_events().await;
         if self.pruned_at.elapsed() >= PRUNE_INTERVAL {
             self.pruned_at = Instant::now();
@@ -2057,6 +2089,9 @@ impl Coordinator {
                 }),
                 progress: self.progress.clone(),
                 metering: None,
+                check_files: self.file_checks.on,
+                hashing: self.file_checks.hashing(),
+                checksums: Vec::new(),
                 job,
                 attempt,
             };

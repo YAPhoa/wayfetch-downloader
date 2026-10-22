@@ -37,7 +37,7 @@ export function content(start, end) {
 }
 
 /**
- * @typedef {{ size: number, stallAt: number | null, etag: string, filename: string | null, waiters: (() => void)[] }} FixtureFile
+ * @typedef {{ size: number, stallAt: number | null, etag: string, filename: string | null, body?: Buffer, waiters: (() => void)[] }} FixtureFile
  */
 
 /**
@@ -79,6 +79,17 @@ export class Fixture {
    */
   put(name, size, stallAt = null, filename = null) {
     this.files.set(name, { size, stallAt, filename, etag: '"v1"', waiters: [] });
+    return `${this.base}/files/${encodeURIComponent(name)}`;
+  }
+
+  /**
+   * Serves `name` with exactly `text`, such as a checksum file.
+   * @param {string} name
+   * @param {string} text
+   */
+  putText(name, text) {
+    const body = Buffer.from(text);
+    this.files.set(name, { size: body.length, stallAt: null, filename: null, etag: '"v1"', body, waiters: [] });
     return `${this.base}/files/${encodeURIComponent(name)}`;
   }
 
@@ -170,7 +181,7 @@ export class Fixture {
         continue;
       }
       const end = Math.min(file.size, offset + chunk, file.stallAt ?? Infinity);
-      if (!response.write(content(offset, end))) await once(response, 'drain').catch(() => {});
+      if (!response.write(file.body?.subarray(offset, end) ?? content(offset, end))) await once(response, 'drain').catch(() => {});
       offset = end;
     }
     response.end();

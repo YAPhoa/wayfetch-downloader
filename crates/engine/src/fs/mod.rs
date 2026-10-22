@@ -26,7 +26,7 @@ pub use path::{
     MAX_COMPONENT_BYTES, MAX_DEPTH, MAX_PATH_BYTES, PRIVATE_DIR, PathError, RelativePath,
 };
 pub use private::{create_private, is_private};
-pub use publish::{PublicationCheck, PublishedFile, RenameCheck};
+pub use publish::{FileVersion, PublicationCheck, PublishedFile, RenameCheck};
 pub use root::Root;
 #[cfg(test)]
 pub(crate) use staging::tests::{own_name, root as test_root, staging_path};

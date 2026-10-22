@@ -364,7 +364,9 @@ pub enum Command {
     /// account it downloads through. The attempt continues the job's
     /// verified saved data when it safely can, and otherwise starts from
     /// zero and says why. A failure whose retry deadline has not passed is
-    /// refused.
+    /// refused. A complete job whose file failed its check is downloaded
+    /// again: the file Wayfetch saved is removed first, only while it is
+    /// unchanged.
     Retry {
         /// The job.
         job: JobId,
@@ -401,6 +403,13 @@ pub enum Command {
         /// Whether the engine checks for a newer release on its own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         automatic_update_checks: Option<bool>,
+        /// Whether complete downloads are checked against checksums.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        check_files: Option<bool>,
+        /// Whether a download that fails its check is downloaded again once
+        /// on its own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redownload_failed_checks: Option<bool>,
     },
     /// Give a completed job's published file another name in the same
     /// folder. Never replaces an existing file.
@@ -978,6 +987,8 @@ mod tests {
             download_speed_limit: None,
             extract_archives: None,
             automatic_update_checks: None,
+            check_files: None,
+            redownload_failed_checks: None,
         };
         assert_eq!(
             serde_json::to_string(&command).unwrap(),
@@ -990,6 +1001,8 @@ mod tests {
             download_speed_limit: None,
             extract_archives: None,
             automatic_update_checks: None,
+            check_files: None,
+            redownload_failed_checks: None,
         };
         assert_eq!(
             serde_json::to_string(&change).unwrap(),

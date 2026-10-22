@@ -209,6 +209,9 @@ pub struct GeneratedLink {
     pub filename: Option<String>,
     /// The size the provider reports; `None` when it does not know.
     pub size: Option<u64>,
+    /// Checksums the provider gives for the file's bytes, checked before
+    /// it is published.
+    pub checksums: Vec<crate::checksum::Digest>,
 }
 
 impl std::fmt::Debug for GeneratedLink {
@@ -217,6 +220,7 @@ impl std::fmt::Debug for GeneratedLink {
             .field("url", &"[redacted]")
             .field("filename", &self.filename)
             .field("size", &self.size)
+            .field("checksums", &self.checksums)
             .finish()
     }
 }

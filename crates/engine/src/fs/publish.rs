@@ -38,6 +38,36 @@ pub struct PublishedFile {
     pub size: u64,
 }
 
+/// A published file as a check saw it: which file, its size, and when it
+/// was last modified, if the filesystem says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileVersion {
+    /// The file.
+    pub identity: FileIdentity,
+    /// Its size.
+    pub size: u64,
+    /// Its modification time in nanoseconds since the Unix epoch.
+    pub modified_ns: Option<i64>,
+}
+
+impl FileVersion {
+    fn of(meta: &cap_std::fs::Metadata) -> Result<Self, FsError> {
+        Ok(Self {
+            identity: sys::identity(meta)?,
+            size: meta.len(),
+            modified_ns: sys::modified_ns(meta),
+        })
+    }
+
+    /// Whether this is `file` as published, unchanged since it was seen
+    /// modified at `modified_ns`, when that is known.
+    fn is(&self, file: &PublishedFile, modified_ns: Option<i64>) -> bool {
+        self.identity.matches(&file.identity)
+            && self.size == file.size
+            && (modified_ns.is_none() || self.modified_ns == modified_ns)
+    }
+}
+
 /// Where an interrupted rename stands, judged by file identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameCheck {
@@ -230,6 +260,20 @@ impl Root {
     /// External writers must be trusted, as for rename: portable filesystems
     /// provide no atomic compare-identity-and-unlink operation.
     pub fn delete_published(&self, file: &PublishedFile) -> Result<(), FsError> {
+        self.retire_published(file, None)
+    }
+
+    /// [`Root::delete_published`] for a file that failed a check: deleted
+    /// only while it also still has the modification time `modified_ns`
+    /// the check saw, when known, so a file changed in place since is
+    /// refused as [`FsError::PublishedChanged`]. The same limitation
+    /// applies: a writer racing between the check and the unlink is not
+    /// detected.
+    pub fn retire_published(
+        &self,
+        file: &PublishedFile,
+        modified_ns: Option<i64>,
+    ) -> Result<(), FsError> {
         self.verify()?;
         let (parent, name) = file.path.split_last();
         let dir = self
@@ -237,10 +281,7 @@ impl Root {
             .ok_or_else(|| FsError::PublishedMissing(file.path.clone()))?;
         match dir.symlink_metadata(name) {
             Ok(meta) => {
-                if !meta.is_file()
-                    || !sys::identity(&meta)?.matches(&file.identity)
-                    || meta.len() != file.size
-                {
+                if !meta.is_file() || !FileVersion::of(&meta)?.is(file, modified_ns) {
                     return Err(FsError::PublishedChanged(file.path.clone()));
                 }
                 dir.remove_file(name)
@@ -251,6 +292,67 @@ impl Root {
         }
         sys::sync_dir(&dir).map_err(FsError::io("sync download folder"))?;
         Ok(())
+    }
+
+    /// When the published file `file` was last modified, checking that its
+    /// name still holds it at its published size.
+    pub fn published_modified(&self, file: &PublishedFile) -> Result<Option<i64>, FsError> {
+        self.verify()?;
+        let (parent, name) = file.path.split_last();
+        let dir = self
+            .parent_dir(parent, false)?
+            .ok_or_else(|| FsError::PublishedMissing(file.path.clone()))?;
+        match dir.symlink_metadata(name) {
+            Ok(meta) if meta.is_file() && FileVersion::of(&meta)?.is(file, None) => {
+                Ok(sys::modified_ns(&meta))
+            }
+            Ok(_) => Err(FsError::PublishedChanged(file.path.clone())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Err(FsError::PublishedMissing(file.path.clone()))
+            }
+            Err(e) => Err(FsError::io("inspect downloaded file")(e)),
+        }
+    }
+
+    /// Opens the published file `file` to read it, refusing any other file
+    /// at its name, or the file at another size or, when `modified_ns` is
+    /// known, modified since. Answers the open file and its version, which
+    /// the caller compares with [`Root::file_version`] once it has read it.
+    pub fn open_published(
+        &self,
+        file: &PublishedFile,
+        modified_ns: Option<i64>,
+    ) -> Result<(cap_std::fs::File, FileVersion), FsError> {
+        self.verify()?;
+        let (parent, name) = file.path.split_last();
+        let dir = self
+            .parent_dir(parent, false)?
+            .ok_or_else(|| FsError::PublishedMissing(file.path.clone()))?;
+        let opened = match dir.open(name) {
+            Ok(opened) => opened,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(FsError::PublishedMissing(file.path.clone()));
+            }
+            Err(e) => return Err(FsError::io("open downloaded file")(e)),
+        };
+        let version = Self::file_version(&opened)?;
+        let regular = opened
+            .metadata()
+            .map_err(FsError::io("inspect downloaded file"))?
+            .is_file();
+        if !regular || !version.is(file, modified_ns) {
+            return Err(FsError::PublishedChanged(file.path.clone()));
+        }
+        Ok((opened, version))
+    }
+
+    /// The version of an open file.
+    pub fn file_version(opened: &cap_std::fs::File) -> Result<FileVersion, FsError> {
+        FileVersion::of(
+            &opened
+                .metadata()
+                .map_err(FsError::io("inspect downloaded file"))?,
+        )
     }
 
     /// The absolute path of the published file `file`, for a host to open

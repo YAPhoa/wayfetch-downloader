@@ -8,6 +8,7 @@
 //! and its cursor agree. Migrations live in [`schema`].
 
 mod accounts;
+mod checks;
 mod commands;
 mod crawl;
 mod deletions;
@@ -26,6 +27,7 @@ mod scenarios;
 pub mod schema;
 
 pub(crate) use accounts::{AccountRow, CheckResult, StoredCredential};
+pub(crate) use checks::{CheckOutcome, ManifestPlan, ReplaceStart, Replacement};
 pub use commands::CommandContext;
 pub(crate) use crawl::{Child, Found, Task};
 pub use deletions::DeleteStart;

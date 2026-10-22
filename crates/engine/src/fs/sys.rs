@@ -28,6 +28,15 @@ pub(super) fn identity(_meta: &Metadata) -> Result<FileIdentity, FsError> {
     Err(FsError::Unsupported("file identity"))
 }
 
+/// When the file `meta` describes was last modified, in nanoseconds since
+/// the Unix epoch, if the filesystem reports it.
+pub(super) fn modified_ns(meta: &Metadata) -> Option<i64> {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_nanos()).ok())
+}
+
 /// Makes `dir`'s entries durable: new, linked, and removed names.
 #[cfg(unix)]
 pub(super) fn sync_dir(dir: &Dir) -> io::Result<()> {

@@ -124,6 +124,8 @@ impl Store {
                 download_speed_limit,
                 extract_archives,
                 automatic_update_checks,
+                check_files,
+                redownload_failed_checks,
             } => roots::update_settings(
                 &tx,
                 *expected_revision,
@@ -132,6 +134,7 @@ impl Store {
                 *download_speed_limit,
                 *extract_archives,
                 *automatic_update_checks,
+                (*check_files, *redownload_failed_checks),
                 now,
             )?,
             Command::Extract {
@@ -229,6 +232,18 @@ pub(super) fn replayed(
             ));
         }
         return Err(StoreError::Busy("the file is being renamed; try again shortly").into());
+    }
+    // So does an unfinished retry of a file that failed its check.
+    if let Some(fingerprint) = super::checks::holding(tx, &key)? {
+        if fingerprint != envelope.command.fingerprint().as_bytes() {
+            return Err(ProtocolError::new(
+                ErrorCode::IdempotencyConflict,
+                "idempotency key was used for a different command",
+            ));
+        }
+        return Err(
+            StoreError::Busy("the file is being downloaded again; try again shortly").into(),
+        );
     }
     let Some(record) = stored(tx, &key)? else {
         return Ok(None);

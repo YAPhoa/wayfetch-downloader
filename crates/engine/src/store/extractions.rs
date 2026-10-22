@@ -91,7 +91,8 @@ fn row(tx: &Transaction<'_>, job: JobId) -> Result<Option<(ExtractionState, i64)
 }
 
 /// Sets `job`'s extraction to `state`, adding the row if missing, clearing
-/// its output and setting its problem, and announces the job.
+/// its output and setting its problem, and announces the job, unless it is
+/// already so.
 fn set(
     tx: &Transaction<'_>,
     job: JobId,
@@ -100,6 +101,15 @@ fn set(
     now: UtcTimestamp,
 ) -> Result<(), StoreError> {
     let state: &'static str = state.into();
+    let unchanged: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM extractions WHERE job_id = ?1 AND state = ?2 \
+         AND output IS NULL AND problem IS ?3)",
+        params![sql(job)?, state, problem],
+        |r| r.get(0),
+    )?;
+    if unchanged {
+        return Ok(());
+    }
     tx.execute(
         "INSERT INTO extractions (job_id, generation, state, problem, updated_at) \
          VALUES (?1, 1, ?2, ?3, ?4) \
@@ -139,14 +149,14 @@ fn check_run(
 }
 
 /// The other volumes of `archive`, the first volume `job` published at
-/// `file` in `root`, that finished downloading beside it.
+/// `file` in `root`, that finished downloading beside it, with their jobs.
 fn volumes(
     tx: &Transaction<'_>,
     job: JobId,
     root: RootId,
     archive: &ArchiveName,
     file: &PublishedFile,
-) -> Result<Vec<PublishedFile>, StoreError> {
+) -> Result<Vec<(JobId, PublishedFile)>, StoreError> {
     let folder = file.path.split_last().0;
     let ids: Vec<(i64, String)> = tx
         .prepare(
@@ -168,8 +178,9 @@ fn volumes(
         {
             continue;
         }
-        if let Some((_, _, file)) = renames::published(tx, key(id)?)? {
-            volumes.push(file);
+        let id: JobId = key(id)?;
+        if let Some((_, _, file)) = renames::published(tx, id)? {
+            volumes.push((id, file));
         }
     }
     Ok(volumes)
@@ -205,14 +216,17 @@ fn unfinished_parts(
 }
 
 /// Queues `job`'s archive to be unpacked, or has it wait while other
-/// volumes of it are still downloading.
+/// volumes of it are still downloading or its files are being checked.
 fn queue(tx: &Transaction<'_>, job: JobId, now: UtcTimestamp) -> Result<(), StoreError> {
     let stored = jobs::load(tx, job)?;
     let (Some(archive), Some(root)) = (stored.archive(), stored.artifact_root()) else {
         return Err(StoreError::Corrupt("archive job"));
     };
     match unfinished_parts(tx, job, root, &archive)? {
-        0 => set(tx, job, ExtractionState::Queued, None, now),
+        0 => match held(tx, job)? {
+            Some(why) => set(tx, job, ExtractionState::Waiting, Some(why), now),
+            None => set(tx, job, ExtractionState::Queued, None, now),
+        },
         n => {
             let problem = match n {
                 1 => "Waiting for 1 more part to download.".to_owned(),
@@ -221,6 +235,45 @@ fn queue(tx: &Transaction<'_>, job: JobId, now: UtcTimestamp) -> Result<(), Stor
             set(tx, job, ExtractionState::Waiting, Some(&problem), now)
         }
     }
+}
+
+/// Why `job`'s archive must not be unpacked yet while its files are
+/// checked, if it must not (see [`super::checks::extraction_hold`]).
+fn held(tx: &Transaction<'_>, job: JobId) -> Result<Option<&'static str>, StoreError> {
+    let stored = jobs::load(tx, job)?;
+    let (Some(archive), Some((_, root, file))) = (stored.archive(), renames::published(tx, job)?)
+    else {
+        return Ok(None);
+    };
+    let mut parts = vec![job];
+    parts.extend(
+        volumes(tx, job, root, &archive, &file)?
+            .into_iter()
+            .map(|(id, _)| id),
+    );
+    super::checks::extraction_hold(tx, stored.package(), &parts)
+}
+
+/// Queues every waiting archive but `skip` again, or has it wait on.
+/// Answers whether there was any.
+fn requeue(
+    tx: &Transaction<'_>,
+    skip: Option<JobId>,
+    now: UtcTimestamp,
+) -> Result<bool, StoreError> {
+    let waiting: Vec<i64> = tx
+        .prepare("SELECT job_id FROM extractions WHERE state = 'waiting' ORDER BY job_id")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let mut any = false;
+    for id in waiting {
+        let id: JobId = key(id)?;
+        if Some(id) != skip {
+            queue(tx, id, now)?;
+            any = true;
+        }
+    }
+    Ok(any)
 }
 
 impl Store {
@@ -245,18 +298,19 @@ impl Store {
             begin(&tx, finished, now)?;
             changed = true;
         }
-        let waiting: Vec<i64> = tx
-            .prepare("SELECT job_id FROM extractions WHERE state = 'waiting' ORDER BY job_id")?
-            .query_map([], |r| r.get(0))?
-            .collect::<Result<_, _>>()?;
-        for id in waiting {
-            let id: JobId = key(id)?;
-            if id == finished && changed {
-                continue;
-            }
-            queue(&tx, id, now)?;
-            changed = true;
-        }
+        changed |= requeue(&tx, changed.then_some(finished), now)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// Checks every archive waiting for other volumes or for its files'
+    /// checks again. Answers whether there was any.
+    pub(crate) fn requeue_waiting_extractions(
+        &mut self,
+        now: UtcTimestamp,
+    ) -> Result<bool, StoreError> {
+        let tx = self.write()?;
+        let changed = requeue(&tx, None, now)?;
         tx.commit()?;
         Ok(changed)
     }
@@ -298,8 +352,17 @@ impl Store {
                 )?;
                 continue;
             };
+            // Checked again just before unpacking: a checksum file may
+            // have arrived since the archive was queued.
+            if let Some(why) = held(&tx, job)? {
+                set(&tx, job, ExtractionState::Waiting, Some(why), now)?;
+                continue;
+            }
             let generation: Generation = key(generation)?;
-            let volumes = volumes(&tx, job, root, &archive, &file)?;
+            let volumes = volumes(&tx, job, root, &archive, &file)?
+                .into_iter()
+                .map(|(_, file)| file)
+                .collect();
             let staging = format!("{}-g{}", job.get(), generation.get());
             tx.execute(
                 "UPDATE extractions SET state = 'extracting', staging = ?2, \
@@ -445,7 +508,7 @@ pub(super) fn check_idle(tx: &Transaction<'_>, job: JobId) -> Result<(), StoreEr
             busy = *own_root == root
                 && volumes(tx, id, root, &archive, &file)?
                     .iter()
-                    .any(|volume| volume.path == own.path);
+                    .any(|(_, volume)| volume.path == own.path);
         }
         if busy {
             return Err(StoreError::Busy(
@@ -471,6 +534,7 @@ pub(super) fn extract(
     job.state
         .check_complete(expected)
         .map_err(StoreError::from)?;
+    super::checks::check_idle(tx, id)?;
     if !job.archive().is_some_and(|a| a.first) {
         return Err(ProtocolError::new(
             ErrorCode::NotApplicable,

@@ -25,9 +25,12 @@ use wayfetch_domain::version::BootEpoch;
 use wayfetch_protocol::InstanceId;
 use wayfetch_protocol::query::FailureSummary;
 
+use crate::checksum::{Digest, Hashing};
 use crate::config::{Limits, Timeouts};
 use crate::destinations::Destination;
-use crate::fs::{FsError, PublicationCheck, RelativePath, Root, StagingFile, StagingRecord};
+use crate::fs::{
+    FsError, PublicationCheck, PublishedFile, RelativePath, Root, StagingFile, StagingRecord,
+};
 use crate::lifecycle::{Resolution, ResolvedLink, SoleAttempt, StoreClient};
 use crate::media::{Converter, MediaService};
 use crate::progress::{Metering, Progress};
@@ -177,6 +180,12 @@ pub(crate) struct Download {
     pub(crate) progress: Progress,
     /// The meter of the body being written, while one is.
     pub(crate) metering: Option<Metering>,
+    /// Whether complete files are checked against checksums.
+    pub(crate) check_files: bool,
+    /// The engine's bound on files being hashed.
+    pub(crate) hashing: Hashing,
+    /// Checksums the provider gave for the bytes being downloaded.
+    pub(crate) checksums: Vec<Digest>,
 }
 
 /// What makes a media download.
@@ -255,6 +264,7 @@ impl Download {
             // Every byte is already durable, for example after a crash
             // between the last checkpoint and publication.
             Some(c) if c.partial.is_complete() => {
+                self.checksums.clone_from(&c.partial.checksums);
                 let name = target_name(self.job.job, c.partial.suggested_name.as_deref(), &url);
                 return self
                     .finish(&root, c.file, c.partial.durable_end, name)
@@ -263,6 +273,11 @@ impl Download {
             other => other,
         };
         let (opened, link) = self.open(&url, continued.as_ref()).await?;
+        self.checksums = match (&continued, &link) {
+            (Some(c), _) => c.partial.checksums.clone(),
+            (None, Some(link)) => link.link.checksums.clone(),
+            (None, None) => Vec::new(),
+        };
         // A provider's link names the file better than the original link.
         let named = link.as_ref().map_or(&url, |l| &l.link.url);
         let (response, target) = match opened {
@@ -290,8 +305,16 @@ impl Download {
             Some(c) => c.file,
             None => {
                 let representation = response.representation.clone();
-                self.create_staging(&root, representation, suggested.clone())
-                    .await?
+                let file = self
+                    .create_staging(&root, representation, suggested.clone())
+                    .await?;
+                if !self.checksums.is_empty() {
+                    let (job, generation) = (self.job.job, self.job.generation);
+                    let checksums = self.checksums.clone();
+                    self.call(move |s| s.record_checksums(job, generation, &checksums))
+                        .await??;
+                }
+                file
             }
         };
         self.meter(target.start, target.end);
@@ -944,8 +967,60 @@ impl Download {
             self.advance(JobStage::Transferring).await?;
         }
         self.advance(JobStage::Verifying).await?;
+        let (file, verified) = self.verify(file, size).await?;
         self.advance(JobStage::Publishing).await?;
-        self.publish(root, file, size, &name, 0).await
+        self.publish(root, file, size, &name, 0).await?;
+        let (job, generation) = (self.job.job, self.job.generation);
+        for digest in verified {
+            self.call(move |s| s.record_provider_check(job, generation, &digest, now()))
+                .await??;
+        }
+        Ok(())
+    }
+
+    /// Checks the staged file's first `size` bytes against the provider's
+    /// checksums, if checks are on, answering the file and the checksums it
+    /// matched. A mismatch never publishes: the store gives the file to
+    /// cleanup and fails the job, or queues it to start from zero.
+    async fn verify(
+        &self,
+        file: StagingFile,
+        size: u64,
+    ) -> Result<(StagingFile, Vec<Digest>), Stop> {
+        if !self.check_files || self.checksums.is_empty() {
+            return Ok((file, Vec::new()));
+        }
+        let algorithms: Vec<_> = self.checksums.iter().map(Digest::algorithm).collect();
+        let stop = self.cancel.clone();
+        let (file, hashed) = self
+            .hashing
+            .run(move || {
+                let hashed = file.hash(size, &algorithms, &stop);
+                (file, hashed)
+            })
+            .await
+            .ok_or(Stop::Abandon)?;
+        let actual = match hashed {
+            Ok(Some(actual)) => actual,
+            Ok(None) => return Err(Stop::Interrupted),
+            Err(e) => return Err(failed(FailureCode::DestinationUnavailable, e)),
+        };
+        let mismatch = self
+            .checksums
+            .iter()
+            .find(|expected| !actual.contains(expected));
+        if let Some(expected) = mismatch {
+            drop(file);
+            let why = format!(
+                "the downloaded file did not match the {} checksum the provider gave",
+                expected.algorithm()
+            );
+            let (job, generation) = (self.job.job, self.job.generation);
+            self.call(move |s| s.fail_provider_check(job, generation, &why, now()))
+                .await??;
+            return Err(Stop::Abandon);
+        }
+        Ok((file, self.checksums.clone()))
     }
 
     /// Publishes `file` under `name`, or its first free numbered
@@ -979,9 +1054,20 @@ impl Download {
                 None => self.reopen(root, record.clone(), size).await?,
             };
             let (r, t) = (root.clone(), target.clone());
-            match self.blocking(move || r.publish(staging, &t, size)).await? {
-                Ok(()) => {
-                    self.call(move |s| s.complete_publication(job, generation, now()))
+            let published = PublishedFile {
+                path: target.clone(),
+                identity: record.identity,
+                size,
+            };
+            let publishing = move || {
+                r.publish(staging, &t, size)?;
+                // Seen right after publishing, so a later check can tell
+                // a file changed in place; not seeing it changes nothing.
+                Ok(r.published_modified(&published).ok().flatten())
+            };
+            match self.blocking(publishing).await? {
+                Ok(modified) => {
+                    self.call(move |s| s.complete_publication_at(job, generation, modified, now()))
                         .await??;
                     return Ok(());
                 }
@@ -1250,6 +1336,9 @@ mod tests {
             media: None,
             progress: Progress::new(epoch),
             metering: None,
+            check_files: true,
+            hashing: Hashing::new(Arc::new(())),
+            checksums: Vec::new(),
             job: Admission {
                 job,
                 stage,

@@ -149,6 +149,7 @@ impl Store {
         }
         super::deletions::check_idle(&tx, *id)?;
         super::extractions::check_idle(&tx, *id)?;
+        super::checks::check_idle(&tx, *id)?;
         let job = jobs::load_listed(&tx, *id)?;
         // Checks the revision and stage without keeping the new revision:
         // that is recorded once the file has its name.

@@ -15,8 +15,8 @@ use wayfetch_domain::version::Generation;
 use wayfetch_protocol::event::{EventCursor, EventKind};
 use wayfetch_protocol::media::{JobMedia, MediaChoice};
 use wayfetch_protocol::query::{
-    ArtifactSummary, ExtractionState, ExtractionSummary, FailureSummary, JobCounts, JobFilter,
-    JobRoute, JobSummary, Page, Query, QueryResult,
+    ArtifactSummary, ExtractionState, ExtractionSummary, FailureSummary, FileCheck, JobCounts,
+    JobFilter, JobRoute, JobSummary, Page, Query, QueryResult,
 };
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
@@ -27,14 +27,22 @@ use crate::transfer::transport::Reach;
 /// the job's newest partial; the next three describe its published file,
 /// then come the submitted link, the job's destination root, whether the
 /// user removed it from lists, and why its latest attempt restarted from
-/// zero, and the provider route it was started through.
+/// zero, and the provider route it was started through; then its media,
+/// unpacking, and the check of its file that matters most, with whether
+/// the file is being replaced (see [`super::checks::decode`]).
 const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.generation, \
      j.revision, j.bytes_total, j.failure_code, j.failure_retry_at, j.failure_message, \
      COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
                ORDER BY p.generation DESC LIMIT 1), 0), \
      a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id, j.removed_at IS NOT NULL, \
      j.restart_reason, j.route_service, j.route_account, j.suggested_name, \
-     j.media_service, j.media_choice, x.state, x.output, x.problem, x.generation";
+     j.media_service, j.media_choice, x.state, x.output, x.problem, x.generation, \
+     (SELECT v.state || char(31) || v.algorithm || char(31) || COALESCE(v.source_name, '') \
+      || char(31) || COALESCE(v.problem, '') FROM verifications v \
+      WHERE v.publication_id = a.id ORDER BY CASE v.state WHEN 'changed' THEN 0 \
+      WHEN 'conflict' THEN 1 WHEN 'failed' THEN 2 WHEN 'pending' THEN 3 ELSE 4 END, \
+      v.source_publication_id LIMIT 1), \
+     EXISTS (SELECT 1 FROM replacements r WHERE r.job_id = j.id)";
 
 /// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
 /// has exactly one source link.
@@ -103,9 +111,26 @@ pub(super) struct StoredJob {
     name: Option<String>,
     media: Option<JobMedia>,
     extraction: Option<ExtractionSummary>,
+    check: Option<FileCheck>,
 }
 
 impl StoredJob {
+    /// Its package.
+    pub(super) fn package(&self) -> PackageId {
+        self.package
+    }
+
+    /// The name it was given before any number was added to make it
+    /// unique: the source's or provider's suggestion, else the link's.
+    pub(super) fn intended_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Where its published file is in its root, once complete.
+    pub(super) fn artifact_path(&self) -> Option<&str> {
+        self.artifact.as_ref().map(|a| a.path.as_str())
+    }
+
     /// The published file's name as an archive, if it is one.
     pub(super) fn archive(&self) -> Option<crate::extract::ArchiveName> {
         let path = &self.artifact.as_ref()?.path;
@@ -161,6 +186,7 @@ impl StoredJob {
             route: self.route.clone().map(Box::new),
             media: self.media.clone().map(Box::new),
             extraction: self.extraction.clone().map(Box::new),
+            check: self.check.clone().map(Box::new),
         }
     }
 }
@@ -187,6 +213,7 @@ struct RawJob {
     name: Option<String>,
     media: (Option<String>, Option<String>),
     extraction: (Option<String>, Option<String>, Option<String>, Option<i64>),
+    check: (Option<String>, bool),
 }
 
 impl RawJob {
@@ -215,6 +242,7 @@ impl RawJob {
             name: row.get(20)?,
             media: (row.get(21)?, row.get(22)?),
             extraction: (row.get(23)?, row.get(24)?, row.get(25)?, row.get(26)?),
+            check: (row.get(27)?, row.get(28)?),
         })
     }
 
@@ -236,6 +264,7 @@ impl RawJob {
             .or_else(|| source_name(&self.input_url))
             .map(|name| name.as_str().to_owned());
         let extraction = super::extractions::decode(self.extraction)?;
+        let check = super::checks::decode(self.check.0, self.check.1)?;
         let mut job = StoredJob {
             id: key(self.id)?,
             state,
@@ -270,6 +299,7 @@ impl RawJob {
             name,
             media: decode_media(self.media.0, self.media.1.as_deref())?,
             extraction,
+            check,
         };
         job.offer_extraction();
         Ok(job)

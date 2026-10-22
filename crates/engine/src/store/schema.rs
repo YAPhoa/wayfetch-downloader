@@ -14,6 +14,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0001_initial.sql")),
     M::up(include_str!("migrations/0002_root_initialized.sql")),
     M::up(include_str!("migrations/0003_automatic_update_checks.sql")),
+    M::up(include_str!("migrations/0004_file_checks.sql")),
 ];
 
 /// Newest schema version this engine knows.
@@ -81,6 +82,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(automatic, 1);
+    }
+
+    #[test]
+    fn a_released_database_upgrades_with_file_checks_on() {
+        // v0.1.2 shipped at schema version 3.
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(MIGRATIONS)
+            .to_version(&mut conn, 3)
+            .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
+        let (check, redownload): (i64, i64) = conn
+            .query_row(
+                "SELECT check_files, redownload_failed_checks FROM settings WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((check, redownload), (1, 0));
     }
 
     #[test]

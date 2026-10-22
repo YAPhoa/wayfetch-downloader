@@ -12,6 +12,7 @@ use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{BootEpoch, Generation};
 
 use super::{OrCorrupt, Store, StoreError, jobs, key, progress, sql};
+use crate::checksum::Digest;
 use crate::fs::{FileIdentity, RelativePath, Removal, StagingRecord};
 use crate::lifecycle::SoleAttempt;
 use crate::transfer::lease::Representation;
@@ -34,6 +35,8 @@ pub struct Partial {
     /// The generation a manual retry reserved the file for, which may
     /// adopt it while the engine runs ([`Store::adopt_retained`]).
     pub reserved_for: Option<Generation>,
+    /// Checksums the provider gave for the file's bytes.
+    pub checksums: Vec<Digest>,
 }
 
 impl Partial {
@@ -277,12 +280,12 @@ impl Store {
     /// reopen, which is what a restart or a resumed job reopens.
     pub fn latest_staging(&mut self, job: JobId) -> Result<Option<Partial>, StoreError> {
         let tx = self.read()?;
-        let Some((record, representation, suggested_name, reserved_for)) = tx
+        let Some((record, representation, suggested_name, reserved_for, checksums)) = tx
             .query_row(
                 &format!(
                     "SELECT {STAGING_COLUMNS}, representation_known, representation_length, \
                      representation_etag, representation_modified, suggested_name, \
-                     representation_resource, handoff_generation FROM staging_files \
+                     representation_resource, handoff_generation, checksums FROM staging_files \
                      WHERE job_id = ?1 AND cleanup IS NULL ORDER BY generation DESC LIMIT 1"
                 ),
                 [sql(job)?],
@@ -301,6 +304,7 @@ impl Store {
                         representation.transpose()?,
                         row.get::<_, Option<String>>(11)?,
                         row.get::<_, Option<i64>>(13)?,
+                        row.get::<_, Option<String>>(14)?,
                     ))
                 },
             )
@@ -331,6 +335,12 @@ impl Store {
             representation,
             suggested_name,
             reserved_for: reserved_for.map(key).transpose()?,
+            checksums: checksums
+                .as_deref()
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(|d| d.parse().or_corrupt("staging checksums"))
+                .collect::<Result<_, _>>()?,
         }))
     }
 
@@ -392,6 +402,33 @@ impl Store {
             params![length, now.unix_millis(), sql(job)?, name],
         )?;
         jobs::announce(&tx, job, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records the checksums a provider gave for the bytes of the job
+    /// generation's staging file, which are checked before it is
+    /// published, including after a restart.
+    pub(crate) fn record_checksums(
+        &mut self,
+        job: JobId,
+        generation: Generation,
+        checksums: &[Digest],
+    ) -> Result<(), StoreError> {
+        let text = checksums
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let tx = self.write()?;
+        tx.execute(
+            "UPDATE staging_files SET checksums = ?3 WHERE job_id = ?1 AND generation = ?2",
+            params![
+                sql(job)?,
+                sql(generation)?,
+                (!text.is_empty()).then_some(text)
+            ],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -587,6 +624,18 @@ impl Store {
         generation: Generation,
         now: UtcTimestamp,
     ) -> Result<(), StoreError> {
+        self.complete_publication_at(job, generation, None, now)
+    }
+
+    /// [`Store::complete_publication`], recording when the published file
+    /// was last modified, as seen right after publishing, if seen.
+    pub(crate) fn complete_publication_at(
+        &mut self,
+        job: JobId,
+        generation: Generation,
+        modified_ns: Option<i64>,
+        now: UtcTimestamp,
+    ) -> Result<(), StoreError> {
         let tx = self.write()?;
         job_at(
             &tx,
@@ -605,8 +654,9 @@ impl Store {
             .optional()?
             .ok_or(StoreError::NotFound("publication intent"))?;
         tx.execute(
-            "UPDATE publications SET state = 'published', completed_at = ?1 WHERE id = ?2",
-            params![now.unix_millis(), intent],
+            "UPDATE publications SET state = 'published', completed_at = ?1, \
+             file_modified_ns = ?3 WHERE id = ?2",
+            params![now.unix_millis(), intent, modified_ns],
         )?;
         // The published file no longer has a staging name. Records of older
         // generations' files stay for their cleanup.

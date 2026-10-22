@@ -13,6 +13,8 @@ import {
   availableActions,
   canRemove,
   canRename,
+  checkNote,
+  checkResult,
   describe,
   displayLink,
   explain,
@@ -2031,6 +2033,7 @@ export class Downloads {
         ['Size', shown.size],
         [job.artifact ? 'Saved in' : 'Saves to', this.folder(job, where.folder)],
         ['Unpacked to', job.extraction?.output],
+        ['Check', checkResult(job)],
         ...this.source(job),
       ]),
       unpackNote(job) &&
@@ -2039,6 +2042,7 @@ export class Downloads {
           { class: `note tone-${job.extraction?.state === 'failed' ? 'bad' : 'warn'}`, 'data-note': 'unpack' },
           unpackNote(job),
         ),
+      checkNote(job) && h('p', { class: 'note tone-bad', 'data-note': 'check' }, checkNote(job)),
       job.failure && h('p', { class: `note tone-${state.status === 'failed' ? 'bad' : 'warn'}` }, explain(job.failure)),
       restartNote(job) && h('p', { class: 'note tone-warn', 'data-note': 'restart' }, restartNote(job)),
     );
