@@ -8,6 +8,9 @@
  * @typedef {import('./contract.js').ProgressSample} ProgressSample
  * @typedef {import('./contract.js').JobCounts} JobCounts
  * @typedef {import('./contract.js').ExtractionState} ExtractionState
+ * @typedef {import('./generated/FileCheck.js').FileCheck} FileCheck
+ * @typedef {import('./generated/FileCheckState.js').FileCheckState} FileCheckState
+ * @typedef {import('./generated/ChecksumAlgorithm.js').ChecksumAlgorithm} ChecksumAlgorithm
  * @typedef {import('./generated/FailureCode.js').FailureCode} FailureCode
  * @typedef {import('./generated/FailureSummary.js').FailureSummary} FailureSummary
  *
@@ -43,6 +46,8 @@ export function availableActions(job) {
   if (job.desired !== 'cancelled' && job.stage !== 'complete') actions.push('cancel');
   // A cancel still stopping keeps its active stage until it settles.
   if (job.stage === 'failed' || job.stage === 'cancelled') actions.push('retry');
+  // A complete file that failed its check is downloaded again.
+  if (job.stage === 'complete' && job.check?.state === 'failed') actions.push('retry');
   return actions;
 }
 
@@ -53,6 +58,7 @@ export function availableActions(job) {
  * @param {JobSummary} job
  */
 export function retryPlan(job) {
+  if (job.stage === 'complete') return 'Removes the file that failed its check and downloads it again';
   return job.bytes_done > 0
     ? `Continues from the ${formatBytes(job.bytes_done)} saved when it can`
     : 'Starts the download again';
@@ -145,6 +151,61 @@ const UNPACKING = Object.freeze({
   failed: ['Unpack failed', 'failed'],
   cancelled: ['Unpack cancelled', 'cancelled'],
 });
+
+/**
+ * How a complete download's check reads in place of Done, when it is not
+ * simply passed: one that passed, or was never checked, reads Done.
+ * @type {Readonly<Record<FileCheckState, [string, Status] | null>>}
+ */
+const CHECKS = Object.freeze({
+  pending: ['Checking…', 'active'],
+  verified: null,
+  failed: ['Check failed', 'failed'],
+  conflict: ['Checksums disagree', 'failed'],
+  changed: ['Changed since download', 'failed'],
+  replacing: ['Downloading again', 'active'],
+});
+
+/** @type {Readonly<Record<ChecksumAlgorithm, string>>} */
+const ALGORITHMS = Object.freeze({ crc32: 'CRC32', md5: 'MD5', sha1: 'SHA-1', sha256: 'SHA-256' });
+
+/**
+ * What `check` compared against, such as "CRC32 from release.sfv".
+ * @param {FileCheck} check
+ */
+function checkedAgainst(check) {
+  return `${ALGORITHMS[check.algorithm]} ${check.source ? `from ${check.source}` : 'from the provider'}`;
+}
+
+/**
+ * How a complete download's check went, for its details.
+ * @param {JobSummary} job
+ */
+export function checkResult(job) {
+  const check = job.stage === 'complete' ? job.check : undefined;
+  if (!check) return undefined;
+  const state = check.state === 'verified' ? 'Passed' : (CHECKS[check.state]?.[0] ?? check.state);
+  return `${state} (${checkedAgainst(check)})`;
+}
+
+/**
+ * What a complete download's check says beyond its state: what failed
+ * and what to do.
+ * @param {JobSummary} job
+ */
+export function checkNote(job) {
+  const check = job.stage === 'complete' ? job.check : undefined;
+  switch (check?.state) {
+    case 'failed':
+      return `The file does not match its ${checkedAgainst(check)}. It is kept; Retry removes it and downloads it again.`;
+    case 'conflict':
+      return `${check.problem ?? 'Checksum files list different values for this file.'} It is not downloaded again on its own.`;
+    case 'changed':
+      return `${check.problem ?? 'The file changed after it was downloaded.'} Wayfetch leaves it as it is.`;
+    default:
+      return undefined;
+  }
+}
 
 /**
  * What can be done about unpacking `job`, mirroring the engine's rules
@@ -310,8 +371,12 @@ export function groupCount(group, counts) {
  * @returns {{ label: string, status: Status | null }}
  */
 export function describe(job) {
+  const checked = job.display === 'complete' && job.check && CHECKS[job.check.state];
+  // A part that failed its check holds unpacking, so its check says more.
+  if (checked && job.check?.state !== 'pending') return { label: checked[0], status: checked[1] };
   const unpacking = job.display === 'complete' && job.extraction && UNPACKING[job.extraction.state];
   if (unpacking) return { label: unpacking[0], status: unpacking[1] };
+  if (checked) return { label: checked[0], status: checked[1] };
   /** @type {[string, Status | null]} */
   const [name, status] = STATES[job.display] ?? [String(job.display), null];
   const failure = job.failure;

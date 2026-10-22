@@ -3073,6 +3073,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3780,7 +3790,7 @@ dependencies = [
  "idea",
  "k256",
  "log",
- "md-5",
+ "md-5 0.10.6",
  "memchr",
  "nom 8.0.0",
  "num-bigint-dig",
@@ -3794,7 +3804,7 @@ dependencies = [
  "replace_with",
  "ripemd",
  "rsa",
- "sha1",
+ "sha1 0.10.7",
  "sha1-checked",
  "sha2 0.10.9",
  "sha3",
@@ -4938,13 +4948,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sha1-checked"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89f599ac0c323ebb1c6082821a54962b839832b03984598375bff3975b804423"
 dependencies = [
  "digest 0.10.7",
- "sha1",
+ "sha1 0.10.7",
  "zeroize",
 ]
 
@@ -6393,9 +6414,11 @@ version = "0.1.2"
 dependencies = [
  "bytes",
  "cap-std",
+ "crc32fast",
  "fail",
  "html5ever",
  "linkify",
+ "md-5 0.11.0",
  "percent-encoding",
  "rangemap",
  "ring",
@@ -6405,6 +6428,8 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.1",
  "strum",
  "tempfile",
  "thiserror 2.0.21",

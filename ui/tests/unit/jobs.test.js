@@ -5,6 +5,8 @@ import {
   availableActions,
   canRemove,
   canRename,
+  checkNote,
+  checkResult,
   describe,
   displayLink,
   explain,
@@ -253,6 +255,33 @@ test('a finished archive reads as its unpacking, and offers what the engine allo
   assert.deepEqual(unpackActions({ ...archive('idle'), stage: 'queued' }), { start: null, stop: false });
   assert.equal(unpackNote(archive('waiting', 'Waiting for 2 more parts to download.')), 'Waiting for 2 more parts to download.');
   assert.equal(unpackNote(archive('complete')), undefined);
+});
+
+test('a complete file reads as its check, and one that failed can be retried', () => {
+  const checked = (
+    /** @type {import('../../src/client/generated/FileCheckState.js').FileCheckState} */ state,
+    /** @type {string | undefined} */ source = 'release.sfv',
+  ) =>
+    job({
+      stage: 'complete',
+      display: 'complete',
+      check: { state, algorithm: 'crc32', source },
+      extraction: { state: 'waiting', problem: 'A part failed its check; download it again to continue.' },
+    });
+  assert.deepEqual(describe(checked('failed')), { label: 'Check failed', status: 'failed' });
+  assert.deepEqual(describe(checked('replacing')), { label: 'Downloading again', status: 'active' });
+  // A pending check gives way to unpacking, which waits for it.
+  assert.deepEqual(describe(checked('pending')), { label: 'Waiting for parts', status: 'queued' });
+  assert.deepEqual(describe({ ...checked('verified'), extraction: undefined }), { label: 'Done', status: 'done' });
+  assert.equal(checkResult(checked('verified')), 'Passed (CRC32 from release.sfv)');
+  assert.equal(checkResult(job({ stage: 'complete', check: { state: 'verified', algorithm: 'sha256' } })), 'Passed (SHA-256 from the provider)');
+  assert.match(String(checkNote(checked('failed'))), /does not match its CRC32 from release\.sfv.*Retry/);
+  assert.equal(checkNote(checked('verified')), undefined);
+  assert.deepEqual(availableActions(checked('failed')), ['retry']);
+  assert.equal(retryPlan(checked('failed')), 'Removes the file that failed its check and downloads it again');
+  for (const state of /** @type {const} */ (['verified', 'conflict', 'changed', 'replacing', 'pending'])) {
+    assert.deepEqual(availableActions(checked(state)), [], state);
+  }
 });
 
 test('a failed deletion may have deleted data unless refused before it began', () => {

@@ -232,6 +232,15 @@ pub struct UpdateSettingsRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub automatic_update_checks: Option<bool>,
+    /// Whether complete downloads are checked against checksums.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub check_files: Option<bool>,
+    /// Whether a download that fails its check is downloaded again once
+    /// on its own.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub redownload_failed_checks: Option<bool>,
 }
 
 impl UpdateSettingsRequest {
@@ -247,6 +256,8 @@ impl UpdateSettingsRequest {
                 download_speed_limit: self.download_speed_limit,
                 extract_archives: self.extract_archives,
                 automatic_update_checks: self.automatic_update_checks,
+                check_files: self.check_files,
+                redownload_failed_checks: self.redownload_failed_checks,
             },
         }
     }
@@ -798,6 +809,8 @@ mod tests {
                 download_speed_limit: None,
                 extract_archives: None,
                 automatic_update_checks: None,
+                check_files: None,
+                redownload_failed_checks: None,
             }
         );
         let preference: UpdateSettingsRequest = serde_json::from_value(json!({
@@ -816,6 +829,8 @@ mod tests {
                 download_speed_limit: None,
                 extract_archives: None,
                 automatic_update_checks: None,
+                check_files: None,
+                redownload_failed_checks: None,
             }
         );
         let both: UpdateSettingsRequest = serde_json::from_value(json!({

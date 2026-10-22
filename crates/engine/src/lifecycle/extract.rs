@@ -24,11 +24,13 @@ use crate::store::{ExtractionEnd, ExtractionStart};
 /// How long a password given for an archive is kept for its next attempt.
 const PASSWORD_TTL: Duration = Duration::from_secs(10 * 60);
 
+/// How often archives that wait are checked again on their own.
+const RECHECK_INTERVAL: Duration = Duration::from_secs(2);
+
 /// How often an attempt's output is measured while it is written.
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The extractor and the attempt running.
-#[derive(Default)]
 pub(super) struct Extractions {
     extractor: Option<Arc<dyn Extractor>>,
     /// The attempt running, its generation, and what stops it.
@@ -37,6 +39,8 @@ pub(super) struct Extractions {
     pub(super) automatic: bool,
     /// Passwords given for archives' next attempts, until they expire.
     passwords: HashMap<JobId, (Secret, Instant)>,
+    /// When archives that wait were last checked again.
+    rechecked: Instant,
 }
 
 impl Extractions {
@@ -44,7 +48,9 @@ impl Extractions {
         Self {
             extractor,
             automatic,
-            ..Self::default()
+            running: None,
+            passwords: HashMap::new(),
+            rechecked: Instant::now(),
         }
     }
 
@@ -94,6 +100,18 @@ impl Coordinator {
         let automatic = self.extractions.automatic && self.extractions.unavailable().is_none();
         let _ = self
             .with_store(move |store| store.plan_extractions(job, automatic, now()))
+            .await;
+    }
+
+    /// Every few seconds, or when something may have released one, checks
+    /// archives waiting for other parts or for their files' checks again.
+    pub(super) async fn recheck_extractions(&mut self) {
+        if self.extractions.rechecked.elapsed() < RECHECK_INTERVAL {
+            return;
+        }
+        self.extractions.rechecked = Instant::now();
+        let _ = self
+            .with_store(move |store| store.requeue_waiting_extractions(now()))
             .await;
     }
 

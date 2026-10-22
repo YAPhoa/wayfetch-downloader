@@ -346,6 +346,8 @@ impl RealDebrid {
                 .filter(|n| !n.is_empty() && n.len() <= MAX_NAME)
                 .map(str::to_owned),
             size: filesize.filter(|&s| s > 0),
+            // The provider gives no hash of the file.
+            checksums: Vec::new(),
         })
     }
 

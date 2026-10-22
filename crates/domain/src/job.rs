@@ -490,6 +490,19 @@ impl JobState {
         self.commit(*self)
     }
 
+    /// Queues a completed job again under a new generation, after its
+    /// published file failed a check and was removed. Only the engine's
+    /// replacement workflow calls this, once the file is gone.
+    pub fn replace(&mut self) -> Result<Outcome, JobError> {
+        if self.stage != JobStage::Complete || self.desired != DesiredState::Running {
+            return Err(self.not_applicable());
+        }
+        let mut next = *self;
+        next.stage = JobStage::Queued;
+        next.generation = self.generation.next()?;
+        self.commit(next)
+    }
+
     /// Checks that the job is complete at `expected`, for work on its
     /// published file that leaves the job's state as it is, such as
     /// unpacking it.
@@ -816,6 +829,19 @@ mod tests {
         let r = job.revision();
         assert_eq!(job.request_cancel(r), Ok(Outcome::Unchanged));
         assert_eq!(job.request_resume(r), Err(job.not_applicable()));
+    }
+
+    #[test]
+    fn only_a_complete_job_is_replaced_and_under_a_new_generation() {
+        let mut job = running(Complete);
+        let (generation, revision) = (job.generation(), job.revision());
+        assert_eq!(job.replace().unwrap(), Outcome::Changed);
+        assert_eq!(job.stage(), Queued);
+        assert!(job.generation() > generation && job.revision() > revision);
+        for stage in ALL.iter().copied().filter(|s| *s != Complete) {
+            let mut job = settled(stage);
+            assert!(job.replace().is_err(), "replace from {stage}");
+        }
     }
 
     #[test]

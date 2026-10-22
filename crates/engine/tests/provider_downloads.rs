@@ -35,7 +35,7 @@ use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::domain::name::ProviderId;
 use wayfetch_protocol::domain::time::UtcTimestamp;
 use wayfetch_protocol::query::{
-    CheckReason, CollectedLink, JobRoute, JobSummary, LinkCheck, PageSize,
+    CheckReason, CollectedLink, FileCheckState, JobRoute, JobSummary, LinkCheck, PageSize,
 };
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Permission, ProtocolError, Query,
@@ -106,6 +106,8 @@ struct Provider {
     /// What the generated file is called.
     filename: Mutex<Option<String>>,
     size: Mutex<Option<u64>>,
+    /// Checksums its generated links carry.
+    checksums: Mutex<Vec<wayfetch_engine::checksum::Digest>>,
     /// What a link check is told, instead of the file it would generate.
     availability: Mutex<Option<Availability>>,
     availabilities: AtomicUsize,
@@ -138,6 +140,7 @@ impl Provider {
             delay: Mutex::new(Duration::ZERO),
             filename: Mutex::new(Some("Provider Name.bin".into())),
             size: Mutex::new(None),
+            checksums: Mutex::new(Vec::new()),
             availability: Mutex::new(None),
             availabilities: AtomicUsize::new(0),
             availability_panic: AtomicBool::new(false),
@@ -187,6 +190,7 @@ impl Provider {
             url: Url::parse(&format!("https://{CDN}/d/{n}/file.bin?sig={SIGNATURE}-{n}")).unwrap(),
             filename: self.filename.lock().unwrap().clone(),
             size: *self.size.lock().unwrap(),
+            checksums: self.checksums.lock().unwrap().clone(),
         };
         self.record
             .lock()
@@ -838,6 +842,86 @@ async fn a_link_started_through_an_account_downloads_its_exact_bytes() {
     for (path, bytes) in state_files(&env.state) {
         assert_no_secret_in(&bytes, &path.display().to_string());
     }
+}
+
+/// The provider's SHA-256 of `data`, or of something else.
+fn sha256(data: &[u8]) -> wayfetch_engine::checksum::Digest {
+    use wayfetch_engine::checksum::{Algorithm, hash};
+    let stop = tokio_util::sync::CancellationToken::new();
+    hash(&mut &data[..], &[Algorithm::Sha256], &stop)
+        .unwrap()
+        .unwrap()
+        .remove(0)
+}
+
+async fn turn_on_redownloads(owner: &EngineOwner) {
+    let QueryResult::Settings(settings) =
+        owner.handle().query(Query::Settings {}, ALL).await.unwrap()
+    else {
+        panic!()
+    };
+    let update = Command::UpdateSettings {
+        expected_revision: settings.revision,
+        default_root: None,
+        max_active_downloads: None,
+        download_speed_limit: None,
+        extract_archives: None,
+        automatic_update_checks: None,
+        check_files: None,
+        redownload_failed_checks: Some(true),
+    };
+    owner
+        .handle()
+        .execute(envelope(owner, update), ALL)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_checksum_is_checked_before_the_file_is_published() {
+    let env = env();
+    let (provider, host) = (&env.server.provider, &env.server.host);
+    let data = body(20 * KIB);
+    host.serve(data.clone());
+    *provider.size.lock().unwrap() = Some(data.len() as u64);
+    *provider.checksums.lock().unwrap() = vec![sha256(&data)];
+    let owner = env.start().await;
+    let account = add_account(&owner, provider).await;
+    let id = start_one(&owner, Some(account)).await;
+    let done = support::complete(&owner, id).await;
+    let check = done.check.unwrap();
+    assert_eq!(check.state, FileCheckState::Verified);
+    assert_eq!(check.source, None);
+    assert_eq!(env.published("Provider Name.bin"), data);
+
+    // A file that does not match is never published.
+    *provider.checksums.lock().unwrap() = vec![sha256(b"other")];
+    let id = start_one(&owner, Some(account)).await;
+    let failed = failed(&owner, id).await;
+    assert_eq!(failed.failure.unwrap().code, FailureCode::IntegrityMismatch);
+    assert!(failed.artifact.is_none());
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_checksum_mismatch_downloads_again_only_once() {
+    let env = env();
+    let (provider, host) = (&env.server.provider, &env.server.host);
+    let data = body(20 * KIB);
+    host.serve(data.clone());
+    *provider.size.lock().unwrap() = Some(data.len() as u64);
+    *provider.checksums.lock().unwrap() = vec![sha256(b"other")];
+    let owner = env.start().await;
+    turn_on_redownloads(&owner).await;
+    let account = add_account(&owner, provider).await;
+    let id = start_one(&owner, Some(account)).await;
+    let failed = failed(&owner, id).await;
+    assert_eq!(failed.failure.unwrap().code, FailureCode::IntegrityMismatch);
+    // Downloaded twice in all, never more.
+    let requests = host.requests();
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(env.staging_files(), 0);
+    shutdown(owner).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -536,12 +536,13 @@ impl Destinations {
         max_active_downloads: BoundedSetting,
         download_speed_limit: SpeedLimitSetting,
         plugins: Vec<wayfetch_protocol::media::PluginSummary>,
-        extract_archives: bool,
-        automatic_update_checks: bool,
+        switches: Switches,
     ) -> Settings {
         Settings {
-            extract_archives,
-            automatic_update_checks,
+            extract_archives: switches.extract_archives,
+            automatic_update_checks: switches.automatic_update_checks,
+            check_files: switches.check_files,
+            redownload_failed_checks: switches.redownload_failed_checks,
             max_active_downloads,
             download_speed_limit,
             plugins,
@@ -839,6 +840,19 @@ fn unavailable(err: &FsError) -> String {
         }
         other => other.to_string(),
     }
+}
+
+/// The settings that are on or off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Switches {
+    /// Whether downloaded archives are unpacked as they finish.
+    pub(crate) extract_archives: bool,
+    /// Whether the engine checks for a newer release on its own.
+    pub(crate) automatic_update_checks: bool,
+    /// Whether complete downloads are checked against checksums.
+    pub(crate) check_files: bool,
+    /// Whether a download that fails its check is downloaded again once.
+    pub(crate) redownload_failed_checks: bool,
 }
 
 #[cfg(test)]

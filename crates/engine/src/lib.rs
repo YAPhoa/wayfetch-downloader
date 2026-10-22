@@ -16,6 +16,7 @@ macro_rules! crash_point {
 }
 
 pub mod accounts;
+pub mod checksum;
 mod cleanup;
 pub mod config;
 pub mod crawl;

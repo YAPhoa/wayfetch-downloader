@@ -82,6 +82,7 @@ impl Store {
             .state
             .check_remove(expected)
             .map_err(StoreError::from)?;
+        super::checks::check_idle(&tx, job)?;
         Ok(())
     }
 
@@ -149,6 +150,7 @@ impl Store {
             return Err(StoreError::Busy("the file is being renamed; try again").into());
         }
         super::extractions::check_idle(&tx, id)?;
+        super::checks::check_idle(&tx, id)?;
         if existing.is_none() {
             tx.execute(
                 "INSERT INTO deletions (job_id, revision, generation, idempotency_key, fingerprint) \
@@ -253,6 +255,13 @@ impl Store {
         job.state.check_remove(key(revision)?)?;
         if sql(job.state.generation())? != generation {
             return Err(StoreError::Corrupt("deletion generation"));
+        }
+        let publications: Vec<i64> = tx
+            .prepare("SELECT id FROM publications WHERE job_id = ?1")?
+            .query_map([sql(id)?], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for publication in publications {
+            super::checks::forget_publication(&tx, publication)?;
         }
         tx.execute("DELETE FROM publications WHERE job_id=?1", [sql(id)?])?;
         tx.execute("DELETE FROM partials WHERE job_id=?1", [sql(id)?])?;

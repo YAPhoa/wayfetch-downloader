@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
+export const PROTOCOL = Object.freeze({ major: 0, minor: 4 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -190,6 +190,8 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
  *   downloadSpeedLimit?: SpeedLimitChange,
  *   extractArchives?: boolean,
  *   automaticUpdateChecks?: boolean,
+ *   checkFiles?: boolean,
+ *   redownloadFailedChecks?: boolean,
  * }} SettingsChange
  */
 
@@ -255,6 +257,8 @@ export function settingsRequest({
   downloadSpeedLimit,
   extractArchives,
   automaticUpdateChecks,
+  checkFiles,
+  redownloadFailedChecks,
 }) {
   /** @type {UpdateSettingsRequest} */
   const request = { idempotency_key: idempotencyKey, target, expected_revision: expectedRevision };
@@ -263,6 +267,8 @@ export function settingsRequest({
   if (downloadSpeedLimit !== undefined) request.download_speed_limit = downloadSpeedLimit;
   if (extractArchives !== undefined) request.extract_archives = extractArchives;
   if (automaticUpdateChecks !== undefined) request.automatic_update_checks = automaticUpdateChecks;
+  if (checkFiles !== undefined) request.check_files = checkFiles;
+  if (redownloadFailedChecks !== undefined) request.redownload_failed_checks = redownloadFailedChecks;
   return request;
 }
 

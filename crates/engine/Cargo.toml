@@ -13,6 +13,13 @@ wayfetch-domain.workspace = true
 wayfetch-protocol.workspace = true
 bytes.workspace = true
 cap-std.workspace = true
+# Checksums of downloaded files: CRC32 for SFV files (already in the tree
+# through flate2), and MD5, SHA-1, and SHA-256 from RustCrypto, the family
+# of the sha2 already used elsewhere.
+crc32fast.workspace = true
+md-5.workspace = true
+sha1.workspace = true
+sha2.workspace = true
 # The tokenizer under scraper, already in the tree: tells pasted markup
 # from text by the tags actually written, which a parsed tree cannot.
 html5ever = "0.39.0"

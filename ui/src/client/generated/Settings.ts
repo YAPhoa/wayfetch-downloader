@@ -44,4 +44,14 @@ extract_archives: boolean,
 /**
  * Whether the engine checks for a newer release on its own.
  */
-automatic_update_checks: boolean, };
+automatic_update_checks: boolean, 
+/**
+ * Whether complete downloads are checked against checksum files
+ * downloaded with them and checksums their provider gives.
+ */
+check_files: boolean, 
+/**
+ * Whether a download whose file fails its check is downloaded again
+ * once on its own.
+ */
+redownload_failed_checks: boolean, };

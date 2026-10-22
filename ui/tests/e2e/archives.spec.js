@@ -6,10 +6,11 @@
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { crc32 } from 'node:zlib';
 
 import { expect, test } from '@playwright/test';
 
-import { Daemon, Fixture, freePort } from './harness.js';
+import { Daemon, Fixture, content, freePort } from './harness.js';
 
 const PASSWORD = 'correct horse battery staple';
 const ARCHIVE_PASSWORD = 'open sesame';
@@ -47,7 +48,7 @@ printf secret > "$out/plans.txt"
   return path;
 }
 
-test('finished archives unpack beside them, and a protected one asks for its password', async ({ page }) => {
+test('finished archives unpack beside them, a protected one asks for its password, and files are checked', async ({ page }) => {
   const fixture = await new Fixture().start();
   const plugins = await mkdtemp(join(tmpdir(), 'wayfetch-plugins-'));
   const daemon = await new Daemon(await freePort(), {
@@ -137,6 +138,42 @@ test('finished archives unpack beside them, and a protected one asks for its pas
     await later.getByRole('button', { name: /^Actions for / }).click();
     await page.getByRole('menuitem', { name: 'Unpack', exact: true }).click();
     await expect(later.locator('td[data-state]')).toHaveText('Unpacked');
+
+    // Files are checked against a checksum file started with them; one
+    // that fails is kept, marked, and can be downloaded again.
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await expect(page.locator('[data-key="check-files-on"]')).toBeChecked();
+    await expect(page.locator('[data-key="redownload-failed-off"]')).toBeChecked();
+    await page.getByRole('button', { name: 'Back to Downloads' }).click();
+    const goodCrc = crc32(content(0, 1000)).toString(16).padStart(8, '0');
+    await page.getByRole('button', { name: 'Add links' }).click();
+    await page
+      .getByLabel('Links, text with links in it, or a page’s HTML')
+      .fill(
+        [
+          fixture.put('good.bin', 1000),
+          fixture.put('bad.bin', 1000),
+          fixture.putText('set.sfv', `; checksums\r\ngood.bin ${goodCrc}\r\nbad.bin 00000000\r\n`),
+        ].join('\n'),
+      );
+    await page.getByRole('button', { name: 'Collect links' }).click();
+    await expect(page.locator('tr[data-link]', { hasText: 'set.sfv' })).toBeVisible();
+    await page.getByRole('checkbox', { name: 'Select all links shown' }).check();
+    await page.getByRole('button', { name: 'Start selected' }).click();
+    const good = page.locator('tr[data-job]', { hasText: 'good.bin' });
+    const bad = page.locator('tr[data-job]', { hasText: 'bad.bin' });
+    await expect(bad.locator('td[data-state]')).toHaveText('Check failed');
+    await expect(good.locator('td[data-state]')).toHaveText('Done');
+    await good.locator('td.name a').click();
+    await expect(page.locator('dd[data-fact="check"]')).toHaveText('Passed (CRC32 from set.sfv)');
+    await bad.locator('td.name a').click();
+    await expect(page.locator('[data-note="check"]')).toContainText('does not match its CRC32 from set.sfv');
+    expect(await daemon.published('bad.bin')).toHaveLength(1000);
+    await bad.getByRole('button', { name: /^Actions for / }).click();
+    await page.getByRole('menuitem', { name: 'Retry' }).click();
+    // The same bytes arrive again, and fail again.
+    await expect.poll(() => fixture.requested.filter((name) => name === 'bad.bin').length).toBe(2);
+    await expect(bad.locator('td[data-state]')).toHaveText('Check failed');
   } finally {
     await daemon.remove();
     await rm(plugins, { recursive: true, force: true });

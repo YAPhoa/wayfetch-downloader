@@ -271,6 +271,91 @@ pub struct JobSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub extraction: Option<Box<ExtractionSummary>>,
+    /// For a complete download that a checksum names: whether its file
+    /// matched. Boxed, as most jobs have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub check: Option<Box<FileCheck>>,
+}
+
+/// A hash a downloaded file is checked with.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    strum::Display,
+    strum::IntoStaticStr,
+    strum::EnumString,
+    strum::VariantArray,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum ChecksumAlgorithm {
+    /// CRC-32, as SFV files list.
+    Crc32,
+    /// MD5.
+    Md5,
+    /// SHA-1.
+    Sha1,
+    /// SHA-256.
+    Sha256,
+}
+
+/// Where checking a complete download against its checksums stands.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum FileCheckState {
+    /// Waiting to be checked, or being checked.
+    Pending,
+    /// The file matched every checksum found for it.
+    Verified,
+    /// The file did not match.
+    Failed,
+    /// Checksums found for the file disagree, so it cannot be checked.
+    Conflict,
+    /// The file was changed or replaced outside Wayfetch since it was
+    /// downloaded, so it was not checked or not replaced.
+    Changed,
+    /// The file failed its check and is being removed to download it again.
+    Replacing,
+}
+
+/// The outcome of checking a complete download against its checksums.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct FileCheck {
+    /// Where it stands.
+    pub state: FileCheckState,
+    /// The hash that decided it.
+    pub algorithm: ChecksumAlgorithm,
+    /// The checksum file it came from; absent for one the provider gave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub source: Option<String>,
+    /// More about a failure, conflict, or change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub problem: Option<DiagnosticText>,
 }
 
 /// Where unpacking a downloaded archive stands.
@@ -452,6 +537,14 @@ pub struct Settings {
     /// Whether the engine checks for a newer release on its own.
     #[serde(default)]
     pub automatic_update_checks: bool,
+    /// Whether complete downloads are checked against checksum files
+    /// downloaded with them and checksums their provider gives.
+    #[serde(default)]
+    pub check_files: bool,
+    /// Whether a download whose file fails its check is downloaded again
+    /// once on its own.
+    #[serde(default)]
+    pub redownload_failed_checks: bool,
 }
 
 /// An engine preference with a whole-number value, as the operator's
@@ -948,6 +1041,8 @@ mod tests {
             }],
             extract_archives: true,
             automatic_update_checks: true,
+            check_files: true,
+            redownload_failed_checks: false,
         });
         assert_eq!(
             serde_json::to_value(&settings).unwrap(),
@@ -974,6 +1069,8 @@ mod tests {
                 }],
                 "extract_archives": true,
                 "automatic_update_checks": true,
+                "check_files": true,
+                "redownload_failed_checks": false,
             })
         );
         // A 4.0 engine's plugins carry none of 4.1's fields: each is on,

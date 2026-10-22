@@ -27,7 +27,8 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('../client/contract.js').SpeedLimit} SpeedLimit
  * @typedef {import('../client/contract.js').SpeedLimitSetting} SpeedLimitSetting
  * @typedef {import('../client/contract.js').SpeedLimitChange} SpeedLimitChange
- * @typedef {Pick<import('../client/contract.js').SettingsChange, 'maxActiveDownloads' | 'downloadSpeedLimit' | 'extractArchives'>} Change
+ * @typedef {Pick<import('../client/contract.js').SettingsChange, 'maxActiveDownloads' | 'downloadSpeedLimit' | 'extractArchives' | 'checkFiles' | 'redownloadFailedChecks'>} Change
+ * @typedef {'extract_archives' | 'check_files' | 'redownload_failed_checks'} Switch
  * @typedef {'KiB' | 'MiB'} RateUnit
  * @typedef {'compact' | 'comfortable'} Density
  * @typedef {'downloads' | 'folder' | 'display' | 'accounts' | 'plugins' | 'about'} Section
@@ -573,23 +574,41 @@ export class SettingsPage {
     );
     const speedPolicy = h('span', { class: 'hint', id: 'speed-limit-policy' });
 
-    const extractRadio = (/** @type {boolean} */ value, /** @type {string} */ text) =>
-      h(
-        'label',
-        null,
-        h('input', {
-          type: 'radio',
-          name: 'extract-archives',
-          value: String(value),
-          'data-key': `extract-${value ? 'on' : 'off'}`,
-          onchange: () => update(),
-        }),
-        h('span', null, text),
-      );
-    const extractOffLabel = extractRadio(false, 'Off');
-    const extractOnLabel = extractRadio(true, 'On');
-    const extractOff = /** @type {HTMLInputElement} */ (extractOffLabel.querySelector('input'));
-    const extractOn = /** @type {HTMLInputElement} */ (extractOnLabel.querySelector('input'));
+    /**
+     * An Off/On choice for a switch setting, keyed `{key}-off` and `{key}-on`.
+     * @param {string} key
+     */
+    const onOff = (key) => {
+      const radio = (/** @type {boolean} */ value) =>
+        h(
+          'label',
+          null,
+          h('input', {
+            type: 'radio',
+            name: key,
+            value: String(value),
+            'data-key': `${key}-${value ? 'on' : 'off'}`,
+            onchange: () => update(),
+          }),
+          h('span', null, value ? 'On' : 'Off'),
+        );
+      const labels = [radio(false), radio(true)];
+      const [off, on] = labels.map((label) => /** @type {HTMLInputElement} */ (label.querySelector('input')));
+      return { labels, on, off };
+    };
+    /** @type {Record<Switch, ReturnType<typeof onOff>>} */
+    const switches = {
+      extract_archives: onOff('extract'),
+      check_files: onOff('check-files'),
+      redownload_failed_checks: onOff('redownload-failed'),
+    };
+    /** @type {Record<Switch, 'extractArchives' | 'checkFiles' | 'redownloadFailedChecks'>} */
+    const switchChanges = {
+      extract_archives: 'extractArchives',
+      check_files: 'checkFiles',
+      redownload_failed_checks: 'redownloadFailedChecks',
+    };
+    const switchNames = /** @type {Switch[]} */ (Object.keys(switches));
     const speedProblem = h('span', { class: 'problem', id: 'speed-limit-problem' });
 
     const message = h('p', { class: 'message', role: 'status' });
@@ -607,7 +626,7 @@ export class SettingsPage {
           if (!current) return;
           showCount(current.max_active_downloads);
           showSpeed(current.download_speed_limit);
-          showExtract(current.extract_archives);
+          showSwitches(current);
           update();
           show(message, 'Changes discarded.');
           input.focus();
@@ -624,13 +643,13 @@ export class SettingsPage {
         onsubmit: (/** @type {SubmitEvent} */ event) => {
           event.preventDefault();
           if (!current) return;
-          const { count, speed, extract } = draft();
+          const { count, speed, toggled } = draft();
           if ((count.changed && count.parsed.error) || (speed.changed && speed.error)) return;
           /** @type {Change} */
           const change = {};
           if (count.changed && count.parsed.value !== null) change.maxActiveDownloads = { set: count.parsed.value };
           if (speed.changed && speed.limit) change.downloadSpeedLimit = { set: speed.limit };
-          if (extract.changed) change.extractArchives = extract.value;
+          for (const name of toggled) change[switchChanges[name]] = switches[name].on.checked;
           if (Object.keys(change).length > 0) void save(change);
         },
       },
@@ -707,8 +726,45 @@ export class SettingsPage {
             h(
               'div',
               { class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'extract-archives-name' },
-              extractOffLabel,
-              extractOnLabel,
+              switches.extract_archives.labels,
+            ),
+          ),
+          h(
+            'div',
+            { class: 'setting-row' },
+            h(
+              'div',
+              { class: 'setting-text' },
+              h('span', { class: 'setting-name', id: 'check-files-name' }, 'Check files against checksums'),
+              h(
+                'span',
+                { class: 'hint' },
+                'Against SFV, MD5, SHA-1 and SHA-256 files from the same batch, and provider hashes.',
+              ),
+            ),
+            h(
+              'div',
+              { class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'check-files-name' },
+              switches.check_files.labels,
+            ),
+          ),
+          h(
+            'div',
+            { class: 'setting-row' },
+            h(
+              'div',
+              { class: 'setting-text' },
+              h('span', { class: 'setting-name', id: 'redownload-failed-name' }, 'Download again when a check fails'),
+              h(
+                'span',
+                { class: 'hint' },
+                'Removes the failed file and downloads it once more. Off keeps it, marked Check failed.',
+              ),
+            ),
+            h(
+              'div',
+              { class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'redownload-failed-name' },
+              switches.redownload_failed_checks.labels,
             ),
           ),
         ),
@@ -742,10 +798,17 @@ export class SettingsPage {
       }
     };
 
-    /** @param {boolean} on */
-    const showExtract = (on) => {
-      extractOn.checked = on;
-      extractOff.checked = !on;
+    /**
+     * Shows each switch as `settings` has it, except those in `keep`.
+     * @param {Settings} settings
+     * @param {Switch[]} [keep]
+     */
+    const showSwitches = (settings, keep = []) => {
+      for (const name of switchNames) {
+        if (keep.includes(name)) continue;
+        switches[name].on.checked = settings[name];
+        switches[name].off.checked = !settings[name];
+      }
     };
 
     /**
@@ -774,8 +837,8 @@ export class SettingsPage {
           error: parsed.error,
         };
       }
-      const extract = { value: extractOn.checked, changed: extractOn.checked !== settings.extract_archives };
-      return { count, speed, extract };
+      const toggled = switchNames.filter((name) => switches[name].on.checked !== settings[name]);
+      return { count, speed, toggled };
     };
 
     /** Enables what can be done now, and says what is wrong with the draft. */
@@ -783,7 +846,7 @@ export class SettingsPage {
       if (!current) return;
       const countSetting = current.max_active_downloads;
       const speedSetting = current.download_speed_limit;
-      const { count, speed, extract } = draft();
+      const { count, speed, toggled } = draft();
       const countInvalid = count.changed && count.parsed.error !== null;
       const speedInvalid = speed.changed && speed.error !== null;
       show(problem, countInvalid ? count.parsed.error : '');
@@ -798,10 +861,16 @@ export class SettingsPage {
       limited.disabled = speedFixed;
       rate.disabled = speedFixed || !limited.checked;
       unit.disabled = rate.disabled;
-      extractOn.disabled = !canChange || saving;
-      extractOff.disabled = extractOn.disabled;
+      for (const name of switchNames) {
+        switches[name].on.disabled = !canChange || saving;
+        switches[name].off.disabled = switches[name].on.disabled;
+      }
+      // Downloading again only follows a check.
+      const unchecked = !switches.check_files.on.checked;
+      switches.redownload_failed_checks.on.disabled ||= unchecked;
+      switches.redownload_failed_checks.off.disabled ||= unchecked;
       const editable = canChange;
-      const changed = count.changed || speed.changed || extract.changed;
+      const changed = count.changed || speed.changed || toggled.length > 0;
       saveButton.hidden = !editable;
       cancel.hidden = !editable;
       saveButton.disabled = saving || !changed || countInvalid || speedInvalid;
@@ -832,7 +901,7 @@ export class SettingsPage {
       input.max = String(countSetting.max);
       if (!kept?.count.changed) showCount(countSetting);
       if (!kept?.speed.changed) showSpeed(settings.download_speed_limit);
-      if (!kept?.extract.changed) showExtract(settings.extract_archives);
+      showSwitches(settings, kept?.toggled);
       const denied = !canChange && ' You may not change settings.';
       show(policy, describeSetting(countSetting, client.local), denied);
       show(speedPolicy, describeSpeedLimit(settings.download_speed_limit, client.local), denied);
@@ -904,7 +973,7 @@ export class SettingsPage {
       try {
         const settings = await client.settings();
         const kept = current !== null ? draft() : null;
-        const changed = kept !== null && (kept.count.changed || kept.speed.changed || kept.extract.changed);
+        const changed = kept !== null && (kept.count.changed || kept.speed.changed || kept.toggled.length > 0);
         apply(
           settings,
           said || (changed ? 'The settings were changed elsewhere. Your unsaved values are kept.' : ''),

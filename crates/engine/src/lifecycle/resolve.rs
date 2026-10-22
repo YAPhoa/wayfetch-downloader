@@ -130,6 +130,9 @@ struct Sealed {
     filename: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
+    /// As `algorithm:hex`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    checksums: Vec<String>,
 }
 
 impl Drop for Sealed {
@@ -214,6 +217,7 @@ fn seal_link(
         url: link.url.as_str().to_owned(),
         filename: link.filename.clone(),
         size: link.size,
+        checksums: link.checksums.iter().map(ToString::to_string).collect(),
     };
     let secret = Secret::new(serde_json::to_vec(&payload).ok()?);
     let reference = keys.reference().ok()?;
@@ -235,6 +239,11 @@ fn open_link(keys: &Keys, operation: &Operation) -> Option<GeneratedLink> {
         url: Url::parse(&payload.url).ok()?,
         filename: payload.filename.clone(),
         size: payload.size,
+        checksums: payload
+            .checksums
+            .iter()
+            .filter_map(|d| d.parse().ok())
+            .collect(),
     })
 }
 

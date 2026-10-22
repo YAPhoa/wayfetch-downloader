@@ -60,6 +60,20 @@ impl StagingFile {
         self.file.set_len(len)
     }
 
+    /// Hashes the file's first `len` bytes with each of `algorithms`;
+    /// `None` if `stop` was cancelled first. Blocking.
+    pub fn hash(
+        &self,
+        len: u64,
+        algorithms: &[crate::checksum::Algorithm],
+        stop: &tokio_util::sync::CancellationToken,
+    ) -> io::Result<Option<Vec<crate::checksum::Digest>>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        crate::checksum::hash(&mut file.take(len), algorithms, stop)
+    }
+
     /// Synchronizes the file's data to stable storage. Blocking.
     pub fn sync_data(&self) -> io::Result<()> {
         self.file.sync_data()
