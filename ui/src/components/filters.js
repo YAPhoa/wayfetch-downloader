@@ -587,13 +587,15 @@ export function filtersSection(context) {
     const { enabled, filters } = settings.link_filters;
     const toggle = h('input', {
       type: 'checkbox',
+      role: 'switch',
+      class: 'switch',
       'data-key': 'filters-enabled',
       checked: enabled,
       disabled: !canChange,
       onchange: () =>
         void save(
           { enabled: toggle.checked, filters: settings.link_filters.filters },
-          toggle.checked ? 'Filters are on.' : 'Filters are off: links are collected as they are.',
+          toggle.checked ? 'Filters enabled.' : 'Filters disabled.',
         ),
     });
     const add = h(
@@ -626,7 +628,7 @@ export function filtersSection(context) {
           'div',
           { class: 'group-head' },
           h('span', { class: 'group-title' }, 'Filters'),
-          h('label', { class: 'switch' }, toggle, 'Enabled'),
+          h('label', { class: 'switch-label' }, toggle, 'Enabled'),
           add,
         ),
         h(
