@@ -41,7 +41,7 @@ ui/
 - **Settings (`/settings/*`)**:
   - **Downloads**: Turn unpacking archives after download off or on, and configure `max_active_downloads` and `download_speed_limit` (`KiB/s`, `MiB/s`, or `Unlimited`) within operator-defined policy ranges (`min`, `max`, `locked`), with clear conflict explanations.
   - **Download folders**: Switch the default destination root, remove non-default roots, or add new folders (browsing server paths via `GET /v1/folders` in a browser, or opening the native OS folder dialog in the desktop app).
-  - **Accounts & services**: Searchable catalogue of file hosts, cloud storage, and multi-host services (searchable by name, domain, or pasted URL). Supports **Real-Debrid** device-code sign-in, live status/plan/expiry checks, enable/disable toggles, and removal.
+  - **Accounts & services**: Searchable catalogue of file hosts, cloud storage, and multi-host services (searchable by name, domain, or pasted URL). Supports device-code sign-in for multi-host services, live status/plan/expiry checks, enable/disable toggles, and removal.
   - **Plugins**: Shows detected `yt-dlp`, `ffmpeg`, and 7-Zip versions and status, with actions to enable/disable plugins, install or update `yt-dlp` from official PGP-signed GitHub releases, or remove an installed update to roll back.
   - **Display**: System/Light/Dark theme toggle and Compact/Comfortable row density (stored locally per browser).
 

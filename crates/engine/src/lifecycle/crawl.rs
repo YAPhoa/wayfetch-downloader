@@ -38,7 +38,7 @@ pub(super) const MAX_CHECKS: usize = 2;
 const CHECK_DEADLINE: Duration = Duration::from_secs(130);
 
 /// How long a provider that asked to slow down is not asked to check
-/// links. Real-Debrid counts refused requests toward its limit.
+/// links. Providers may count refused requests toward their limit.
 const PROVIDER_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Longest a video service's check may take.

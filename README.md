@@ -19,15 +19,23 @@ The current release is **0.1.2**. The workspace crates, desktop packages, and re
 
 - **Durable, crash-safe transfers**: Locked SQLite state directory (`cap-std` confined roots), 8 MiB durable checkpoints, conditional HTTP resume (`ETag` / `Last-Modified` / `206 Partial Content`), atomic publication into verified destination roots, and generation-checked cancellation.
 - **Link staging and page analysis**: Collect links or raw HTML into a persistent staging queue (`/links`) without starting transfers immediately. Background checks (`HEAD` or 1-byte `GET`, bounded per host) inspect availability, filenames, and sizes; `analyze` mode reads web pages (up to 2 MiB) to extract embedded file and video links.
-- **Provider accounts and automatic routing**: OAuth-style device-code sign-in for multi-host providers (**Real-Debrid**) with owner-only keyfile encryption (`credential-key`). Collected links route automatically by matching hostnames against provider-supported domains, or explicitly via Direct / account overrides.
+- **Provider accounts and automatic routing**: OAuth-style device-code sign-in for multi-host providers with owner-only keyfile encryption (`credential-key`). Collected links route automatically by matching hostnames against provider-supported domains, or explicitly via Direct / account overrides.
 - **YouTube video and audio downloads**: Resolves video titles and formats via `yt-dlp`, downloads streams through the engine's own rate-limited, resumable transfer pipeline, and muxes or converts audio (`MP3` / `M4A`) with `ffmpeg`. Supports PGP-verified `yt-dlp` updates in Settings.
 - **Strict network and security boundaries**: Public-IP-only egress policy re-checked on every redirect (with explicit `--allow-network` CIDR and `--ca-cert` exceptions), no automatic HTTP decompression, non-replayable transfer leases, scoped API bearer tokens, and Argon2id browser owner sessions with `SameSite=Strict` cookies, `X-CSRF-Token`, and Trusted Types CSP.
+
+## Supported Providers
+
+| Kind | Supported |
+|---|---|
+| Multi-host accounts | Real-Debrid |
+| Video services | YouTube (through `yt-dlp`) |
+| Direct links | Any public HTTP(S) URL |
 
 ## Repository Structure & Documentation Map
 
 | Guide | What it covers |
 |---|---|
-| [`apps/wayfetchd/README.md`](apps/wayfetchd/README.md) | `wayfetchd` daemon CLI, bearer token scopes, complete `/v1/*` HTTP & SSE API reference, staging/page analysis, Real-Debrid accounts, `yt-dlp`/`ffmpeg` plugins, and browser authentication |
+| [`apps/wayfetchd/README.md`](apps/wayfetchd/README.md) | `wayfetchd` daemon CLI, bearer token scopes, complete `/v1/*` HTTP & SSE API reference, staging/page analysis, provider accounts, `yt-dlp`/`ffmpeg` plugins, and browser authentication |
 | [`deploy/README.md`](deploy/README.md) | `wayfetch.toml` configuration reference, Distroless Docker image & Compose deployment (non-root `1000:1000` default user), SSH port forwarding, and Caddy/Nginx TLS reverse proxy setup |
 | [`apps/wayfetch-desktop/README.md`](apps/wayfetch-desktop/README.md) | Native Linux desktop host (Tauri 2), `.deb`/`.rpm` packages and the release workflow, first start from the app menu, in-process IPC security boundary, WebKitGTK 4.1 dependencies, native folder picker, and `xvfb-run` window tests |
 | [`ui/README.md`](ui/README.md) | Zero-build ES module web UI, Downloads/Links/Settings workflows, Content Security Policy & Trusted Types, `ts-rs` generated wire types, and Playwright E2E tests |
@@ -50,7 +58,7 @@ wayfetch-downloader/
 │   ├── protocol/                # Transport-neutral commands, queries, errors, events
 │   ├── engine/                  # SQLite store, safe roots, checkpoints, transfer scheduler
 │   ├── net/                     # HTTP(S) transport, TLS, redirect egress policy, leases
-│   ├── adapters/                # Real-Debrid, YouTube, yt-dlp, ffmpeg integrations
+│   ├── adapters/                # Provider, YouTube, yt-dlp, ffmpeg integrations
 │   ├── host/                    # Shared CLI/config/runtime/signal composition
 │   ├── cli/                     # Foreground `wayfetch` CLI host
 │   └── api/                     # HTTP/1.1 & SSE server, bearer and browser auth
@@ -103,7 +111,7 @@ wayfetchd run --state-dir /tmp/wf/state --download-root /tmp/wf/downloads \
 # Open http://127.0.0.1:7878 and enter the secret from /tmp/wf/auth/setup-secret
 ```
 
-See [**`apps/wayfetchd/README.md`**](apps/wayfetchd/README.md) for the complete HTTP/SSE API reference, bearer token permissions, link staging, Real-Debrid accounts, `yt-dlp`/`ffmpeg` plugins, and production HTTPS browser authentication.
+See [**`apps/wayfetchd/README.md`**](apps/wayfetchd/README.md) for the complete HTTP/SSE API reference, bearer token permissions, link staging, provider accounts, `yt-dlp`/`ffmpeg` plugins, and production HTTPS browser authentication.
 
 ## Running in a container
 
