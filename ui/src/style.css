@@ -1467,7 +1467,28 @@ input.switch:focus-visible { outline: 2px solid var(--focus); outline-offset: 2p
 }
 /* Off, the filters stay editable but read as not in use. */
 .settings-group.filters.off .table-scroll { opacity: 0.45; filter: grayscale(1); }
+.filters-state { color: var(--muted); }
+.filters-table th { white-space: nowrap; }
 .filters-table td.toggle { width: 1%; }
+/* Adding on the left, paging on the right. */
+.filters-foot {
+  clear: both;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 6px 12px 6px 8px;
+  box-sizing: border-box;
+  background: var(--chrome);
+  border-top: 1px solid var(--line);
+}
+.filters-foot button.ghost { border-color: transparent; background: transparent; color: var(--ink); }
+.filters-foot button.ghost:hover:not(:disabled) { background: var(--hover); }
+.filters-pager { display: flex; align-items: center; gap: 4px; margin-left: auto; color: var(--muted); }
+.filters-pager .range { margin-right: 8px; }
+.filters-pager .page { padding: 0 4px; color: var(--ink); }
+.filters-pager button.icon-only { min-height: 28px; padding: 0 6px; border-color: transparent; background: transparent; }
+.filters-pager button.icon-only:hover:not(:disabled) { background: var(--hover); }
 .filters-table td.filter-summary { white-space: normal; color: var(--muted); }
 .filters-table td.filter-summary .tag { margin-left: 8px; }
 .dialog.filter-dialog { width: min(760px, calc(100vw - 32px)); }

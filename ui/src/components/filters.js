@@ -49,6 +49,8 @@ import { Menu, rowMenuHandlers } from './menu.js';
 
 /** The columns of the filters table; the last holds each row's menu. */
 const FILTER_COLUMNS = ['On', 'Name', 'Leaves out links when'];
+/** Filters shown per page. */
+const PAGE_SIZE = 10;
 
 /** What a tried link would meet, in words. */
 /** @type {Record<FilterTrial, string>} */
@@ -394,6 +396,13 @@ export function filtersSection(context) {
   const canChange = client.permissions.includes('control');
   /** @type {Settings | null} */
   let current = null;
+  /** The page shown, from 0. */
+  let page = 0;
+  /**
+   * Shows the page holding the filter at `index` once saved.
+   * @param {number} index
+   */
+  const follow = (index) => (page = Math.floor(index / PAGE_SIZE));
   let saving = false;
   const markMenu = () => {
     for (const row of section.querySelectorAll('tr[data-filter]')) {
@@ -464,24 +473,32 @@ export function filtersSection(context) {
     {
       key: 'duplicate-filter',
       label: 'Duplicate',
-      run: () =>
+      run: () => {
+        follow(index + 1);
         void save(
           changed((rules) => rules.splice(index + 1, 0, { ...rule, name: `${rule.name} (copy)`.slice(0, 80) })),
           'Duplicated.',
-        ),
+        );
+      },
     },
     'separator',
     {
       key: 'filter-up',
       label: 'Move up',
       disabled: index === 0,
-      run: () => void save(changed((rules) => rules.splice(index - 1, 0, ...rules.splice(index, 1))), 'Moved.'),
+      run: () => {
+        follow(index - 1);
+        void save(changed((rules) => rules.splice(index - 1, 0, ...rules.splice(index, 1))), 'Moved.');
+      },
     },
     {
       key: 'filter-down',
       label: 'Move down',
       disabled: index === count - 1,
-      run: () => void save(changed((rules) => rules.splice(index + 1, 0, ...rules.splice(index, 1))), 'Moved.'),
+      run: () => {
+        follow(index + 1);
+        void save(changed((rules) => rules.splice(index + 1, 0, ...rules.splice(index, 1))), 'Moved.');
+      },
     },
     'separator',
     {
@@ -503,15 +520,16 @@ export function filtersSection(context) {
   /** @param {number | null} index the filter to edit, or `null` to add one */
   const edit = (index) => {
     const rule = index === null ? null : /** @type {Settings} */ (current).link_filters.filters[index];
-    editFilter(context, rule, (saved) =>
-      save(
+    editFilter(context, rule, (saved) => {
+      if (index === null) follow(/** @type {Settings} */ (current).link_filters.filters.length);
+      return save(
         changed((rules) => {
           if (index === null) rules.push(saved);
           else rules[index] = saved;
         }),
         index === null ? 'Filter added.' : 'Saved.',
-      ),
-    );
+      );
+    });
   };
 
   /**
@@ -602,10 +620,51 @@ export function filtersSection(context) {
     });
     const add = h(
       'button',
-      { type: 'button', 'data-key': 'add-filter', disabled: !canChange, onclick: () => edit(null) },
+      { type: 'button', class: 'ghost', 'data-key': 'add-filter', disabled: !canChange, onclick: () => edit(null) },
       icon('add'),
-      'Add filter…',
+      'Add filter',
     );
+    const pages = Math.max(1, Math.ceil(filters.length / PAGE_SIZE));
+    page = Math.min(Math.max(page, 0), pages - 1);
+    const from = page * PAGE_SIZE;
+    const shown = filters.slice(from, from + PAGE_SIZE);
+    /** @param {number} to */
+    const turn = (to) => {
+      page = to;
+      render(settings, '');
+    };
+    const pager =
+      pages > 1 &&
+      h(
+        'nav',
+        { class: 'filters-pager', 'aria-label': 'Pages of filters' },
+        h('span', { class: 'range' }, `${from + 1}\u2013${from + shown.length} of ${filters.length}`),
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'icon-only',
+            'aria-label': 'Previous page',
+            'data-key': 'filters-back',
+            disabled: page === 0,
+            onclick: () => turn(page - 1),
+          },
+          icon('left'),
+        ),
+        h('span', { class: 'page' }, `${page + 1} / ${pages}`),
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'icon-only',
+            'aria-label': 'Next page',
+            'data-key': 'filters-next',
+            disabled: page === pages - 1,
+            onclick: () => turn(page + 1),
+          },
+          icon('right'),
+        ),
+      );
     const rows =
       filters.length === 0
         ? [
@@ -619,7 +678,7 @@ export function filtersSection(context) {
               ),
             ),
           ]
-        : filters.map((rule, index) => filterRow(rule, index, filters.length));
+        : shown.map((rule, at) => filterRow(rule, from + at, filters.length));
     if (said) say(said, tone);
     show(
       section,
@@ -630,7 +689,7 @@ export function filtersSection(context) {
           'div',
           { class: 'group-head' },
           h('span', { class: 'group-title' }, 'Filters'),
-          add,
+          h('span', { class: 'filters-state', 'aria-hidden': 'true' }, enabled ? 'Enabled' : 'Disabled'),
           toggle,
         ),
         h(
@@ -652,13 +711,15 @@ export function filtersSection(context) {
             h('tbody', null, rows),
           ),
         ),
+        h('div', { class: 'filters-foot' }, add, pager),
       ),
       h(
         'p',
         { class: 'hint' },
-        'Filters apply as links are added or found on an analyzed page, before they reach the Links list. ' +
-          'Links already in the list stay. A link any enabled filter matches is left out.' +
-          (canChange ? '' : ' You may not change settings.'),
+        enabled
+          ? 'Filters apply to links you add and links found on analyzed pages.'
+          : 'Filtering is off. Saved filters won’t run.',
+        canChange ? '' : ' You may not change settings.',
       ),
       menu.element,
       banner,

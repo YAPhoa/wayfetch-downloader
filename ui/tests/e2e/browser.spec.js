@@ -1159,7 +1159,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await page.goto(`${daemon.origin}/settings/filters`);
   const filters = page.locator('.settings-content [data-section="filters"]');
   await expect(filters.getByText('No filters yet.', { exact: false })).toBeVisible();
-  await filters.getByRole('button', { name: 'Add filter…' }).click();
+  await filters.getByRole('button', { name: 'Add filter', exact: true }).click();
   let dialog = page.getByRole('dialog', { name: 'Add filter' });
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect(dialog.getByText('Give the filter a name.')).toBeVisible();
@@ -1175,7 +1175,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await expect(dialog).toBeHidden();
   await expect(filters.getByText('Filter added.')).toBeVisible();
   await expect(filters.locator('tr[data-filter="0"] td.filter-summary')).toHaveText('File name is “*gone*”');
-  await filters.getByRole('button', { name: 'Add filter…' }).click();
+  await filters.getByRole('button', { name: 'Add filter', exact: true }).click();
   dialog = page.getByRole('dialog', { name: 'Add filter' });
   await dialog.getByLabel('Name', { exact: true }).fill('Tiny files');
   await dialog.getByRole('checkbox', { name: 'Size', exact: true }).check();
