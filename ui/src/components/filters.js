@@ -1,4 +1,4 @@
-// Settings > Collecting links: link filters, which leave matching links out
+// Settings > Link filters: link filters, which leave matching links out
 // when links are added or found on an analyzed page. Every change saves the
 // whole list at once, at the settings revision shown; the engine matches
 // links, and says what a filter would do with a link to try.
@@ -361,7 +361,7 @@ function editFilter(context, rule, onSave) {
 }
 
 /**
- * The Collecting links section.
+ * The Link filters section.
  * @param {FiltersContext} context
  */
 export function filtersSection(context) {
@@ -601,7 +601,7 @@ export function filtersSection(context) {
         h(
           'div',
           { class: 'group-head' },
-          h('span', { class: 'group-title' }, 'Link filters'),
+          h('span', { class: 'group-title' }, 'Filters'),
           h('label', { class: 'switch' }, toggle, 'Enabled'),
           add,
         ),

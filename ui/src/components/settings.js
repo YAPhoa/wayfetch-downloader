@@ -31,7 +31,7 @@ import { toolbar } from './toolbar.js';
  * @typedef {Pick<import('../client/contract.js').SettingsChange, 'maxActiveDownloads' | 'downloadSpeedLimit' | 'extractArchives'>} Change
  * @typedef {'KiB' | 'MiB'} RateUnit
  * @typedef {'compact' | 'comfortable'} Density
- * @typedef {'downloads' | 'folder' | 'collecting' | 'display' | 'accounts' | 'plugins' | 'about'} Section
+ * @typedef {'downloads' | 'folder' | 'filters' | 'display' | 'accounts' | 'plugins' | 'about'} Section
  */
 
 /**
@@ -57,12 +57,7 @@ import { toolbar } from './toolbar.js';
 export const SECTIONS = [
   { id: 'downloads', label: 'Downloads', about: 'How downloads run.', icon: 'brand' },
   { id: 'folder', label: 'Download folders', about: 'Where new downloads are saved.', icon: 'folder' },
-  {
-    id: 'collecting',
-    label: 'Collecting links',
-    about: 'Which links are collected for review when you add links.',
-    icon: 'filter',
-  },
+  { id: 'filters', label: 'Link filters', about: 'Links to leave out when you add links.', icon: 'filter' },
   {
     id: 'accounts',
     label: 'Accounts & services',
@@ -475,7 +470,7 @@ export class SettingsPage {
     const panels = {
       downloads: this.downloadsSection(),
       folder: this.destinationSection(),
-      collecting: filtersSection({
+      filters: filtersSection({
         client: this.context.client,
         hello: this.context.hello,
         onSignedOut: this.context.onSignedOut,

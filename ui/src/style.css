@@ -1427,11 +1427,12 @@ th[aria-sort] button.sort { color: var(--ink); }
   color: var(--surface);
 }
 
-/* Settings > Collecting links: the link filters, and a filter's
+/* Settings > Link filters: the link filters, and a filter's
    conditions, each switched on by its checkbox. */
 
 .group-head .switch { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); }
-.settings-group.filters.off tbody { opacity: 0.6; }
+/* Off, the filters stay editable but read as not in use. */
+.settings-group.filters.off .table-scroll { opacity: 0.45; filter: grayscale(1); }
 .filters-table td.toggle { width: 1%; }
 .filters-table td.filter-summary { white-space: normal; color: var(--muted); }
 .filters-table td.filter-summary .tag { margin-left: 8px; }

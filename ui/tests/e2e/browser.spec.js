@@ -484,7 +484,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   expect(await sections.getByRole('link').allInnerTexts()).toEqual([
     'Downloads',
     'Download folders',
-    'Collecting links',
+    'Link filters',
     'Accounts & services',
     'Plugins',
     'Display',
@@ -566,7 +566,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(displayLink).toHaveAttribute('aria-current', 'page');
   // From the keyboard: arrows move along the sections, Enter opens one,
   // and focus is drawn.
-  await sections.getByRole('link', { name: 'Collecting links' }).focus();
+  await sections.getByRole('link', { name: 'Link filters' }).focus();
   await page.keyboard.press('ArrowDown');
   await expect(accountsLink).toBeFocused();
   expect(await accountsLink.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe('solid');
@@ -1154,10 +1154,10 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await page.getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(page.getByText('No links collected.')).toBeVisible();
 
-  // Link filters, in Settings, leave matching links out before they reach
+  // Link filters, in Settings > Link filters, leave matching links out before they reach
   // the list: by name as the page is read, by size once a link is checked.
-  await page.goto(`${daemon.origin}/settings/collecting`);
-  const filters = page.locator('.settings-content [data-section="collecting"]');
+  await page.goto(`${daemon.origin}/settings/filters`);
+  const filters = page.locator('.settings-content [data-section="filters"]');
   await expect(filters.getByText('No filters yet.', { exact: false })).toBeVisible();
   await filters.getByRole('button', { name: 'Add filter…' }).click();
   let dialog = page.getByRole('dialog', { name: 'Add filter' });
@@ -1205,7 +1205,7 @@ ${tiny}`, 'Collected 2 links for review.');
   await expect(linkRow('tiny.bin')).toHaveCount(0);
   await expect(page.locator('[data-key="links-screening"]')).toHaveCount(0);
   // Turned off, filters leave every link in.
-  await page.goto(`${daemon.origin}/settings/collecting`);
+  await page.goto(`${daemon.origin}/settings/filters`);
   await filters.getByRole('checkbox', { name: 'Enabled' }).uncheck();
   await expect(filters.getByText('Filters are off', { exact: false })).toBeVisible();
   await page.goto(`${daemon.origin}/links`);
