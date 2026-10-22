@@ -120,7 +120,7 @@ cp deploy/.env.example deploy/.env      # then set the two folders
 docker compose -f deploy/compose.yaml up -d
 ```
 
-Compose pulls `ghcr.io/yaphoa/wayfetch-downloader:v0.1.1` (Linux x86-64).
+Compose pulls `ghcr.io/yaphoa/wayfetch-downloader:v0.1.2` (Linux x86-64).
 Set `WAYFETCH_IMAGE` in `deploy/.env` to select another compatible version
 or an immutable digest. Existing 0.1.0 container installations must follow
 the [storage migration steps](deploy/README.md#upgrading-from-010).

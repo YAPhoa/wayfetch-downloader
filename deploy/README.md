@@ -46,7 +46,7 @@ The root [`Dockerfile`](../Dockerfile) builds `wayfetchd` with the toolchain pin
 
 ### Quick start
 
-Compose pulls `ghcr.io/yaphoa/wayfetch-downloader:v0.1.1` (Linux x86-64). The image includes the web UI; no separate frontend container is needed. Set `WAYFETCH_IMAGE` in `deploy/.env` to select another compatible version or pin an immutable `ghcr.io/yaphoa/wayfetch-downloader@sha256:…` digest. This layout needs `v0.1.1` or newer; `v0.1.0` expects the earlier three-folder layout.
+Compose pulls `ghcr.io/yaphoa/wayfetch-downloader:v0.1.2` (Linux x86-64). The image includes the web UI; no separate frontend container is needed. Set `WAYFETCH_IMAGE` in `deploy/.env` to select another compatible version or pin an immutable `ghcr.io/yaphoa/wayfetch-downloader@sha256:…` digest. This layout needs `v0.1.1` or newer; `v0.1.0` expects the earlier three-folder layout.
 
 To build locally, set `WAYFETCH_IMAGE=wayfetch:local` in `deploy/.env`, then run `docker compose -f deploy/compose.yaml build` before `up -d`. Rebuild after updating the source.
 
