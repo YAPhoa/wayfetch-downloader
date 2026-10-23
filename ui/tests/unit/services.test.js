@@ -76,6 +76,7 @@ test('a pasted link or a subdomain finds the service of its host', () => {
     'https://drive.usercontent.google.com/download?id=1': 'google-drive',
     'https://dl.dropboxusercontent.com/s/abc/file.zip': 'dropbox',
     'mega.nz/file/abc#key': 'mega',
+    'https://pixeldrain.net/u/abc123': 'pixeldrain',
     'www.nitro.download': 'nitroflare',
     'gofile.io.': 'gofile',
   };
