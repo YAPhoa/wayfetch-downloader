@@ -120,6 +120,10 @@ impl Coordinator {
         let mut plan = CollectPlan {
             html: found.html,
             repeated: found.repeated,
+            page: base_url
+                .as_ref()
+                .filter(|_| found.html)
+                .map(|u| u.as_url().clone()),
             ..CollectPlan::default()
         };
         for entry in found.entries {

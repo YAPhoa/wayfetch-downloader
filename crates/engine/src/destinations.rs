@@ -21,6 +21,7 @@ use wayfetch_domain::id::RootId;
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
+use wayfetch_protocol::filter::LinkFilters;
 use wayfetch_protocol::query::{
     BoundedSetting, FolderListing, MAX_LISTED_FOLDERS, RootSummary, Settings, SpeedLimitSetting,
 };
@@ -533,15 +534,20 @@ impl Destinations {
     pub(crate) fn settings(
         &self,
         available: Vec<Result<(), String>>,
-        max_active_downloads: BoundedSetting,
-        download_speed_limit: SpeedLimitSetting,
-        plugins: Vec<wayfetch_protocol::media::PluginSummary>,
-        extract_archives: bool,
-        automatic_update_checks: bool,
+        preferences: Preferences,
     ) -> Settings {
+        let Preferences {
+            max_active_downloads,
+            download_speed_limit,
+            plugins,
+            extract_archives,
+            automatic_update_checks,
+            link_filters,
+        } = preferences;
         Settings {
             extract_archives,
             automatic_update_checks,
+            link_filters,
             max_active_downloads,
             download_speed_limit,
             plugins,
@@ -561,6 +567,16 @@ impl Destinations {
                 .collect(),
         }
     }
+}
+
+/// The engine's preferences, which the settings show beside the roots.
+pub(crate) struct Preferences {
+    pub(crate) max_active_downloads: BoundedSetting,
+    pub(crate) download_speed_limit: SpeedLimitSetting,
+    pub(crate) plugins: Vec<wayfetch_protocol::media::PluginSummary>,
+    pub(crate) extract_archives: bool,
+    pub(crate) automatic_update_checks: bool,
+    pub(crate) link_filters: LinkFilters,
 }
 
 /// Keys of work in progress, at most one piece of work per key: one

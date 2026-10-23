@@ -194,6 +194,17 @@ export class DesktopIpcClient {
     return String(result.url);
   }
 
+  /**
+   * @param {Args<'tryLinkFilter'>[0]} filter
+   * @param {string} link
+   */
+  async tryLinkFilter(filter, link) {
+    /** @type {Query} */
+    const query = { type: 'try_link_filter', filter, link };
+    const result = await this.call('query', { query });
+    return result.outcome;
+  }
+
   settings() {
     /** @type {Query} */
     const query = { type: 'settings' };

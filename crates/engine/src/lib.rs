@@ -24,6 +24,7 @@ mod download;
 pub mod extract;
 pub mod fs;
 pub mod lifecycle;
+mod link_filter;
 pub mod media;
 mod preferences;
 mod progress;

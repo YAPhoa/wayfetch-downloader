@@ -191,6 +191,7 @@ impl Api {
                 "/v1/settings",
                 get(routes::settings).put(routes::update_settings),
             )
+            .route("/v1/link-filters/try", post(routes::try_link_filter))
             .route("/v1/folders", get(routes::folders))
             .route("/v1/roots", post(routes::add_root))
             .route("/v1/roots/remove", post(routes::remove_root))

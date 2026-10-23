@@ -484,6 +484,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   expect(await sections.getByRole('link').allInnerTexts()).toEqual([
     'Downloads',
     'Download folders',
+    'Link filters',
     'Accounts & services',
     'Plugins',
     'Display',
@@ -565,7 +566,7 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   await expect(displayLink).toHaveAttribute('aria-current', 'page');
   // From the keyboard: arrows move along the sections, Enter opens one,
   // and focus is drawn.
-  await folderLink.focus();
+  await sections.getByRole('link', { name: 'Link filters' }).focus();
   await page.keyboard.press('ArrowDown');
   await expect(accountsLink).toBeFocused();
   expect(await accountsLink.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe('solid');
@@ -1149,6 +1150,87 @@ test('collected links wait on the Links page until chosen ones are started', asy
     .toBe(true);
   // The page and what is left of its links can be removed.
   await views.getByRole('link', { name: /^Links/ }).click();
+  await page.getByRole('checkbox', { name: 'Select all links shown' }).check();
+  await page.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(page.getByText('No links collected.')).toBeVisible();
+
+  // Link filters, in Settings > Link filters, leave matching links out before they reach
+  // the list: by name as the page is read, by size once a link is checked.
+  await page.goto(`${daemon.origin}/settings/filters`);
+  const filters = page.locator('.settings-content [data-section="filters"]');
+  await expect(filters.getByText('No filters yet.', { exact: false })).toBeVisible();
+  await filters.getByRole('button', { name: 'Add filter', exact: true }).click();
+  let dialog = page.getByRole('dialog', { name: 'Add filter' });
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog.getByText('Give the filter a name.')).toBeVisible();
+  await dialog.getByLabel('Name', { exact: true }).fill('Skip gone files');
+  await dialog.getByRole('checkbox', { name: 'File name' }).check();
+  await expect(dialog.getByLabel('File name pattern')).toBeFocused();
+  await dialog.getByLabel('File name pattern').fill('*gone*');
+  await dialog.getByLabel('File name comparison').selectOption('is');
+  await dialog.getByLabel('A link to try the filter on').fill('https://example.com/files/release-gone.zip');
+  await dialog.getByRole('button', { name: 'Try' }).click();
+  await expect(dialog.getByText('Its check decides', { exact: false })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(filters.getByText('Filter added.')).toBeVisible();
+  await expect(filters.locator('tr[data-filter="0"] td.filter-summary')).toHaveText('File name is “*gone*”');
+  await filters.getByRole('button', { name: 'Add filter', exact: true }).click();
+  dialog = page.getByRole('dialog', { name: 'Add filter' });
+  await dialog.getByLabel('Name', { exact: true }).fill('Tiny files');
+  await dialog.getByRole('checkbox', { name: 'Size', exact: true }).check();
+  await dialog.getByLabel('Largest size', { exact: true }).fill('4');
+  await dialog.getByLabel('Largest size unit').selectOption('KiB');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(filters.locator('tr[data-filter="1"] td.filter-summary')).toHaveText('Size at most 4.0 KiBAfter check');
+  // An invalid regular expression is refused with the filter's name.
+  await filters.getByRole('button', { name: 'Actions for Tiny files' }).click();
+  await page.getByRole('menu', { name: 'Filter actions' }).getByRole('menuitem', { name: 'Edit…' }).click();
+  dialog = page.getByRole('dialog', { name: 'Edit filter Tiny files' });
+  await dialog.getByRole('checkbox', { name: 'Link', exact: true }).check();
+  await dialog.getByLabel('Link pattern').fill('(');
+  await dialog.getByRole('checkbox', { name: 'Regex' }).nth(1).check();
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog.getByText('"Tiny files": the link pattern is not a valid regular expression', { exact: false })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  // A filter edited in one window is never saved over another that took
+  // its place after a change in a second window.
+  await filters.getByRole('button', { name: 'Actions for Skip gone files' }).click();
+  await page.getByRole('menu', { name: 'Filter actions' }).getByRole('menuitem', { name: 'Duplicate' }).click();
+  await expect(filters.locator('tr[data-filter="1"] td.filter-name')).toHaveText('Skip gone files (copy)');
+  await filters.getByRole('button', { name: 'Actions for Skip gone files (copy)' }).click();
+  await page.getByRole('menu', { name: 'Filter actions' }).getByRole('menuitem', { name: 'Edit…' }).click();
+  dialog = page.getByRole('dialog', { name: 'Edit filter Skip gone files (copy)' });
+  const second = await context.newPage();
+  await second.goto(`${daemon.origin}/settings/filters`);
+  const elsewhere = second.locator('.settings-content [data-section="filters"]');
+  await elsewhere.getByRole('button', { name: 'Actions for Skip gone files (copy)' }).click();
+  await second.getByRole('menu', { name: 'Filter actions' }).getByRole('menuitem', { name: 'Remove…' }).click();
+  await second.getByRole('dialog', { name: 'Remove filter' }).getByRole('button', { name: 'Remove' }).click();
+  await expect(elsewhere.locator('tr[data-filter]')).toHaveCount(2);
+  await second.close();
+  await expect(filters.locator('tr[data-filter]')).toHaveCount(2);
+  await dialog.getByLabel('Name', { exact: true }).fill('Renamed');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog.getByText('This filter was changed or removed elsewhere.', { exact: false })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(filters.locator('tr[data-filter="1"] td.filter-name')).toHaveText('Tiny files');
+
+  const tiny = fixture.put('tiny.bin', 1024);
+  await page.goto(`${daemon.origin}/links`);
+  await collect(page, `${release}
+${tiny}`, 'Collected 2 links for review.');
+  await expect(pageRow.locator('td.link-status')).toContainText('Your link filters left out 1 link on this page.');
+  await expect(foundRow('Release A\\.bin').locator('td.link-status')).toHaveText('Online');
+  await expect(foundRow('release-gone\\.zip')).toHaveCount(0);
+  await expect(page.locator('tr[data-link]')).toHaveCount(2);
+  await expect(linkRow('tiny.bin')).toHaveCount(0);
+  await expect(page.locator('[data-key="links-screening"]')).toHaveCount(0);
+  // Turned off, filters leave every link in.
+  await page.goto(`${daemon.origin}/settings/filters`);
+  await filters.getByRole('switch', { name: 'Filters enabled' }).uncheck();
+  await expect(filters.getByText('Filters disabled.')).toBeVisible();
+  await page.goto(`${daemon.origin}/links`);
   await page.getByRole('checkbox', { name: 'Select all links shown' }).check();
   await page.getByRole('button', { name: 'Remove', exact: true }).click();
   await expect(page.getByText('No links collected.')).toBeVisible();

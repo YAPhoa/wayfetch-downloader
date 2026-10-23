@@ -847,10 +847,11 @@ impl Store {
             Query::Settings {}
             | Query::Accounts {}
             | Query::Authorization { .. }
-            | Query::Updates { .. } => {
+            | Query::Updates { .. }
+            | Query::TryLinkFilter { .. } => {
                 return Err(ProtocolError::new(
                     wayfetch_protocol::ErrorCode::Internal,
-                    "settings, accounts, and updates are answered by the coordinator",
+                    "settings, accounts, updates, and filter trials are answered by the coordinator",
                 ));
             }
         };

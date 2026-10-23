@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
+export const PROTOCOL = Object.freeze({ major: 0, minor: 4 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -79,6 +79,16 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
  * @typedef {import('./generated/UpdateCheck.js').UpdateCheck} UpdateCheck
  * @typedef {import('./generated/UpdateOutcome.js').UpdateOutcome} UpdateOutcome
  * @typedef {import('./generated/UpdateInstall.js').UpdateInstall} UpdateInstall
+ * @typedef {import('./generated/LinkFilters.js').LinkFilters} LinkFilters
+ * @typedef {import('./generated/LinkRule.js').LinkRule} LinkRule
+ * @typedef {import('./generated/FilterTrial.js').FilterTrial} FilterTrial
+ * @typedef {import('./generated/TextCondition.js').TextCondition} TextCondition
+ * @typedef {import('./generated/TextOp.js').TextOp} TextOp
+ * @typedef {import('./generated/Membership.js').Membership} Membership
+ * @typedef {import('./generated/FileKind.js').FileKind} FileKind
+ * @typedef {import('./generated/LinkOrigin.js').LinkOrigin} LinkOrigin
+ * @typedef {import('./generated/CheckOutcome.js').CheckOutcome} CheckOutcome
+ * @typedef {import('./generated/LinkRoute.js').LinkRoute} LinkRoute
  * @typedef {Exclude<JobAction, 'rename' | 'remove' | 'delete_files' | 'cancel_extraction'>} StateAction The
  *   actions that change whether a job runs.
  */
@@ -136,6 +146,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
  *   extract: (job: JobId, request: ExtractChange) => Promise<CommandResult>,
  *   settings: () => Promise<Settings>,
  *   updateSettings: (change: SettingsChange) => Promise<CommandResult>,
+ *   tryLinkFilter: (filter: LinkRule, link: string) => Promise<FilterTrial>,
  *   removeRoot: (request: {
  *     idempotencyKey: string,
  *     target: string,
@@ -190,6 +201,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 3 });
  *   downloadSpeedLimit?: SpeedLimitChange,
  *   extractArchives?: boolean,
  *   automaticUpdateChecks?: boolean,
+ *   linkFilters?: LinkFilters,
  * }} SettingsChange
  */
 
@@ -255,6 +267,7 @@ export function settingsRequest({
   downloadSpeedLimit,
   extractArchives,
   automaticUpdateChecks,
+  linkFilters,
 }) {
   /** @type {UpdateSettingsRequest} */
   const request = { idempotency_key: idempotencyKey, target, expected_revision: expectedRevision };
@@ -263,6 +276,7 @@ export function settingsRequest({
   if (downloadSpeedLimit !== undefined) request.download_speed_limit = downloadSpeedLimit;
   if (extractArchives !== undefined) request.extract_archives = extractArchives;
   if (automaticUpdateChecks !== undefined) request.automatic_update_checks = automaticUpdateChecks;
+  if (linkFilters !== undefined) request.link_filters = linkFilters;
   return request;
 }
 

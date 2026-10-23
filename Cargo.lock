@@ -6398,6 +6398,7 @@ dependencies = [
  "linkify",
  "percent-encoding",
  "rangemap",
+ "regex",
  "ring",
  "rusqlite",
  "rusqlite_migration",

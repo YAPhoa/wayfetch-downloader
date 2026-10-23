@@ -401,6 +401,7 @@ async fn turned_off_archives_stay_packed_until_asked() {
             download_speed_limit: None,
             extract_archives: Some(false),
             automatic_update_checks: None,
+            link_filters: None,
         },
     )
     .await

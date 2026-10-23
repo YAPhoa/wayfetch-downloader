@@ -63,7 +63,11 @@ repeated?: number,
  * Links in pasted HTML that lead to other web pages, which are not
  * collected.
  */
-skipped?: number, } | { "type": "links_applied", 
+skipped?: number, 
+/**
+ * Links a link filter left out.
+ */
+filtered?: number, } | { "type": "links_applied", 
 /**
  * The links it applied to.
  */

@@ -131,6 +131,8 @@ export class LinksPage {
     this.before = null;
     /** Links in the whole list being checked, as last read. */
     this.checking = 0;
+    /** Links off the list until their check tells a link filter's conditions. */
+    this.screening = 0;
     /** Services' display names, once the catalogue is read. @type {Map<string, string>} */
     this.serviceNames = new Map();
     void loadServices()
@@ -315,6 +317,7 @@ export class LinksPage {
     this.total = Number(page.total);
     this.before = page.before ?? null;
     this.checking = Number(page.checking ?? 0);
+    this.screening = Number(page.screening ?? 0);
     this.nextAfter = page.next_after ?? null;
     this.selected.keepOnly(page.items.map((l) => l.id));
     this.context.onTotal(this.total);
@@ -831,6 +834,12 @@ export class LinksPage {
         // With no links it stays empty, so it takes no room.
         !!this.total && h('span', null, 'Select links to start them. Nothing downloads until you do.'),
         this.checking > 0 && h('span', { class: 'label' }, `Checking ${count(this.checking, 'link')}…`),
+        this.screening > 0 &&
+          h(
+            'span',
+            { class: 'label', 'data-key': 'links-screening' },
+            `${count(this.screening, 'link')} waiting for ${this.screening === 1 ? 'its check' : 'their checks'} before your link filters decide…`,
+          ),
         hiddenNote,
       );
       return;

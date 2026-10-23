@@ -20,6 +20,9 @@ html5ever = "0.39.0"
 linkify = "0.11.0"
 percent-encoding.workspace = true
 rangemap.workspace = true
+# Matches link filters' patterns in linear time, with a bound on each
+# compiled pattern; already in the tree.
+regex = "1.13.1"
 # Credential encryption and key derivation; already in the tree through
 # rustls, so no new cryptography is added.
 ring = "0.17.14"

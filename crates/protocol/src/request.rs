@@ -16,8 +16,10 @@ use crate::command::{
     LinkRefs, PreferenceChange, SpeedLimitChange, StartRouting, SubmitItems,
 };
 use crate::error::{ErrorCode, ProtocolError};
+use crate::filter::{LinkFilters, LinkRule};
 use crate::instance::InstanceId;
 use crate::media::{MediaChoice, PluginChange};
+use crate::query::Query;
 
 /// Submits a batch of URLs.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -232,6 +234,10 @@ pub struct UpdateSettingsRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub automatic_update_checks: Option<bool>,
+    /// The link filters, replacing all of them.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub link_filters: Option<LinkFilters>,
 }
 
 impl UpdateSettingsRequest {
@@ -247,7 +253,30 @@ impl UpdateSettingsRequest {
                 download_speed_limit: self.download_speed_limit,
                 extract_archives: self.extract_archives,
                 automatic_update_checks: self.automatic_update_checks,
+                link_filters: self.link_filters,
             },
+        }
+    }
+}
+
+/// Tries a link filter, saved or not, on a link. Changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct TryLinkFilterRequest {
+    /// The filter.
+    pub filter: LinkRule,
+    /// The link to try it on.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
+    pub link: InputUrl,
+}
+
+impl TryLinkFilterRequest {
+    /// The query.
+    pub fn into_query(self) -> Query {
+        Query::TryLinkFilter {
+            filter: Box::new(self.filter),
+            link: self.link,
         }
     }
 }
@@ -798,6 +827,7 @@ mod tests {
                 download_speed_limit: None,
                 extract_archives: None,
                 automatic_update_checks: None,
+                link_filters: None,
             }
         );
         let preference: UpdateSettingsRequest = serde_json::from_value(json!({
@@ -816,6 +846,7 @@ mod tests {
                 download_speed_limit: None,
                 extract_archives: None,
                 automatic_update_checks: None,
+                link_filters: None,
             }
         );
         let both: UpdateSettingsRequest = serde_json::from_value(json!({

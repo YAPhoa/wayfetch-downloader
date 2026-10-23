@@ -33,6 +33,7 @@ use wayfetch_protocol::command::{IdempotencyKey, MAX_SUBMIT_ITEMS};
 use wayfetch_protocol::event::{
     DurableEvent, EventCursor, ResyncReason, Retained, SubscriptionStart,
 };
+use wayfetch_protocol::filter::LinkFilters;
 use wayfetch_protocol::query::{
     BoundedSetting, FailureSummary, FolderListing, JobRoute, RootSummary, SpeedLimit,
     SpeedLimitSetting,
@@ -60,6 +61,7 @@ use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::extract::Extractor;
 use crate::fs::Root;
+use crate::link_filter::{self, Filters};
 use crate::media::{Converter, MediaService, PluginControl, PluginWork};
 use crate::progress::Progress;
 use crate::state_dir::{Identity, StateDir, StateDirError};
@@ -294,6 +296,7 @@ impl EngineBuilder {
             destinations,
             max_active: saved.max_active_downloads,
             speed_limit,
+            link_filters: saved.link_filters,
             bandwidth,
             probes,
             file_jobs: Claims::default(),
@@ -1116,6 +1119,9 @@ struct Coordinator {
     max_active: Option<u64>,
     /// The user's saved total download speed limit, if any.
     speed_limit: Option<SpeedLimit>,
+    /// The link filters, as the settings show them; collecting reads
+    /// them from the store.
+    link_filters: LinkFilters,
     /// The budget every download's body is written from, set to the
     /// effective speed limit.
     bandwidth: Arc<Bandwidth>,
@@ -1278,6 +1284,11 @@ impl Coordinator {
             Request::Query(Query::Updates { check }, reply) => {
                 let cancel = self.supervisor.cancel.clone();
                 self.answer(reply, self.updates.clone().answer(check, cancel));
+            }
+            Request::Query(Query::TryLinkFilter { filter, link }, reply) => {
+                let media = self.media.recognize(link.as_url()).is_some();
+                let outcome = link_filter::trial(*filter, link.as_url(), media);
+                let _ = reply.send(outcome.map(|outcome| QueryResult::LinkFilterTried { outcome }));
             }
             Request::RefreshAccount(account, reply) => self.refresh_account(account, reply).await,
             Request::Extract(envelope, password, reply) => {
@@ -1443,6 +1454,7 @@ impl Coordinator {
             self.bandwidth.set(self.download_speed_limit().value);
             self.extractions.automatic = saved.extract_archives;
             self.updates.set_automatic(saved.automatic_update_checks);
+            self.link_filters = saved.link_filters;
         }
         // Only the run the request named stops, even when an exact replay
         // answers with the first request's result after a later run began.
@@ -1636,6 +1648,7 @@ impl Coordinator {
                 download_speed_limit,
                 extract_archives,
                 automatic_update_checks,
+                link_filters,
                 ..
             } => {
                 if self.replays(envelope).await? {
@@ -1646,6 +1659,7 @@ impl Coordinator {
                     && download_speed_limit.is_none()
                     && extract_archives.is_none()
                     && automatic_update_checks.is_none()
+                    && link_filters.is_none()
                 {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidRequest,
@@ -1664,6 +1678,9 @@ impl Coordinator {
                         &self.config.policy.download_speed_limit,
                         change,
                     )?;
+                }
+                if let Some(filters) = link_filters {
+                    Filters::compile(filters)?;
                 }
                 if let Some(root) = *default_root {
                     self.refresh_destinations().await;
@@ -1794,12 +1811,16 @@ impl Coordinator {
     fn answer_settings(&self, reply: oneshot::Sender<Result<QueryResult, ProtocolError>>) {
         let (destinations, probes) = (self.destinations.clone(), self.probes.clone());
         let instance = self.identity.instance;
-        let max_active_downloads = self.max_active_downloads();
-        let download_speed_limit = self.download_speed_limit();
         let mut plugins = self.media.plugins();
         plugins.extend(self.extractions.plugin());
-        let extract_archives = self.extractions.automatic;
-        let automatic_update_checks = self.updates.automatic();
+        let preferences = destinations::Preferences {
+            max_active_downloads: self.max_active_downloads(),
+            download_speed_limit: self.download_speed_limit(),
+            plugins,
+            extract_archives: self.extractions.automatic,
+            automatic_update_checks: self.updates.automatic(),
+            link_filters: self.link_filters.clone(),
+        };
         self.supervisor.spawn(async move {
             let mut checks = tokio::task::JoinSet::new();
             for (i, root) in destinations.all().into_iter().enumerate() {
@@ -1809,14 +1830,7 @@ impl Coordinator {
             let mut available = checks.join_all().await;
             available.sort_by_key(|(i, _)| *i);
             let available = available.into_iter().map(|(_, a)| a).collect();
-            let settings = destinations.settings(
-                available,
-                max_active_downloads,
-                download_speed_limit,
-                plugins,
-                extract_archives,
-                automatic_update_checks,
-            );
+            let settings = destinations.settings(available, preferences);
             let _ = reply.send(Ok(QueryResult::Settings(settings)));
         });
     }

@@ -9,6 +9,7 @@ pub mod account;
 pub mod command;
 pub mod error;
 pub mod event;
+pub mod filter;
 pub mod instance;
 pub mod media;
 pub mod query;

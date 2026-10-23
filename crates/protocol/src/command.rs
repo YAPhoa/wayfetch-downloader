@@ -16,6 +16,7 @@ use wayfetch_domain::version::{Generation, Revision};
 
 use crate::account::{AccountAlias, AccountRef, Authorization};
 use crate::error::{ErrorCode, ProtocolError};
+use crate::filter::LinkFilters;
 use crate::instance::InstanceId;
 use crate::media::{MediaChoice, PluginChange, PluginChanged};
 use crate::query::SpeedLimit;
@@ -401,6 +402,10 @@ pub enum Command {
         /// Whether the engine checks for a newer release on its own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         automatic_update_checks: Option<bool>,
+        /// The link filters, replacing all of them. Links already collected
+        /// stay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link_filters: Option<LinkFilters>,
     },
     /// Give a completed job's published file another name in the same
     /// folder. Never replaces an existing file.
@@ -759,6 +764,10 @@ pub enum CommandResult {
         #[serde(default, skip_serializing_if = "is_zero")]
         #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
         skipped: u32,
+        /// Links a link filter left out.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        #[cfg_attr(feature = "ts", ts(as = "Option<u32>", optional))]
+        filtered: u32,
     },
     /// A command on collected links was applied to some of them and
     /// refused for the rest, which stay as they were.
@@ -978,6 +987,7 @@ mod tests {
             download_speed_limit: None,
             extract_archives: None,
             automatic_update_checks: None,
+            link_filters: None,
         };
         assert_eq!(
             serde_json::to_string(&command).unwrap(),
@@ -990,6 +1000,7 @@ mod tests {
             download_speed_limit: None,
             extract_archives: None,
             automatic_update_checks: None,
+            link_filters: None,
         };
         assert_eq!(
             serde_json::to_string(&change).unwrap(),

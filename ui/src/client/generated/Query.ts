@@ -2,6 +2,7 @@
 import type { AuthorizationId } from "./AuthorizationId.js";
 import type { JobFilter } from "./JobFilter.js";
 import type { JobId } from "./JobId.js";
+import type { LinkRule } from "./LinkRule.js";
 import type { SourceLinkId } from "./SourceLinkId.js";
 
 /**
@@ -52,4 +53,12 @@ id: AuthorizationId, } | { "type": "updates",
 /**
  * Check now rather than answer with the last check.
  */
-check?: boolean, };
+check?: boolean, } | { "type": "try_link_filter", 
+/**
+ * The filter, saved or not.
+ */
+filter: LinkRule, 
+/**
+ * The link to try it on.
+ */
+link: string, };

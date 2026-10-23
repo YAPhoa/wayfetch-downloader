@@ -12,10 +12,12 @@ use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::Revision;
 use wayfetch_protocol::command::{PreferenceChange, SpeedLimitChange};
 use wayfetch_protocol::event::EventKind;
+use wayfetch_protocol::filter::LinkFilters;
 use wayfetch_protocol::query::SpeedLimit;
 use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 
 use super::{OrCorrupt, Store, StoreError, key, outbox, sql};
+use crate::link_filter::Filters;
 
 /// A recorded root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,7 +199,7 @@ impl Store {
 /// The user's settings as saved: the default destination they chose and
 /// their engine preferences, each `None` until chosen. The operator's
 /// policy decides what applies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SavedSettings {
     /// Revision to present with the next change.
     pub(crate) revision: Revision,
@@ -212,6 +214,8 @@ pub(crate) struct SavedSettings {
     pub(crate) extract_archives: bool,
     /// Whether the engine checks for a newer release on its own.
     pub(crate) automatic_update_checks: bool,
+    /// The link filters.
+    pub(crate) link_filters: LinkFilters,
 }
 
 /// A speed limit's stored form: 0 is Unlimited.
@@ -229,6 +233,24 @@ fn read_speed_limit(stored: i64) -> Result<SpeedLimit, StoreError> {
         Ok(rate) => Ok(SpeedLimit::BytesPerSecond(rate)),
         Err(_) => Err(StoreError::Corrupt("download_speed_limit")),
     }
+}
+
+/// The saved link filters; on, with none, until some are saved.
+pub(super) fn link_filters(tx: &Transaction<'_>) -> Result<LinkFilters, StoreError> {
+    let stored: Option<String> = tx.query_row(
+        "SELECT link_filters FROM settings WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    stored
+        .map(|json| serde_json::from_str(&json).or_corrupt("link_filters"))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+/// The link filters that apply, compiled.
+pub(super) fn active_filters(tx: &Transaction<'_>) -> Result<Filters, StoreError> {
+    Filters::compile(&link_filters(tx)?).or_corrupt("link_filters")
 }
 
 fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
@@ -263,6 +285,7 @@ fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
         download_speed_limit: speed.map(read_speed_limit).transpose()?,
         extract_archives: extract,
         automatic_update_checks: updates,
+        link_filters: link_filters(tx)?,
     })
 }
 
@@ -341,6 +364,7 @@ pub(super) fn update_settings(
     download_speed_limit: Option<SpeedLimitChange>,
     extract_archives: Option<bool>,
     automatic_update_checks: Option<bool>,
+    link_filters: Option<&LinkFilters>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     let saved = settings(tx)?;
@@ -359,6 +383,9 @@ pub(super) fn update_settings(
         },
         extract_archives: extract_archives.unwrap_or(saved.extract_archives),
         automatic_update_checks: automatic_update_checks.unwrap_or(saved.automatic_update_checks),
+        link_filters: link_filters
+            .cloned()
+            .unwrap_or_else(|| saved.link_filters.clone()),
         ..saved
     };
     if wanted == saved {
@@ -379,7 +406,7 @@ pub(super) fn update_settings(
     tx.execute(
         "UPDATE settings SET revision = ?1, default_root = ?2, max_active_downloads = ?3, \
          download_speed_limit = ?4, extract_archives = ?5, automatic_update_checks = ?6, \
-         updated_at = ?7 WHERE id = 1",
+         updated_at = ?7, link_filters = ?8 WHERE id = 1",
         params![
             sql(next)?,
             wanted.default_root.map(sql).transpose()?,
@@ -387,10 +414,14 @@ pub(super) fn update_settings(
             speed,
             wanted.extract_archives,
             wanted.automatic_update_checks,
-            now.unix_millis()
+            now.unix_millis(),
+            serde_json::to_string(&wanted.link_filters).or_corrupt("link_filters")?,
         ],
     )
     .map_err(StoreError::from)?;
+    if link_filters.is_some() {
+        super::links::release(tx, &active_filters(tx)?, now)?;
+    }
     Ok(CommandResult::SettingsUpdated {
         revision: next,
         changed: true,
@@ -544,7 +575,7 @@ mod tests {
         let first = first.revision;
         let tx = store.write().unwrap();
         let updated =
-            update_settings(&tx, first, Some(root), None, None, None, None, now()).unwrap();
+            update_settings(&tx, first, Some(root), None, None, None, None, None, now()).unwrap();
         assert_eq!(
             updated,
             CommandResult::SettingsUpdated {
@@ -552,14 +583,15 @@ mod tests {
                 changed: true
             }
         );
-        let stale =
-            update_settings(&tx, first, Some(root), None, None, None, None, now()).unwrap_err();
+        let stale = update_settings(&tx, first, Some(root), None, None, None, None, None, now())
+            .unwrap_err();
         assert_eq!(stale.code, ErrorCode::RevisionConflict);
         assert_eq!(stale.current_revision, first.next().ok());
         let same = update_settings(
             &tx,
             first.next().unwrap(),
             Some(root),
+            None,
             None,
             None,
             None,
@@ -594,12 +626,13 @@ mod tests {
         let root = store.allocate_root(Path::new("/a"), false, now()).unwrap();
         let tx = store.write().unwrap();
         let first = settings(&tx).unwrap().revision;
-        update_settings(&tx, first, Some(root), None, None, None, None, now()).unwrap();
+        update_settings(&tx, first, Some(root), None, None, None, None, None, now()).unwrap();
         let change = |revision: Revision, change| match update_settings(
             &tx,
             revision,
             None,
             Some(change),
+            None,
             None,
             None,
             None,
@@ -641,6 +674,7 @@ mod tests {
             speed,
             None,
             None,
+            None,
             now(),
         )
         .unwrap()
@@ -679,11 +713,22 @@ mod tests {
         // Turning automatic updates off is one more setting.
         assert!(settings(&tx).unwrap().automatic_update_checks);
         let current = settings(&tx).unwrap().revision;
-        update_settings(&tx, current, None, None, None, None, Some(false), now()).unwrap();
+        update_settings(
+            &tx,
+            current,
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+            now(),
+        )
+        .unwrap();
         assert!(!settings(&tx).unwrap().automatic_update_checks);
         // A stale revision changes neither.
-        let stale =
-            update_settings(&tx, second, None, None, unlimited, None, None, now()).unwrap_err();
+        let stale = update_settings(&tx, second, None, None, unlimited, None, None, None, now())
+            .unwrap_err();
         assert_eq!(stale.code, ErrorCode::RevisionConflict);
         assert_eq!(settings(&tx).unwrap().download_speed_limit, None);
     }

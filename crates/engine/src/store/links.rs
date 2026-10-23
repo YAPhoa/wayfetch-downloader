@@ -5,9 +5,10 @@
 //! repeated start never adds a second download. Each command applies to the
 //! links it can and refuses the rest with a reason.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use rusqlite::{OptionalExtension, Transaction, params, params_from_iter};
+use serde::{Deserialize, Serialize};
 use url::Url;
 use wayfetch_domain::id::{BatchId, JobId, RootId, SourceLinkId};
 use wayfetch_domain::name::{DiagnosticText, HostName, ProviderId};
@@ -17,13 +18,15 @@ use wayfetch_protocol::command::{
     AppliedLink, CollectMode, LinkRef, LinkRefs, MAX_COLLECTED_LINKS, RefusedLink,
 };
 use wayfetch_protocol::event::{EventCursor, EventKind};
+use wayfetch_protocol::filter::LinkOrigin;
 use wayfetch_protocol::media::MediaChoice;
 use wayfetch_protocol::query::{CollectedLink, JobRoute, LinkCheck, LinkPage, PageSize};
 use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 
-use super::{OrCorrupt, Store, StoreError, crawl, jobs, key, media, outbox, sql};
+use super::{OrCorrupt, Store, StoreError, crawl, jobs, key, media, outbox, roots, sql};
 use crate::crawl::extract::Entry;
 use crate::crawl::looks_like_file;
+use crate::link_filter::{Answer, Filters, Link, Verdict};
 
 /// The most characters of an invalid entry a list shows.
 const SHOWN_TEXT_CHARS: usize = 200;
@@ -64,6 +67,31 @@ pub struct CollectPlan {
     pub repeated: u32,
     /// Links in HTML that lead to other pages, left alone.
     pub skipped: u32,
+    /// The address given with pasted HTML, which its links were found on.
+    pub page: Option<Url>,
+}
+
+/// What link filters need to judge a link held back for its check again,
+/// besides the link itself: how it came.
+#[derive(Debug, Serialize, Deserialize)]
+struct Screen {
+    origin: LinkOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    found_on: Option<Url>,
+}
+
+/// The stored form of how `link` came, if `verdict` holds it back for its
+/// check.
+pub(super) fn screen(verdict: Verdict, link: &Link<'_>) -> Result<Option<String>, StoreError> {
+    if verdict != Verdict::Wait {
+        return Ok(None);
+    }
+    serde_json::to_string(&Screen {
+        origin: link.origin,
+        found_on: link.found_on.cloned(),
+    })
+    .or_corrupt("link screen")
+    .map(Some)
 }
 
 /// Records `plan`'s links as a new batch of held links saved in
@@ -71,8 +99,10 @@ pub struct CollectPlan {
 /// `batch_accepted` event, and queues the checks `mode` asks for: in
 /// [`CollectMode::Analyze`] every link's, each link typed as text allowed
 /// to be read as a page; otherwise only those of links that look like
-/// files or that a video service recognizes. Refused whole if the list
-/// would hold more than [`MAX_COLLECTED_LINKS`].
+/// files or that a video service recognizes. Links a link filter matches
+/// are left out, and those it could match once checked are held off the
+/// list until then. Refused whole if the list would hold more than
+/// [`MAX_COLLECTED_LINKS`], or if filters leave out every link.
 pub(super) fn collect(
     tx: &Transaction<'_>,
     plan: &CollectPlan,
@@ -94,6 +124,44 @@ pub(super) fn collect(
             &format!("the Links list holds at most {MAX_COLLECTED_LINKS} links; remove some first"),
         ));
     }
+    let analyze = mode == CollectMode::Analyze;
+    let checked =
+        |link: &Collecting, url: &Url| analyze || link.media.is_some() || looks_like_file(url);
+    let filters = roots::active_filters(tx)?;
+    let origin = if plan.html {
+        LinkOrigin::WebPage
+    } else {
+        LinkOrigin::Text
+    };
+    // Each link's verdict, with how it came if it waits for its check.
+    let verdicts: Vec<(Verdict, Option<String>)> = plan
+        .links
+        .iter()
+        .map(|link| match &link.entry {
+            Entry::Valid(url) => {
+                let link = Link {
+                    url: url.as_url(),
+                    origin,
+                    found_on: plan.page.as_ref(),
+                    media: link.media.is_some(),
+                    checked: checked(link, url.as_url()),
+                };
+                let verdict = filters.judge(&link);
+                Ok((verdict, screen(verdict, &link)?))
+            }
+            Entry::Invalid { .. } => Ok((Verdict::Keep, None)),
+        })
+        .collect::<Result<_, StoreError>>()?;
+    let filtered = verdicts.iter().filter(|(v, _)| *v == Verdict::Drop).count();
+    if filtered == plan.links.len() {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidRequest,
+            &format!(
+                "Your link filters left out all {filtered} links. Change or turn off the \
+                 filters in Settings to collect them."
+            ),
+        ));
+    }
     // Name the package after the first valid link's host.
     let name = plan
         .links
@@ -110,8 +178,7 @@ pub(super) fn collect(
     )
     .map_err(StoreError::from)?;
     let package = tx.last_insert_rowid();
-    let count = u32::try_from(plan.links.len()).or_corrupt("input count")?;
-    let analyze = mode == CollectMode::Analyze;
+    let count = u32::try_from(plan.links.len() - filtered).or_corrupt("input count")?;
     tx.execute(
         "INSERT INTO input_batches (package_id, input_count, root_id, created_at, mode) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -128,13 +195,16 @@ pub(super) fn collect(
     let mut insert = tx
         .prepare(
             "INSERT INTO source_links (batch_id, ordinal, input_url, held, listed, root_id, \
-             invalid, problem, media_service, media_state, may_analyze, public_only) \
+             invalid, problem, media_service, media_state, may_analyze, public_only, screen) \
              VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6, ?7, CASE WHEN ?7 IS NULL THEN NULL \
-             ELSE 'pending' END, ?8, ?9)",
+             ELSE 'pending' END, ?8, ?9, ?10)",
         )
         .map_err(StoreError::from)?;
     let mut invalid = 0u32;
-    for (position, link) in plan.links.iter().enumerate() {
+    for (position, (link, (verdict, screen))) in plan.links.iter().zip(&verdicts).enumerate() {
+        if *verdict == Verdict::Drop {
+            continue;
+        }
         let ordinal = i64::try_from(position).or_corrupt("ordinal")?;
         let service = match link.entry {
             Entry::Valid(_) => link.media.as_ref().map(ProviderId::as_str),
@@ -161,11 +231,12 @@ pub(super) fn collect(
                 // copied: its links never get the local networks the
                 // operator allows, whatever page address came with it.
                 plan.html,
+                screen,
             ])
             .map_err(StoreError::from)?;
         if let Entry::Valid(url) = &link.entry {
             let url = url.as_url();
-            if analyze || service.is_some() || looks_like_file(url) {
+            if checked(link, url) {
                 crawl::enqueue(tx, tx.last_insert_rowid(), url, service, now)?;
             }
         }
@@ -184,12 +255,12 @@ pub(super) fn collect(
         invalid,
         repeated: plan.repeated,
         skipped: plan.skipped,
+        filtered: u32::try_from(filtered).or_corrupt("filtered count")?,
     })
 }
 
 /// A collected link's row, as commands see it.
 struct Held {
-    batch: i64,
     package: i64,
     listed: bool,
     invalid: bool,
@@ -212,8 +283,8 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
     let raw = tx
         .query_row(
             &format!(
-                "SELECT s.batch_id, b.package_id, s.listed, s.invalid, s.revision, s.root_id, \
-                 s.problem, j.id, s.input_url, \
+                "SELECT b.package_id, s.listed = 1 AND s.screen IS NULL, s.invalid, s.revision, \
+                 s.root_id, s.problem, j.id, s.input_url, \
                  EXISTS(SELECT 1 FROM source_links c WHERE c.parent_id = s.id), \
                  s.check_state IS 'page' OR s.origin_page = 1, {MEDIA_COLUMNS} \
                  FROM source_links s \
@@ -225,32 +296,23 @@ fn held(tx: &Transaction<'_>, link: SourceLinkId) -> Result<Option<Held>, StoreE
                 Ok((
                     (
                         r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
+                        r.get::<_, bool>(1)?,
                         r.get::<_, bool>(2)?,
-                        r.get::<_, bool>(3)?,
-                        r.get::<_, i64>(4)?,
-                        r.get::<_, Option<i64>>(5)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, Option<i64>>(4)?,
                     ),
-                    r.get::<_, Option<String>>(6)?,
-                    r.get::<_, Option<i64>>(7)?,
-                    r.get::<_, String>(8)?,
-                    (r.get::<_, bool>(9)?, r.get::<_, bool>(10)?),
-                    media::LinkColumns::read(r, 11)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
+                    r.get::<_, String>(7)?,
+                    (r.get::<_, bool>(8)?, r.get::<_, bool>(9)?),
+                    media::LinkColumns::read(r, 10)?,
                 ))
             },
         )
         .optional()?;
     raw.map(
-        |(
-            (batch, package, listed, invalid, revision, root),
-            problem,
-            job,
-            url,
-            (parent, page),
-            media,
-        )| {
+        |((package, listed, invalid, revision, root), problem, job, url, (parent, page), media)| {
             Ok(Held {
-                batch,
                 package,
                 listed,
                 invalid,
@@ -309,10 +371,119 @@ const PAGE_UNREAD: &str =
 /// never makes it a job; one started already is both.
 fn unlist(tx: &Transaction<'_>, link: i64) -> Result<(), StoreError> {
     tx.execute(
-        "UPDATE source_links SET listed = 0, held = 0, staged = 1 WHERE id = ?1",
+        "UPDATE source_links SET listed = 0, held = 0, staged = 1, screen = NULL WHERE id = ?1",
         [link],
     )?;
     crawl::drop_check(tx, link)
+}
+
+/// Takes listed link `id` away for good. One with a download, or a page
+/// with links found on it, only leaves the list, since its download or
+/// those links keep it as their source; any other goes, with its batch and
+/// package once they hold nothing.
+fn discard(tx: &Transaction<'_>, id: i64) -> Result<(), StoreError> {
+    let (batch, kept): (i64, bool) = tx.query_row(
+        "SELECT batch_id, EXISTS(SELECT 1 FROM jobs WHERE source_link_id = s.id) \
+         OR EXISTS(SELECT 1 FROM source_links c WHERE c.parent_id = s.id) \
+         FROM source_links s WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if kept {
+        return unlist(tx, id);
+    }
+    delete_unused(tx, id)?;
+    let package: Option<i64> = tx
+        .query_row(
+            "DELETE FROM input_batches WHERE id = ?1 \
+             AND NOT EXISTS (SELECT 1 FROM source_links WHERE batch_id = ?1) \
+             RETURNING package_id",
+            [batch],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(package) = package {
+        tx.execute(
+            "DELETE FROM packages WHERE id = ?1 \
+             AND NOT EXISTS (SELECT 1 FROM input_batches WHERE package_id = ?1) \
+             AND NOT EXISTS (SELECT 1 FROM jobs WHERE package_id = ?1)",
+            [package],
+        )?;
+    }
+    Ok(())
+}
+
+/// Settles link `id` if it was held back for its check: the link filters
+/// as they are now judge it again with what `answer` tells, dropping it
+/// (and counting it on the page it was found on) or listing it.
+pub(super) fn settle(tx: &Transaction<'_>, id: i64, answer: &Answer<'_>) -> Result<(), StoreError> {
+    let row: Option<(Option<String>, String, Option<i64>, bool)> = tx
+        .query_row(
+            "SELECT screen, input_url, parent_id, media_service IS NOT NULL \
+             FROM source_links WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((Some(screen), url, parent, media)) = row else {
+        return Ok(());
+    };
+    let screen: Screen = serde_json::from_str(&screen).or_corrupt("link screen")?;
+    let url = Url::parse(&url).or_corrupt("source URL")?;
+    let link = Link {
+        url: &url,
+        origin: screen.origin,
+        found_on: screen.found_on.as_ref(),
+        media,
+        checked: true,
+    };
+    if !roots::active_filters(tx)?.leaves_out(&link, answer) {
+        tx.execute("UPDATE source_links SET screen = NULL WHERE id = ?1", [id])?;
+        return Ok(());
+    }
+    if let Some(parent) = parent {
+        tx.execute(
+            "UPDATE source_links SET filtered = filtered + 1 WHERE id = ?1",
+            [parent],
+        )?;
+    }
+    discard(tx, id)
+}
+
+/// After the link filters changed to `filters`, lists every link held back
+/// for its check that no filter could still leave out.
+pub(super) fn release(
+    tx: &Transaction<'_>,
+    filters: &Filters,
+    now: UtcTimestamp,
+) -> Result<(), StoreError> {
+    let held: Vec<(i64, String, String, bool)> = tx
+        .prepare(
+            "SELECT id, screen, input_url, media_service IS NOT NULL FROM source_links \
+             WHERE screen IS NOT NULL",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut released = false;
+    for (id, screen, url, media) in held {
+        let screen: Screen = serde_json::from_str(&screen).or_corrupt("link screen")?;
+        let url = Url::parse(&url).or_corrupt("source URL")?;
+        let verdict = filters.judge(&Link {
+            url: &url,
+            origin: screen.origin,
+            found_on: screen.found_on.as_ref(),
+            media,
+            checked: true,
+        });
+        if verdict == Verdict::Keep {
+            tx.execute("UPDATE source_links SET screen = NULL WHERE id = ?1", [id])?;
+            released = true;
+        }
+    }
+    if released {
+        outbox::append(tx, &EventKind::LinksChanged, now)?;
+    }
+    Ok(())
 }
 
 /// Refusals that apply to every command: a link no longer in the list (or
@@ -473,17 +644,14 @@ pub(super) fn start(
     })
 }
 
-/// Removes links from the list. A link not started goes, with batches and
-/// packages left with nothing; a started one, or a page with links found
-/// on it, only leaves the list, since its download or those links keep it
-/// as their source. A page kept only for that goes once its last found
-/// link does. A link already gone counts as removed.
+/// Removes links from the list, as [`discard`] does. A page kept only for
+/// the links found on it goes once its last found link does. A link
+/// already gone counts as removed.
 pub(super) fn remove(
     tx: &Transaction<'_>,
     links: &LinkRefs,
 ) -> Result<CommandResult, ProtocolError> {
-    let mut batches = BTreeSet::new();
-    let result = apply_each(tx, links, |link, row| {
+    apply_each(tx, links, |link, row| {
         let applied = AppliedLink {
             link: link.link,
             job: None,
@@ -498,36 +666,9 @@ pub(super) fn remove(
         if let Some(refused) = refusal(link, &row, true) {
             return Ok(Err(refused));
         }
-        if row.job.is_some() || row.parent {
-            unlist(tx, sql(link.link)?)?;
-        } else {
-            delete_unused(tx, sql(link.link)?)?;
-            batches.insert(row.batch);
-        }
+        discard(tx, sql(link.link)?)?;
         Ok(Ok(applied))
-    })?;
-    for batch in batches {
-        let package: Option<i64> = tx
-            .query_row(
-                "DELETE FROM input_batches WHERE id = ?1 \
-                 AND NOT EXISTS (SELECT 1 FROM source_links WHERE batch_id = ?1) \
-                 RETURNING package_id",
-                [batch],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from)?;
-        if let Some(package) = package {
-            tx.execute(
-                "DELETE FROM packages WHERE id = ?1 \
-                 AND NOT EXISTS (SELECT 1 FROM input_batches WHERE package_id = ?1) \
-                 AND NOT EXISTS (SELECT 1 FROM jobs WHERE package_id = ?1)",
-                [package],
-            )
-            .map_err(StoreError::from)?;
-        }
-    }
-    Ok(result)
+    })
 }
 
 /// Deletes link `id`, which has no download and no found links, and then
@@ -714,13 +855,15 @@ struct Listed {
     skipped: Option<u32>,
     page: Option<String>,
     via: Option<String>,
+    filtered: u32,
     media: media::LinkColumns,
 }
 
 impl Listed {
     const COLUMNS: &str = "s.id, s.batch_id, b.created_at, s.revision, s.invalid, s.input_url, \
          s.root_id, s.problem, r.path, j.id, t.id IS NOT NULL, s.check_state, s.check_reason, \
-         s.check_problem, s.size, s.observed_name, s.found, s.skipped, p.input_url, s.checked_via";
+         s.check_problem, s.size, s.observed_name, s.found, s.skipped, p.input_url, s.checked_via, \
+         s.filtered";
 
     fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
@@ -744,7 +887,8 @@ impl Listed {
             skipped: r.get(17)?,
             page: r.get(18)?,
             via: r.get(19)?,
-            media: media::LinkColumns::read(r, 20)?,
+            filtered: r.get(20)?,
+            media: media::LinkColumns::read(r, 21)?,
         })
     }
 
@@ -775,8 +919,25 @@ impl Listed {
         })
     }
 
+    /// What the check found to say, then how many links on the page the
+    /// link filters left out.
+    fn check_detail(&self) -> Option<String> {
+        let filtered = (self.filtered > 0).then(|| {
+            let links = if self.filtered == 1 { "link" } else { "links" };
+            format!(
+                "Your link filters left out {} {links} on this page.",
+                self.filtered
+            )
+        });
+        match (self.detail.as_deref(), filtered) {
+            (Some(detail), Some(filtered)) => Some(format!("{detail} {filtered}")),
+            (detail, filtered) => detail.map(str::to_owned).or(filtered),
+        }
+    }
+
     fn into_link(self, converter: bool) -> Result<CollectedLink, StoreError> {
         let check = self.check()?;
+        let detail = self.check_detail();
         let url = (!self.invalid)
             .then(|| Url::parse(&self.text).ok())
             .flatten();
@@ -807,8 +968,7 @@ impl Listed {
                 .filter(|_| checked)
                 .map(|r| r.parse().or_corrupt("check reason"))
                 .transpose()?,
-            check_detail: self
-                .detail
+            check_detail: detail
                 .filter(|_| checked)
                 .as_deref()
                 .map(DiagnosticText::new),
@@ -854,7 +1014,7 @@ pub(super) fn list(
              LEFT JOIN jobs j ON j.source_link_id = s.id \
              LEFT JOIN crawl_tasks t ON t.source_link_id = s.id \
              LEFT JOIN source_links p ON p.id = s.parent_id \
-             WHERE s.listed = 1 AND s.id > ?1 ORDER BY s.id LIMIT ?2",
+             WHERE s.listed = 1 AND s.screen IS NULL AND s.id > ?1 ORDER BY s.id LIMIT ?2",
             Listed::COLUMNS
         ))?
         .query_map(
@@ -869,11 +1029,14 @@ pub(super) fn list(
     } else {
         None
     };
-    let (total, checking, before): (i64, i64, i64) = tx.query_row(
-        "SELECT COUNT(*), COUNT(t.id), COALESCE(SUM(s.id <= ?1), 0) FROM source_links s \
+    let (total, checking, before, screening): (i64, i64, i64, i64) = tx.query_row(
+        "SELECT COALESCE(SUM(s.screen IS NULL), 0), \
+         COALESCE(SUM(s.screen IS NULL AND t.id IS NOT NULL), 0), \
+         COALESCE(SUM(s.screen IS NULL AND s.id <= ?1), 0), \
+         COALESCE(SUM(s.screen IS NOT NULL), 0) FROM source_links s \
          LEFT JOIN crawl_tasks t ON t.source_link_id = s.id WHERE s.listed = 1",
         [after],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     let count = |n: i64| u64::try_from(n).or_corrupt("link count");
     Ok(LinkPage {
@@ -881,6 +1044,7 @@ pub(super) fn list(
         next_after,
         total: count(total)?,
         checking: count(checking)?,
+        screening: count(screening)?,
         before: Some(count(before)?),
         as_of,
     })
@@ -892,7 +1056,7 @@ pub(super) fn source(tx: &Transaction<'_>, link: SourceLinkId) -> Result<String,
         return Err(StoreError::NotFound("link"));
     };
     tx.query_row(
-        "SELECT input_url FROM source_links WHERE id = ?1 AND listed = 1",
+        "SELECT input_url FROM source_links WHERE id = ?1 AND listed = 1 AND screen IS NULL",
         [id],
         |r| r.get(0),
     )
