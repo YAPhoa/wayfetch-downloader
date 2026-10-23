@@ -181,7 +181,7 @@ export class AddLinksPage {
           h(
             'button',
             { type: 'button', class: 'tool back', 'data-key': 'add-back', onclick: () => context.back() },
-            icon('back'),
+            icon('arrow-left'),
             this.backLabel,
           ),
           this.title,

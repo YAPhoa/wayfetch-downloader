@@ -138,7 +138,7 @@ export function sortHeader({ column, label, sort, onSort, className }) {
       'button',
       { type: 'button', class: 'sort', 'data-key': `sort-${column}`, onclick: () => onSort(column) },
       label,
-      active && icon(sort.descending ? 'down' : 'up'),
+      active && icon(sort.descending ? 'arrow-down' : 'arrow-up'),
     ),
   );
 }

@@ -67,14 +67,14 @@ export function updateStatus(check) {
       return {
         ...plain,
         badge: 'Failed',
-        icon: 'cancel',
+        icon: 'error',
         tone: 'bad',
         detail: sentence(outcome.problem),
         link: { href: check.releases, label: 'All releases' },
       };
   }
   const get = { href: outcome.url, label: `Get ${outcome.version}` };
-  const available = { ...plain, badge: `${outcome.version} available`, icon: /** @type {const} */ ('up'), tone: /** @type {const} */ ('run') };
+  const available = { ...plain, badge: `${outcome.version} available`, icon: /** @type {const} */ ('arrow-up'), tone: /** @type {const} */ ('run') };
   switch (install?.state) {
     case undefined:
       return { ...available, link: get };
@@ -82,17 +82,17 @@ export function updateStatus(check) {
       return { ...available, command: 'download' };
     case 'downloading': {
       const share = install.total ? ` ${Math.floor((install.received / install.total) * 100)}%` : '…';
-      return { ...plain, badge: `Downloading${share}`, icon: 'down', tone: 'run', busy: true };
+      return { ...plain, badge: `Downloading${share}`, icon: 'arrow-down', tone: 'run', busy: true };
     }
     case 'ready':
-      return { ...plain, badge: `${outcome.version} ready`, icon: 'up', command: 'restart' };
+      return { ...plain, badge: `${outcome.version} ready`, icon: 'arrow-up', command: 'restart' };
     case 'installing':
       return { ...plain, badge: 'Installing…', icon: 'more', tone: 'run', busy: true };
     case 'failed':
       return {
         ...plain,
         badge: 'Failed',
-        icon: 'cancel',
+        icon: 'error',
         tone: 'bad',
         detail: sentence(install.problem),
         command: 'download',
@@ -137,7 +137,7 @@ function explain(error) {
  */
 function outsideLink(client, href, label, props = {}) {
   if (client.local) return h('span', { ...props, class: 'address' }, href.replace(/^https:\/\//, ''));
-  return h('a', { ...props, href, target: '_blank', rel: 'noopener noreferrer' }, label, icon('external'));
+  return h('a', { ...props, href, target: '_blank', rel: 'noopener noreferrer' }, label, icon('external-link'));
 }
 
 /** @param {AboutContext} context */
@@ -157,7 +157,7 @@ export function aboutSection(context) {
       'data-key': 'check-for-updates',
       onclick: () => void check(),
     },
-    icon('retry'),
+    icon('refresh'),
   );
   const download = h(
     'button',
@@ -388,7 +388,7 @@ export function aboutSection(context) {
 }
 
 /** @type {UpdateStatus} */
-const FAILED = { badge: 'Failed', icon: 'cancel', tone: 'bad', detail: '', link: null, command: null, busy: false };
+const FAILED = { badge: 'Failed', icon: 'error', tone: 'bad', detail: '', link: null, command: null, busy: false };
 /** @type {UpdateStatus} */
 const CHECKING = { ...FAILED, badge: 'Checking…', icon: 'more', tone: 'run' };
 /** @type {UpdateStatus} */

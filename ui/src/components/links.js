@@ -173,9 +173,9 @@ export class LinksPage {
     };
 
     this.buttons = {
-      start: this.tool('start', 'resume', 'Start selected', () => void this.start(this.chosen().filter(startable))),
-      move: this.tool('move', 'folder', 'Save to…', () => this.chooseFolder(this.chosen().filter((l) => !l.job))),
-      remove: this.tool('remove', 'cancel', 'Remove', () => this.act('remove', this.chosen())),
+      start: this.tool('start', 'play', 'Start selected', () => void this.start(this.chosen().filter(startable))),
+      move: this.tool('move', 'move-to-folder', 'Save to…', () => this.chooseFolder(this.chosen().filter((l) => !l.job))),
+      remove: this.tool('remove', 'trash', 'Remove', () => this.act('remove', this.chosen())),
     };
     const search = h('input', {
       type: 'search',

@@ -73,6 +73,9 @@ const UPDATES_EVERY = 30 * 60_000;
 /** @type {Record<StateAction, string>} */
 const ACTION_LABELS = { pause: 'Pause', resume: 'Resume', cancel: 'Cancel', retry: 'Retry' };
 
+/** @type {Record<StateAction, import('./icons.js').IconName>} */
+const ACTION_ICONS = { pause: 'pause', resume: 'play', cancel: 'cancel', retry: 'retry' };
+
 /** The state commands, in toolbar order. @type {readonly StateAction[]} */
 const STATE_ACTIONS = ['pause', 'resume', 'cancel', 'retry'];
 
@@ -331,7 +334,7 @@ export class Downloads {
           onclick: (/** @type {MouseEvent} */ event) =>
             this.command(action, /** @type {HTMLButtonElement} */ (event.currentTarget)),
         },
-        icon(action),
+        icon(ACTION_ICONS[action]),
         ACTION_LABELS[action],
       ),
     );
@@ -1578,7 +1581,7 @@ export class Downloads {
             'aria-pressed': String(group.key === this.group),
             onclick: () => this.filter(group.key),
           },
-          group.status ? dot(group.status) : icon('display'),
+          group.status ? dot(group.status) : icon('list'),
           h('span', { class: 'filter-label' }, group.label),
           count !== undefined && h('span', { class: 'count' }, count),
         );
@@ -1963,7 +1966,7 @@ export class Downloads {
           'aria-label': 'Close details',
           onclick: () => this.navigate('/'),
         },
-        icon('cancel'),
+        icon('close'),
       ),
     );
   }

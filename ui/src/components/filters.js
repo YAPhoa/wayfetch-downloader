@@ -385,7 +385,7 @@ export function filtersSection(context) {
     if (!text) return;
     banner.className = `flash ${tone}`;
     banner.setAttribute('role', tone === 'bad' ? 'alert' : 'status');
-    show(banner, icon(tone === 'bad' ? 'cancel' : 'check'), h('span', null, text));
+    show(banner, icon(tone === 'bad' ? 'error' : 'check'), h('span', null, text));
     fading = setTimeout(
       () => {
         banner.classList.add('leaving');
@@ -678,7 +678,7 @@ export function filtersSection(context) {
             disabled: page === 0,
             onclick: () => turn(page - 1),
           },
-          icon('left'),
+          icon('chevron-left'),
         ),
         h('span', { class: 'page' }, `${page + 1} / ${pages}`),
         h(
@@ -691,7 +691,7 @@ export function filtersSection(context) {
             disabled: page === pages - 1,
             onclick: () => turn(page + 1),
           },
-          icon('right'),
+          icon('chevron-right'),
         ),
       );
     const rows =

@@ -135,7 +135,7 @@ export function pickerButton({ menu, owner, label, name, disabled = false, title
       },
     },
     h('span', { class: 'picker-label' }, label),
-    icon('chevron'),
+    icon('chevron-down'),
   );
 }
 
