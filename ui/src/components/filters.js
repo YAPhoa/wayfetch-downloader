@@ -37,7 +37,7 @@ import { Menu, rowMenuHandlers } from './menu.js';
  *   hello: () => Hello | null,
  *   onSignedOut: () => void,
  *   onSettings: (settings: Settings) => void,
- *   onChanged: (refresh: () => void) => void,
+ *   onChanged: (refresh: (revision: number | null) => void) => void,
  * }} FiltersContext
  * @typedef {{
  *   key: string,
@@ -758,11 +758,13 @@ export function filtersSection(context) {
   /**
    * @param {string} [said]
    * @param {'ok' | 'bad'} [tone]
+   * @param {boolean} [quiet] whether to leave the filters as shown if they did not change
    */
-  const reload = async (said = '', tone = /** @type {'ok' | 'bad'} */ ('ok')) => {
+  const reload = async (said = '', tone = /** @type {'ok' | 'bad'} */ ('ok'), quiet = false) => {
     try {
       const settings = await client.settings();
       context.onSettings(settings);
+      if (quiet && current !== null && settings.revision === current.revision) return;
       render(settings, said, tone);
     } catch (error) {
       if (error instanceof WayfetchError && error.code === 'unauthenticated') {
@@ -778,8 +780,11 @@ export function filtersSection(context) {
     }
   };
 
-  context.onChanged(() => {
-    if (!saving) void reload();
+  // A change elsewhere shows once its revision is newer than the one shown,
+  // so an open menu is not rebuilt under the pointer for nothing.
+  context.onChanged((revision) => {
+    if (saving || (revision !== null && current !== null && revision <= current.revision)) return;
+    void reload('', 'ok', true);
   });
   show(section, h('p', { class: 'message', role: 'status' }, 'Loading…'));
   void reload();
