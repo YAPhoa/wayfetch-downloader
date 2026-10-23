@@ -5,6 +5,8 @@
 //! Results commit with the row's deletion and a `links_changed` event in one
 //! transaction.
 
+use std::collections::BTreeSet;
+
 use rusqlite::{OptionalExtension, Transaction, params};
 use url::Url;
 use wayfetch_domain::id::SourceLinkId;
@@ -16,7 +18,7 @@ use wayfetch_protocol::filter::{CheckOutcome, LinkOrigin, LinkRoute};
 use wayfetch_protocol::query::CheckReason;
 
 use super::{OrCorrupt, Store, StoreError, key, links, outbox, roots, sql};
-use crate::crawl::Checked;
+use crate::crawl::{Checked, Checker};
 use crate::link_filter::{Answer, Link, Verdict};
 use crate::transfer::transport::Reach;
 
@@ -118,53 +120,66 @@ pub(super) fn finish(tx: &Transaction<'_>, task: i64) -> Result<bool, StoreError
 
 impl Store {
     /// Takes up to `limit` waiting checks, the oldest of each queue not in
-    /// `busy`, oldest first, and marks them running; only video services'
-    /// checks unless `links` says link checks can be sent. A huge page's
-    /// links share one queue, so they never hold back another host's.
+    /// `busy` that can be sent, oldest first, and marks them running. A
+    /// video service's check can always be sent, a link's when `sendable`
+    /// says. A huge page's links share one queue, so they never hold back
+    /// another host's.
     pub(crate) fn take_checks(
         &mut self,
         limit: usize,
         busy: &[String],
-        links: bool,
+        sendable: impl Fn(&Url) -> bool,
     ) -> Result<Vec<Task>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        /// A waiting check: its id, queue, link, URL, whether it may be
+        /// read as a page, video service, and whether it is public only.
+        type Waiting = (i64, String, i64, String, bool, Option<String>, bool);
         let tx = self.write()?;
-        let fetch = i64::try_from(limit.saturating_add(busy.len())).unwrap_or(i64::MAX);
-        let heads: Vec<(i64, String)> = tx
+        let waiting: Vec<Waiting> = tx
             .prepare(
-                "SELECT MIN(id), queue FROM crawl_tasks WHERE state = 'pending' \
-                 AND (?2 OR queue LIKE 'media:%') GROUP BY queue ORDER BY 1 LIMIT ?1",
+                "SELECT t.id, t.queue, s.id, s.input_url, s.may_analyze, s.media_service, \
+                 s.public_only FROM crawl_tasks t \
+                 JOIN source_links s ON s.id = t.source_link_id \
+                 WHERE t.state = 'pending' ORDER BY t.id",
             )?
-            .query_map(params![fetch, links], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })?
             .collect::<Result<_, _>>()?;
+        let mut taken = BTreeSet::new();
         let mut tasks = Vec::new();
-        for (id, queue) in heads {
-            if tasks.len() == limit || busy.contains(&queue) {
+        for (id, queue, link, url, analyze, media, public_only) in waiting {
+            if tasks.len() == limit {
+                break;
+            }
+            if busy.contains(&queue) || taken.contains(&queue) {
                 continue;
             }
-            let (link, url, analyze, media, public_only): (
-                i64,
-                String,
-                bool,
-                Option<String>,
-                bool,
-            ) = tx.query_row(
-                "SELECT s.id, s.input_url, s.may_analyze, s.media_service, \
-                     s.public_only FROM crawl_tasks t \
-                     JOIN source_links s ON s.id = t.source_link_id WHERE t.id = ?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )?;
+            let url = Url::parse(&url).or_corrupt("source URL")?;
+            // One that cannot be sent waits without holding back the
+            // rest of its queue.
+            if media.is_none() && !sendable(&url) {
+                continue;
+            }
             tx.execute(
                 "UPDATE crawl_tasks SET state = 'running' WHERE id = ?1",
                 [id],
             )?;
+            taken.insert(queue.clone());
             tasks.push(Task {
                 id,
                 link: key(link)?,
-                url: Url::parse(&url).or_corrupt("source URL")?,
+                url,
                 queue,
                 analyze,
                 reach: reach(public_only),
@@ -202,7 +217,7 @@ impl Store {
         &mut self,
         task: i64,
         link: SourceLinkId,
-        (checked, via): (&Checked, Option<&ProviderId>),
+        (checked, via): (&Checked, Option<&Checker>),
         origin: Option<&Checked>,
         found: &Found,
         now: UtcTimestamp,
@@ -286,7 +301,7 @@ impl Store {
                 collected,
                 collected.map(|_| found.skipped),
                 id,
-                via.map(ProviderId::as_str),
+                via.map(|via| via.service().as_str()),
                 matches!(origin, Checked::Page { .. }),
             ],
         )?;
@@ -294,10 +309,10 @@ impl Store {
             name,
             size,
             check: outcome,
-            route: if via.is_some() {
-                LinkRoute::Account
-            } else {
-                LinkRoute::Direct
+            // A file host downloads without an account.
+            route: match via {
+                Some(Checker::Account(_)) => LinkRoute::Account,
+                Some(Checker::Host(_)) | None => LinkRoute::Direct,
             },
         };
         links::settle(&tx, id, &answer)?;
@@ -470,10 +485,12 @@ mod tests {
                         Some(l) => Collecting {
                             entry: Entry::parse(l),
                             media: Some(ProviderId::new("youtube".to_owned()).unwrap()),
+                            hosted: false,
                         },
                         None => Collecting {
                             entry: Entry::parse(l),
                             media: None,
+                            hosted: false,
                         },
                     })
                     .collect(),
@@ -583,6 +600,24 @@ mod tests {
     }
 
     #[test]
+    fn a_check_that_cannot_be_sent_does_not_hold_back_its_queue() {
+        let mut f = Fixture::new();
+        f.collect(
+            &["https://a.example/1.zip", "https://a.example/2.zip"],
+            CollectMode::Analyze,
+            false,
+        );
+        let taken = f
+            .store
+            .take_checks(4, &[], |url| url.path() == "/2.zip")
+            .unwrap();
+        let urls: Vec<_> = taken.iter().map(|t| t.url.as_str()).collect();
+        assert_eq!(urls, ["https://a.example/2.zip"]);
+        let busy = [taken[0].queue.clone()];
+        assert!(f.store.take_checks(4, &busy, |_| true).unwrap().is_empty());
+    }
+
+    #[test]
     fn checks_are_taken_one_per_queue_oldest_first() {
         let mut f = Fixture::new();
         f.collect(
@@ -596,22 +631,22 @@ mod tests {
             false,
         );
         // Without link checks only the video's is taken.
-        let only_media = f.store.take_checks(4, &[], false).unwrap();
+        let only_media = f.store.take_checks(4, &[], |_| false).unwrap();
         assert_eq!(only_media.len(), 1);
         assert_eq!(only_media[0].queue, "media:youtube");
         let taken = f
             .store
-            .take_checks(4, &["media:youtube".to_owned()], true)
+            .take_checks(4, &["media:youtube".to_owned()], |_| true)
             .unwrap();
         let urls: Vec<_> = taken.iter().map(|t| t.url.as_str()).collect();
         assert_eq!(urls, ["https://a.example/1.zip", "https://b.example/3.zip"]);
         assert!(taken.iter().all(|t| t.analyze && t.media.is_none()));
         let busy: Vec<String> = taken.iter().map(|t| t.queue.clone()).collect();
-        assert!(f.store.take_checks(4, &busy, true).unwrap().is_empty());
+        assert!(f.store.take_checks(4, &busy, |_| true).unwrap().is_empty());
         // A restart sends the running checks again.
         assert_eq!(f.store.requeue_checks().unwrap(), 3);
         assert_eq!(
-            f.store.take_checks(1, &[], true).unwrap()[0].id,
+            f.store.take_checks(1, &[], |_| true).unwrap()[0].id,
             taken[0].id
         );
     }
@@ -624,7 +659,7 @@ mod tests {
             CollectMode::Analyze,
             false,
         );
-        let tasks = f.store.take_checks(2, &[], true).unwrap();
+        let tasks = f.store.take_checks(2, &[], |_| true).unwrap();
         // The second is in the same queue and waits.
         assert_eq!(tasks.len(), 1);
         let file = Checked::File {
@@ -641,7 +676,7 @@ mod tests {
                 NOW,
             )
             .unwrap();
-        let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
+        let task = f.store.take_checks(1, &[], |_| true).unwrap().remove(0);
         let gone = Checked::Offline(CheckReason::NotFound, "HTTP 404".into());
         f.store
             .record_link_check(
@@ -675,7 +710,7 @@ mod tests {
             CollectMode::Analyze,
             false,
         );
-        let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
+        let task = f.store.take_checks(1, &[], |_| true).unwrap().remove(0);
         let child = |url: &str| Child {
             url: InputUrl::parse(url).unwrap(),
             media: None,
@@ -822,6 +857,7 @@ mod tests {
             .map(|l| Collecting {
                 entry: Entry::parse(l),
                 media: None,
+                hosted: false,
             })
             .collect(),
             ..CollectPlan::default()
@@ -858,13 +894,13 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!((page.items.len(), page.total, page.screening), (0, 0, 3));
-        let tasks = f.store.take_checks(3, &[], true).unwrap();
+        let tasks = f.store.take_checks(3, &[], |_| true).unwrap();
         let [small, big] = &tasks[..] else {
             panic!("{tasks:?}")
         };
         f.found_file(small, 10);
         f.found_file(big, 5000);
-        let page_task = &f.store.take_checks(1, &[], true).unwrap()[0];
+        let page_task = &f.store.take_checks(1, &[], |_| true).unwrap()[0];
         // A page's links pass the same filters.
         let child = |url: &str| Child {
             url: InputUrl::parse(url).unwrap(),
@@ -907,7 +943,7 @@ mod tests {
         );
         // Its server says the video is a small archive, so it is left out
         // too, and the page counts it.
-        let video = &f.store.take_checks(1, &[], true).unwrap()[0];
+        let video = &f.store.take_checks(1, &[], |_| true).unwrap()[0];
         f.found_named(video, Some("z.zip"), 10);
         assert_eq!(f.rows().len(), 2);
         assert_eq!(
@@ -921,6 +957,7 @@ mod tests {
                 links: vec![Collecting {
                     entry: Entry::parse("https://ads.example/z.zip"),
                     media: None,
+                    hosted: false,
                 }],
                 ..CollectPlan::default()
             },
@@ -973,7 +1010,7 @@ mod tests {
         assert_eq!(f.links().0.len(), 1);
         let task = f
             .store
-            .take_checks(2, &[], true)
+            .take_checks(2, &[], |_| true)
             .unwrap()
             .into_iter()
             .find(|t| t.url.as_str() == other)
@@ -995,7 +1032,7 @@ mod tests {
         // Not checked, so no check can match: listed at once.
         f.collect(&[PAGE, FILE], CollectMode::SupportedOnly, false);
         assert_eq!(f.links().0.len(), 1);
-        let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
+        let task = f.store.take_checks(1, &[], |_| true).unwrap().remove(0);
         f.found_file(&task, 1);
         assert_eq!(f.links().0.len(), 2);
     }
@@ -1004,7 +1041,7 @@ mod tests {
     fn a_new_check_drops_the_old_ones_answer() {
         let mut f = Fixture::new();
         f.collect(&[FILE], CollectMode::Analyze, false);
-        let old = f.store.take_checks(1, &[], true).unwrap().remove(0);
+        let old = f.store.take_checks(1, &[], |_| true).unwrap().remove(0);
         let (links, _) = f.links();
         f.links_command(&[&links[0]], |links| Command::CheckLinks { links });
         let late = Checked::File {
@@ -1026,7 +1063,7 @@ mod tests {
             (links[0].check, links[0].size, checking),
             (LinkCheck::Checking, None, 1)
         );
-        let new = f.store.take_checks(1, &[], true).unwrap().remove(0);
+        let new = f.store.take_checks(1, &[], |_| true).unwrap().remove(0);
         assert_ne!(new.id, old.id);
     }
 
@@ -1037,7 +1074,7 @@ mod tests {
         let (links, checking) = f.links();
         assert_eq!((links[0].check, checking), (LinkCheck::NotChecked, 0));
         f.links_command(&[&links[0]], |links| Command::AnalyzeLinks { links });
-        let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
+        let task = f.store.take_checks(1, &[], |_| true).unwrap().remove(0);
         assert!(task.analyze);
     }
 
@@ -1046,7 +1083,7 @@ mod tests {
         for (local, reach) in [(false, Reach::Public), (true, Reach::Allowed)] {
             let mut f = Fixture::new();
             f.collect(&[PAGE], CollectMode::Analyze, false);
-            let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
+            let task = f.store.take_checks(1, &[], |_| true).unwrap().remove(0);
             // The person typed the page: it gets what the operator allows.
             assert_eq!(task.reach, Reach::Allowed);
             let found = Found {
@@ -1063,7 +1100,7 @@ mod tests {
             f.store
                 .record_link_check(task.id, task.link, (&page, None), None, &found, NOW)
                 .unwrap();
-            let child = f.store.take_checks(1, &[], true).unwrap().remove(0);
+            let child = f.store.take_checks(1, &[], |_| true).unwrap().remove(0);
             assert_eq!(child.reach, reach, "page served locally: {local}");
             // Its download reaches no more than its checks.
             let (links, _) = f.links();
@@ -1082,7 +1119,7 @@ mod tests {
         for (html, reach) in [(true, Reach::Public), (false, Reach::Allowed)] {
             let mut f = Fixture::new();
             f.collect(&["http://192.168.1.10/f.zip"], CollectMode::Analyze, html);
-            let task = f.store.take_checks(1, &[], true).unwrap().remove(0);
+            let task = f.store.take_checks(1, &[], |_| true).unwrap().remove(0);
             assert_eq!(task.reach, reach, "pasted as HTML: {html}");
             let (links, _) = f.links();
             f.links_command(&[&links[0]], |links| Command::StartLinks {

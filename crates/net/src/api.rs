@@ -11,7 +11,7 @@ use reqwest::header::{self, HeaderValue};
 use reqwest::{Method, StatusCode};
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
-    ApiClient, ApiError, ApiErrorKind, ApiMethod, ApiRequest, ApiResponse,
+    ApiBody, ApiClient, ApiError, ApiErrorKind, ApiMethod, ApiRequest, ApiResponse,
 };
 use wayfetch_engine::transfer::transport::Reach;
 use wayfetch_engine::transfer::writer::BoxFuture;
@@ -64,10 +64,14 @@ impl HttpTransport {
             value.set_sensitive(true);
             builder = builder.header(header::AUTHORIZATION, value);
         }
-        if let Some(form) = &request.form {
+        if let Some(body) = &request.body {
+            let (kind, body) = match body {
+                ApiBody::Form(body) => ("application/x-www-form-urlencoded", body),
+                ApiBody::Json(body) => ("application/json", body),
+            };
             builder = builder
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(form.expose().to_vec());
+                .header(header::CONTENT_TYPE, kind)
+                .body(body.expose().to_vec());
         }
         let mut response = builder.send().await.map_err(send_failure)?;
         let status = response.status();

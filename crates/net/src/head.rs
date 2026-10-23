@@ -34,6 +34,7 @@ pub(crate) fn error(code: FailureCode, message: impl Into<String>) -> TransportE
     TransportError {
         code,
         message: message.into(),
+        status: None,
     }
 }
 
@@ -114,7 +115,10 @@ pub(crate) fn status_failure(status: StatusCode, replay_safe: bool) -> Transport
         // be gone (failure matrix, 7.4).
         _ => FailureCode::LeaseNotFound,
     };
-    error(code, format!("HTTP {status}"))
+    TransportError {
+        status: Some(status.as_u16()),
+        ..error(code, format!("HTTP {status}"))
+    }
 }
 
 /// What a link check reads from an answer's headers. Lenient where

@@ -23,6 +23,7 @@ mod destinations;
 mod download;
 pub mod extract;
 pub mod fs;
+pub mod hosting;
 pub mod lifecycle;
 mod link_filter;
 pub mod media;

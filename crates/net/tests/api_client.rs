@@ -12,7 +12,7 @@ use support::{Raw, Route, Server, config_for};
 use url::Url;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{
-    ApiClient, ApiError, ApiErrorKind, ApiMethod, ApiRequest, ApiResponse,
+    ApiBody, ApiClient, ApiError, ApiErrorKind, ApiMethod, ApiRequest, ApiResponse,
 };
 use wayfetch_net::{HttpConfig, HttpTransport};
 
@@ -21,7 +21,7 @@ fn request(server: &Server, path: &str) -> ApiRequest {
         method: ApiMethod::Get,
         url: Url::parse(&server.url(path)).unwrap(),
         bearer: None,
-        form: None,
+        body: None,
         deadline: Duration::from_secs(5),
         max_body: 1024,
     }
@@ -46,7 +46,7 @@ async fn sends_bearer_and_form_and_reads_the_body() {
     let mut req = request(&server, "/api");
     req.method = ApiMethod::Post;
     req.bearer = Some(Secret::from_text("synthetic-token"));
-    req.form = Some(Secret::from_text("a=1&b=2"));
+    req.body = Some(ApiBody::Form(Secret::from_text("a=1&b=2")));
     let response = send(&transport, &req).await.unwrap();
     assert_eq!(response.status, 200);
     assert_eq!(response.body.expose(), b"{\"ok\":true}");
@@ -68,6 +68,21 @@ async fn sends_bearer_and_form_and_reads_the_body() {
         !shown.contains("synthetic-token") && !shown.contains("a=1"),
         "{shown}"
     );
+}
+
+#[tokio::test]
+async fn sends_a_json_body_as_json() {
+    let server = Server::http().await;
+    server.route("/api", answer("200 OK", "[0]"));
+    let transport = HttpTransport::new(config_for(&server)).unwrap();
+    let mut req = request(&server, "/api");
+    req.method = ApiMethod::Post;
+    req.body = Some(ApiBody::Json(Secret::from_text("[{\"a\":\"g\"}]")));
+    let response = send(&transport, &req).await.unwrap();
+    assert_eq!(response.body.expose(), b"[0]");
+    let logged = &server.log()[0];
+    assert_eq!(logged.header("content-type"), Some("application/json"));
+    assert_eq!(&logged.body[..], b"[{\"a\":\"g\"}]");
 }
 
 #[tokio::test]

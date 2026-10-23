@@ -10,7 +10,13 @@ publish.workspace = true
 
 [dependencies]
 wayfetch-engine.workspace = true
+# MEGA's file encryption: AES-128 in CTR mode, plus its CBC-MAC and
+# attribute blocks built on the bare block cipher.
+aes = "0.8.4"
+# Decodes MEGA's unpadded URL-safe base64 keys and handles.
+base64 = "0.22.1"
 bytes.workspace = true
+ctr = "0.9.2"
 hex = "0.4.3"
 # Verifies plugin releases' signatures; no compression or extra algorithms.
 pgp = { version = "0.21", default-features = false }

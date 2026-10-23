@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use url::Url;
+use wayfetch_domain::name::ProviderId;
 use wayfetch_protocol::query::CheckReason;
 
 use crate::transfer::transport::Reach;
@@ -155,6 +156,24 @@ pub enum Checked {
     Offline(CheckReason, String),
     /// Checking could not tell.
     Unknown(CheckReason, String),
+}
+
+/// Who answered a link's check in place of its own server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Checker {
+    /// The provider of an account that would download the link.
+    Account(ProviderId),
+    /// The file host the link is on, which downloads it without an account.
+    Host(ProviderId),
+}
+
+impl Checker {
+    /// The service that answered.
+    pub(crate) fn service(&self) -> &ProviderId {
+        match self {
+            Self::Account(service) | Self::Host(service) => service,
+        }
+    }
 }
 
 /// What an answer says about the link, without its page's links.

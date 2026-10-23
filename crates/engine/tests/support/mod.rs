@@ -15,6 +15,7 @@ use wayfetch_engine::accounts::provider::AccountProvider;
 use wayfetch_engine::crawl::Inspector;
 use wayfetch_engine::extract::Extractor;
 use wayfetch_engine::fs::Root;
+use wayfetch_engine::hosting::FileHost;
 use wayfetch_engine::media::{Converter, MediaService, PluginControl};
 use wayfetch_engine::transfer::transport::Transport;
 use wayfetch_engine::{
@@ -60,6 +61,8 @@ pub struct Env<S> {
     pub providers: Vec<Arc<dyn AccountProvider>>,
     /// Media services engines start with.
     pub media: Vec<Arc<dyn MediaService>>,
+    /// File hosts engines start with.
+    pub hosts: Vec<Arc<dyn FileHost>>,
     /// The converter engines start with, if any.
     pub converter: Option<Arc<dyn Converter>>,
     /// The archive extractor engines start with, if any.
@@ -104,6 +107,7 @@ impl<S> Env<S> {
             credential_key: None,
             providers: Vec::new(),
             media: Vec::new(),
+            hosts: Vec::new(),
             converter: None,
             extractor: None,
             plugin_control: None,
@@ -138,6 +142,9 @@ impl<S> Env<S> {
         }
         for service in &self.media {
             builder = builder.media_service(service.clone());
+        }
+        for host in &self.hosts {
+            builder = builder.file_host(host.clone());
         }
         if let Some(converter) = &self.converter {
             builder = builder.converter(converter.clone());

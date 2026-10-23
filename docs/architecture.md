@@ -472,6 +472,8 @@ Domain record IDs are distinct, store-allocated positive integer types, never re
 
 **Gate:** an uncheckable link can still be attempted; checking a list does not silently spend provider quota or solver money.
 
+**Amendment (file hosts):** a host that serves shared links itself, without an account or a plugin, is a `FileHost` (`crates/engine/src/hosting.rs`): `recognizes` is pure, `check` (probe) spends no transfer quota and may list a shared folder's files onto the Links list, and `resolve` gives a download URL for one attempt, never stored. Its links skip automatic account routing. The engine downloads the URL itself; the staging representation's `resource` is `wfh1;{service};{identity}`, the host's stable identity of the file, so a fresh URL continues saved bytes only for the same file. A host that stores files encrypted supplies an `Encoding`: a decoder that starts at any offset, applied while writing (staging holds the decoded file), and a verifier the finished file is read through in the Verifying stage. A file that fails is never published: continued bytes restart from zero once; a file downloaded whole and still failing fails with `integrity_mismatch`. MEGA is the first file host (AES-128-CTR content, MEGA's chunk MAC, keys from the link fragment that never leave the machine).
+
 ### ADR-09 — Transfer leases, not naked final URLs
 
 **Decision:** represent transfer preparation as an expiring lease bound to provider/account/session/route and representation. A lease may reference a prepared request or an already-open broker-owned response.

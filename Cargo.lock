@@ -6276,7 +6276,10 @@ dependencies = [
 name = "wayfetch-adapters"
 version = "0.1.2"
 dependencies = [
+ "aes",
+ "base64 0.22.1",
  "bytes",
+ "ctr",
  "hex",
  "httparse",
  "landlock",

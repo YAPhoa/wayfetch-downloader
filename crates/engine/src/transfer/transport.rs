@@ -82,6 +82,9 @@ pub struct TransportError {
     pub code: FailureCode,
     /// A short description for diagnostics, without secrets.
     pub message: String,
+    /// The HTTP status the server refused the request with, if it
+    /// answered.
+    pub status: Option<u16>,
 }
 
 /// Sends requests for the engine.

@@ -93,11 +93,14 @@ impl Coordinator {
                 return;
             }
         };
-        // A media link is made by its media service, which needs no
-        // account or host catalogue.
+        // A media link is made by its media service, and a file host's
+        // link downloaded from the host; neither needs an account or a
+        // host catalogue.
         let media: BTreeSet<_> = urls
             .iter()
-            .filter(|(_, url)| self.media.recognize(url).is_some())
+            .filter(|(_, url)| {
+                self.media.recognize(url).is_some() || self.hosts.recognize(url).is_some()
+            })
             .map(|(link, _)| *link)
             .collect();
         let urls: Vec<_> = urls
