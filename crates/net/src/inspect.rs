@@ -77,6 +77,7 @@ impl HttpTransport {
             length: described.length,
             filename: described.filename,
             attachment: described.attachment,
+            validators: described.validators,
             page: None,
             // Unknown counts as public, so links found on it stay public.
             local: response

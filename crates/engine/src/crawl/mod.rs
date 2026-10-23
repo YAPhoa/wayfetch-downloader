@@ -15,6 +15,7 @@ use url::Url;
 use wayfetch_domain::name::ProviderId;
 use wayfetch_protocol::query::CheckReason;
 
+use crate::transfer::lease::Representation;
 use crate::transfer::transport::Reach;
 use crate::transfer::writer::BoxFuture;
 
@@ -74,6 +75,9 @@ pub struct Inspection {
     pub filename: Option<String>,
     /// Whether `Content-Disposition` says `attachment`.
     pub attachment: bool,
+    /// What identifies the version that answered: its strong `ETag` and
+    /// `Last-Modified`. Length and resource are left unset.
+    pub validators: Representation,
     /// A page's body, for [`InspectMethod::Page`] when the answer is one.
     pub page: Option<Bytes>,
     /// Whether it came from an address that is not public, which only the

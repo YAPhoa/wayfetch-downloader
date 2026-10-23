@@ -24,7 +24,7 @@ use wayfetch_protocol::command::{CollectMode, CollectText};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::domain::name::ProviderId;
-use wayfetch_protocol::query::{CollectedLink, LinkCheck, PageSize};
+use wayfetch_protocol::query::{CollectedLink, JobSummary, LinkCheck, PageSize};
 use wayfetch_protocol::{Command, Query, QueryResult};
 
 const SERVICE: &str = "synthetic-host";
@@ -107,14 +107,31 @@ struct Host {
     /// Ranges storage was asked for, by URL path and query.
     requests: Mutex<Vec<Request>>,
     folder_files: Vec<Url>,
+    /// For a host that stores files as they are, the `ETag` of the version
+    /// it stores, if it has one; `None` for an encoding host.
+    version: Option<Mutex<Option<String>>>,
 }
 
 impl Host {
     fn new(plain: Bytes) -> Arc<Self> {
+        Self::build(encode(&plain), plain, None)
+    }
+
+    /// A host that stores files as they are, under validators only.
+    fn unencoded(plain: Bytes, etag: Option<&str>) -> Arc<Self> {
+        Self::build(
+            plain.clone(),
+            plain,
+            Some(Mutex::new(etag.map(str::to_owned))),
+        )
+    }
+
+    fn build(stored: Bytes, plain: Bytes, version: Option<Mutex<Option<String>>>) -> Arc<Self> {
         Arc::new(Self {
             id: ProviderId::new(SERVICE).unwrap(),
-            stored: Mutex::new(encode(&plain)),
+            stored: Mutex::new(stored),
             plain,
+            version,
             stall_at: Mutex::new(None),
             refuse: Mutex::new(None),
             resolves: AtomicUsize::new(0),
@@ -124,6 +141,16 @@ impl Host {
                 .map(|f| Url::parse(&format!("{FOLDER}/file/{f}")).unwrap())
                 .collect(),
         })
+    }
+
+    fn etag(&self) -> Option<String> {
+        self.version.as_ref()?.lock().unwrap().clone()
+    }
+
+    /// Replaces the stored file with `plain`, as version `etag`.
+    fn replace(&self, plain: Bytes, etag: Option<&str>) {
+        *self.stored.lock().unwrap() = plain;
+        *self.version.as_ref().unwrap().lock().unwrap() = etag.map(str::to_owned);
     }
 }
 
@@ -153,14 +180,21 @@ impl FileHost for Host {
         Box::pin(async move {
             // Every answer is a fresh URL.
             let n = self.resolves.fetch_add(1, Ordering::SeqCst);
+            let unencoded = self.version.is_some();
             Ok(HostedFile {
                 url: Url::parse(&format!("https://{STORAGE}/dl/{n}")).unwrap(),
                 name: Some(NAME.into()),
                 size: self.plain.len() as u64,
                 identity: "abc;v1".into(),
-                encoding: Some(Arc::new(Stored {
-                    plain: self.plain.clone(),
-                })),
+                encoding: (!unencoded).then(|| {
+                    Arc::new(Stored {
+                        plain: self.plain.clone(),
+                    }) as Arc<dyn Encoding>
+                }),
+                validators: unencoded.then(|| Representation {
+                    strong_etag: self.etag(),
+                    ..Representation::default()
+                }),
             })
         })
     }
@@ -229,8 +263,14 @@ impl Transport for Storage {
             }
             let data = host.stored.lock().unwrap().clone();
             let len = data.len() as u64;
+            let etag = host.etag();
+            // `If-Range`: a range of another version is answered whole.
+            let current = request
+                .validators
+                .as_ref()
+                .is_none_or(|v| v.strong_etag.is_none() || v.strong_etag == etag);
             let (framing, start) = match request.range {
-                Some((start, _)) => (
+                Some((start, _)) if current => (
                     Framing::Partial {
                         first: start,
                         last: len - 1,
@@ -238,12 +278,13 @@ impl Transport for Storage {
                     },
                     start,
                 ),
-                None => (Framing::Full { length: Some(len) }, 0),
+                _ => (Framing::Full { length: Some(len) }, 0),
             };
             Ok(Response {
                 framing,
                 representation: Representation {
                     length: Some(len),
+                    strong_etag: etag,
                     ..Representation::default()
                 },
                 filename: None,
@@ -261,7 +302,10 @@ impl Transport for Storage {
 type Env = support::Env<Arc<Host>>;
 
 fn env(plain: Bytes) -> Env {
-    let host = Host::new(plain);
+    env_with(Host::new(plain))
+}
+
+fn env_with(host: Arc<Host>) -> Env {
     let mut env = Env::new(host.clone(), Arc::new(Storage(host.clone())));
     // No inspector: links are checked by the file host, never by their
     // own server.
@@ -491,6 +535,86 @@ async fn continued_bytes_that_fail_the_check_are_downloaded_again_from_zero() {
         requests.last().unwrap().1,
         None,
         "the last request is whole"
+    );
+    shutdown(owner).await;
+}
+
+/// Starts `env`, pauses its download of [`FILE`] once some bytes are
+/// saved, and returns the paused job.
+async fn paused_partway(env: &Env) -> (EngineOwner, JobSummary) {
+    *env.server.stall_at.lock().unwrap() = Some(8 * KIB as u64);
+    let owner = env.start().await;
+    let id = submit(&owner, [FILE.to_owned()]).await[0];
+    let at = wait_for(&owner, id, |j| j.bytes_done >= 4 * KIB as u64).await;
+    let pause = Command::Pause {
+        job: id,
+        expected_revision: at.revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, pause), ALL)
+        .await
+        .unwrap();
+    let paused = wait_for(&owner, id, |j| j.stage == JobStage::Paused).await;
+    assert!(paused.bytes_done > 0, "{paused:?}");
+    *env.server.stall_at.lock().unwrap() = None;
+    (owner, paused)
+}
+
+async fn resume(owner: &EngineOwner, paused: &JobSummary) {
+    let resume = Command::Resume {
+        job: paused.id,
+        expected_revision: paused.revision,
+    };
+    owner
+        .handle()
+        .execute(envelope(owner, resume), ALL)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_unencoded_file_continues_under_the_same_validators() {
+    let plain = body(16 * KIB);
+    let env = env_with(Host::unencoded(plain.clone(), Some("\"v1\"")));
+    let (owner, paused) = paused_partway(&env).await;
+    resume(&owner, &paused).await;
+    let done = complete(&owner, paused.id).await;
+    assert_eq!(done.generation, paused.generation, "continued");
+    assert_eq!(env.published(NAME), plain);
+    shutdown(owner).await;
+}
+
+#[tokio::test]
+async fn a_file_replaced_behind_the_same_link_is_downloaded_again_from_zero() {
+    let plain = body(16 * KIB);
+    let env = env_with(Host::unencoded(plain.clone(), Some("\"v1\"")));
+    let (owner, paused) = paused_partway(&env).await;
+    // Another file of the same size, under the same host identity.
+    let other: Bytes = plain.iter().map(|b| b ^ 0xff).collect();
+    env.server.replace(other.clone(), Some("\"v2\""));
+    resume(&owner, &paused).await;
+    let done = complete(&owner, paused.id).await;
+    assert!(done.generation > paused.generation, "restarted from zero");
+    assert_eq!(env.published(NAME), other);
+    shutdown(owner).await;
+}
+
+#[tokio::test]
+async fn a_file_without_validators_is_never_continued() {
+    let plain = body(16 * KIB);
+    let env = env_with(Host::unencoded(plain.clone(), None));
+    let (owner, paused) = paused_partway(&env).await;
+    let other: Bytes = plain.iter().map(|b| b ^ 0xff).collect();
+    env.server.replace(other.clone(), None);
+    resume(&owner, &paused).await;
+    let done = complete(&owner, paused.id).await;
+    assert!(done.generation > paused.generation, "restarted from zero");
+    assert_eq!(env.published(NAME), other);
+    let requests = env.server.requests.lock().unwrap().clone();
+    assert!(
+        requests.iter().all(|(_, range)| range.is_none()),
+        "{requests:?}"
     );
     shutdown(owner).await;
 }

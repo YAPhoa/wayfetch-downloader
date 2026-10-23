@@ -23,6 +23,8 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(20);
 const MAX_BODY: usize = 64 * 1024;
 /// Longest token, code, or secret accepted from a provider.
 pub const MAX_TOKEN: usize = 2048;
+/// Longest download URL accepted from a file host.
+const MAX_URL: usize = 4096;
 
 /// Where a provider's API is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,13 +42,7 @@ impl Endpoint {
     /// testing: HTTPS, or plain HTTP to a loopback address only.
     pub fn custom(base: &str) -> Result<Self, String> {
         let mut base = Url::parse(base).map_err(|e| format!("invalid API address: {e}"))?;
-        let loopback = match base.host() {
-            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-            _ => false,
-        };
-        let secure = base.scheme() == "https" || base.scheme() == "http" && loopback;
-        if !secure
+        if !secure(&base)
             || base.cannot_be_a_base()
             || !base.username().is_empty()
             || base.password().is_some()
@@ -255,6 +251,27 @@ pub fn authorization_failure(name: &str, status: u16) -> Option<String> {
         )),
         _ => None,
     }
+}
+
+/// `url` if a file host's download URL may be fetched: HTTPS (or plain
+/// HTTP to a loopback test server), no credentials, bounded.
+pub fn download_url(url: Url) -> Option<Url> {
+    let ok = secure(&url)
+        && url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.as_str().len() <= MAX_URL;
+    ok.then_some(url)
+}
+
+/// Whether `url` is HTTPS, or plain HTTP to a loopback address.
+fn secure(url: &Url) -> bool {
+    let loopback = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    url.scheme() == "https" || url.scheme() == "http" && loopback
 }
 
 /// An `application/x-www-form-urlencoded` body, kept secret.
