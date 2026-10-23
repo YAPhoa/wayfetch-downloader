@@ -28,6 +28,7 @@ use wayfetch_protocol::query::FailureSummary;
 use crate::config::{Limits, Timeouts};
 use crate::destinations::Destination;
 use crate::fs::{FsError, PublicationCheck, RelativePath, Root, StagingFile, StagingRecord};
+use crate::hosting::FileHost;
 use crate::lifecycle::{Resolution, ResolvedLink, SoleAttempt, StoreClient};
 use crate::media::{Converter, MediaService};
 use crate::progress::{Metering, Progress};
@@ -38,9 +39,10 @@ use crate::transfer::lease::{
 };
 use crate::transfer::range::{self, Plan};
 use crate::transfer::throttle::Bandwidth;
-use crate::transfer::transport::{OpenRequest, Response, Transport};
+use crate::transfer::transport::{OpenRequest, Response, Transport, TransportError};
 use crate::transfer::writer::{IntervalWriter, StreamEnd, WriteError};
 
+mod hosted;
 mod media;
 
 /// The host's one egress route; routes are not configurable yet.
@@ -90,6 +92,8 @@ mod why {
         "the finished file was missing or damaged before it could be saved";
     pub(super) const MEDIA_CHANGED: &str =
         "the video's formats changed since the saved data was downloaded";
+    pub(super) const DAMAGED: &str =
+        "the continued file did not pass its host's integrity check when finished";
     pub(super) const NEW_LINK: &str = "the download host no longer accepted the provider's link, \
          and a new link cannot continue the saved data";
 }
@@ -173,6 +177,8 @@ pub(crate) struct Download {
     pub(crate) attempt: SoleAttempt,
     /// For a download of a media link: what makes it.
     pub(crate) media: Option<MediaJob>,
+    /// For a direct download of a file host's link: the host.
+    pub(crate) host: Option<Arc<dyn FileHost>>,
     /// The engine's live progress.
     pub(crate) progress: Progress,
     /// The meter of the body being written, while one is.
@@ -250,6 +256,9 @@ impl Download {
         }
         if self.media.is_some() {
             return self.drive_media(&root, &url).await;
+        }
+        if let Some(host) = self.host.clone() {
+            return self.drive_hosted(&root, &url, host).await;
         }
         let continued = match self.continue_partial(&root, false).await? {
             // Every byte is already durable, for example after a crash
@@ -726,8 +735,18 @@ impl Download {
     /// Sends `request` within the response deadline, unless the job is
     /// interrupted first, with oversized validators dropped.
     async fn send(&self, request: &OpenRequest) -> Result<Response, Stop> {
+        self.send_or_refused(request)
+            .await?
+            .map_err(|e| failed(e.code, e.message))
+    }
+
+    /// [`Self::send`], keeping the transport's error.
+    async fn send_or_refused(
+        &self,
+        request: &OpenRequest,
+    ) -> Result<Result<Response, TransportError>, Stop> {
         let deadline = self.timeouts.response;
-        Ok(tokio::select! {
+        Ok(Ok(tokio::select! {
             biased;
             () = self.cancel.cancelled() => return Err(Stop::Interrupted),
             opened = tokio::time::timeout(deadline, self.transport.open(request)) => match opened {
@@ -737,7 +756,7 @@ impl Download {
                         format!("no response headers within {deadline:?}"),
                     ));
                 }
-                Ok(Err(e)) => return Err(failed(e.code, e.message)),
+                Ok(Err(e)) => return Ok(Err(e)),
                 Ok(Ok(mut response)) => {
                     // A validator or resource too long to record identifies
                     // nothing the engine can check later.
@@ -751,7 +770,7 @@ impl Download {
                     response
                 }
             },
-        })
+        }))
     }
 
     /// What a response planned as `plan` opens: a body to write, the
@@ -1248,6 +1267,7 @@ mod tests {
             cancel: CancellationToken::new(),
             guard: Arc::new(()),
             media: None,
+            host: None,
             progress: Progress::new(epoch),
             metering: None,
             job: Admission {

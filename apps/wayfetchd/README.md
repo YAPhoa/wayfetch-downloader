@@ -130,6 +130,13 @@ All mutations require `"target"` (the `instance` UUID from `GET /v1/capabilities
   - Its own `real-debrid.com/d/<alphanumeric-id>` links are recognized locally and always require a usable Real-Debrid account (`real-debrid.download` CDN links remain direct-capable).
   - If a network failure loses the response after link generation, the engine checks the account's recent downloads list; if no match is found, the job fails with `operation_ambiguous` and requires `"repeat_provider_operation": true` on retry.
 
+### File Hosts (MEGA)
+
+- **Public links**: `mega.nz/file/<handle>#<key>` and `mega.nz/folder/<handle>#<key>` links (and the older `#!` and `#F!` forms) are recognized locally and downloaded without an account or automatic account routing. The key stays in the link: it is never sent to MEGA or anywhere else.
+- **Checks and folders**: checking a file link reads its name and size from MEGA's API without spending transfer quota. Checking a folder link lists every file below it on the Links list (flattened, at most 1000), each with a link of its own.
+- **Decrypted while downloading**: each attempt asks MEGA for a fresh download URL, and the engine decrypts the stored bytes as it writes them, so pause, resume, the speed limit, and the egress policy apply as for any download. Saved bytes are continued under MEGA's file handle, size, and key rather than the URL. Before publication, the finished file is read once and checked against MEGA's MAC; a file that fails is not published.
+- **Transfer quota**: when MEGA's free transfer quota is used up (API error `-17`, or HTTP `509` from storage), the download fails with `quota_exhausted` and can be retried later.
+
 ### Video Links, Archives & Plugins (`yt-dlp`, `ffmpeg` & 7-Zip)
 
 - **YouTube resolution**: `youtube.com/watch`, `youtu.be`, `/shorts/`, `/live/`, and `/embed/` single-video links are inspected via `yt-dlp` (using Deno as the unprivileged JS runtime for player scripts, with caches under `STATE_DIR/cache/yt-dlp`). Users can choose **Best available**, a maximum resolution (e.g. `1080p`), or audio-only (`MP3` or `M4A`).

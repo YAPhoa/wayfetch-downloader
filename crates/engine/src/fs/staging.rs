@@ -49,6 +49,12 @@ impl StagingFile {
         Ok(self.file.metadata()?.len())
     }
 
+    /// Reads up to `buf.len()` bytes at `offset`, fewer only at the end of
+    /// the file. Blocking.
+    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        sys::read_at(&self.file, buf, offset)
+    }
+
     /// Writes `buf` at `offset`. Blocking.
     pub fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         sys::write_all_at(&self.file, buf, offset)

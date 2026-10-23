@@ -26,6 +26,7 @@ use super::{Coordinator, Internal, now};
 use crate::accounts::provider::{AccountProvider, Availability, ProviderError, SupportedHosts};
 use crate::crawl::extract::{self, Entry};
 use crate::crawl::{self as crawler, Checked, Inspector, looks_like_file};
+use crate::hosting::{FileHost, HostCheck};
 use crate::media::unusable;
 use crate::store::{Child, CollectPlan, Collecting, Found, Store, Task};
 
@@ -134,15 +135,24 @@ impl Coordinator {
                     .map(|s| s.service().clone()),
                 Entry::Invalid { .. } => None,
             };
+            let hosted = match &entry {
+                Entry::Valid(url) => self.hosts.recognize(url.as_url()).is_some(),
+                Entry::Invalid { .. } => false,
+            };
             if found.html
                 && media.is_none()
+                && !hosted
                 && let Entry::Valid(url) = &entry
                 && !looks_like_file(url.as_url())
             {
                 plan.skipped += 1;
                 continue;
             }
-            plan.links.push(Collecting { entry, media });
+            plan.links.push(Collecting {
+                entry,
+                media,
+                hosted,
+            });
         }
         if plan.links.is_empty() {
             let message = if plan.skipped > 0 {
@@ -191,6 +201,8 @@ impl Coordinator {
         for task in tasks {
             if let Some(service) = task.media.clone() {
                 self.check_media(task, &service).await;
+            } else if let Some(host) = self.hosts.recognize(&task.url).cloned() {
+                self.check_hosted(task, host);
             } else if let Some(inspector) = self.checks.inspector.clone() {
                 self.checks.running.insert(task.id, task.queue.clone());
                 let (sender, cancel) = (self.client.0.clone(), self.supervisor.cancel.clone());
@@ -291,6 +303,48 @@ impl Coordinator {
         });
     }
 
+    /// Starts a file host's check of one of its links.
+    fn check_hosted(&mut self, task: Task, host: Arc<dyn FileHost>) {
+        self.checks.running.insert(task.id, task.queue.clone());
+        let (sender, cancel) = (self.client.0.clone(), self.supervisor.cancel.clone());
+        let runtime = self.supervisor.runtime.clone();
+        self.supervisor.spawn(async move {
+            let checking = {
+                let (host, url) = (host.clone(), task.url.clone());
+                isolated(&runtime, async move {
+                    tokio::time::timeout(CHECK_DEADLINE, host.check(&url)).await
+                })
+            };
+            let found = tokio::select! {
+                () = cancel.cancelled() => return,
+                found = checking => found,
+            };
+            let checked = match found {
+                Some(HostCheck::File { name, size }) => Checked::File { name, size },
+                Some(HostCheck::Folder(files)) => Checked::Page {
+                    links: Some(files),
+                    local: false,
+                },
+                Some(HostCheck::Offline(why)) => Checked::Offline(CheckReason::NotFound, why),
+                Some(HostCheck::Unknown(reason, why)) => Checked::Unknown(reason, why),
+                None => Checked::Unknown(
+                    CheckReason::TimedOut,
+                    "The file host did not answer in time.".into(),
+                ),
+            };
+            let answer = Answer::Link(Box::new(LinkAnswer {
+                checked,
+                origin: None,
+                via: Some(host.service().clone()),
+                hosts: Capabilities::new(),
+                limited: false,
+            }));
+            let _ = sender
+                .send(Internal::Checked(task.id, task.link, task.url, answer))
+                .await;
+        });
+    }
+
     /// Records a finished check: for a page that was read, with the links
     /// on it worth collecting.
     pub(super) async fn link_checked(
@@ -333,10 +387,13 @@ impl Coordinator {
             let mut page = url.clone();
             page.set_fragment(None);
             for child in links {
+                // A file host's links differ in their fragment only, so a
+                // place on the page is told apart from them by the host.
+                let hosted = self.hosts.recognize(child).is_some();
                 // A link to the page itself, or a place on it.
                 let mut target = child.clone();
                 target.set_fragment(None);
-                if target == page {
+                if target == page && !hosted || *child == url {
                     continue;
                 }
                 let Ok(child) = InputUrl::new(child.clone()) else {
@@ -346,7 +403,7 @@ impl Coordinator {
                     .media
                     .recognize(child.as_url())
                     .map(|s| s.service().clone());
-                if media.is_none() && !looks_like_file(child.as_url()) {
+                if media.is_none() && !hosted && !looks_like_file(child.as_url()) {
                     found.skipped += 1;
                     continue;
                 }

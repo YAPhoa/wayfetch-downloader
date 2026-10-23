@@ -53,6 +53,8 @@ pub struct Collecting {
     pub entry: Entry,
     /// The video service that recognizes it, if any.
     pub media: Option<ProviderId>,
+    /// Whether a file host recognizes it.
+    pub hosted: bool,
 }
 
 /// What the coordinator found in a collect's text.
@@ -125,8 +127,9 @@ pub(super) fn collect(
         ));
     }
     let analyze = mode == CollectMode::Analyze;
-    let checked =
-        |link: &Collecting, url: &Url| analyze || link.media.is_some() || looks_like_file(url);
+    let checked = |link: &Collecting, url: &Url| {
+        analyze || link.media.is_some() || link.hosted || looks_like_file(url)
+    };
     let filters = roots::active_filters(tx)?;
     let origin = if plan.html {
         LinkOrigin::WebPage

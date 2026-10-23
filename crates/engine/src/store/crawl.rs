@@ -470,10 +470,12 @@ mod tests {
                         Some(l) => Collecting {
                             entry: Entry::parse(l),
                             media: Some(ProviderId::new("youtube".to_owned()).unwrap()),
+                            hosted: false,
                         },
                         None => Collecting {
                             entry: Entry::parse(l),
                             media: None,
+                            hosted: false,
                         },
                     })
                     .collect(),
@@ -822,6 +824,7 @@ mod tests {
             .map(|l| Collecting {
                 entry: Entry::parse(l),
                 media: None,
+                hosted: false,
             })
             .collect(),
             ..CollectPlan::default()
@@ -921,6 +924,7 @@ mod tests {
                 links: vec![Collecting {
                     entry: Entry::parse("https://ads.example/z.zip"),
                     media: None,
+                    hosted: false,
                 }],
                 ..CollectPlan::default()
             },

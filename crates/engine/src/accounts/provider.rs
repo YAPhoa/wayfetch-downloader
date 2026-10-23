@@ -37,8 +37,8 @@ pub struct ApiRequest {
     pub url: Url,
     /// A bearer token for the `Authorization` header.
     pub bearer: Option<Secret>,
-    /// An `application/x-www-form-urlencoded` body, already encoded.
-    pub form: Option<Secret>,
+    /// The body, already encoded.
+    pub body: Option<ApiBody>,
     /// Deadline for the whole exchange, body included.
     pub deadline: Duration,
     /// Largest body accepted; a longer one is refused, not truncated.
@@ -53,6 +53,15 @@ impl std::fmt::Debug for ApiRequest {
             .field("path", &self.url.path())
             .finish_non_exhaustive()
     }
+}
+
+/// The body of a metadata request, already encoded.
+#[derive(Debug)]
+pub enum ApiBody {
+    /// `application/x-www-form-urlencoded`.
+    Form(Secret),
+    /// `application/json`.
+    Json(Secret),
 }
 
 /// A provider's answer: any status, with its whole body.

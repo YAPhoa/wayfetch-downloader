@@ -485,12 +485,14 @@ impl Transport for HostTransport {
                 return Err(TransportError {
                     code: FailureCode::LeaseNotFound,
                     message: "HTTP 404".into(),
+                    status: Some(404),
                 });
             };
             if file.refuse {
                 return Err(TransportError {
                     code: FailureCode::LeaseExpired,
                     message: "HTTP 403".into(),
+                    status: Some(403),
                 });
             }
             let len = file.body.len() as u64;

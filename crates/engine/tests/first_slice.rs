@@ -210,6 +210,7 @@ impl Transport for Fake {
                 return Err(TransportError {
                     code: FailureCode::ResourceDeleted,
                     message: "404".into(),
+                    status: Some(404),
                 });
             };
             if resource.no_headers {

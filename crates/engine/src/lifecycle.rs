@@ -61,6 +61,7 @@ use crate::destinations::{self, Claims, Destination, Destinations, Probes};
 use crate::download::Download;
 use crate::extract::Extractor;
 use crate::fs::Root;
+use crate::hosting::{FileHost, Hosts};
 use crate::link_filter::{self, Filters};
 use crate::media::{Converter, MediaService, PluginControl, PluginWork};
 use crate::progress::Progress;
@@ -116,6 +117,7 @@ pub struct EngineBuilder {
     inspector: Option<Arc<dyn Inspector>>,
     providers: Vec<Arc<dyn AccountProvider>>,
     media_services: Vec<Arc<dyn MediaService>>,
+    file_hosts: Vec<Arc<dyn FileHost>>,
     converter: Option<Arc<dyn Converter>>,
     plugin_control: Option<Arc<dyn PluginControl>>,
     extractor: Option<Arc<dyn Extractor>>,
@@ -130,6 +132,7 @@ impl std::fmt::Debug for EngineBuilder {
             .field("inspector", &self.inspector.is_some())
             .field("providers", &self.providers.len())
             .field("media_services", &self.media_services.len())
+            .field("file_hosts", &self.file_hosts.len())
             .field("converter", &self.converter.is_some())
             .field("plugin_control", &self.plugin_control.is_some())
             .field("extractor", &self.extractor.is_some())
@@ -148,6 +151,7 @@ impl EngineBuilder {
             inspector: None,
             providers: Vec::new(),
             media_services: Vec::new(),
+            file_hosts: Vec::new(),
             converter: None,
             plugin_control: None,
             extractor: None,
@@ -176,6 +180,15 @@ impl EngineBuilder {
         self.media_services
             .retain(|s| s.service() != service.service());
         self.media_services.push(service);
+        self
+    }
+
+    /// Adds a file host: links it recognizes are checked, and folders
+    /// listed, when collected, and downloaded from it. A later one for the
+    /// same service replaces it.
+    pub fn file_host(mut self, host: Arc<dyn FileHost>) -> Self {
+        self.file_hosts.retain(|h| h.service() != host.service());
+        self.file_hosts.push(host);
         self
     }
 
@@ -316,6 +329,7 @@ impl EngineBuilder {
                 self.converter,
                 self.plugin_control,
             ),
+            hosts: Hosts::new(self.file_hosts),
             extractions: extract::Extractions::new(self.extractor, saved.extract_archives),
             updates: updates.clone(),
         };
@@ -1152,6 +1166,8 @@ struct Coordinator {
     routing: routing::RoutingService,
     /// Media services, their converter, and the links being checked.
     media: media::MediaServices,
+    /// File hosts whose links the engine downloads itself.
+    hosts: Hosts,
     /// The archive extractor and the extraction running.
     extractions: extract::Extractions,
     /// Update checks, when a client asks.
@@ -2069,6 +2085,12 @@ impl Coordinator {
                     choice: m.choice,
                     converter: self.media.converter().cloned(),
                 }),
+                host: job
+                    .route
+                    .is_none()
+                    .then(|| url::Url::parse(&job.url).ok())
+                    .flatten()
+                    .and_then(|url| self.hosts.recognize(&url).cloned()),
                 progress: self.progress.clone(),
                 metering: None,
                 job,

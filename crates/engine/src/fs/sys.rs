@@ -46,6 +46,18 @@ pub(super) fn sync_dir(_dir: &Dir) -> io::Result<()> {
     Ok(())
 }
 
+/// Reads up to `buf.len()` bytes at `offset` without moving a shared
+/// cursor; fewer only at the end of the file.
+#[cfg(unix)]
+pub(super) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+pub(super) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+}
+
 /// Writes all of `buf` at `offset` without moving a shared cursor, so
 /// concurrent writers of disjoint intervals need no lock.
 #[cfg(unix)]
