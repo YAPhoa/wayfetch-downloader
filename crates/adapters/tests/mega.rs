@@ -28,6 +28,8 @@ const FOLDER_KEY: &str = "ZGVmZ2hpamtsbW5vcHFycw";
 const NODE_KEY: &str = "-50QbYsFMxwD_E-zSkk8xoF-K9Dq8NOcYHd6KUAgayg";
 const FILE: &str = "AbCd-_12";
 const FOLDER: &str = "FoLd3r_x";
+/// The shared folder's own node handle, which is not the link's.
+const ROOT: &str = "R00tNode";
 
 fn plain() -> Vec<u8> {
     (0..SIZE).map(|i| ((i * 31 + 7) % 251) as u8).collect()
@@ -224,15 +226,17 @@ fn command(cmd: &Value, folder: Option<&str>, addr: SocketAddr, state: &Mutex<St
                 return json!(code);
             }
             assert_eq!(folder, Some(FOLDER));
+            // The shared folder's node has its own handle, not the
+            // link's, as MEGA lists public folders.
             json!({ "f": [
-                { "h": FOLDER, "p": "Outside1", "t": 1, "a": "x", "k": "FoLd3r_x:x" },
-                { "h": "Ch1ld_aa", "p": FOLDER, "t": 0, "s": SIZE, "a": ATTRIBUTES,
-                  "k": format!("{FOLDER}:{NODE_KEY}") },
-                { "h": "Sub_f0ld", "p": FOLDER, "t": 1, "a": "x", "k": "FoLd3r_x:x" },
-                { "h": "Ch2ld_bb", "p": "Sub_f0ld", "t": 0, "s": SIZE, "a": ATTRIBUTES,
-                  "k": format!("{FOLDER}:{NODE_KEY}") },
                 // Not below the shared folder.
                 { "h": "Elsewher", "p": "Outside1", "t": 0, "s": 1, "a": "x", "k": "a:b" },
+                { "h": ROOT, "p": "Outside1", "t": 1, "a": "x", "k": format!("{ROOT}:x") },
+                { "h": "Ch1ld_aa", "p": ROOT, "t": 0, "s": SIZE, "a": ATTRIBUTES,
+                  "k": format!("{ROOT}:{NODE_KEY}") },
+                { "h": "Sub_f0ld", "p": ROOT, "t": 1, "a": "x", "k": format!("{ROOT}:x") },
+                { "h": "Ch2ld_bb", "p": "Sub_f0ld", "t": 0, "s": SIZE, "a": ATTRIBUTES,
+                  "k": format!("Someone1:x/{ROOT}:{NODE_KEY}") },
             ]})
         }
         other => panic!("unexpected command {other}"),

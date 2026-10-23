@@ -101,6 +101,18 @@ struct Listing {
     f: Vec<Node>,
 }
 
+impl Listing {
+    /// The shared folder's own node: the folder whose parent is not
+    /// listed. MEGA lists it first; the order is not relied on.
+    fn root(&self) -> Option<&str> {
+        let listed: BTreeSet<&str> = self.f.iter().map(|n| n.h.as_str()).collect();
+        self.f
+            .iter()
+            .find(|n| n.t == 1 && n.p.as_deref().is_none_or(|p| !listed.contains(p)))
+            .map(|n| n.h.as_str())
+    }
+}
+
 /// One node of a folder's listing.
 #[derive(Deserialize)]
 struct Node {
@@ -235,12 +247,13 @@ impl Mega {
             Answer::Ok(listing) => listing,
             Answer::Error(e) => return Ok(Answer::Error(e)),
         };
+        let root = listing.root();
         listing
             .f
             .iter()
             .find(|n| n.t == 0 && n.h == node.as_str())
             .map_or(Ok(Answer::Error(code::NOT_FOUND)), |n| {
-                node_key(n, folder, key)
+                node_key(n, root, key)
                     .map(Answer::Ok)
                     .ok_or_else(|| self.api.malformed("a folder listing"))
             })
@@ -264,7 +277,11 @@ impl Mega {
             Answer::Ok(listing) => listing,
             Answer::Error(e) => return Ok(Answer::Error(e)),
         };
-        let root = start.unwrap_or(folder).as_str();
+        // The link's handle is not the shared folder's node handle; the
+        // walk starts from the node the listing roots.
+        let Some(root) = start.map(Handle::as_str).or_else(|| listing.root()) else {
+            return Err(self.api.malformed("a folder listing"));
+        };
         let mut children: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
         for node in &listing.f {
             if let Some(parent) = &node.p {
@@ -311,8 +328,9 @@ impl From<ProviderError> for Lookup {
 }
 
 /// A listed file's key, decrypted with the shared folder's key. The key
-/// paired with the folder's handle is used, else the only one.
-fn node_key(node: &Node, folder: &Handle, key: &FolderKey) -> Option<FileKey> {
+/// paired with the shared folder's node (`root`) is used, else the only
+/// one.
+fn node_key(node: &Node, root: Option<&str>, key: &FolderKey) -> Option<FileKey> {
     let pairs: Vec<(&str, &str)> = node
         .k
         .as_deref()?
@@ -321,7 +339,7 @@ fn node_key(node: &Node, folder: &Handle, key: &FolderKey) -> Option<FileKey> {
         .collect();
     let encrypted = pairs
         .iter()
-        .find(|(owner, _)| *owner == folder.as_str())
+        .find(|(owner, _)| Some(*owner) == root)
         .or(pairs.first().filter(|_| pairs.len() == 1))?
         .1;
     FileKey::in_folder(encrypted, key)

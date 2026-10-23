@@ -13,7 +13,6 @@ use bytes::Bytes;
 use support::{ALL, KIB, body, complete, envelope, job, shutdown, submit, wait_for};
 use url::Url;
 use wayfetch_engine::EngineOwner;
-use wayfetch_engine::crawl::{InspectError, InspectRequest, Inspection, Inspector};
 use wayfetch_engine::hosting::{
     Decoder, Encoding, FileHost, HostCheck, HostError, HostedFile, Verifier,
 };
@@ -259,25 +258,14 @@ impl Transport for Storage {
     }
 }
 
-/// Links are checked by the file host, never by their own server.
-struct NoInspections;
-
-impl Inspector for NoInspections {
-    fn inspect<'a>(
-        &'a self,
-        request: &'a InspectRequest,
-    ) -> BoxFuture<'a, Result<Inspection, InspectError>> {
-        panic!("{} was inspected", request.url)
-    }
-}
-
 type Env = support::Env<Arc<Host>>;
 
 fn env(plain: Bytes) -> Env {
     let host = Host::new(plain);
     let mut env = Env::new(host.clone(), Arc::new(Storage(host.clone())));
+    // No inspector: links are checked by the file host, never by their
+    // own server.
     env.hosts.push(host);
-    env.inspector = Some(Arc::new(NoInspections));
     env
 }
 
@@ -394,6 +382,35 @@ async fn listed(owner: &EngineOwner) -> Vec<CollectedLink> {
 async fn a_folder_lists_its_files_on_the_links_list_and_each_is_checked_by_the_host() {
     let env = env(body(KIB));
     let owner = env.start().await;
+    // A file host downloads without an account, so a filter leaving out
+    // account links keeps its links.
+    let revision = match owner.handle().query(Query::Settings {}, ALL).await.unwrap() {
+        QueryResult::Settings(settings) => settings.revision,
+        other => panic!("{other:?}"),
+    };
+    let filters = serde_json::from_value(serde_json::json!({
+        "enabled": true,
+        "filters": [{
+            "name": "Account links",
+            "enabled": true,
+            "route": { "op": "is", "values": ["account"] },
+        }],
+    }))
+    .unwrap();
+    let settings = Command::UpdateSettings {
+        expected_revision: revision,
+        default_root: None,
+        max_active_downloads: None,
+        download_speed_limit: None,
+        extract_archives: None,
+        automatic_update_checks: None,
+        link_filters: Some(filters),
+    };
+    owner
+        .handle()
+        .execute(envelope(&owner, settings), ALL)
+        .await
+        .unwrap();
     let command = Command::CollectLinks {
         text: CollectText::try_from(FOLDER.to_owned()).unwrap(),
         base_url: None,

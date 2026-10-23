@@ -25,7 +25,7 @@ use super::routing::Capabilities;
 use super::{Coordinator, Internal, now};
 use crate::accounts::provider::{AccountProvider, Availability, ProviderError, SupportedHosts};
 use crate::crawl::extract::{self, Entry};
-use crate::crawl::{self as crawler, Checked, Inspector, looks_like_file};
+use crate::crawl::{self as crawler, Checked, Checker, Inspector, looks_like_file};
 use crate::hosting::{FileHost, HostCheck};
 use crate::media::unusable;
 use crate::store::{Child, CollectPlan, Collecting, Found, Store, Task};
@@ -83,8 +83,8 @@ pub(super) struct LinkAnswer {
     checked: Checked,
     /// Its own server's answer, when a provider's is shown instead.
     origin: Option<Checked>,
-    /// The provider that checked it.
-    via: Option<ProviderId>,
+    /// Who checked it in place of its own server.
+    via: Option<Checker>,
     /// Supported hosts read on the way.
     hosts: Capabilities,
     /// Whether the provider asked to slow down.
@@ -185,9 +185,12 @@ impl Coordinator {
             return;
         }
         let busy: Vec<String> = self.checks.running.values().cloned().collect();
-        let links = self.checks.inspector.is_some();
+        // A file host checks its own links; any other needs the inspector.
+        let inspects = self.checks.inspector.is_some();
+        let hosts = self.hosts.clone();
+        let sendable = move |url: &Url| inspects || hosts.recognize(url).is_some();
         let Ok(tasks) = self
-            .with_store(move |store| store.take_checks(free, &busy, links))
+            .with_store(move |store| store.take_checks(free, &busy, sendable))
             .await
         else {
             return;
@@ -335,7 +338,7 @@ impl Coordinator {
             let answer = Answer::Link(Box::new(LinkAnswer {
                 checked,
                 origin: None,
-                via: Some(host.service().clone()),
+                via: Some(Checker::Host(host.service().clone())),
                 hosts: Capabilities::new(),
                 limited: false,
             }));
@@ -377,7 +380,7 @@ impl Coordinator {
         self.routing.remember(hosts);
         if limited && let Some(via) = &via {
             let until = Instant::now() + PROVIDER_COOLDOWN;
-            self.checks.cooling.insert(via.clone(), until);
+            self.checks.cooling.insert(via.service().clone(), until);
         }
         let mut found = Found::default();
         if let Checked::Page {
@@ -477,7 +480,7 @@ async fn check_link(
     LinkAnswer {
         checked,
         origin: Some(origin),
-        via: Some(provider.provider.service().clone()),
+        via: Some(Checker::Account(provider.provider.service().clone())),
         hosts,
         limited,
     }
