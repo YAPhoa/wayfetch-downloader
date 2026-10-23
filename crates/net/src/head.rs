@@ -73,11 +73,8 @@ pub(crate) fn read(
         framing,
         representation: Representation {
             length: complete,
-            strong_etag: header_str(headers, header::ETAG)?.and_then(strong_etag),
-            last_modified: header_str(headers, header::LAST_MODIFIED)?
-                .and_then(|v| httpdate::parse_http_date(v).ok())
-                .map(timestamp),
             resource: Some(resource(url)),
+            ..validators(headers)?
         },
         filename: header_str(headers, header::CONTENT_DISPOSITION)?.and_then(disposition_filename),
     })
@@ -137,6 +134,8 @@ pub(crate) struct Described {
     pub(crate) attachment: bool,
     /// Whether the body is in an encoding other than `identity`.
     pub(crate) encoded: bool,
+    /// Its strong `ETag` and `Last-Modified`, if sent.
+    pub(crate) validators: Representation,
 }
 
 /// What `headers` of an answer with `status` say about the file.
@@ -173,7 +172,19 @@ pub(crate) fn describe(status: StatusCode, headers: &HeaderMap) -> Described {
                 .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("attachment"))
         }),
         encoded,
+        validators: validators(headers).unwrap_or_default(),
     }
+}
+
+/// The strong `ETag` and `Last-Modified` in `headers`.
+fn validators(headers: &HeaderMap) -> Result<Representation, TransportError> {
+    Ok(Representation {
+        strong_etag: header_str(headers, header::ETAG)?.and_then(strong_etag),
+        last_modified: header_str(headers, header::LAST_MODIFIED)?
+            .and_then(|v| httpdate::parse_http_date(v).ok())
+            .map(timestamp),
+        ..Representation::default()
+    })
 }
 
 /// Transfers address the stored bytes, so a body in any encoding but

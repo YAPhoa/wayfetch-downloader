@@ -21,6 +21,7 @@ use wayfetch_net::{HttpConfig, HttpTransport};
 const SIZE: usize = 300_000;
 const NAME: &str = "Quarterly report €.pdf";
 const FILE: &str = "/scl/fi/abc123/report.pdf";
+const ETAG: &str = "\"rev-1\"";
 
 fn content() -> Vec<u8> {
     (0..SIZE).map(|i| ((i * 13 + 5) % 251) as u8).collect()
@@ -36,6 +37,8 @@ struct State {
     log: Vec<String>,
     /// Temporary URLs handed out so far.
     issued: AtomicUsize,
+    /// The `ETag` the download servers send, if any.
+    etag: Option<&'static str>,
 }
 
 struct Server {
@@ -47,7 +50,10 @@ impl Server {
     async fn start() -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let state = Arc::new(Mutex::new(State::default()));
+        let state = Arc::new(Mutex::new(State {
+            etag: Some(ETAG),
+            ..State::default()
+        }));
         let shared = state.clone();
         tokio::spawn(async move {
             loop {
@@ -61,6 +67,10 @@ impl Server {
     fn dropbox(&self) -> Dropbox {
         let site = Endpoint::custom(&format!("http://{}/", self.addr)).unwrap();
         Dropbox::new(transport(), site)
+    }
+
+    fn without_etag(&self) {
+        self.state.lock().unwrap().etag = None;
     }
 
     fn log(&self) -> Vec<String> {
@@ -91,11 +101,12 @@ async fn serve(mut stream: TcpStream, state: Arc<Mutex<State>>) {
         name.eq_ignore_ascii_case("range")
             .then(|| value.trim().strip_prefix("bytes=").map(str::to_owned))?
     });
-    let issued = {
+    let (issued, etag) = {
         let mut state = state.lock().unwrap();
         state.log.push(target.clone());
-        state.issued.load(Ordering::Relaxed)
+        (state.issued.load(Ordering::Relaxed), state.etag)
     };
+    let etag = etag.map_or(String::new(), |e| format!("ETag: {e}\r\n"));
     let url = Url::parse(&format!("http://stand.in{target}")).unwrap();
     let dl = url.query_pairs().any(|(k, v)| k == "dl" && v == "1");
     let rlkey = url
@@ -135,7 +146,7 @@ async fn serve(mut stream: TcpStream, state: Arc<Mutex<State>>) {
                 "HTTP/1.1 {}\r\nContent-Type: application/pdf\r\n\
                  Content-Disposition: attachment; filename=\"report.pdf\"; \
                  filename*=UTF-8''Quarterly%20report%20%E2%82%AC.pdf\r\n\
-                 Content-Length: {}\r\n{}Accept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                 Content-Length: {}\r\n{}{etag}Accept-Ranges: bytes\r\nConnection: close\r\n\r\n",
                 if partial {
                     "206 Partial Content"
                 } else {
@@ -220,8 +231,21 @@ async fn each_attempt_gets_a_fresh_url_under_one_identity_and_resumes() {
     assert_eq!(first.size, SIZE as u64);
     assert_eq!(first.name.as_deref(), Some(NAME));
     assert!(first.encoding.is_none());
+    let version = first.validators.as_ref().unwrap();
+    assert_eq!(version.strong_etag.as_deref(), Some(ETAG));
+    assert!(version.is_trustworthy());
     assert_eq!(download(&first.url, 0).await, content());
     assert_eq!(download(&second.url, 1000).await, content()[1000..]);
+}
+
+#[tokio::test]
+async fn a_file_without_validators_cannot_be_continued() {
+    let server = Server::start().await;
+    server.without_etag();
+    let hosted = server.dropbox().resolve(&link(FILE, "k1")).await.unwrap();
+    let version = hosted.validators.unwrap();
+    assert_eq!(version.strong_etag, None);
+    assert!(!version.is_trustworthy(), "the engine restarts instead");
 }
 
 #[tokio::test]

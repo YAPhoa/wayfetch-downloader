@@ -18,6 +18,7 @@ use wayfetch_domain::failure::FailureCode;
 use wayfetch_domain::name::ProviderId;
 use wayfetch_protocol::query::CheckReason;
 
+use crate::transfer::lease::Representation;
 use crate::transfer::writer::BoxFuture;
 
 /// Most files a folder check may list.
@@ -78,6 +79,13 @@ pub struct HostedFile {
     pub identity: String,
     /// How its stored bytes become the file, if they are not the file.
     pub encoding: Option<Arc<dyn Encoding>>,
+    /// What the host's server says identifies this version of the file
+    /// (strong `ETag`, `Last-Modified`), for a host whose identity does not
+    /// change with the content. `None` when the identity or the encoding's
+    /// check already proves the content. When given, saved bytes are
+    /// continued only under the same trustworthy validators, ranges are
+    /// conditional on them, and every response must agree with them.
+    pub validators: Option<Representation>,
 }
 
 impl std::fmt::Debug for HostedFile {
@@ -88,6 +96,7 @@ impl std::fmt::Debug for HostedFile {
             .field("size", &self.size)
             .field("identity", &self.identity)
             .field("encoding", &self.encoding.is_some())
+            .field("validators", &self.validators)
             .finish()
     }
 }

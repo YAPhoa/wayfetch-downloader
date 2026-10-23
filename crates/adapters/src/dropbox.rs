@@ -2,7 +2,9 @@
 //!
 //! A file link with `dl=1` redirects to a temporary download URL that names
 //! the file and accepts ranges. A check asks for its first byte, as direct
-//! links are checked, and each attempt asks again for a fresh URL. No
+//! links are checked, and each attempt asks again for a fresh URL. A link
+//! can be pointed at another file of the same name and size, so saved bytes
+//! are continued only under the same `ETag` or `Last-Modified`. No
 //! account or app key is used, so shared folders and password-protected
 //! links are not supported: Dropbox serves those only as a page or a zip.
 
@@ -151,7 +153,7 @@ impl std::fmt::Debug for Dropbox {
 /// What Dropbox answered about a file link.
 enum Answer {
     /// The file: its name, its size, and where this answer came from.
-    File(Inspection),
+    File(Box<Inspection>),
     /// Something else, already explained.
     Refused(Refusal),
 }
@@ -204,7 +206,7 @@ impl Dropbox {
             200 | 206 if is_page(answer.content_type.as_deref(), answer.attachment) => {
                 Refusal::Page
             }
-            200 | 206 => return Answer::File(answer),
+            200 | 206 => return Answer::File(Box::new(answer)),
             404 | 410 => Refusal::NotFound,
             429 => Refusal::Traffic,
             401 | 403 => Refusal::Denied,
@@ -334,6 +336,10 @@ impl FileHost for Dropbox {
                 size,
                 identity: format!("{};{size}", link.fingerprint()),
                 encoding: None,
+                // A link keeps its name when its file is replaced, so only
+                // Dropbox's validators tell versions apart; without them
+                // nothing saved is continued.
+                validators: Some(file.validators),
             })
         })
     }

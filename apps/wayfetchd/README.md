@@ -141,7 +141,7 @@ All mutations require `"target"` (the `instance` UUID from `GET /v1/capabilities
 
 - **Public file links**: `www.dropbox.com/scl/fi/…` and the older `/s/…` links (and the same paths on `dl.dropbox.com` or `dl.dropboxusercontent.com`) are recognized locally and downloaded without an account or app key. The link's `rlkey` is kept; `dl` and `raw` are ignored.
 - **Checks**: checking a link asks Dropbox for the file's first byte with `dl=1`, which gives its name and size. Dropbox may count that as one download of the link.
-- **Downloads**: each attempt asks again for Dropbox's temporary download URL, and saved bytes are continued under a digest of the link and the file's size rather than the URL.
+- **Downloads**: each attempt asks again for Dropbox's temporary download URL. Saved bytes are continued only for the same link, size, and `ETag` or `Last-Modified` (a link can be pointed at a replaced file of the same size); if Dropbox sends neither, or either changed, the download starts again from zero.
 - **Limits**: when Dropbox suspends a link for too much traffic (HTTP `429`), the download fails with `host_unavailable_via_provider` and a retry time a day later. Folder links and password-protected links are recognized and reported as not supported yet.
 
 ### Video Links, Archives & Plugins (`yt-dlp`, `ffmpeg` & 7-Zip)

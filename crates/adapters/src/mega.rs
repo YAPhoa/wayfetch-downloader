@@ -487,6 +487,8 @@ impl FileHost for Mega {
                 size: info.s,
                 identity: format!("{handle};{};{}", info.s, key.fingerprint()),
                 encoding: Some(Arc::new(Encrypted(key))),
+                // MEGA's MAC proves the content.
+                validators: None,
             })
         })
     }

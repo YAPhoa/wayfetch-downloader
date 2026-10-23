@@ -46,12 +46,26 @@ impl Download {
         let hosted = self.hosted_file(host.as_ref(), url).await?;
         let size = hosted.size;
         let resource = format!("{IDENTITY_TAG};{};{}", host.service(), hosted.identity);
+        let version = hosted.validators.as_ref().map(|v| Representation {
+            length: Some(size),
+            ..version_of(v)
+        });
         if let Some(c) = &continued {
             let stored = c.partial.representation.as_ref();
             if stored.and_then(|r| r.resource.as_deref()) != Some(resource.as_str())
                 || stored.and_then(|r| r.length) != Some(size)
             {
                 return Err(Stop::Restart(why::CHANGED));
+            }
+            if let Some(version) = &version {
+                // Without validators the bytes saved and the bytes offered
+                // cannot be proved one version, so nothing is continued.
+                if !version.is_trustworthy() {
+                    return Err(Stop::Restart(why::UNIDENTIFIED));
+                }
+                if stored.map(version_of) != Some(version_of(version)) {
+                    return Err(Stop::Restart(why::CHANGED));
+                }
             }
         }
         let durable = continued.as_ref().map_or(0, |c| c.partial.durable_end);
@@ -77,7 +91,7 @@ impl Download {
                 let representation = Representation {
                     length: Some(size),
                     resource: Some(resource),
-                    ..Representation::default()
+                    ..version.clone().unwrap_or_default()
                 };
                 let file = self
                     .fetch_hosted(
@@ -85,6 +99,7 @@ impl Download {
                         file,
                         host.as_ref(),
                         &hosted,
+                        version.as_ref(),
                         durable,
                         representation,
                         suggested.clone(),
@@ -150,6 +165,7 @@ impl Download {
         file: Option<StagingFile>,
         host: &dyn FileHost,
         hosted: &HostedFile,
+        version: Option<&Representation>,
         from: u64,
         representation: Representation,
         suggested: Option<String>,
@@ -159,8 +175,9 @@ impl Download {
         let request = OpenRequest {
             url: hosted.url.clone(),
             range: requested,
-            // The host's identity names the file; its URLs do not.
-            validators: None,
+            // The host's identity names the file; its URLs do not, so a
+            // range is conditional only on the version it gave.
+            validators: version.filter(|v| v.is_trustworthy()).cloned(),
             connect_timeout: self.timeouts.connect,
             read_buffer: self.limits.read_buffer_bytes.get(),
             user_agent: None,
@@ -184,6 +201,18 @@ impl Download {
                 FailureCode::IntegrityMismatch,
                 "the file host's download is not the size it reported",
             ));
+        }
+        if version.is_some_and(|v| v.contradicts(&version_of(&response.representation))) {
+            // Bytes of another version are never added to saved ones; a
+            // whole download of it would not be the file the host named.
+            return Err(if from > 0 {
+                Stop::Restart(why::CHANGED)
+            } else {
+                failed(
+                    FailureCode::IntegrityMismatch,
+                    "the file changed on the file host while it was being downloaded",
+                )
+            });
         }
         let start = match range::plan(requested, response.framing, Some(size))
             .map_err(|e| failed(FailureCode::IntegrityMismatch, e))?
@@ -272,6 +301,15 @@ fn check_file(
         at += read as u64;
     }
     Ok(Some(verifier.verify()))
+}
+
+/// Only what identifies a version of `representation`: its validators.
+fn version_of(representation: &Representation) -> Representation {
+    Representation {
+        strong_etag: representation.strong_etag.clone(),
+        last_modified: representation.last_modified,
+        ..Representation::default()
+    }
 }
 
 /// The failure a host's refusal records.
