@@ -1193,6 +1193,28 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect(dialog.getByText('"Tiny files": the link pattern is not a valid regular expression', { exact: false })).toBeVisible();
   await dialog.getByRole('button', { name: 'Cancel' }).click();
+  // A filter edited in one window is never saved over another that took
+  // its place after a change in a second window.
+  await filters.getByRole('button', { name: 'Actions for Skip gone files' }).click();
+  await page.getByRole('menu', { name: 'Filter actions' }).getByRole('menuitem', { name: 'Duplicate' }).click();
+  await expect(filters.locator('tr[data-filter="1"] td.filter-name')).toHaveText('Skip gone files (copy)');
+  await filters.getByRole('button', { name: 'Actions for Skip gone files (copy)' }).click();
+  await page.getByRole('menu', { name: 'Filter actions' }).getByRole('menuitem', { name: 'Edit…' }).click();
+  dialog = page.getByRole('dialog', { name: 'Edit filter Skip gone files (copy)' });
+  const second = await context.newPage();
+  await second.goto(`${daemon.origin}/settings/filters`);
+  const elsewhere = second.locator('.settings-content [data-section="filters"]');
+  await elsewhere.getByRole('button', { name: 'Actions for Skip gone files (copy)' }).click();
+  await second.getByRole('menu', { name: 'Filter actions' }).getByRole('menuitem', { name: 'Remove…' }).click();
+  await second.getByRole('dialog', { name: 'Remove filter' }).getByRole('button', { name: 'Remove' }).click();
+  await expect(elsewhere.locator('tr[data-filter]')).toHaveCount(2);
+  await second.close();
+  await expect(filters.locator('tr[data-filter]')).toHaveCount(2);
+  await dialog.getByLabel('Name', { exact: true }).fill('Renamed');
+  await dialog.getByRole('button', { name: 'Save' }).click();
+  await expect(dialog.getByText('This filter was changed or removed elsewhere.', { exact: false })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(filters.locator('tr[data-filter="1"] td.filter-name')).toHaveText('Tiny files');
 
   const tiny = fixture.put('tiny.bin', 1024);
   await page.goto(`${daemon.origin}/links`);

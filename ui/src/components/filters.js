@@ -414,22 +414,25 @@ export function filtersSection(context) {
   const menu = new Menu('Filter actions', markMenu);
 
   /**
-   * Saves `filters`, replacing every filter, and says `said`. Resolves to
+   * Saves `filters`, made from the settings at `base`'s revision, replacing
+   * every filter, and says `said`. Refused if the settings changed since,
+   * so a change never lands on filters it was not made from. Resolves to
    * why it was not saved, or `null`.
    * @param {LinkFilters} filters
    * @param {string} said
+   * @param {Settings | null} [base]
    * @returns {Promise<string | null>}
    */
-  const save = async (filters, said) => {
+  const save = async (filters, said, base = current) => {
     const hello = context.hello() ?? (await client.hello().catch(() => null));
-    if (!hello || !current) return 'Not connected yet. Try again in a moment.';
+    if (!hello || !base) return 'Not connected yet. Try again in a moment.';
     const working = focusedKey(section);
     saving = true;
     try {
       await client.updateSettings({
         idempotencyKey: idempotencyKey(),
         target: hello.instance,
-        expectedRevision: current.revision,
+        expectedRevision: base.revision,
         linkFilters: filters,
       });
       saving = false;
@@ -450,12 +453,13 @@ export function filtersSection(context) {
   };
 
   /**
-   * The filters with `change` made to a copy of their list.
+   * The filters of `base` with `change` made to a copy of their list.
    * @param {(rules: LinkRule[]) => void} change
+   * @param {Settings | null} [base]
    * @returns {LinkFilters}
    */
-  const changed = (change) => {
-    const filters = /** @type {Settings} */ (current).link_filters;
+  const changed = (change, base = current) => {
+    const filters = /** @type {Settings} */ (base).link_filters;
     const rules = filters.filters.map((rule) => ({ ...rule }));
     change(rules);
     return { enabled: filters.enabled, filters: rules };
@@ -468,66 +472,88 @@ export function filtersSection(context) {
    * @param {number} count
    * @returns {MenuEntry[]}
    */
-  const entries = (rule, index, count) => [
-    { key: 'edit-filter', label: 'Edit…', run: () => edit(index) },
-    {
-      key: 'duplicate-filter',
-      label: 'Duplicate',
-      run: () => {
-        follow(index + 1);
-        void save(
-          changed((rules) => rules.splice(index + 1, 0, { ...rule, name: `${rule.name} (copy)`.slice(0, 80) })),
-          'Duplicated.',
-        );
+  const entries = (rule, index, count) => {
+    // What the menu was opened on: a change elsewhere since refuses these.
+    const base = current;
+    return [
+      { key: 'edit-filter', label: 'Edit…', run: () => edit(index) },
+      {
+        key: 'duplicate-filter',
+        label: 'Duplicate',
+        run: () => {
+          follow(index + 1);
+          const copy = { ...rule, name: `${rule.name} (copy)`.slice(0, 80) };
+          void save(changed((rules) => rules.splice(index + 1, 0, copy), base), 'Duplicated.', base);
+        },
       },
-    },
-    'separator',
-    {
-      key: 'filter-up',
-      label: 'Move up',
-      disabled: index === 0,
-      run: () => {
-        follow(index - 1);
-        void save(changed((rules) => rules.splice(index - 1, 0, ...rules.splice(index, 1))), 'Moved.');
+      'separator',
+      {
+        key: 'filter-up',
+        label: 'Move up',
+        disabled: index === 0,
+        run: () => {
+          follow(index - 1);
+          void save(changed((rules) => rules.splice(index - 1, 0, ...rules.splice(index, 1)), base), 'Moved.', base);
+        },
       },
-    },
-    {
-      key: 'filter-down',
-      label: 'Move down',
-      disabled: index === count - 1,
-      run: () => {
-        follow(index + 1);
-        void save(changed((rules) => rules.splice(index + 1, 0, ...rules.splice(index, 1))), 'Moved.');
+      {
+        key: 'filter-down',
+        label: 'Move down',
+        disabled: index === count - 1,
+        run: () => {
+          follow(index + 1);
+          void save(changed((rules) => rules.splice(index + 1, 0, ...rules.splice(index, 1)), base), 'Moved.', base);
+        },
       },
-    },
-    'separator',
-    {
-      key: 'remove-filter',
-      label: 'Remove…',
-      danger: true,
-      run: () =>
-        confirmDialog(
-          {
-            title: 'Remove filter',
-            confirm: 'Remove',
-            onConfirm: () => void save(changed((rules) => rules.splice(index, 1)), 'Removed.'),
-          },
-          `Remove ${rule.name}? Links already in the list stay.`,
-        ),
-    },
-  ];
+      'separator',
+      {
+        key: 'remove-filter',
+        label: 'Remove…',
+        danger: true,
+        run: () =>
+          confirmDialog(
+            {
+              title: 'Remove filter',
+              confirm: 'Remove',
+              onConfirm: () => void save(changed((rules) => rules.splice(index, 1), base), 'Removed.', base),
+            },
+            `Remove ${rule.name}? Links already in the list stay.`,
+          ),
+      },
+    ];
+  };
 
-  /** @param {number | null} index the filter to edit, or `null` to add one */
+  /**
+   * Opens the editor. A new filter is added to the filters as they are on
+   * saving; an edited one replaces the filter opened only while that filter
+   * is still there, unchanged, wherever other changes left it.
+   * @param {number | null} index the filter to edit, or `null` to add one
+   */
   const edit = (index) => {
-    const rule = index === null ? null : /** @type {Settings} */ (current).link_filters.filters[index];
-    editFilter(context, rule, (saved) => {
-      if (index === null) follow(/** @type {Settings} */ (current).link_filters.filters.length);
+    const opened = /** @type {Settings} */ (current);
+    const rule = index === null ? null : opened.link_filters.filters[index];
+    editFilter(context, rule, async (saved) => {
+      const latest = /** @type {Settings} */ (current);
+      if (index === null) {
+        follow(latest.link_filters.filters.length);
+        return save(
+          changed((rules) => rules.push(saved), latest),
+          'Filter added.',
+          latest,
+        );
+      }
+      /** @param {LinkRule | undefined} other */
+      const same = (other) => JSON.stringify(other) === JSON.stringify(rule);
+      const at =
+        latest === opened || same(latest.link_filters.filters[index])
+          ? index
+          : latest.link_filters.filters.findIndex(same);
+      if (at < 0) return 'This filter was changed or removed elsewhere. Cancel, then open it again.';
+      follow(at);
       return save(
-        changed((rules) => {
-          if (index === null) rules.push(saved);
-          else rules[index] = saved;
-        }),
-        index === null ? 'Filter added.' : 'Saved.',
+        changed((rules) => (rules[at] = saved), latest),
+        'Saved.',
+        latest,
       );
     });
   };
@@ -540,6 +566,7 @@ export function filtersSection(context) {
    */
   const filterRow = (rule, index, count) => {
     const id = String(index);
+    const base = current;
     /** @param {Anchor} anchor */
     const open = (anchor) =>
       menu.show(entries(rule, index, count), anchor, {
@@ -575,8 +602,9 @@ export function filtersSection(context) {
           onchange: (/** @type {Event} */ event) => {
             const on = /** @type {HTMLInputElement} */ (event.currentTarget).checked;
             void save(
-              changed((rules) => (rules[index].enabled = on)),
+              changed((rules) => (rules[index].enabled = on), base),
               on ? `${rule.name} is on.` : `${rule.name} is off.`,
+              base,
             );
           },
         }),

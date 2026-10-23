@@ -419,6 +419,9 @@ pub(super) fn update_settings(
         ],
     )
     .map_err(StoreError::from)?;
+    if link_filters.is_some() {
+        super::links::release(tx, &active_filters(tx)?, now)?;
+    }
     Ok(CommandResult::SettingsUpdated {
         revision: next,
         changed: true,

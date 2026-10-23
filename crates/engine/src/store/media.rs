@@ -212,6 +212,7 @@ impl Store {
         )?;
         if changed == 1 {
             let answer = Answer {
+                name: None,
                 size: None,
                 check: if state == "ready" {
                     CheckOutcome::Online

@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use rusqlite::{OptionalExtension, Transaction, params, params_from_iter};
+use serde::{Deserialize, Serialize};
 use url::Url;
 use wayfetch_domain::id::{BatchId, JobId, RootId, SourceLinkId};
 use wayfetch_domain::name::{DiagnosticText, HostName, ProviderId};
@@ -25,7 +26,7 @@ use wayfetch_protocol::{CommandResult, ErrorCode, ProtocolError};
 use super::{OrCorrupt, Store, StoreError, crawl, jobs, key, media, outbox, roots, sql};
 use crate::crawl::extract::Entry;
 use crate::crawl::looks_like_file;
-use crate::link_filter::{self, Answer, Link, Pending, Verdict};
+use crate::link_filter::{Answer, Filters, Link, Verdict};
 
 /// The most characters of an invalid entry a list shows.
 const SHOWN_TEXT_CHARS: usize = 200;
@@ -70,14 +71,27 @@ pub struct CollectPlan {
     pub page: Option<Url>,
 }
 
-/// The stored form of the filter conditions a link waits on for its check.
-pub(super) fn screen(verdict: &Verdict) -> Result<Option<String>, StoreError> {
-    match verdict {
-        Verdict::Wait(pending) => serde_json::to_string(pending)
-            .or_corrupt("link screen")
-            .map(Some),
-        Verdict::Keep | Verdict::Drop => Ok(None),
+/// What link filters need to judge a link held back for its check again,
+/// besides the link itself: how it came.
+#[derive(Debug, Serialize, Deserialize)]
+struct Screen {
+    origin: LinkOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    found_on: Option<Url>,
+}
+
+/// The stored form of how `link` came, if `verdict` holds it back for its
+/// check.
+pub(super) fn screen(verdict: Verdict, link: &Link<'_>) -> Result<Option<String>, StoreError> {
+    if verdict != Verdict::Wait {
+        return Ok(None);
     }
+    serde_json::to_string(&Screen {
+        origin: link.origin,
+        found_on: link.found_on.cloned(),
+    })
+    .or_corrupt("link screen")
+    .map(Some)
 }
 
 /// Records `plan`'s links as a new batch of held links saved in
@@ -119,21 +133,26 @@ pub(super) fn collect(
     } else {
         LinkOrigin::Text
     };
-    let verdicts: Vec<Verdict> = plan
+    // Each link's verdict, with how it came if it waits for its check.
+    let verdicts: Vec<(Verdict, Option<String>)> = plan
         .links
         .iter()
         .map(|link| match &link.entry {
-            Entry::Valid(url) => filters.judge(&Link {
-                url: url.as_url(),
-                origin,
-                found_on: plan.page.as_ref(),
-                media: link.media.is_some(),
-                checked: checked(link, url.as_url()),
-            }),
-            Entry::Invalid { .. } => Verdict::Keep,
+            Entry::Valid(url) => {
+                let link = Link {
+                    url: url.as_url(),
+                    origin,
+                    found_on: plan.page.as_ref(),
+                    media: link.media.is_some(),
+                    checked: checked(link, url.as_url()),
+                };
+                let verdict = filters.judge(&link);
+                Ok((verdict, screen(verdict, &link)?))
+            }
+            Entry::Invalid { .. } => Ok((Verdict::Keep, None)),
         })
-        .collect();
-    let filtered = verdicts.iter().filter(|v| **v == Verdict::Drop).count();
+        .collect::<Result<_, StoreError>>()?;
+    let filtered = verdicts.iter().filter(|(v, _)| *v == Verdict::Drop).count();
     if filtered == plan.links.len() {
         return Err(ProtocolError::new(
             ErrorCode::InvalidRequest,
@@ -182,7 +201,7 @@ pub(super) fn collect(
         )
         .map_err(StoreError::from)?;
     let mut invalid = 0u32;
-    for (position, (link, verdict)) in plan.links.iter().zip(&verdicts).enumerate() {
+    for (position, (link, (verdict, screen))) in plan.links.iter().zip(&verdicts).enumerate() {
         if *verdict == Verdict::Drop {
             continue;
         }
@@ -212,7 +231,7 @@ pub(super) fn collect(
                 // copied: its links never get the local networks the
                 // operator allows, whatever page address came with it.
                 plan.html,
-                screen(verdict)?,
+                screen,
             ])
             .map_err(StoreError::from)?;
         if let Entry::Valid(url) = &link.entry {
@@ -394,24 +413,76 @@ fn discard(tx: &Transaction<'_>, id: i64) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Settles link `id` if it was held back for its check: drops it when a
-/// link filter's condition holds for what the check told, and lists it
-/// otherwise.
-pub(super) fn settle(tx: &Transaction<'_>, id: i64, answer: &Answer) -> Result<(), StoreError> {
-    let screen: Option<String> = tx
-        .query_row("SELECT screen FROM source_links WHERE id = ?1", [id], |r| {
-            r.get(0)
-        })
-        .optional()?
-        .flatten();
-    let Some(screen) = screen else {
+/// Settles link `id` if it was held back for its check: the link filters
+/// as they are now judge it again with what `answer` tells, dropping it
+/// (and counting it on the page it was found on) or listing it.
+pub(super) fn settle(tx: &Transaction<'_>, id: i64, answer: &Answer<'_>) -> Result<(), StoreError> {
+    let row: Option<(Option<String>, String, Option<i64>, bool)> = tx
+        .query_row(
+            "SELECT screen, input_url, parent_id, media_service IS NOT NULL \
+             FROM source_links WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((Some(screen), url, parent, media)) = row else {
         return Ok(());
     };
-    let pending: Vec<Pending> = serde_json::from_str(&screen).or_corrupt("link screen")?;
-    if link_filter::any_holds(&pending, answer) {
-        return discard(tx, id);
+    let screen: Screen = serde_json::from_str(&screen).or_corrupt("link screen")?;
+    let url = Url::parse(&url).or_corrupt("source URL")?;
+    let link = Link {
+        url: &url,
+        origin: screen.origin,
+        found_on: screen.found_on.as_ref(),
+        media,
+        checked: true,
+    };
+    if !roots::active_filters(tx)?.leaves_out(&link, answer) {
+        tx.execute("UPDATE source_links SET screen = NULL WHERE id = ?1", [id])?;
+        return Ok(());
     }
-    tx.execute("UPDATE source_links SET screen = NULL WHERE id = ?1", [id])?;
+    if let Some(parent) = parent {
+        tx.execute(
+            "UPDATE source_links SET filtered = filtered + 1 WHERE id = ?1",
+            [parent],
+        )?;
+    }
+    discard(tx, id)
+}
+
+/// After the link filters changed to `filters`, lists every link held back
+/// for its check that no filter could still leave out.
+pub(super) fn release(
+    tx: &Transaction<'_>,
+    filters: &Filters,
+    now: UtcTimestamp,
+) -> Result<(), StoreError> {
+    let held: Vec<(i64, String, String, bool)> = tx
+        .prepare(
+            "SELECT id, screen, input_url, media_service IS NOT NULL FROM source_links \
+             WHERE screen IS NOT NULL",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut released = false;
+    for (id, screen, url, media) in held {
+        let screen: Screen = serde_json::from_str(&screen).or_corrupt("link screen")?;
+        let url = Url::parse(&url).or_corrupt("source URL")?;
+        let verdict = filters.judge(&Link {
+            url: &url,
+            origin: screen.origin,
+            found_on: screen.found_on.as_ref(),
+            media,
+            checked: true,
+        });
+        if verdict == Verdict::Keep {
+            tx.execute("UPDATE source_links SET screen = NULL WHERE id = ?1", [id])?;
+            released = true;
+        }
+    }
+    if released {
+        outbox::append(tx, &EventKind::LinksChanged, now)?;
+    }
     Ok(())
 }
 
@@ -784,13 +855,15 @@ struct Listed {
     skipped: Option<u32>,
     page: Option<String>,
     via: Option<String>,
+    filtered: u32,
     media: media::LinkColumns,
 }
 
 impl Listed {
     const COLUMNS: &str = "s.id, s.batch_id, b.created_at, s.revision, s.invalid, s.input_url, \
          s.root_id, s.problem, r.path, j.id, t.id IS NOT NULL, s.check_state, s.check_reason, \
-         s.check_problem, s.size, s.observed_name, s.found, s.skipped, p.input_url, s.checked_via";
+         s.check_problem, s.size, s.observed_name, s.found, s.skipped, p.input_url, s.checked_via, \
+         s.filtered";
 
     fn read(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
@@ -814,7 +887,8 @@ impl Listed {
             skipped: r.get(17)?,
             page: r.get(18)?,
             via: r.get(19)?,
-            media: media::LinkColumns::read(r, 20)?,
+            filtered: r.get(20)?,
+            media: media::LinkColumns::read(r, 21)?,
         })
     }
 
@@ -845,8 +919,25 @@ impl Listed {
         })
     }
 
+    /// What the check found to say, then how many links on the page the
+    /// link filters left out.
+    fn check_detail(&self) -> Option<String> {
+        let filtered = (self.filtered > 0).then(|| {
+            let links = if self.filtered == 1 { "link" } else { "links" };
+            format!(
+                "Your link filters left out {} {links} on this page.",
+                self.filtered
+            )
+        });
+        match (self.detail.as_deref(), filtered) {
+            (Some(detail), Some(filtered)) => Some(format!("{detail} {filtered}")),
+            (detail, filtered) => detail.map(str::to_owned).or(filtered),
+        }
+    }
+
     fn into_link(self, converter: bool) -> Result<CollectedLink, StoreError> {
         let check = self.check()?;
+        let detail = self.check_detail();
         let url = (!self.invalid)
             .then(|| Url::parse(&self.text).ok())
             .flatten();
@@ -877,8 +968,7 @@ impl Listed {
                 .filter(|_| checked)
                 .map(|r| r.parse().or_corrupt("check reason"))
                 .transpose()?,
-            check_detail: self
-                .detail
+            check_detail: detail
                 .filter(|_| checked)
                 .as_deref()
                 .map(DiagnosticText::new),

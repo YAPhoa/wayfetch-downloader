@@ -1,13 +1,14 @@
 //! Link filters, compiled for matching links as they are collected.
 //!
-//! Conditions on the link itself are judged as it is collected, pasted or
-//! found on a page. Those on what only a check tells (size, check result,
-//! an account) travel with a link that will be checked, which stays off
-//! the list until its check decides; a link that is never checked cannot
-//! meet them, so it is kept.
+//! Conditions on the link's address and where it came from are judged as
+//! it is collected, pasted or found on a page. A link that will be checked
+//! and that a filter could still match stays off the list until its check,
+//! when the filters as they are then judge it again, by the file name its
+//! server gives and what else the check told (size, check result, an
+//! account). A link that is never checked is judged by the name in its
+//! address, and cannot meet conditions only a check tells.
 
 use regex::{Regex, RegexBuilder};
-use serde::{Deserialize, Serialize};
 use url::Url;
 use wayfetch_protocol::filter::{
     CheckOutcome, Choice, FileKind, FileTypeCondition, FilterTrial, LinkFilters, LinkOrigin,
@@ -116,48 +117,14 @@ impl Types {
     }
 }
 
-/// A filter's conditions on what only a check tells, kept as JSON with a
-/// link that waits for its check.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Pending {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    size: Option<SizeCondition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    check: Option<Choice<CheckOutcome>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    route: Option<Choice<LinkRoute>>,
-}
-
-impl Pending {
-    fn is_empty(&self) -> bool {
-        self.size.is_none() && self.check.is_none() && self.route.is_none()
-    }
-
-    /// Whether `answer` meets every condition. A size the server did not
-    /// say meets none.
-    fn holds(&self, answer: &Answer) -> bool {
-        let size = self.size.is_none_or(|c| {
-            answer.size.is_some_and(|s| {
-                let within = s >= c.min && c.max.is_none_or(|max| s <= max);
-                within == (c.op == Membership::Is)
-            })
-        });
-        size && self.check.as_ref().is_none_or(|c| c.holds(&answer.check))
-            && self.route.as_ref().is_none_or(|c| c.holds(&answer.route))
-    }
-}
-
 /// What a link's check told.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Answer {
+pub(crate) struct Answer<'a> {
+    /// The file name the server gave, if any.
+    pub(crate) name: Option<&'a str>,
     pub(crate) size: Option<u64>,
     pub(crate) check: CheckOutcome,
     pub(crate) route: LinkRoute,
-}
-
-/// Whether any of the conditions a link waited with holds for its check.
-pub(crate) fn any_holds(pending: &[Pending], answer: &Answer) -> bool {
-    pending.iter().any(|p| p.holds(answer))
 }
 
 /// A compiled filter.
@@ -187,14 +154,60 @@ pub(crate) struct Link<'a> {
 }
 
 /// What filters decide for a link being collected.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verdict {
     /// List it.
     Keep,
     /// Leave it out.
     Drop,
-    /// Hold it back until its check tells whether any of these hold.
-    Wait(Vec<Pending>),
+    /// Hold it back until its check, which decides.
+    Wait,
+}
+
+impl Rule {
+    /// Whether the conditions on the link's address and where it came
+    /// from hold, which are known as it is collected.
+    fn holds_for_address(&self, link: &Link<'_>) -> bool {
+        let found_on = link.found_on.map_or("", Url::as_str);
+        self.link.as_ref().is_none_or(|t| t.holds(link.url.as_str()))
+            && self.found_on.as_ref().is_none_or(|t| t.holds(found_on))
+            && self
+                .added_from
+                .as_ref()
+                .is_none_or(|c| c.holds(&link.origin))
+            // A media service is known as the link is collected.
+            && (!link.media || self.route.as_ref().is_none_or(|c| c.holds(&LinkRoute::Media)))
+    }
+
+    /// Whether the conditions on the file's name hold for `name`.
+    fn holds_for_name(&self, name: Option<&str>) -> bool {
+        self.file_name
+            .as_ref()
+            .is_none_or(|t| t.holds(name.unwrap_or("")))
+            && self.file_type.as_ref().is_none_or(|t| t.holds(name))
+    }
+
+    fn names(&self) -> bool {
+        self.file_name.is_some() || self.file_type.is_some()
+    }
+
+    /// Whether the rule has conditions only a check tells for `link`.
+    fn needs_answer(&self, link: &Link<'_>) -> bool {
+        self.size.is_some() || self.check.is_some() || (self.route.is_some() && !link.media)
+    }
+
+    /// Whether the conditions only a check tells hold for `answer`. A
+    /// size the server did not say meets none.
+    fn holds_for_answer(&self, answer: &Answer<'_>) -> bool {
+        let size = self.size.is_none_or(|c| {
+            answer.size.is_some_and(|s| {
+                let within = s >= c.min && c.max.is_none_or(|max| s <= max);
+                within == (c.op == Membership::Is)
+            })
+        });
+        size && self.check.as_ref().is_none_or(|c| c.holds(&answer.check))
+            && self.route.as_ref().is_none_or(|c| c.holds(&answer.route))
+    }
 }
 
 /// The filters that apply, compiled.
@@ -249,54 +262,49 @@ impl Filters {
         Ok(Self(rules))
     }
 
-    /// Decides whether `link` is listed: dropped if a filter matches it
-    /// outright, held for its check if one could still match then.
+    /// Decides whether `link` is listed as it is collected: dropped if a
+    /// filter matches it outright, held for its check if one could still
+    /// match then. A link that will be checked is judged by the file name
+    /// its server gives, so conditions on the name wait for the check
+    /// too; one never checked cannot meet conditions only a check tells.
     pub(crate) fn judge(&self, link: &Link<'_>) -> Verdict {
-        if self.0.is_empty() {
-            return Verdict::Keep;
-        }
         let name = crate::download::url_file_name(link.url);
         let name = name.as_ref().map(|n| n.as_str());
-        let found_on = link.found_on.map_or("", Url::as_str);
-        let mut waits = Vec::new();
+        let mut wait = false;
         for rule in &self.0 {
-            let now = rule
-                .file_name
-                .as_ref()
-                .is_none_or(|t| t.holds(name.unwrap_or("")))
-                && rule.file_type.as_ref().is_none_or(|t| t.holds(name))
-                && rule.link.as_ref().is_none_or(|t| t.holds(link.url.as_str()))
-                && rule.found_on.as_ref().is_none_or(|t| t.holds(found_on))
-                && rule
-                    .added_from
-                    .as_ref()
-                    .is_none_or(|c| c.holds(&link.origin))
-                // A media service is known as the link is collected.
-                && (!link.media || rule.route.as_ref().is_none_or(|c| c.holds(&LinkRoute::Media)));
-            if !now {
+            if !rule.holds_for_address(link) {
                 continue;
             }
-            let later = Pending {
-                size: rule.size,
-                check: rule.check.clone(),
-                route: rule.route.clone().filter(|_| !link.media),
-            };
-            if later.is_empty() {
+            if link.checked {
+                if !rule.names() && !rule.needs_answer(link) {
+                    return Verdict::Drop;
+                }
+                wait = true;
+            } else if !rule.needs_answer(link) && rule.holds_for_name(name) {
                 return Verdict::Drop;
             }
-            if link.checked {
-                waits.push(later);
-            }
         }
-        if waits.is_empty() {
-            Verdict::Keep
-        } else {
-            Verdict::Wait(waits)
-        }
+        if wait { Verdict::Wait } else { Verdict::Keep }
+    }
+
+    /// Whether a filter leaves out `link`, held back for its check, now
+    /// that `answer` tells what it found: by the name the server gave, or
+    /// else the one in its address.
+    pub(crate) fn leaves_out(&self, link: &Link<'_>, answer: &Answer<'_>) -> bool {
+        let from_url = crate::download::url_file_name(link.url);
+        let name = answer
+            .name
+            .or_else(|| from_url.as_ref().map(|n| n.as_str()));
+        self.0.iter().any(|rule| {
+            rule.holds_for_address(link)
+                && rule.holds_for_name(name)
+                && rule.holds_for_answer(answer)
+        })
     }
 }
 
-/// What `rule` would do with `url` pasted as text, enabled or not.
+/// What `rule` would do with `url` pasted as text, enabled or not, taking
+/// the file name from the address as its server would most often give it.
 pub(crate) fn trial(
     mut rule: LinkRule,
     url: &Url,
@@ -307,17 +315,25 @@ pub(crate) fn trial(
         enabled: true,
         filters: vec![rule],
     })?;
+    let link = Link {
+        url,
+        origin: LinkOrigin::Text,
+        found_on: None,
+        media,
+        checked: true,
+    };
+    let name = crate::download::url_file_name(url);
+    let name = name.as_ref().map(|n| n.as_str());
+    let Some(rule) = filters.0.first() else {
+        return Ok(FilterTrial::Kept);
+    };
     Ok(
-        match filters.judge(&Link {
-            url,
-            origin: LinkOrigin::Text,
-            found_on: None,
-            media,
-            checked: true,
-        }) {
-            Verdict::Drop => FilterTrial::LeftOut,
-            Verdict::Keep => FilterTrial::Kept,
-            Verdict::Wait(_) => FilterTrial::CheckDecides,
+        if !rule.holds_for_address(&link) || !rule.holds_for_name(name) {
+            FilterTrial::Kept
+        } else if rule.needs_answer(&link) {
+            FilterTrial::CheckDecides
+        } else {
+            FilterTrial::LeftOut
         },
     )
 }
@@ -342,13 +358,31 @@ mod tests {
         rule
     }
 
+    /// Pasted, and not checked, so judged by its address alone.
     fn pasted(url: &Url) -> Link<'_> {
         Link {
             url,
             origin: LinkOrigin::Text,
             found_on: None,
             media: false,
+            checked: false,
+        }
+    }
+
+    /// Pasted, and checked.
+    fn checked(url: &Url) -> Link<'_> {
+        Link {
             checked: true,
+            ..pasted(url)
+        }
+    }
+
+    fn online<'a>(name: Option<&'a str>, size: Option<u64>) -> Answer<'a> {
+        Answer {
+            name,
+            size,
+            check: CheckOutcome::Online,
+            route: LinkRoute::Direct,
         }
     }
 
@@ -456,32 +490,45 @@ mod tests {
             "file_type": { "op": "is", "kinds": ["archive"] },
             "size": { "op": "is", "max": 1000 },
         }))]));
-        let Verdict::Wait(pending) = small.judge(&pasted(&link)) else {
-            panic!("a size waits for the check");
-        };
-        let answer = |size| Answer {
-            size,
-            check: CheckOutcome::Online,
-            route: LinkRoute::Direct,
-        };
-        assert!(any_holds(&pending, &answer(Some(10))));
-        assert!(!any_holds(&pending, &answer(Some(5000))));
-        assert!(!any_holds(&pending, &answer(None)));
+        assert_eq!(small.judge(&checked(&link)), Verdict::Wait);
+        assert!(small.leaves_out(&checked(&link), &online(None, Some(10))));
+        assert!(!small.leaves_out(&checked(&link), &online(None, Some(5000))));
+        assert!(!small.leaves_out(&checked(&link), &online(None, None)));
         // A link that will not be checked is kept.
-        let unchecked = Link {
-            checked: false,
-            ..pasted(&link)
-        };
-        assert_eq!(small.judge(&unchecked), Verdict::Keep);
-        // Conditions on the link that fail decide without waiting.
-        let other = url("https://a.example/x.mkv");
-        assert_eq!(small.judge(&pasted(&other)), Verdict::Keep);
-        // The stored form round-trips.
-        let stored = serde_json::to_string(&pending).unwrap();
-        assert_eq!(
-            serde_json::from_str::<Vec<Pending>>(&stored).unwrap(),
-            pending
-        );
+        assert_eq!(small.judge(&pasted(&link)), Verdict::Keep);
+        // Conditions on the address that fail decide without waiting.
+        let address = filters(json!([rule(json!({
+            "link": text("contains", "b.example"),
+            "size": { "op": "is", "max": 1000 },
+        }))]));
+        assert_eq!(address.judge(&checked(&link)), Verdict::Keep);
+        // Ones on the address alone decide at once.
+        let host = filters(json!([rule(
+            json!({ "link": text("contains", "a.example") })
+        )]));
+        assert_eq!(host.judge(&checked(&link)), Verdict::Drop);
+    }
+
+    #[test]
+    fn a_checked_link_is_judged_by_the_name_its_server_gives() {
+        let link = url("https://a.example/download/123");
+        let samples = filters(json!([rule(
+            json!({ "file_name": text("contains", "sample") })
+        )]));
+        assert_eq!(samples.judge(&checked(&link)), Verdict::Wait);
+        assert!(samples.leaves_out(&checked(&link), &online(Some("sample.zip"), None)));
+        assert!(!samples.leaves_out(&checked(&link), &online(Some("film.zip"), None)));
+        // A negative type waits for the name too, instead of dropping a
+        // link whose address names no file.
+        let not_video = filters(json!([rule(
+            json!({ "file_type": { "op": "is_not", "kinds": ["video"] } })
+        )]));
+        assert_eq!(not_video.judge(&checked(&link)), Verdict::Wait);
+        assert!(!not_video.leaves_out(&checked(&link), &online(Some("film.mkv"), None)));
+        assert!(not_video.leaves_out(&checked(&link), &online(Some("notes.txt"), None)));
+        // Without a name from the server, the address's is used.
+        let named = url("https://a.example/files/sample.zip");
+        assert!(samples.leaves_out(&checked(&named), &online(None, None)));
     }
 
     #[test]
@@ -489,7 +536,7 @@ mod tests {
         let link = url("https://video.example/watch?v=1");
         let media = Link {
             media: true,
-            ..pasted(&link)
+            ..checked(&link)
         };
         let via = |values: serde_json::Value| {
             filters(json!([rule(
@@ -502,15 +549,12 @@ mod tests {
         let accounts = filters(json!([rule(
             json!({ "route": { "op": "is", "values": ["account"] } })
         )]));
-        let Verdict::Wait(pending) = accounts.judge(&pasted(&link)) else {
-            panic!("an account is told by the check");
-        };
+        assert_eq!(accounts.judge(&checked(&link)), Verdict::Wait);
         let answer = Answer {
-            size: None,
-            check: CheckOutcome::Online,
             route: LinkRoute::Account,
+            ..online(None, None)
         };
-        assert!(any_holds(&pending, &answer));
+        assert!(accounts.leaves_out(&checked(&link), &answer));
     }
 
     #[test]
@@ -533,6 +577,10 @@ mod tests {
         assert_eq!(
             try_rule(json!({ "size": { "op": "is", "max": 10 } })),
             FilterTrial::CheckDecides
+        );
+        assert_eq!(
+            try_rule(json!({ "file_name": text("contains", "x") })),
+            FilterTrial::LeftOut
         );
     }
 

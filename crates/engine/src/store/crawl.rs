@@ -93,7 +93,7 @@ pub(super) fn enqueue(
     )?;
     tx.execute(
         "UPDATE source_links SET check_state = NULL, check_reason = NULL, check_problem = NULL, \
-         checked_via = NULL, origin_page = 0, size = NULL, observed_name = NULL, found = NULL, skipped = NULL, \
+         checked_via = NULL, origin_page = 0, size = NULL, observed_name = NULL, found = NULL, skipped = NULL, filtered = 0, \
          media_state = CASE WHEN media_service IS NULL THEN NULL ELSE 'pending' END, \
          media_problem = NULL WHERE id = ?1",
         [link],
@@ -251,7 +251,7 @@ impl Store {
             CheckOutcome::Unknown => "unknown",
             CheckOutcome::Page => "page",
         };
-        let (mut collected, mut left_out, mut filtered) = (None, 0u32, 0u32);
+        let (mut collected, mut left_out) = (None, 0u32);
         if let Checked::Page {
             links: Some(_),
             local,
@@ -259,7 +259,7 @@ impl Store {
         {
             let children = collect_children(&tx, id, &found.children, !local, now)?;
             collected = Some(children.found);
-            (left_out, filtered) = (children.left_out, children.filtered);
+            left_out = children.left_out;
         }
         let mut notes: Vec<String> = problem.filter(|p| !p.is_empty()).into_iter().collect();
         if left_out > 0 {
@@ -267,12 +267,6 @@ impl Store {
                 "{left_out} more links on this page were not collected: the Links list holds \
                  at most {MAX_COLLECTED_LINKS}."
             )];
-        }
-        if filtered > 0 {
-            let links = if filtered == 1 { "link" } else { "links" };
-            notes.push(format!(
-                "Your link filters left out {filtered} {links} on this page."
-            ));
         }
         let problem = (!notes.is_empty()).then(|| notes.join(" "));
         tx.execute(
@@ -297,6 +291,7 @@ impl Store {
             ],
         )?;
         let answer = Answer {
+            name,
             size,
             check: outcome,
             route: if via.is_some() {
@@ -318,14 +313,12 @@ struct Collected {
     found: u32,
     /// Left out because the Links list was full.
     left_out: u32,
-    /// Left out by a link filter.
-    filtered: u32,
 }
 
 /// Collects `children` of page `parent` into its batch, each with a check,
-/// unless a link filter leaves it out. A link already in the batch counts
-/// as found, not again. With `public_only`, their requests reach public
-/// addresses only.
+/// unless a link filter leaves it out, which the page counts. A link
+/// already in the batch counts as found, not again. With `public_only`,
+/// their requests reach public addresses only.
 fn collect_children(
     tx: &Transaction<'_>,
     parent: i64,
@@ -367,13 +360,14 @@ fn collect_children(
             found += 1;
             continue;
         }
-        let verdict = filters.judge(&Link {
+        let link = Link {
             url,
             origin: LinkOrigin::AnalyzedPage,
             found_on: Some(&page),
             media: child.media.is_some(),
             checked: true,
-        });
+        };
+        let verdict = filters.judge(&link);
         if verdict == Verdict::Drop {
             filtered += 1;
             continue;
@@ -398,17 +392,17 @@ fn collect_children(
                 parent,
                 public_only,
                 media,
-                links::screen(&verdict)?,
+                links::screen(verdict, &link)?,
             ],
         )?;
         enqueue(tx, tx.last_insert_rowid(), url, media, now)?;
         found += 1;
     }
-    Ok(Collected {
-        found,
-        left_out,
-        filtered,
-    })
+    tx.execute(
+        "UPDATE source_links SET filtered = ?1 WHERE id = ?2",
+        params![filtered, parent],
+    )?;
+    Ok(Collected { found, left_out })
 }
 
 /// The page a link was found on, as a list shows it: without its query or
@@ -784,8 +778,14 @@ mod tests {
 
         /// Records that check `task` found a file of `size` bytes.
         fn found_file(&mut self, task: &Task, size: u64) {
+            self.found_named(task, None, size);
+        }
+
+        /// Records that check `task` found a file of `size` bytes, which its
+        /// server called `name`.
+        fn found_named(&mut self, task: &Task, name: Option<&str>, size: u64) {
             let file = Checked::File {
-                name: None,
+                name: name.map(str::to_owned),
                 size: Some(size),
             };
             self.store
@@ -845,7 +845,8 @@ mod tests {
             panic!()
         };
         assert_eq!((collected, filtered), (3, 1));
-        // The archives wait off the list for their size.
+        // The archives wait off the list for their size, and the page for
+        // the name its server gives.
         let page = match f.store.query(
             &Query::ListLinks {
                 after: None,
@@ -856,7 +857,7 @@ mod tests {
             Ok(QueryResult::Links(page)) => page,
             other => panic!("{other:?}"),
         };
-        assert_eq!((page.items.len(), page.total, page.screening), (1, 1, 2));
+        assert_eq!((page.items.len(), page.total, page.screening), (0, 0, 3));
         let tasks = f.store.take_checks(3, &[], true).unwrap();
         let [small, big] = &tasks[..] else {
             panic!("{tasks:?}")
@@ -895,7 +896,7 @@ mod tests {
             [
                 ("https://b.example/big.zip".to_owned(), true),
                 (PAGE.to_owned(), true),
-                ("https://c.example/z.mkv".to_owned(), true),
+                ("https://c.example/z.mkv".to_owned(), false),
             ]
         );
         let (links, _) = f.links();
@@ -903,6 +904,15 @@ mod tests {
         assert_eq!(
             links[1].check_detail.as_ref().unwrap().as_str(),
             "Your link filters left out 1 link on this page."
+        );
+        // Its server says the video is a small archive, so it is left out
+        // too, and the page counts it.
+        let video = &f.store.take_checks(1, &[], true).unwrap()[0];
+        f.found_named(video, Some("z.zip"), 10);
+        assert_eq!(f.rows().len(), 2);
+        assert_eq!(
+            f.links().0[1].check_detail.as_ref().unwrap().as_str(),
+            "Your link filters left out 2 links on this page."
         );
 
         // Text whose every link a filter matches is refused.
@@ -926,6 +936,53 @@ mod tests {
             .execute(&envelope, f.instance, &only_ads, NOW)
             .unwrap_err();
         assert!(error.message.as_str().contains("left out all 1 links"));
+    }
+
+    #[test]
+    fn links_held_for_their_checks_follow_the_filters_as_they_change() {
+        let mut f = Fixture::new();
+        let small = serde_json::json!([
+            { "name": "Small", "enabled": true, "size": { "op": "is", "max": 1000 } },
+        ]);
+        f.filter(small.clone());
+        f.collect(&[FILE], CollectMode::SupportedOnly, false);
+        assert_eq!(f.links().0.len(), 0);
+        // Turned off, the filter no longer holds the link back.
+        let revision = f.store.settings().unwrap().revision;
+        f.execute(
+            Command::UpdateSettings {
+                expected_revision: revision,
+                default_root: None,
+                max_active_downloads: None,
+                download_speed_limit: None,
+                extract_archives: None,
+                automatic_update_checks: None,
+                link_filters: Some(wayfetch_protocol::filter::LinkFilters {
+                    enabled: false,
+                    ..wayfetch_protocol::filter::LinkFilters::default()
+                }),
+            },
+            &CommandContext::default(),
+        );
+        assert_eq!(f.links().0.len(), 1);
+        // A link still waiting when its filter is removed is judged by the
+        // filters as they are when its check answers.
+        f.filter(small);
+        let other = "https://b.example/g.zip";
+        f.collect(&[other], CollectMode::SupportedOnly, false);
+        assert_eq!(f.links().0.len(), 1);
+        let task = f
+            .store
+            .take_checks(2, &[], true)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.url.as_str() == other)
+            .unwrap();
+        f.filter(serde_json::json!([
+            { "name": "Offline", "enabled": true, "check": { "op": "is", "values": ["offline"] } },
+        ]));
+        f.found_file(&task, 10);
+        assert_eq!(f.links().0.len(), 2);
     }
 
     #[test]
