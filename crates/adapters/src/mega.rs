@@ -19,6 +19,7 @@ use serde_json::Value;
 use url::Url;
 use wayfetch_engine::accounts::Secret;
 use wayfetch_engine::accounts::provider::{ApiClient, ProviderError};
+use wayfetch_engine::crawl::Inspector;
 use wayfetch_engine::domain::failure::FailureCode;
 use wayfetch_engine::domain::name::ProviderId;
 use wayfetch_engine::hosting::{
@@ -27,7 +28,7 @@ use wayfetch_engine::hosting::{
 use wayfetch_engine::protocol::query::CheckReason;
 use wayfetch_engine::transfer::writer::BoxFuture;
 
-use crate::common::{Api, Endpoint, now_millis};
+use crate::common::{self, Api, Endpoint, now_millis};
 use crypto::{FileKey, MacCheck};
 use link::{FolderKey, Handle, Inner, MegaLink};
 
@@ -37,8 +38,6 @@ pub const SERVICE: &str = "mega";
 pub const OFFICIAL_API: &str = "https://g.api.mega.co.nz/";
 /// Largest API answer read: a folder's whole listing comes in one.
 const MAX_BODY: usize = 8 * 1024 * 1024;
-/// Longest a download URL MEGA gives may be.
-const MAX_URL: usize = 4096;
 /// How long to wait after MEGA asks to slow down.
 const BACK_OFF: Duration = Duration::from_secs(60);
 
@@ -146,7 +145,11 @@ impl Mega {
     }
 
     /// The file host, for registering with the engine.
-    pub fn host(client: Arc<dyn ApiClient>, endpoint: Endpoint) -> Arc<dyn FileHost> {
+    pub fn host(
+        client: Arc<dyn ApiClient>,
+        _: Arc<dyn Inspector>,
+        endpoint: Endpoint,
+    ) -> Arc<dyn FileHost> {
         Arc::new(Self::new(client, endpoint))
     }
 
@@ -345,21 +348,9 @@ fn node_key(node: &Node, root: Option<&str>, key: &FolderKey) -> Option<FileKey>
     FileKey::in_folder(encrypted, key)
 }
 
-/// A download URL MEGA gave: HTTPS (or plain HTTP to a loopback test
-/// server), no credentials, bounded.
+/// A download URL MEGA gave, if it is one the engine may fetch.
 fn download_url(value: Option<&Value>) -> Option<Url> {
-    let url = Url::parse(value?.as_str()?).ok()?;
-    let loopback = match url.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        _ => false,
-    };
-    let ok = (url.scheme() == "https" || url.scheme() == "http" && loopback)
-        && url.host().is_some()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.as_str().len() <= MAX_URL;
-    ok.then_some(url)
+    common::download_url(Url::parse(value?.as_str()?).ok()?)
 }
 
 /// What MEGA's error number means for a download.

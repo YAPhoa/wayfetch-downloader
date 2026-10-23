@@ -417,7 +417,8 @@ pub async fn start_engine(settings: EngineSettings) -> Result<Started, String> {
     let transport =
         Arc::new(HttpTransport::new(http).map_err(|e| format!("cannot configure HTTP: {e}"))?);
     let providers = wayfetch_adapters::providers(transport.clone(), &provider_endpoints)?;
-    let file_hosts = wayfetch_adapters::file_hosts(transport.clone(), &provider_endpoints)?;
+    let file_hosts =
+        wayfetch_adapters::file_hosts(transport.clone(), transport.clone(), &provider_endpoints)?;
     let releases = match updates_endpoint {
         Some(url) => Endpoint::custom(&url)?,
         None => Endpoint::official(updates::OFFICIAL_API),

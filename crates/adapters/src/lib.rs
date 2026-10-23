@@ -10,10 +10,12 @@
 use std::sync::Arc;
 
 use wayfetch_engine::accounts::provider::{AccountProvider, ApiClient};
+use wayfetch_engine::crawl::Inspector;
 use wayfetch_engine::hosting::FileHost;
 
 pub mod common;
 pub mod confine;
+pub mod dropbox;
 pub mod ffmpeg;
 pub mod mega;
 pub mod plugin;
@@ -44,22 +46,33 @@ pub const INTEGRATIONS: &[Integration] = &[Integration {
     build: real_debrid::RealDebrid::provider,
 }];
 
+/// Builds a file host on a host's API client and inspector, at an
+/// endpoint.
+pub type BuildHost = fn(Arc<dyn ApiClient>, Arc<dyn Inspector>, Endpoint) -> Arc<dyn FileHost>;
+
 /// One file host a host can register.
 pub struct HostIntegration {
     /// The service's ID, as in the UI's catalogue.
     pub service: &'static str,
     /// The host's own API.
     pub official_api: &'static str,
-    /// Builds the integration on `client`, at an endpoint.
-    pub build: fn(Arc<dyn ApiClient>, Endpoint) -> Arc<dyn FileHost>,
+    /// Builds the integration.
+    pub build: BuildHost,
 }
 
 /// Every file host this build ships.
-pub const FILE_HOSTS: &[HostIntegration] = &[HostIntegration {
-    service: mega::SERVICE,
-    official_api: mega::OFFICIAL_API,
-    build: mega::Mega::host,
-}];
+pub const FILE_HOSTS: &[HostIntegration] = &[
+    HostIntegration {
+        service: mega::SERVICE,
+        official_api: mega::OFFICIAL_API,
+        build: mega::Mega::host,
+    },
+    HostIntegration {
+        service: dropbox::SERVICE,
+        official_api: dropbox::OFFICIAL_SITE,
+        build: dropbox::Dropbox::host,
+    },
+];
 
 /// Every integration, each at its official API unless `endpoints` gives
 /// another for its service (for testing against a local stand-in). An
@@ -84,16 +97,18 @@ pub fn providers(
 }
 
 /// Every file host, each at its official API unless `endpoints` gives
-/// another for its service, as for [`providers`].
+/// another for its service, as for [`providers`]. Hosts without an API
+/// check links with `inspector`, as direct links are checked.
 pub fn file_hosts(
     client: Arc<dyn ApiClient>,
+    inspector: Arc<dyn Inspector>,
     endpoints: &[(String, String)],
 ) -> Result<Vec<Arc<dyn FileHost>>, String> {
     FILE_HOSTS
         .iter()
         .map(|host| {
             let endpoint = endpoint(endpoints, host.service, host.official_api)?;
-            Ok((host.build)(client.clone(), endpoint))
+            Ok((host.build)(client.clone(), inspector.clone(), endpoint))
         })
         .collect()
 }
@@ -113,12 +128,22 @@ fn endpoint(
 mod tests {
     use super::*;
     use wayfetch_engine::accounts::provider::{ApiError, ApiRequest, ApiResponse};
+    use wayfetch_engine::crawl::{InspectError, InspectRequest, Inspection};
     use wayfetch_engine::transfer::writer::BoxFuture;
 
     struct Unused;
 
     impl ApiClient for Unused {
         fn send<'a>(&'a self, _: &'a ApiRequest) -> BoxFuture<'a, Result<ApiResponse, ApiError>> {
+            unreachable!("no request is sent")
+        }
+    }
+
+    impl Inspector for Unused {
+        fn inspect<'a>(
+            &'a self,
+            _: &'a InspectRequest,
+        ) -> BoxFuture<'a, Result<Inspection, InspectError>> {
             unreachable!("no request is sent")
         }
     }
@@ -144,7 +169,14 @@ mod tests {
         assert!(providers(client.clone(), &pair("real-debrid", "http://127.0.0.1:9/")).is_ok());
         assert!(providers(client.clone(), &pair("real-debrid", "http://rd.example/")).is_err());
         assert!(providers(client.clone(), &pair("mega", "http://127.0.0.1:9/")).is_ok());
-        assert!(file_hosts(client.clone(), &pair("mega", "http://mega.example/")).is_err());
+        let inspector: Arc<dyn Inspector> = Arc::new(Unused);
+        let hosts = |s, u| file_hosts(client.clone(), inspector.clone(), &pair(s, u));
+        assert!(hosts("mega", "http://mega.example/").is_err());
+        assert!(hosts("dropbox", "http://127.0.0.1:9/").is_ok());
+        assert_eq!(
+            hosts("dropbox", "https://dropbox.example/").unwrap().len(),
+            FILE_HOSTS.len()
+        );
         let unknown = providers(client, &pair("no-such-host", "https://x.example/"));
         assert!(unknown.is_err_and(|e| e.contains("no-such-host")));
     }

@@ -137,6 +137,13 @@ All mutations require `"target"` (the `instance` UUID from `GET /v1/capabilities
 - **Decrypted while downloading**: each attempt asks MEGA for a fresh download URL, and the engine decrypts the stored bytes as it writes them, so pause, resume, the speed limit, and the egress policy apply as for any download. Saved bytes are continued under MEGA's file handle, size, and key rather than the URL. Before publication, the finished file is read once and checked against MEGA's MAC; a file that fails is not published.
 - **Transfer quota**: when MEGA's free transfer quota is used up (API error `-17`, or HTTP `509` from storage), the download fails with `quota_exhausted` and can be retried later.
 
+### File Hosts (Dropbox)
+
+- **Public file links**: `www.dropbox.com/scl/fi/…` and the older `/s/…` links (and the same paths on `dl.dropbox.com` or `dl.dropboxusercontent.com`) are recognized locally and downloaded without an account or app key. The link's `rlkey` is kept; `dl` and `raw` are ignored.
+- **Checks**: checking a link asks Dropbox for the file's first byte with `dl=1`, which gives its name and size. Dropbox may count that as one download of the link.
+- **Downloads**: each attempt asks again for Dropbox's temporary download URL, and saved bytes are continued under a digest of the link and the file's size rather than the URL.
+- **Limits**: when Dropbox suspends a link for too much traffic (HTTP `429`), the download fails with `host_unavailable_via_provider` and a retry time a day later. Folder links and password-protected links are recognized and reported as not supported yet.
+
 ### Video Links, Archives & Plugins (`yt-dlp`, `ffmpeg` & 7-Zip)
 
 - **YouTube resolution**: `youtube.com/watch`, `youtu.be`, `/shorts/`, `/live/`, and `/embed/` single-video links are inspected via `yt-dlp` (using Deno as the unprivileged JS runtime for player scripts, with caches under `STATE_DIR/cache/yt-dlp`). Users can choose **Best available**, a maximum resolution (e.g. `1080p`), or audio-only (`MP3` or `M4A`).
