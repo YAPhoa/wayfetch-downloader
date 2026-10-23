@@ -1170,7 +1170,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   await dialog.getByLabel('File name comparison').selectOption('is');
   await dialog.getByLabel('A link to try the filter on').fill('https://example.com/files/release-gone.zip');
   await dialog.getByRole('button', { name: 'Try' }).click();
-  await expect(dialog.getByText('This filter would leave this link out.')).toBeVisible();
+  await expect(dialog.getByText('Its check decides', { exact: false })).toBeVisible();
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect(dialog).toBeHidden();
   await expect(filters.getByText('Filter added.')).toBeVisible();

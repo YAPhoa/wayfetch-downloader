@@ -303,8 +303,10 @@ impl Filters {
     }
 }
 
-/// What `rule` would do with `url` pasted as text, enabled or not, taking
-/// the file name from the address as its server would most often give it.
+/// What `rule` would do with `url` pasted as text, enabled or not. Its
+/// check decides when the rule has conditions on the file name, which its
+/// server may give differently from the address, or on what only the check
+/// tells.
 pub(crate) fn trial(
     mut rule: LinkRule,
     url: &Url,
@@ -322,20 +324,16 @@ pub(crate) fn trial(
         media,
         checked: true,
     };
-    let name = crate::download::url_file_name(url);
-    let name = name.as_ref().map(|n| n.as_str());
     let Some(rule) = filters.0.first() else {
         return Ok(FilterTrial::Kept);
     };
-    Ok(
-        if !rule.holds_for_address(&link) || !rule.holds_for_name(name) {
-            FilterTrial::Kept
-        } else if rule.needs_answer(&link) {
-            FilterTrial::CheckDecides
-        } else {
-            FilterTrial::LeftOut
-        },
-    )
+    Ok(if !rule.holds_for_address(&link) {
+        FilterTrial::Kept
+    } else if rule.names() || rule.needs_answer(&link) {
+        FilterTrial::CheckDecides
+    } else {
+        FilterTrial::LeftOut
+    })
 }
 
 #[cfg(test)]
@@ -578,9 +576,14 @@ mod tests {
             try_rule(json!({ "size": { "op": "is", "max": 10 } })),
             FilterTrial::CheckDecides
         );
+        // The server may name the file differently from its address.
         assert_eq!(
-            try_rule(json!({ "file_name": text("contains", "x") })),
-            FilterTrial::LeftOut
+            try_rule(json!({ "file_name": text("contains", "sample") })),
+            FilterTrial::CheckDecides
+        );
+        assert_eq!(
+            try_rule(json!({ "file_type": { "op": "is", "kinds": ["archive"] } })),
+            FilterTrial::CheckDecides
         );
     }
 

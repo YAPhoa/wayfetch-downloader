@@ -57,7 +57,8 @@ const PAGE_SIZE = 10;
 const TRIALS = {
   left_out: 'This filter would leave this link out.',
   kept: 'This filter would keep this link.',
-  check_decides: 'Its check decides: this link would wait off the list until its size, check result, or account is known.',
+  check_decides:
+    'Its check decides: this link would wait off the list until its file name, size, check result, or account is known.',
 };
 
 /**
