@@ -159,12 +159,10 @@ a { color: var(--accent); }
   flex: none;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.7;
+  stroke-width: 2.4;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-
-.action-resume .icon { fill: currentColor; stroke: none; }
 
 /* Controls. */
 
@@ -772,7 +770,6 @@ dd { margin: 0; overflow-wrap: anywhere; }
   color: var(--muted);
 }
 
-.jobs button.more .icon, .accounts-table button.more .icon { stroke-width: 3; }
 .jobs tr:hover button.more, .jobs tr.menu-open button.more, .jobs button.more:focus-visible,
 .accounts-table tr:hover button.more, .accounts-table tr.menu-open button.more, .accounts-table button.more:focus-visible {
   border-color: var(--control);
@@ -819,7 +816,6 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .menu-item[role='menuitemradio'] { justify-content: flex-start; gap: 8px; }
 .menu-item[role='menuitemradio'] .menu-label { flex: 1; }
 .menu-check { display: inline-flex; width: 14px; flex: none; color: var(--accent); }
-.menu-check .icon { stroke-width: 2; }
 .menu-item[aria-disabled='true'] { color: var(--muted); cursor: default; }
 .menu-item.danger:not([aria-disabled='true']) { color: var(--bad); }
 .menu-hint { color: var(--muted); font-size: 12px; }

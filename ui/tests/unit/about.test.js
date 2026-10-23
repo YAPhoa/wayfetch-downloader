@@ -26,7 +26,7 @@ test('a newer release shows a badge and links to its page', () => {
   assert.deepEqual(updateStatus(check(AVAILABLE)), {
     ...PLAIN,
     badge: '0.2.0 available',
-    icon: 'up',
+    icon: 'arrow-up',
     tone: 'run',
     link: { href: URL, label: 'Get 0.2.0' },
   });
@@ -45,7 +45,7 @@ test('a failed check says why and links every release', () => {
   assert.deepEqual(updateStatus(check({ kind: 'unavailable', problem: 'GitHub could not be reached' })), {
     ...PLAIN,
     badge: 'Failed',
-    icon: 'cancel',
+    icon: 'error',
     tone: 'bad',
     detail: 'GitHub could not be reached.',
     link: { href: RELEASES, label: 'All releases' },
@@ -56,17 +56,17 @@ test('the desktop app downloads a newer release when asked, then offers to resta
   assert.deepEqual(updateStatus(check(AVAILABLE, { state: 'idle' })), {
     ...PLAIN,
     badge: '0.2.0 available',
-    icon: 'up',
+    icon: 'arrow-up',
     tone: 'run',
     command: 'download',
   });
   const downloading = updateStatus(check(AVAILABLE, { state: 'downloading', received: 420, total: 1000 }));
-  assert.deepEqual(downloading, { ...PLAIN, badge: 'Downloading 42%', icon: 'down', tone: 'run', busy: true });
+  assert.deepEqual(downloading, { ...PLAIN, badge: 'Downloading 42%', icon: 'arrow-down', tone: 'run', busy: true });
   assert.equal(updateStatus(check(AVAILABLE, { state: 'downloading', received: 420 }))?.badge, 'Downloading…');
   assert.deepEqual(updateStatus(check(AVAILABLE, { state: 'ready' })), {
     ...PLAIN,
     badge: '0.2.0 ready',
-    icon: 'up',
+    icon: 'arrow-up',
     tone: 'ok',
     command: 'restart',
   });
@@ -81,7 +81,7 @@ test('the desktop app downloads a newer release when asked, then offers to resta
   assert.deepEqual(updateStatus(check(AVAILABLE, { state: 'failed', problem: 'this release has no package for this app' })), {
     ...PLAIN,
     badge: 'Failed',
-    icon: 'cancel',
+    icon: 'error',
     tone: 'bad',
     detail: 'This release has no package for this app.',
     command: 'download',

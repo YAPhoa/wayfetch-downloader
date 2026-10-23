@@ -52,26 +52,26 @@ import { toolbar } from './toolbar.js';
 
 /**
  * The sections, in menu order.
- * @type {{ id: Section, label: string, about: string, icon: 'brand' | 'folder' | 'filter' | 'display' | 'accounts' | 'plugins' | 'about' }[]}
+ * @type {{ id: Section, label: string, about: string, icon: import('./icons.js').IconName }[]}
  */
 export const SECTIONS = [
-  { id: 'downloads', label: 'Downloads', about: 'How downloads run.', icon: 'brand' },
+  { id: 'downloads', label: 'Downloads', about: 'How downloads run.', icon: 'download' },
   { id: 'folder', label: 'Download folders', about: 'Where new downloads are saved.', icon: 'folder' },
   { id: 'filters', label: 'Link filters', about: 'Links to leave out when you add links.', icon: 'filter' },
   {
     id: 'accounts',
     label: 'Accounts & services',
     about: 'Download services you can use with an account, such as multi-host services.',
-    icon: 'accounts',
+    icon: 'account',
   },
   {
     id: 'plugins',
     label: 'Plugins',
     about: 'Programs Wayfetch runs for links that need them.',
-    icon: 'plugins',
+    icon: 'plug',
   },
   { id: 'display', label: 'Display', about: 'Appearance and downloads list layout.', icon: 'display' },
-  { id: 'about', label: 'About', about: '', icon: 'about' },
+  { id: 'about', label: 'About', about: '', icon: 'info' },
 ];
 
 /** The path of Settings, which shows its first section. */
@@ -316,7 +316,7 @@ export class SettingsPage {
     this.back = h(
       'button',
       { type: 'button', class: 'tool back', 'data-key': 'settings-back', onclick: () => this.leave() },
-      icon('back'),
+      icon('arrow-left'),
       this.backLabel,
     );
     this.title = h('h1', { tabindex: -1, 'data-key': 'settings-title' }, 'Settings');
