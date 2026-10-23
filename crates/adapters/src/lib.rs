@@ -18,6 +18,7 @@ pub mod confine;
 pub mod dropbox;
 pub mod ffmpeg;
 pub mod mega;
+pub mod pixeldrain;
 pub mod plugin;
 pub mod plugins;
 pub mod real_debrid;
@@ -71,6 +72,11 @@ pub const FILE_HOSTS: &[HostIntegration] = &[
         service: dropbox::SERVICE,
         official_api: dropbox::OFFICIAL_SITE,
         build: dropbox::Dropbox::host,
+    },
+    HostIntegration {
+        service: pixeldrain::SERVICE,
+        official_api: pixeldrain::OFFICIAL_API,
+        build: pixeldrain::Pixeldrain::host,
     },
 ];
 
