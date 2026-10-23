@@ -177,26 +177,37 @@ impl Refusal {
         let value = serde_json::from_slice::<ErrorInfo>(response.body.expose())
             .map(|e| e.value)
             .unwrap_or_default();
-        match (response.status, value.as_str()) {
-            (451, _) => Self::TakenDown,
-            (404 | 410, _) => Self::NotFound,
-            (_, v) if v.ends_with("_captcha_required") || v == "hotlink_detected" => Self::Captcha,
-            (_, "transfer_limit_exceeded" | "download_limit_exceeded") => Self::Limit,
-            (_, "max_concurrent_downloads") | (429 | 500.., _) => Self::Busy,
-            (401 | 403, _) => Self::Denied,
-            (status, _) => Self::Other(status),
+        match response.status {
+            451 => Self::TakenDown,
+            404 | 410 => Self::NotFound,
+            status => Self::of_value(&value).unwrap_or(match status {
+                429 | 500.. => Self::Busy,
+                401 | 403 => Self::Denied,
+                status => Self::Other(status),
+            }),
         }
+    }
+
+    /// What one of Pixeldrain's error codes means, if it is one this
+    /// integration tells apart. A file's `availability` carries the same
+    /// codes as an error answer.
+    fn of_value(value: &str) -> Option<Self> {
+        Some(match value {
+            "unavailable_for_legal_reasons" => Self::TakenDown,
+            "not_found" => Self::NotFound,
+            v if v.ends_with("_captcha_required") || v == "hotlink_detected" => Self::Captcha,
+            "transfer_limit_exceeded" | "download_limit_exceeded" => Self::Limit,
+            "max_concurrent_downloads" | "ip_rate_limit_reached" => Self::Busy,
+            _ => return None,
+        })
     }
 
     /// What a file's `availability` means, if anything stops its download.
     fn of_availability(info: &FileInfo) -> Option<Self> {
-        let availability = info.availability.as_deref().unwrap_or_default();
-        if availability.ends_with("_captcha_required") {
-            Some(Self::Captcha)
-        } else if !info.can_download {
-            Some(Self::Denied)
-        } else {
-            None
+        match info.availability.as_deref().unwrap_or_default() {
+            "" if info.can_download => None,
+            "" => Some(Self::Denied),
+            value => Some(Self::of_value(value).unwrap_or(Self::Denied)),
         }
     }
 
@@ -318,9 +329,22 @@ impl Pixeldrain {
     }
 }
 
-/// A hex SHA-256, if `value` is one.
-fn sha256(value: Option<&str>) -> Option<[u8; 32]> {
-    hex::decode(value?).ok()?.try_into().ok()
+/// The SHA-256 Pixeldrain gave, if any: `Err` if it is not one, which
+/// must not quietly turn the check off.
+fn sha256(value: Option<&str>) -> Result<Option<[u8; 32]>, HostError> {
+    match value {
+        None | Some("") => Ok(None),
+        Some(hash) => hex::decode(hash)
+            .ok()
+            .and_then(|digest| digest.try_into().ok())
+            .map(Some)
+            .ok_or_else(|| {
+                HostError::new(
+                    FailureCode::AdapterParseFailure,
+                    "Pixeldrain gave a malformed SHA-256 for this file.",
+                )
+            }),
+    }
 }
 
 impl FileHost for Pixeldrain {
@@ -383,7 +407,7 @@ impl FileHost for Pixeldrain {
                     "Pixeldrain's download address is not usable.",
                 )
             })?;
-            let digest = sha256(info.hash_sha256.as_deref());
+            let digest = sha256(info.hash_sha256.as_deref())?;
             Ok(HostedFile {
                 url,
                 name: info.name,
@@ -548,6 +572,32 @@ mod tests {
     }
 
     #[test]
+    fn availability_carries_the_same_codes() {
+        let of = |availability: &str, can_download| {
+            Refusal::of_availability(&FileInfo {
+                name: None,
+                size: 1,
+                hash_sha256: None,
+                availability: Some(availability.into()),
+                can_download,
+            })
+        };
+        assert_eq!(of("", true), None);
+        assert_eq!(of("", false), Some(Refusal::Denied));
+        assert_eq!(
+            of("file_rate_limited_captcha_required", true),
+            Some(Refusal::Captcha)
+        );
+        assert_eq!(of("transfer_limit_exceeded", true), Some(Refusal::Limit));
+        assert_eq!(
+            of("unavailable_for_legal_reasons", true),
+            Some(Refusal::TakenDown)
+        );
+        assert_eq!(of("max_concurrent_downloads", true), Some(Refusal::Busy));
+        assert_eq!(of("something_new", true), Some(Refusal::Denied));
+    }
+
+    #[test]
     fn the_sha256_check_passes_only_the_stored_file() {
         let data = b"pixeldrain".to_vec();
         let encoding = Checked(Sha256::digest(&data).into());
@@ -561,8 +611,17 @@ mod tests {
         let mut check = encoding.verifier();
         check.update(b"pixeldraim");
         assert!(!check.verify());
-        assert_eq!(sha256(Some("00")), None);
-        assert_eq!(sha256(Some("zz")), None);
-        assert_eq!(sha256(None), None);
+        let hash = hex::encode(Sha256::digest(&data));
+        assert_eq!(sha256(Some(&hash)), Ok(Some(encoding.0)));
+        assert_eq!(sha256(Some(&hash.to_uppercase())), Ok(Some(encoding.0)));
+        for malformed in ["abc123", "00", "zz", &hash[1..], &format!("{hash}00")] {
+            assert_eq!(
+                sha256(Some(malformed)).map_err(|e| e.code),
+                Err(FailureCode::AdapterParseFailure),
+                "{malformed}"
+            );
+        }
+        assert_eq!(sha256(None), Ok(None));
+        assert_eq!(sha256(Some("")), Ok(None));
     }
 }

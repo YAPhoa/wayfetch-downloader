@@ -313,7 +313,29 @@ async fn pixeldrains_refusals_have_their_meaning() {
         host.check(&file_link()).await,
         HostCheck::Unknown(CheckReason::AccessDenied, _)
     ));
+    // Limits and takedowns shown there keep their meaning too.
+    server.state.lock().unwrap().availability = "transfer_limit_exceeded";
+    let limited = host.resolve(&file_link()).await.unwrap_err();
+    assert_eq!(limited.code, FailureCode::HostUnavailableViaProvider);
+    assert!(limited.retry_after.is_some());
+    server.state.lock().unwrap().availability = "unavailable_for_legal_reasons";
+    assert!(matches!(
+        host.check(&file_link()).await,
+        HostCheck::Offline(_)
+    ));
+    assert_eq!(
+        host.resolve(&file_link()).await.unwrap_err().code,
+        FailureCode::ResourceDeleted
+    );
     server.state.lock().unwrap().availability = "";
+
+    // A SHA-256 that is not one never turns the check off.
+    server.state.lock().unwrap().hash = Some("abc123".into());
+    assert_eq!(
+        host.resolve(&file_link()).await.unwrap_err().code,
+        FailureCode::AdapterParseFailure
+    );
+    server.state.lock().unwrap().hash = None;
 
     let info = format!("/api/file/{FILE}/info");
     server.error(&info, 451, "unavailable_for_legal_reasons");
