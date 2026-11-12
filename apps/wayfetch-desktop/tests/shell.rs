@@ -1242,9 +1242,10 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
         .await
         .unwrap();
     rate.send_keys("512").await.unwrap();
+    shell.click("[data-key=\"speed-unit\"]").await;
+    shell.click("[data-key=\"menu-item-KiB\"]").await;
     shell
-        .js("const unit = document.querySelector('#speed-limit-unit');
-             unit.value = 'KiB'; unit.dispatchEvent(new Event('change'));")
+        .wait_for("document.querySelector('[data-key=\"speed-unit\"]').getAttribute('aria-label') === 'Speed limit unit: KiB/s'")
         .await;
     shell.click("[data-key=\"downloads-save\"]").await;
     shell
