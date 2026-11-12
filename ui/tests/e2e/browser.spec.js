@@ -221,7 +221,7 @@ async function expectServiceCatalogue(page, accounts) {
   const surface = () => card.evaluate((el) => getComputedStyle(el).backgroundColor);
   expect(await surface()).toBe('rgb(255, 255, 255)');
   await page.emulateMedia({ colorScheme: 'dark' });
-  await expect.poll(surface).toBe('rgb(15, 19, 24)');
+  await expect.poll(surface).toBe('rgb(16, 26, 44)');
   await page.emulateMedia({ colorScheme: 'light' });
   // Escape clears a search, then closes it and stays in Settings, back on
   // Add account.
@@ -1099,7 +1099,7 @@ test('collected links wait on the Links page until chosen ones are started', asy
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(
     true,
   );
-  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(15, 19, 24)');
+  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(12, 19, 34)');
   await expect(views.getByRole('link', { name: 'Downloads' })).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.emulateMedia({ colorScheme: 'light' });
