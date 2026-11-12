@@ -13,7 +13,7 @@ ui/
 ├── src/
 │   ├── index.html / main.js    # Browser shell (owner setup, sign-in, session recovery)
 │   ├── shell/desktop.html      # Desktop WebView entry point (no sign-in needed)
-│   ├── style.css / theme.js    # Light/dark theme, density, and the dense table layout
+│   ├── style.css / theme.js    # Light/dark theme, density, the dense table layout, and motion tokens
 │   ├── fonts/                  # Bundled IBM Plex Sans and Mono WOFF2 (SIL OFL 1.1)
 │   ├── data/services.json      # Searchable provider/hoster catalogue
 │   ├── client/                 # Transport-neutral WayfetchClient contract, JobFeed, sorting
@@ -22,8 +22,12 @@ ui/
 │   └── components/             # Downloads, Links, Add Links, Settings, Plugins, Accounts, Dialogs
 └── tests/
     ├── unit/                   # Fast Node.js unit tests
-    └── e2e/                    # Chromium E2E suites against wayfetchd (browser, media, toolbar)
+    └── e2e/                    # Chromium E2E suites against wayfetchd (browser, media, toolbar, motion)
 ```
+
+## Motion
+
+Menus, dialogs and the Link filters toast open and close with short transitions; the current view, details tab and Settings section are marked by a sliding highlight; the details pane eases its contents in when it opens and closes at once; and a download's state mark swaps shape, or draws its check when it finishes, while it is on screen. The CSS follows the [transitions.dev](https://transitions.dev) snippets (`t-*` classes in `style.css`) on one set of motion tokens, and `components/motion.js` holds the shared close-then-hide, sliding highlight, shake and text swap helpers. Table rows, per-row figures, the status bar and hover stay instant. The system's reduce-motion setting turns all of it off; the E2E suites run that way, except `motion.spec.js`.
 
 ## Views & Workflows
 

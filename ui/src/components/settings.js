@@ -12,6 +12,7 @@ import { focusedKey, h, refocus, show } from './dom.js';
 import { browseServerFolders } from './folders.js';
 import { icon } from './icons.js';
 import { Menu, pickerButton } from './menu.js';
+import { Pill, shake } from './motion.js';
 import { aboutSection } from './about.js';
 import { accountsSection } from './accounts.js';
 import { filtersSection } from './filters.js';
@@ -296,6 +297,16 @@ function notRemoved(error) {
   return `Not removed: ${error.message}.`;
 }
 
+/**
+ * A number field's `change` handler: once a value is entered, the field
+ * shakes if its value is refused, as its problem line says.
+ * @param {Event} event
+ */
+function refusedShakes(event) {
+  const field = /** @type {HTMLInputElement} */ (event.currentTarget);
+  if (field.getAttribute('aria-invalid') === 'true') shake(field);
+}
+
 export class SettingsPage {
   /** @param {SettingsContext} context */
   constructor(context) {
@@ -346,6 +357,8 @@ export class SettingsPage {
       { class: 'settings-nav', 'aria-label': 'Settings sections', onkeydown: (/** @type {KeyboardEvent} */ e) => this.key(e) },
       h('ul', null, this.links.map((link) => h('li', null, link))),
     );
+    this.pill = new Pill(this.nav);
+    this.nav.prepend(this.pill.element);
     this.content = h('main', { class: 'settings-content' });
     this.element = h(
       'div',
@@ -383,6 +396,7 @@ export class SettingsPage {
       if (link.dataset.section === section) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     }
+    this.pill.move(this.links.find((link) => link.dataset.section === section) ?? null, !arriving);
     for (const panel of this.content.children) {
       /** @type {HTMLElement} */ (panel).hidden = /** @type {HTMLElement} */ (panel).dataset.section !== section;
     }
@@ -540,6 +554,7 @@ export class SettingsPage {
       required: true,
       'aria-describedby': 'max-active-about max-active-policy max-active-problem',
       oninput: () => update(),
+      onchange: refusedShakes,
     });
     const policy = h('span', { class: 'hint', id: 'max-active-policy' });
     const problem = h('span', { class: 'problem', id: 'max-active-problem' });
@@ -575,6 +590,7 @@ export class SettingsPage {
       'aria-label': 'Total download speed limit',
       'aria-describedby': 'speed-limit-about speed-limit-policy speed-limit-problem',
       oninput: () => update(),
+      onchange: refusedShakes,
     });
     // The unit, a choice of one from the themed picker the Format column uses.
     /** @type {RateUnit} */

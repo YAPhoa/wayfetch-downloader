@@ -12,6 +12,9 @@ export default defineConfig({
   use: {
     browserName: 'chromium',
     headless: true,
+    // Transitions are off, as under the system setting, so each step sees
+    // its end state at once; motion.spec.js turns them back on.
+    contextOptions: { reducedMotion: 'reduce' },
     // The WAN is unreachable: every request beyond loopback goes to a
     // proxy that does not exist, so the UI must work from the daemon alone.
     proxy: { server: 'http://127.0.0.1:9', bypass: '127.0.0.1' },

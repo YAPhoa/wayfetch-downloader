@@ -22,6 +22,7 @@ import { confirmDialog, openDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { icon } from './icons.js';
 import { Menu, rowMenuHandlers } from './menu.js';
+import { enter, leave } from './motion.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -370,29 +371,28 @@ function editFilter(context, rule, onSave) {
 export function filtersSection(context) {
   const { client } = context;
   const section = h('div', { class: 'settings-section' });
-  // What the last change did, as a banner that fades; refusals stay
-  // longer, so they can be read.
-  const banner = h('div', { class: 'flash', 'data-key': 'filters-message', hidden: true });
+  // What the last change did, as a toast that leaves on its own;
+  // refusals stay longer, so they can be read.
+  const banner = h('div', { class: 'flash t-toast', 'data-key': 'filters-message', hidden: true });
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let fading;
+  const hide = () => leave(banner, '--toast-close', () => (banner.hidden = true));
   /**
    * @param {string} text
    * @param {'ok' | 'bad'} [tone]
    */
   const say = (text, tone = 'ok') => {
     clearTimeout(fading);
-    banner.hidden = !text;
-    if (!text) return;
-    banner.className = `flash ${tone}`;
+    if (!text) {
+      hide();
+      return;
+    }
+    banner.className = `flash t-toast ${tone}${banner.classList.contains('is-open') ? ' is-open' : ''}`;
     banner.setAttribute('role', tone === 'bad' ? 'alert' : 'status');
     show(banner, icon(tone === 'bad' ? 'error' : 'check'), h('span', null, text));
-    fading = setTimeout(
-      () => {
-        banner.classList.add('leaving');
-        fading = setTimeout(() => (banner.hidden = true), 400);
-      },
-      tone === 'bad' ? 8000 : 2500,
-    );
+    banner.hidden = false;
+    enter(banner);
+    fading = setTimeout(hide, tone === 'bad' ? 8000 : 2500);
   };
   const canChange = client.permissions.includes('control');
   /** @type {Settings | null} */

@@ -42,6 +42,7 @@ import { copyText, focusedKey, h, isSelectAllKey, pagerBar, refocus, show, sortH
 import { icon, stateMark } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu, rowMenuHandlers } from './menu.js';
+import { Pill, enter, leave, riseIn, shake, still } from './motion.js';
 import { loadServices } from './services.js';
 import { SETTINGS_PATH, SettingsPage, sectionPath, settingsSection } from './settings.js';
 import { toolbar } from './toolbar.js';
@@ -60,6 +61,13 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('./settings.js').Density} Density
  * @typedef {import('../client/feed.js').FeedStatus} FeedStatus
  * @typedef {import('../client/jobs.js').Status} Status
+ * @typedef {{
+ *   nav: HTMLElement,
+ *   pill: Pill,
+ *   downloads: HTMLElement,
+ *   links: HTMLElement,
+ *   count: HTMLElement,
+ * }} ViewSwitcher
  * @typedef {import('../client/jobs.js').JobColumn} JobColumn
  */
 
@@ -181,6 +189,49 @@ function heartbeat(element, state, sample) {
 }
 
 /**
+ * Plays a download's change of state where `before` showed the old one
+ * and `after`, just put in its place, shows the new: the mark cross-fades
+ * to its new shape (Icon swap), or draws its check when the download has
+ * just finished (Success check), and the label rises in (Text states
+ * swap). Nothing plays when the state is the same, so a page loaded,
+ * paged or filtered stays still.
+ * @param {Element | null | undefined} before
+ * @param {Element | null | undefined} after
+ */
+function playStateChange(before, after) {
+  const was = before?.querySelector('.mark');
+  const mark = after?.querySelector('.mark');
+  if (!after || !was || !mark || still()) return;
+  const status = mark.getAttribute('data-status');
+  if (was.getAttribute('data-status') === status) return;
+  /** @type {HTMLElement} */
+  let shape;
+  if (status === 'done') {
+    shape = h('span', { class: 't-success-check', 'data-state': 'out' });
+    mark.replaceWith(shape);
+    shape.append(mark);
+  } else {
+    const old = /** @type {SVGElement} */ (was.cloneNode(true));
+    old.classList.add('t-icon');
+    old.setAttribute('data-icon', 'a');
+    shape = h('span', { class: 't-icon-swap', 'data-state': 'a' });
+    mark.replaceWith(shape);
+    mark.classList.add('t-icon');
+    mark.setAttribute('data-icon', 'b');
+    shape.append(old, mark);
+  }
+  const text = after.lastChild;
+  if (text?.nodeType === Node.TEXT_NODE) {
+    const label = h('span');
+    text.replaceWith(label);
+    label.append(text);
+    riseIn(label);
+  }
+  void shape.offsetWidth;
+  shape.setAttribute('data-state', status === 'done' ? 'in' : 'b');
+}
+
+/**
  * A download's progress in its state's colour. Unknown progress fills
  * nothing and has no value, rather than reading 0%.
  * @param {{ fraction: number | undefined, percent: string | undefined }} shown
@@ -292,6 +343,9 @@ export class Downloads {
     this.query = '';
     /** @type {'general' | 'engine'} */
     this.tab = 'general';
+    /** The inspector's title bar, built when first shown. */
+    /** @type {ReturnType<Downloads['buildInspectorHead']> | null} */
+    this.head = null;
     /** The outcome of the last command or an error from a read. */
     this.notice = '';
     /** The last notice that reported a success, shown as one. */
@@ -360,8 +414,11 @@ export class Downloads {
     /** Links in the collected list, once read. @type {number | null} */
     this.linkTotal = null;
     /** Each toolbar's view switcher, kept current by `renderViews`. */
-    /** @type {HTMLElement[]} */
+    /** @type {ViewSwitcher[]} */
     this.viewSwitchers = [];
+    /** The view the switchers last marked, which their pills slide from. */
+    /** @type {boolean | null} */
+    this.markedLinks = null;
     this.filters = h('nav', { class: 'filters', 'aria-label': 'Filter by status' });
     /** The column sorting the shown page, or none for the engine's order. */
     /** @type {import('../client/sort.js').Sort<JobColumn | null>} */
@@ -370,7 +427,7 @@ export class Downloads {
     this.tableBody = h('tbody');
     this.listStatus = h('p', { class: 'list-status', role: 'status' });
     this.pager = h('nav', { class: 'pager', 'aria-label': 'Pages' });
-    this.inspector = h('section', { class: 'inspector', 'aria-label': 'Selected download' });
+    this.inspector = h('section', { class: 'inspector t-panel-reveal', 'aria-label': 'Selected download', 'data-open': 'true' });
     /** @type {Density} */
     this.density = 'compact';
     this.setDensity(savedDensity());
@@ -761,8 +818,7 @@ export class Downloads {
    * @param {Node} search
    */
   toolbar(tools, search) {
-    const views = h('nav', { class: 'views', 'aria-label': 'Views' });
-    this.viewSwitchers.push(views);
+    const views = this.viewSwitcher();
     const bar = toolbar(
       [
         h(
@@ -812,37 +868,69 @@ export class Downloads {
     );
   }
 
+  /**
+   * A switch between Downloads and Links, kept by `renderViews`: a pill
+   * slides to the current view, and the count of links waiting pops in
+   * and out.
+   */
+  viewSwitcher() {
+    const nav = h('nav', { class: 'views', 'aria-label': 'Views' });
+    const count = h('span', { class: 'count', hidden: true });
+    const downloads = this.viewLink('/', 'Downloads');
+    const links = this.viewLink(LINKS_PATH, 'Links', count);
+    const pill = new Pill(nav);
+    nav.append(pill.element, downloads, links);
+    this.viewSwitchers.push({ nav, pill, downloads, links, count });
+    return nav;
+  }
+
   /** Marks the view shown in each switcher, with the Links count. */
   renderViews() {
     const links = this.viewPath === LINKS_PATH;
-    const total = this.linkTotal;
-    for (const views of this.viewSwitchers) {
-      const focused = focusedKey(views);
-      show(
-        views,
-        this.viewLink('/', 'Downloads', !links, null),
-        this.viewLink(LINKS_PATH, 'Links', links, total),
-      );
-      refocus(views, focused);
+    const total = this.linkTotal ?? 0;
+    const from = this.markedLinks;
+    this.markedLinks = links;
+    for (const switcher of this.viewSwitchers) {
+      const [current, other] = links ? [switcher.links, switcher.downloads] : [switcher.downloads, switcher.links];
+      current.setAttribute('aria-current', 'page');
+      other.removeAttribute('aria-current');
+      // Read as "Links (3)", not "Links3".
+      if (total > 0) switcher.links.setAttribute('aria-label', `Links (${total})`);
+      else switcher.links.removeAttribute('aria-label');
+      const { count, pill } = switcher;
+      if (total > 0) {
+        count.textContent = String(total);
+        if (!count.classList.contains('is-open')) {
+          // Already waiting when the page loads: shown as it is.
+          const still = from === null && count.hidden;
+          count.hidden = false;
+          if (still) count.classList.add('is-open');
+          else enter(count);
+        }
+      } else if (!count.hidden && count.classList.contains('is-open')) {
+        leave(count, '--badge-pop-close-dur', () => {
+          count.hidden = true;
+          pill.move(pill.target);
+        });
+      }
+      // A page just shown starts its pill on the view left.
+      if (from !== null && from !== links) pill.move(other, false);
+      pill.move(current);
     }
   }
 
   /**
    * @param {string} path
    * @param {string} label
-   * @param {boolean} current
-   * @param {number | null} total
+   * @param {HTMLElement | null} [count]
    */
-  viewLink(path, label, current, total) {
+  viewLink(path, label, count = null) {
     return h(
       'a',
       {
         href: path,
         class: 'view',
         'data-key': `view-${label.toLowerCase()}`,
-        'aria-current': current ? 'page' : null,
-        // Read as "Links (3)", not "Links3".
-        'aria-label': total ? `${label} (${total})` : null,
         onclick: (/** @type {MouseEvent} */ event) => {
           if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
           event.preventDefault();
@@ -851,7 +939,7 @@ export class Downloads {
         },
       },
       label,
-      total ? h('span', { class: 'count' }, total) : null,
+      count,
     );
   }
 
@@ -1423,8 +1511,10 @@ export class Downloads {
       : 'Your access does not allow deleting downloaded data.'),
     message,
     h('div', { class: 'row' }, save, cancel));
-    const dialog = openDialog({ title: one ? 'Remove download' : `Remove ${name}`, closeLabel: 'Cancel removal' }, form);
-    dialog.addEventListener('cancel', (event) => { if (sending) event.preventDefault(); });
+    const dialog = openDialog(
+      { title: one ? 'Remove download' : `Remove ${name}`, closeLabel: 'Cancel removal', held: () => sending },
+      form,
+    );
     const choiceChanged = () => {
       save.textContent = erase.checked ? 'Delete files and remove' : 'Remove';
       save.className = erase.checked ? 'primary delete-confirm' : 'primary';
@@ -1466,6 +1556,11 @@ export class Downloads {
       spellcheck: 'false',
     });
     const save = h('button', { type: 'submit', class: 'primary' }, 'Unpack');
+    /** @param {string} text */
+    const refuse = (text) => {
+      show(message, text);
+      shake(field);
+    };
     const cancel = h('button', { type: 'button', onclick: () => dialog.close() }, 'Cancel');
     const form = h(
       'form',
@@ -1475,14 +1570,14 @@ export class Downloads {
           event.preventDefault();
           const password = field.value;
           if (password === '') {
-            show(message, 'Enter the password.');
+            refuse('Enter the password.');
             return;
           }
           save.disabled = true;
           show(message, '');
           const done = await this.unpack(this.heldJob(job.id) ?? job, {
             password,
-            refused: (text) => show(message, text),
+            refused: (text) => refuse(text),
           });
           save.disabled = false;
           if (done) dialog.close();
@@ -1526,6 +1621,11 @@ export class Downloads {
       spellcheck: 'false',
     });
     const save = h('button', { type: 'submit', class: 'primary' }, 'Rename');
+    /** @param {string} text */
+    const refuse = (text) => {
+      show(message, text);
+      shake(field);
+    };
     const cancel = h('button', { type: 'button', onclick: () => dialog.close() }, 'Cancel');
     const form = h(
       'form',
@@ -1537,6 +1637,7 @@ export class Downloads {
           const problem = nameProblem(name);
           if (problem) {
             show(message, problem);
+            shake(field);
             return;
           }
           if (name === current) {
@@ -1545,7 +1646,7 @@ export class Downloads {
           }
           save.disabled = true;
           show(message, '');
-          const done = await this.send(job, 'rename', { name, refused: (text) => show(message, text) });
+          const done = await this.send(job, 'rename', { name, refused: (text) => refuse(text) });
           save.disabled = false;
           if (done) {
             dialog.close();
@@ -1729,6 +1830,7 @@ export class Downloads {
           ? old.row
           : this.row(job, sample, isSelected);
       if (old && row !== old.row) {
+        const before = old.row.querySelector('td.state');
         // Progress and fresh snapshots must not remove the name link or
         // menu button between pointer-down and click.
         const name = old.row.querySelector('td.name');
@@ -1746,6 +1848,7 @@ export class Downloads {
           const cells = [...row.cells];
           for (let i = 2; i < 8; i++) old.row.cells[i].replaceWith(cells[i]);
           heartbeat(old.row, describe(job), sample);
+          playStateChange(before, old.row.querySelector('td.state'));
           row = old.row;
         }
       }
@@ -1909,11 +2012,21 @@ export class Downloads {
   renderInspector() {
     const { feed } = this;
     const job = feed.watchedJob;
-    // With no download chosen there are no details, so the table keeps the room.
+    // With no download chosen there are no details, so the table keeps the
+    // room. Closing is instant; opening eases the contents in, once, and
+    // not again when another download is chosen.
+    const opening = this.inspector.hidden && feed.watched !== null;
     this.inspector.hidden = feed.watched === null;
     if (feed.watched === null) {
       show(this.inspector);
       return;
+    }
+    if (opening) {
+      this.inspector.dataset.open = 'false';
+      queueMicrotask(() => {
+        void this.inspector.offsetWidth;
+        this.inspector.dataset.open = 'true';
+      });
     }
     if (!job) {
       const text = feed.watchedState === 'missing' ? 'There is no such download.' : 'Loading…';
@@ -1927,19 +2040,38 @@ export class Downloads {
     // The panel is rebuilt on every update; it keeps its scroll position
     // while it shows the same download and tab.
     const shown = `${job.id} ${this.tab}`;
+    const before = this.inspector.dataset.shown === shown ? this.inspector.querySelector('.panel .state') : null;
     const scrolled = this.inspector.dataset.shown === shown ? this.inspector.querySelector('.panel')?.scrollTop ?? 0 : 0;
     this.inspector.dataset.shown = shown;
     const panel = this.tab === 'general' ? this.general(job) : this.engine(job);
     show(this.inspector, this.inspectorHead(jobName(job), job), panel);
     panel.scrollTop = scrolled;
+    playStateChange(before, panel.querySelector('.state'));
   }
 
   /**
-   * The inspector's title bar: the job's name, the tabs, and a close button.
+   * The inspector's title bar: the job's name, the tabs, and a close
+   * button. It is kept across updates, so the tabs' underline can slide.
    * @param {string} title
    * @param {JobSummary | null} job
    */
   inspectorHead(title, job) {
+    const head = (this.head ??= this.buildInspectorHead());
+    head.title.textContent = title;
+    head.title.title = title;
+    head.tablist.hidden = job === null;
+    for (const [tab, button] of head.tabs) {
+      const chosen = this.tab === tab;
+      button.setAttribute('aria-selected', String(chosen));
+      button.tabIndex = chosen ? 0 : -1;
+    }
+    const chosen = head.tabs.get(this.tab) ?? null;
+    // Sliding only between tabs, not into a pane just opened.
+    head.pill.move(chosen, head.pill.target !== null && head.pill.target !== chosen);
+    return head.element;
+  }
+
+  buildInspectorHead() {
     /** @param {'general' | 'engine'} tab @param {string} label */
     const tab = (tab, label) =>
       h(
@@ -1949,9 +2081,7 @@ export class Downloads {
           role: 'tab',
           id: `tab-${tab}`,
           'data-key': `tab-${tab}`,
-          'aria-selected': String(this.tab === tab),
           'aria-controls': 'inspector-panel',
-          tabindex: this.tab === tab ? 0 : -1,
           onclick: () => {
             this.tab = tab;
             this.render();
@@ -1967,17 +2097,20 @@ export class Downloads {
         },
         label,
       );
-    return h(
+    /** @type {Map<'general' | 'engine', HTMLElement>} */
+    const tabs = new Map([
+      ['general', tab('general', 'General')],
+      ['engine', tab('engine', 'Engine details')],
+    ]);
+    const tablist = h('div', { role: 'tablist', 'aria-label': 'Download details' });
+    const pill = new Pill(tablist, { edge: true });
+    tablist.append(pill.element, ...tabs.values());
+    const title = h('h2');
+    const element = h(
       'div',
       { class: 'inspector-head' },
-      h('h2', { title }, title),
-      job &&
-        h(
-          'div',
-          { role: 'tablist', 'aria-label': 'Download details' },
-          tab('general', 'General'),
-          tab('engine', 'Engine details'),
-        ),
+      title,
+      tablist,
       h(
         'button',
         {
@@ -1990,6 +2123,7 @@ export class Downloads {
         icon('close'),
       ),
     );
+    return { element, title, tablist, tabs, pill };
   }
 
   focusTab() {
