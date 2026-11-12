@@ -92,7 +92,7 @@ jobs:
             '! command -v node && ! command -v npm && cargo build --locked -p wayfetch-engine -p wayfetchd'
 
   ui:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
