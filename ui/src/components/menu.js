@@ -7,6 +7,7 @@
 
 import { h, show } from './dom.js';
 import { icon } from './icons.js';
+import { enter, leave, settle } from './motion.js';
 
 /**
  * @typedef {{
@@ -43,6 +44,16 @@ export function place(anchor, size, viewport) {
     left: clamp(left, size.width, viewport.width),
     top: clamp(top, size.height, viewport.height),
   };
+}
+
+/**
+ * The corner a menu placed at `at` grows from: the one nearest `anchor`,
+ * so a menu flipped above or to the left of its opener grows from there.
+ * @param {Anchor} anchor
+ * @param {{ left: number, top: number }} at
+ */
+export function origin(anchor, at) {
+  return `${at.top < anchor.top ? 'bottom' : 'top'}-${at.left < anchor.left ? 'right' : 'left'}`;
 }
 
 /** Inputs whose text can be edited, and so copied and pasted. */
@@ -148,7 +159,7 @@ export class Menu {
     this.onchange = onchange;
     this.label = label;
     this.element = h('div', {
-      class: 'menu',
+      class: 'menu t-dropdown',
       role: 'menu',
       'aria-label': label,
       hidden: true,
@@ -181,7 +192,7 @@ export class Menu {
   }
 
   get open() {
-    return !this.element.hidden;
+    return this.owner !== null;
   }
 
   /**
@@ -194,6 +205,8 @@ export class Menu {
    */
   show(entries, anchor, { owner, restore, label = this.label }) {
     this.close(false);
+    // A menu still fading out is replaced at once.
+    settle(this.element);
     this.dismissed = null;
     this.element.setAttribute('aria-label', label);
     const choice = entries.some((entry) => entry !== 'separator' && entry.checked !== undefined);
@@ -220,7 +233,7 @@ export class Menu {
                   if (document.activeElement !== item) item.focus({ preventScroll: true });
                 },
                 onclick: () => {
-                  if (entry.disabled) return;
+                  if (entry.disabled || !this.open) return;
                   this.close(true);
                   entry.run();
                 },
@@ -241,6 +254,8 @@ export class Menu {
     });
     this.element.style.left = `${at.left}px`;
     this.element.style.top = `${at.top}px`;
+    this.element.dataset.origin = origin(anchor, at);
+    enter(this.element);
     const items = this.items();
     (items.find((item) => item.getAttribute('aria-checked') === 'true') ?? items[0])?.focus();
     document.addEventListener('pointerdown', this.onPointerDown, true);
@@ -291,8 +306,11 @@ export class Menu {
     window.removeEventListener('blur', this.onDismiss);
     const restore = this.restore;
     const inside = this.element.contains(document.activeElement);
-    this.element.hidden = true;
-    this.element.replaceChildren();
+    // It fades out where it is; its items take no presses meanwhile.
+    leave(this.element, '--dropdown-close-dur', () => {
+      this.element.hidden = true;
+      this.element.replaceChildren();
+    });
     this.owner = null;
     this.restore = null;
     // Focus left inside a hidden menu would be lost.
@@ -309,6 +327,7 @@ export class Menu {
 
   /** @param {KeyboardEvent} event */
   key(event) {
+    if (!this.open) return;
     const items = this.items();
     const at = items.indexOf(/** @type {HTMLElement} */ (document.activeElement));
     /** @param {number} index */

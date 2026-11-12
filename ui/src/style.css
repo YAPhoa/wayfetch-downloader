@@ -99,6 +99,84 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Motion: the transitions.dev token scale, then each transition's own
+   names for the values it takes from it. Only what the UI uses. */
+:root {
+  --duration-micro: 80ms;
+  --duration-quick: 150ms;
+  --duration-fast: 250ms;
+  --duration-medium: 350ms;
+  --duration-slow: 400ms;
+  --duration-very-slow: 500ms;
+  --ease-smooth-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: ease-in-out;
+  --ease-bounce: cubic-bezier(0.34, 1.36, 0.64, 1);
+  --distance-micro: 4px;
+  --distance-small: 6px;
+  --distance-base: 8px;
+  --scale-large: 0.96;
+  --scale-medium: 0.97;
+  --scale-tiny: 0.99;
+  --blur-small: 2px;
+
+  --dropdown-open-dur: var(--duration-fast);
+  --dropdown-close-dur: var(--duration-quick);
+  --dropdown-pre-scale: var(--scale-medium);
+  --dropdown-closing-scale: var(--scale-tiny);
+  --dropdown-ease: var(--ease-smooth-out);
+  --modal-open-dur: var(--duration-fast);
+  --modal-close-dur: var(--duration-quick);
+  --modal-scale: var(--scale-large);
+  --modal-scale-close: var(--scale-large);
+  --modal-ease: var(--ease-smooth-out);
+  --toast-open: var(--duration-medium);
+  --toast-close: var(--duration-fast);
+  --toast-distance: 16px;
+  --toast-blur: var(--blur-small);
+  --toast-scale: var(--scale-medium);
+  --toast-ease: var(--ease-smooth-out);
+  --tabs-dur: var(--duration-fast);
+  --tabs-ease: var(--ease-smooth-out);
+  --panel-open-dur: var(--duration-slow);
+  --panel-translate-y: var(--distance-base);
+  --panel-blur: var(--blur-small);
+  --panel-ease: var(--ease-smooth-out);
+  --badge-pop-dur: var(--duration-very-slow);
+  --badge-pop-close-dur: 180ms;
+  --badge-fade-dur: var(--duration-slow);
+  --badge-fade-close-dur: 180ms;
+  --badge-blur: var(--blur-small);
+  --badge-pop-ease: var(--ease-bounce);
+  --badge-close-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --icon-swap-dur: var(--duration-fast);
+  --icon-swap-blur: var(--blur-small);
+  --icon-swap-start-scale: 0.25;
+  --icon-swap-ease: var(--ease-in-out);
+  --check-opacity-dur: var(--duration-very-slow);
+  --check-rotate-dur: var(--duration-very-slow);
+  --check-rotate-from: 80deg;
+  --check-bob-dur: var(--duration-very-slow);
+  --check-y-amount: var(--distance-base);
+  --check-blur-dur: var(--duration-very-slow);
+  --check-blur-from: 8px;
+  --check-path-dur: var(--duration-very-slow);
+  --check-path-delay: var(--duration-micro);
+  --check-ease-out: var(--ease-smooth-out);
+  --check-ease-opacity: var(--ease-smooth-out);
+  --check-ease-rotate: var(--ease-smooth-out);
+  --check-ease-bob: cubic-bezier(0.34, 1.35, 0.64, 1);
+  --check-ease-path: var(--ease-smooth-out);
+  --text-swap-dur: var(--duration-quick);
+  --text-swap-translate-y: var(--distance-micro);
+  --text-swap-blur: var(--blur-small);
+  --text-swap-ease: var(--ease-in-out);
+  --shake-distance: var(--distance-small);
+  --shake-overshoot: var(--distance-micro);
+  --shake-dur-a: var(--duration-micro);
+  --shake-dur-b: 60ms;
+  --shake-ease: var(--ease-smooth-out);
+}
+
 :root[data-density='comfortable'] {
   --row-pad: 10px 12px;
   --font-size: 14px;
@@ -432,6 +510,7 @@ code { font-family: var(--mono); }
    the current view raised on a thumb. */
 
 .views {
+  position: relative;
   display: flex;
   gap: 2px;
   padding: 2px;
@@ -441,6 +520,8 @@ code { font-family: var(--mono); }
 }
 
 .view {
+  position: relative;
+  z-index: 1;
   /* Keep metrics stable when the current view changes. */
   font-weight: 600;
   display: inline-flex;
@@ -454,9 +535,12 @@ code { font-family: var(--mono); }
 }
 
 .view:hover { color: var(--ink); }
-.view[aria-current='page'] { background: var(--thumb); color: var(--ink); box-shadow: var(--shadow-1); }
+.view[aria-current='page'] { color: var(--ink); }
+/* The thumb under the current view, sliding between the two. */
+.views .t-tabs-pill { border-radius: var(--radius); background: var(--thumb); box-shadow: var(--shadow-1); }
 
 .view .count {
+  display: inline-block;
   min-width: 18px;
   padding: 0 5px;
   border-radius: 999px;
@@ -760,7 +844,8 @@ table.jobs {
   overflow-wrap: anywhere;
 }
 
-[role='tablist'] { display: flex; gap: 2px; }
+[role='tablist'] { position: relative; display: flex; gap: 2px; }
+[role='tablist'] .t-tabs-pill { background: var(--brand); }
 
 [role='tab'] {
   min-height: 0;
@@ -773,7 +858,8 @@ table.jobs {
   font-weight: 400;
 }
 
-[role='tab'][aria-selected='true'] { border-bottom-color: var(--brand); color: var(--ink); font-weight: 500; }
+/* The chosen tab's underline is the sliding bar drawn over this border. */
+[role='tab'][aria-selected='true'] { color: var(--ink); font-weight: 500; }
 [role='tab']:hover:not(:disabled) { background: transparent; color: var(--ink); }
 
 .inspector .close { min-height: 28px; padding: 0 6px; border: 0; background: transparent; }
@@ -901,6 +987,42 @@ dd { margin: 0; overflow-wrap: anywhere; }
   box-shadow: var(--shadow-2);
 }
 
+/* Menu dropdown (transitions.dev): grows from the corner nearest its
+   opener, set by menu.js as data-origin. */
+.t-dropdown {
+  transform-origin: top left;
+  transform: scale(var(--dropdown-pre-scale));
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--dropdown-open-dur) var(--dropdown-ease),
+    opacity   var(--dropdown-open-dur) var(--dropdown-ease);
+  will-change: transform, opacity;
+}
+.t-dropdown[data-origin="top-right"]     { transform-origin: top right; }
+.t-dropdown[data-origin="top-center"]    { transform-origin: top center; }
+.t-dropdown[data-origin="bottom-left"]   { transform-origin: bottom left; }
+.t-dropdown[data-origin="bottom-center"] { transform-origin: bottom center; }
+.t-dropdown[data-origin="bottom-right"]  { transform-origin: bottom right; }
+
+.t-dropdown.is-open {
+  transform: scale(1);
+  opacity: 1;
+  pointer-events: auto;
+}
+.t-dropdown.is-closing {
+  transform: scale(var(--dropdown-closing-scale));
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--dropdown-close-dur) var(--dropdown-ease),
+    opacity   var(--dropdown-close-dur) var(--dropdown-ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-dropdown { transition: none !important; }
+}
+
 .menu-item {
   justify-content: space-between;
   gap: 16px;
@@ -942,6 +1064,39 @@ dd { margin: 0; overflow-wrap: anywhere; }
 
 .dialog::backdrop { background: rgb(0 0 0 / 35%); }
 .dialog[open] { display: flex; flex-direction: column; }
+
+/* Modal open / close (transitions.dev), set by dialog.js; the backdrop
+   fades on the same clock. */
+.t-modal {
+  transform-origin: center;
+  transform: scale(var(--modal-scale));
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--modal-open-dur) var(--modal-ease),
+    opacity   var(--modal-open-dur) var(--modal-ease);
+  will-change: transform, opacity;
+}
+.t-modal.is-open {
+  transform: scale(1);
+  opacity: 1;
+  pointer-events: auto;
+}
+.t-modal.is-closing {
+  transform: scale(var(--modal-scale-close));
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--modal-close-dur) var(--modal-ease),
+    opacity   var(--modal-close-dur) var(--modal-ease);
+}
+.t-modal::backdrop { opacity: 0; transition: opacity var(--modal-open-dur) var(--modal-ease); }
+.t-modal.is-open::backdrop { opacity: 1; }
+.t-modal.is-closing::backdrop { opacity: 0; transition-duration: var(--modal-close-dur); }
+
+@media (prefers-reduced-motion: reduce) {
+  .t-modal, .t-modal::backdrop { transition: none !important; }
+}
 .dialog.rename { width: min(440px, calc(100vw - 32px)); }
 
 .dialog-head {
@@ -1144,6 +1299,7 @@ th[aria-sort] button.sort { color: var(--ink); }
 }
 
 .settings-nav {
+  position: relative;
   flex: 0 0 196px;
   padding: 12px 8px;
   overflow-y: auto;
@@ -1154,6 +1310,8 @@ th[aria-sort] button.sort { color: var(--ink); }
 .settings-nav ul { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
 
 .settings-link {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1168,10 +1326,12 @@ th[aria-sort] button.sort { color: var(--ink); }
 .settings-link:hover { background: var(--row-hover); }
 .settings-link:focus-visible { outline-offset: -2px; }
 
-.settings-link[aria-current='page'] {
-  background: var(--tint-strong);
+.settings-link[aria-current='page'],
+.settings-link[aria-current='page']:hover {
+  background: transparent;
   font-weight: 600;
 }
+.settings-nav .t-tabs-pill { border-radius: var(--radius); background: var(--tint-strong); }
 
 .settings-link[aria-current='page'] .icon { color: var(--accent); }
 
@@ -1555,7 +1715,7 @@ input.switch {
   border-radius: 10px;
   background: var(--track);
   cursor: pointer;
-  transition: background 150ms ease, border-color 150ms ease;
+  transition: background var(--duration-fast) var(--ease-smooth-out), border-color var(--duration-fast) var(--ease-smooth-out);
 }
 input.switch::before {
   content: '';
@@ -1567,7 +1727,7 @@ input.switch::before {
   border-radius: 50%;
   background: #ffffff;
   box-shadow: var(--shadow-1);
-  transition: transform 150ms ease;
+  transition: transform var(--duration-fast) var(--ease-smooth-out);
 }
 input.switch:checked { background: var(--brand); border-color: var(--brand); }
 input.switch:checked::before { transform: translateX(14px); }
@@ -1628,8 +1788,9 @@ input.switch:focus-visible { outline: 2px solid var(--brand); outline-offset: 2p
   .condition { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* What the last change in a settings section did: a banner over the
-   bottom of the window that fades out. */
+/* What the last change in a settings section did: a toast over the
+   bottom of the window. `translate` centres it, so the toast's own
+   transform is free to move it. */
 .flash {
   position: fixed;
   left: 50%;
@@ -1643,17 +1804,228 @@ input.switch:focus-visible { outline: 2px solid var(--brand); outline-offset: 2p
   border: 1px solid currentColor;
   border-radius: var(--radius);
   box-shadow: var(--shadow-2);
-  transform: translateX(-50%);
-  animation: flash-in 180ms ease-out;
-  transition: opacity 400ms ease, transform 400ms ease;
+  translate: -50% 0;
 }
 .flash[hidden] { display: none; }
 .flash.ok { color: var(--ok); background: var(--note-ok); }
 .flash.bad { color: var(--bad); background: var(--note-bad); }
 .flash span { color: var(--ink); }
 .flash .icon { flex: none; }
-.flash.leaving { opacity: 0; transform: translate(-50%, 8px); }
-@keyframes flash-in { from { opacity: 0; transform: translate(-50%, 8px); } }
+
+/* Toast open / close (transitions.dev). */
+.t-toast {
+  opacity: 0;
+  transform: translateY(var(--toast-distance)) scale(var(--toast-scale));
+  filter: blur(var(--toast-blur));
+  will-change: transform, opacity, filter;
+  transition:
+    opacity var(--toast-close) var(--toast-ease),
+    transform var(--toast-close) var(--toast-ease),
+    filter var(--toast-close) var(--toast-ease);
+}
+.t-toast.is-open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  filter: blur(0);
+  transition:
+    opacity var(--toast-open) var(--toast-ease),
+    transform var(--toast-open) var(--toast-ease),
+    filter var(--toast-open) var(--toast-ease);
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .flash { animation: none; transition: none; }
+  .t-toast { transition: none !important; }
+}
+
+/* Tabs sliding (transitions.dev): the highlight behind the current
+   view, details tab or Settings section, placed by motion.js `Pill`. It
+   moves in both directions, so height tweens too, for the Settings list. */
+.t-tabs-pill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  transform: translateX(0);
+  transition:
+    transform var(--tabs-dur) var(--tabs-ease),
+    width     var(--tabs-dur) var(--tabs-ease),
+    height    var(--tabs-dur) var(--tabs-ease);
+  will-change: transform, width;
+  z-index: 0;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .t-tabs-pill { transition: none !important; }
+}
+
+/* Panel reveal (transitions.dev), opening only: the details pane takes
+   its room at once and its contents ease in. Its contents are redrawn on
+   every update, so the open state is the resting one and only a pane
+   just opened starts from the slid-out state; closing is instant. */
+.t-panel-reveal > * {
+  transition:
+    transform var(--panel-open-dur) var(--panel-ease),
+    opacity   var(--panel-open-dur) var(--panel-ease),
+    filter    var(--panel-open-dur) var(--panel-ease);
+}
+.t-panel-reveal[data-open="false"] > * {
+  transform: translateY(var(--panel-translate-y));
+  opacity: 0;
+  filter: blur(var(--panel-blur));
+  pointer-events: none;
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .t-panel-reveal > * { transition: none !important; }
+}
+
+/* Notification badge (transitions.dev), the dot's pop: the count of
+   links waiting grows in when links arrive and shrinks away at none. It
+   sits in its link rather than on its corner, so the slide is left out. */
+.view .count {
+  transform-origin: center;
+  transform: scale(0);
+  opacity: 0;
+  filter: blur(var(--badge-blur));
+  transition:
+    transform var(--badge-pop-close-dur)  var(--badge-close-ease),
+    opacity   var(--badge-fade-close-dur) var(--badge-close-ease),
+    filter    var(--badge-pop-close-dur)  var(--badge-close-ease);
+  will-change: transform, opacity, filter;
+}
+.view .count.is-open {
+  transform: scale(1);
+  opacity: 1;
+  filter: blur(0);
+  transition:
+    transform var(--badge-pop-dur)  var(--badge-pop-ease),
+    opacity   var(--badge-fade-dur) var(--badge-pop-ease),
+    filter    var(--badge-pop-dur)  var(--badge-pop-ease);
+}
+@media (prefers-reduced-motion: reduce) {
+  .view .count { transition: none !important; }
+}
+
+/* A download changing state while on screen (downloads.js
+   `playStateChange`): its mark swaps shape, a finish draws its check, and
+   its label rises in. */
+.state .t-icon-swap, .state .t-success-check { vertical-align: middle; }
+.state .t-success-check .mark { margin: -2px 8px 0 1px; }
+
+/* Icon swap (transitions.dev). */
+.t-icon-swap {
+  position: relative;
+  display: inline-grid;
+}
+.t-icon-swap .t-icon {
+  grid-area: 1 / 1;
+  transition:
+    opacity   var(--icon-swap-dur) var(--icon-swap-ease),
+    filter    var(--icon-swap-dur) var(--icon-swap-ease),
+    transform var(--icon-swap-dur) var(--icon-swap-ease);
+}
+.t-icon-swap[data-state="a"] .t-icon[data-icon="a"],
+.t-icon-swap[data-state="b"] .t-icon[data-icon="b"] {
+  opacity: 1;
+  filter: blur(0);
+  transform: scale(1);
+}
+.t-icon-swap[data-state="a"] .t-icon[data-icon="b"],
+.t-icon-swap[data-state="b"] .t-icon[data-icon="a"] {
+  opacity: 0;
+  filter: blur(var(--icon-swap-blur));
+  transform: scale(var(--icon-swap-start-scale));
+}
+@media (prefers-reduced-motion: reduce) {
+  .t-icon-swap .t-icon { transition: none !important; }
+}
+
+/* Success check (transitions.dev), scaled to a 12px mark: a short rise
+   rather than the snippet's 40px, and the dash set to the done mark's
+   path length (12.4, from getTotalLength). */
+.t-success-check {
+  display: inline-block;
+  transform-origin: center;
+  opacity: 0;
+  will-change: transform, opacity, filter;
+}
+.t-success-check svg { display: block; overflow: visible; }
+.t-success-check svg path {
+  stroke-dasharray: 13;
+  stroke-dashoffset: 13;
+}
+.t-success-check[data-state="in"] {
+  animation:
+    t-check-fade   var(--check-opacity-dur) var(--check-ease-opacity) forwards,
+    t-check-rotate var(--check-rotate-dur)  var(--check-ease-rotate)  forwards,
+    t-check-blur   var(--check-blur-dur)    var(--check-ease-out)     forwards,
+    t-check-bob    var(--check-bob-dur)     var(--check-ease-bob)     forwards;
+}
+.t-success-check[data-state="in"] svg path {
+  animation: t-check-draw var(--check-path-dur) var(--check-ease-path) var(--check-path-delay, 0ms) forwards;
+}
+@keyframes t-check-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes t-check-rotate {
+  from { transform: rotate(var(--check-rotate-from)); }
+  to   { transform: rotate(0deg); }
+}
+@keyframes t-check-blur {
+  from { filter: blur(var(--check-blur-from)); }
+  to   { filter: blur(0); }
+}
+@keyframes t-check-bob {
+  from { translate: 0 var(--check-y-amount); }
+  to   { translate: 0 0; }
+}
+@keyframes t-check-draw { to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .t-success-check { animation: none !important; opacity: 1; }
+  .t-success-check svg path { animation: none !important; stroke-dashoffset: 0 !important; }
+}
+
+/* Text states swap (transitions.dev): a new label rises in through a
+   blur. motion.js `swapText` plays both halves; a state label, rebuilt
+   with its cell, plays only the arrival. */
+.t-text-swap {
+  display: inline-block;
+  transform: translateY(0);
+  filter: blur(0);
+  opacity: 1;
+  transition:
+    transform var(--text-swap-dur) var(--text-swap-ease),
+    filter    var(--text-swap-dur) var(--text-swap-ease),
+    opacity   var(--text-swap-dur) var(--text-swap-ease);
+  will-change: transform, filter, opacity;
+}
+.t-text-swap.is-exit {
+  transform: translateY(calc(var(--text-swap-translate-y) * -1));
+  filter: blur(var(--text-swap-blur));
+  opacity: 0;
+}
+.t-text-swap.is-enter-start {
+  transform: translateY(var(--text-swap-translate-y));
+  filter: blur(var(--text-swap-blur));
+  opacity: 0;
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .t-text-swap { transition: none !important; }
+}
+
+/* Error state shake (transitions.dev), the shake alone: a refused field
+   moves once (motion.js `shake`); its message and colours are unchanged. */
+.t-input.is-shaking {
+  animation: t-input-shake calc(
+      var(--shake-dur-a) * 2 + var(--shake-dur-b) * 2
+    ) linear;
+}
+@keyframes t-input-shake {
+  0%      { transform: translateX(0);                                 animation-timing-function: var(--shake-ease); }
+  28.57%  { transform: translateX(var(--shake-distance));             animation-timing-function: var(--shake-ease); }
+  57.14%  { transform: translateX(calc(var(--shake-distance) * -1)); animation-timing-function: var(--shake-ease); }
+  78.57%  { transform: translateX(var(--shake-overshoot));            animation-timing-function: var(--shake-ease); }
+  100%    { transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .t-input { animation: none !important; transform: none !important; }
 }

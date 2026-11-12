@@ -2,32 +2,38 @@
 // it, closes on Escape, and shows above everything else. Closing it puts
 // focus back where it was before it opened, or calls `restore` to, since
 // what was focused may have been redrawn meanwhile.
+//
+// It scales in over a fading backdrop and plays a shorter close before it
+// goes, however it is closed: `close()`, its close button, or Escape.
 
 import { h, show } from './dom.js';
+import { enter, leave } from './motion.js';
 
 /** Dialogs opened so far, for unique title IDs. */
 let opened = 0;
 
 /**
  * A modal dialog with a title bar and a close button. It is shown at once
- * and removed from the page when it closes; `onclose` runs then.
+ * and removed from the page when it closes; `onclose` runs then. While
+ * `held` answers true, Escape leaves it open.
  * @param {{
  *   title: string,
  *   className?: string,
  *   closeLabel?: string,
  *   onclose?: () => void,
  *   restore?: () => void,
+ *   held?: () => boolean,
  * }} options
  * @param {...import('./dom.js').Children} content
  */
-export function openDialog({ title, className = '', closeLabel = 'Close', onclose, restore }, ...content) {
+export function openDialog({ title, className = '', closeLabel = 'Close', onclose, restore, held }, ...content) {
   opened += 1;
   const id = `dialog-${opened}`;
   const returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const body = h('div', { class: 'dialog-body' });
   const dialog = h(
     'dialog',
-    { class: `dialog ${className}`.trim(), 'aria-labelledby': id },
+    { class: `dialog t-modal ${className}`.trim(), 'aria-labelledby': id },
     h(
       'header',
       { class: 'dialog-head' },
@@ -46,6 +52,18 @@ export function openDialog({ title, className = '', closeLabel = 'Close', onclos
     body,
   );
   show(body, ...content);
+  const shut = HTMLDialogElement.prototype.close.bind(dialog);
+  let closing = false;
+  // Every caller closes it through here, so each close is played.
+  dialog.close = (returnValue) => {
+    if (closing || !dialog.open) return;
+    closing = true;
+    leave(dialog, '--modal-close-dur', () => shut(returnValue));
+  };
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    if (!held?.()) dialog.close();
+  });
   dialog.addEventListener('close', () => {
     dialog.remove();
     onclose?.();
@@ -54,6 +72,7 @@ export function openDialog({ title, className = '', closeLabel = 'Close', onclos
   });
   document.body.append(dialog);
   dialog.showModal();
+  enter(dialog);
   return dialog;
 }
 

@@ -8,6 +8,7 @@ import { confirmDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { icon, toneMark } from './icons.js';
 import { Menu, rowMenuHandlers } from './menu.js';
+import { riseIn } from './motion.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -286,6 +287,13 @@ export function pluginsSection(context) {
    */
   const render = (plugins, said = '') => {
     const focused = focusedKey(section);
+    // Each plugin's status as last shown, so a change rises in.
+    const before = new Map(
+      [...section.querySelectorAll('tr[data-plugin]')].map((row) => [
+        row.getAttribute('data-plugin'),
+        row.querySelector('.status-label')?.textContent,
+      ]),
+    );
     menu.close(false);
     shown = [...plugins];
     show(message, said);
@@ -330,6 +338,11 @@ export function pluginsSection(context) {
       ),
       menu.element,
     );
+    for (const row of section.querySelectorAll('tr[data-plugin]')) {
+      const label = /** @type {HTMLElement | null} */ (row.querySelector('.status-label'));
+      const was = before.get(row.getAttribute('data-plugin'));
+      if (label && was !== undefined && was !== label.textContent) riseIn(label);
+    }
     refocus(section, focused);
   };
 

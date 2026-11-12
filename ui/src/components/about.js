@@ -8,6 +8,7 @@ import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { addedWhen } from '../client/links.js';
 import { h, show } from './dom.js';
 import { icon } from './icons.js';
+import { swapText } from './motion.js';
 
 /**
  * @typedef {import('../client/contract.js').WayfetchClient} WayfetchClient
@@ -144,6 +145,8 @@ function outsideLink(client, href, label, props = {}) {
 export function aboutSection(context) {
   const { client } = context;
   const badge = h('span', { class: 'update-status', role: 'status', 'data-key': 'update-status' });
+  // Kept across results, so a new one swaps in over the last.
+  const badgeLabel = h('span');
   // One status line under the name, so a result never moves the row.
   const detail = h('span', { class: 'hint update-detail', 'data-key': 'update-detail' });
   const action = h('span', { class: 'update-link' });
@@ -182,9 +185,11 @@ export function aboutSection(context) {
   const showStatus = (status, problem = '') => {
     if (status) {
       badge.className = `update-status tone-${status.tone}`;
-      show(badge, icon(status.icon), h('span', null, status.badge));
+      show(badge, icon(status.icon), badgeLabel);
+      swapText(badgeLabel, status.badge);
     } else {
       show(badge);
+      badgeLabel.textContent = '';
     }
     const more = problem || status?.detail || '';
     show(detail, more || (last ? lastChecked(last) : ''));

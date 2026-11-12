@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { place, wantsNativeMenu } from '../../src/components/menu.js';
+import { origin, place, wantsNativeMenu } from '../../src/components/menu.js';
 
 const viewport = { width: 800, height: 600 };
 const size = { width: 200, height: 150 };
@@ -51,4 +51,13 @@ test('the native menu is suppressed everywhere else', () => {
   assert.equal(wantsNativeMenu(element({}), selection(true, true)), false);
   // A selection elsewhere does not keep it on unselected text.
   assert.equal(wantsNativeMenu(element({}), selection(false, false)), false);
+});
+
+test('a menu grows from the corner nearest its opener', () => {
+  const button = { left: 100, right: 120, top: 50, bottom: 70 };
+  assert.equal(origin(button, place(button, size, viewport)), 'top-left');
+  const corner = { left: 700, right: 760, top: 500, bottom: 520 };
+  assert.equal(origin(corner, place(corner, size, viewport)), 'bottom-right');
+  const pointer = { left: 790, right: 790, top: 100, bottom: 100 };
+  assert.equal(origin(pointer, place(pointer, size, viewport)), 'top-right');
 });
