@@ -25,6 +25,7 @@ import {
   JOB_SORT_COLUMNS,
   mayHaveDeleted,
   progress,
+  receiving,
   restartNote,
   retryPlan,
   unpackActions,
@@ -38,7 +39,7 @@ import { Selection } from '../client/selection.js';
 import { ADD_PATH, AddLinksPage, collectedText } from './collect.js';
 import { openDialog } from './dialog.js';
 import { copyText, focusedKey, h, isSelectAllKey, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
-import { icon } from './icons.js';
+import { icon, stateMark } from './icons.js';
 import { LINKS_PATH, LinksPage } from './links.js';
 import { Menu, rowMenuHandlers } from './menu.js';
 import { loadServices } from './services.js';
@@ -153,12 +154,30 @@ function asksProviderAgain(job) {
   return !!job.route && job.failure?.code === 'operation_ambiguous';
 }
 
+/** One heartbeat: two quick beats and a rest (`--beat` in style.css). */
+const BEAT_MS = 1600;
+
 /**
- * A state's coloured mark; its label beside it says the same in words.
- * @param {Status | null} status
+ * Marks `element` as beating while a download receives bytes, so a stall
+ * goes still, or as still otherwise. Rows' cells and the details pane are
+ * rebuilt with every sample, so the beat is phased to the page clock and
+ * runs on unbroken.
+ * @template {HTMLElement} E
+ * @param {E} element
+ * @param {{ status: Status | null }} state
+ * @param {ProgressSample | undefined} sample
+ * @returns {E}
  */
-function dot(status) {
-  return h('span', { class: 'dot', 'data-status': status ?? 'unknown', 'aria-hidden': 'true' });
+function heartbeat(element, state, sample) {
+  if (state.status !== 'active' || !receiving(sample)) {
+    delete element.dataset.beat;
+    element.style.removeProperty('--beat-delay');
+    return element;
+  }
+  element.dataset.beat = '';
+  // Through the CSSOM: the CSP refuses style attributes.
+  element.style.setProperty('--beat-delay', `${-(performance.now() % BEAT_MS)}ms`);
+  return element;
 }
 
 /**
@@ -1581,7 +1600,7 @@ export class Downloads {
             'aria-pressed': String(group.key === this.group),
             onclick: () => this.filter(group.key),
           },
-          group.status ? dot(group.status) : icon('list'),
+          group.status ? stateMark(group.status) : icon('list'),
           h('span', { class: 'filter-label' }, group.label),
           count !== undefined && h('span', { class: 'count' }, count),
         );
@@ -1726,6 +1745,7 @@ export class Downloads {
           // cells and their ancestors stay connected.
           const cells = [...row.cells];
           for (let i = 2; i < 8; i++) old.row.cells[i].replaceWith(cells[i]);
+          heartbeat(old.row, describe(job), sample);
           row = old.row;
         }
       }
@@ -1820,7 +1840,7 @@ export class Downloads {
       },
       icon('more'),
     );
-    return h(
+    const row = h(
       'tr',
       {
         'data-job': job.id,
@@ -1864,7 +1884,7 @@ export class Downloads {
         ),
       ),
       h('td', { class: 'host', title: job.original_host ?? null }, job.original_host ?? ''),
-      h('td', { class: 'state', 'data-state': job.display }, dot(state.status), state.label),
+      h('td', { class: 'state', 'data-state': job.display }, stateMark(state.status), state.label),
       h(
         'td',
         { class: 'progress' },
@@ -1881,6 +1901,7 @@ export class Downloads {
       h('td', { class: 'num' }, shown.left ?? ''),
       h('td', { class: 'row-actions' }, more),
     );
+    return heartbeat(row, state, sample);
   }
 
   // The inspector.
@@ -1994,7 +2015,8 @@ export class Downloads {
 
   /** @param {JobSummary} job */
   general(job) {
-    const shown = progress(job, this.feed.sample(job.id));
+    const sample = this.feed.sample(job.id);
+    const shown = progress(job, sample);
     const state = describe(job);
     const name = fileName(job) ?? job.name;
     const where = this.location(job);
@@ -2008,25 +2030,29 @@ export class Downloads {
       },
       // How it is going on the left, where it goes on the right; the rows
       // stay put as it runs, so the panel keeps its height.
-      h(
-        'div',
-        { class: 'transfer' },
+      heartbeat(
         h(
           'div',
-          { class: 'big-progress' },
+          { class: 'transfer' },
           h(
             'div',
-            { class: 'figure' },
-            h('span', { class: 'percent' }, shown.percent ?? '—'),
-            h('span', { class: 'saved' }, `${shown.text} saved`),
+            { class: 'big-progress' },
+            h(
+              'div',
+              { class: 'figure' },
+              h('span', { class: 'percent' }, shown.percent ?? '—'),
+              h('span', { class: 'saved' }, `${shown.text} saved`),
+            ),
+            progressBar(shown, state, 'Saved'),
           ),
-          progressBar(shown, state, 'Saved'),
+          this.facts([
+            ['State', h('span', { class: 'state' }, stateMark(state.status), state.label)],
+            ['Speed', shown.rate ? [shown.rate, shown.left && `, ${shown.left} left`].join('') : '—'],
+            ['Download via', this.via(job)],
+          ]),
         ),
-        this.facts([
-          ['State', h('span', { class: 'state' }, dot(state.status), state.label)],
-          ['Speed', shown.rate ? [shown.rate, shown.left && `, ${shown.left} left`].join('') : '—'],
-          ['Download via', this.via(job)],
-        ]),
+        state,
+        sample,
       ),
       this.facts([
         ['File', name === undefined ? 'Named when it finishes' : h('span', { class: 'path', title: where.file }, name)],

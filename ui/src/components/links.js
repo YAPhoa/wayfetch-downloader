@@ -26,7 +26,7 @@ import { Selection } from '../client/selection.js';
 import { saveSort, savedSort, sortedBy, toggleSort } from '../client/sort.js';
 import { openDialog } from './dialog.js';
 import { copyText, focusedKey, h, isSelectAllKey, pagerBar, refocus, show, sortHeader, stripe } from './dom.js';
-import { icon } from './icons.js';
+import { icon, toneMark } from './icons.js';
 import { pickerButton, rowMenuHandlers } from './menu.js';
 import { loadServices } from './services.js';
 
@@ -828,11 +828,13 @@ export class LinksPage {
   renderSummary(chosen) {
     const hidden = [...this.selected].filter((id) => !chosen.some((l) => l.id === id)).length;
     const hiddenNote = hidden > 0 && h('span', { class: 'warn-text' }, `${count(hidden, 'selected link')} hidden by the filter ${hidden === 1 ? 'is' : 'are'} left out.`);
+    // While there are links, the line keeps its room even when empty, so
+    // ticking one moves no row.
+    this.summary.classList.toggle('steady', (this.total ?? 0) > 0);
     if (chosen.length === 0) {
       show(
         this.summary,
         // With no links it stays empty, so it takes no room.
-        !!this.total && h('span', null, 'Select links to start them. Nothing downloads until you do.'),
         this.checking > 0 && h('span', { class: 'label' }, `Checking ${count(this.checking, 'link')}…`),
         this.screening > 0 &&
           h(
@@ -1025,7 +1027,7 @@ export class LinksPage {
         h(
           'span',
           { class: 'status-label' },
-          h('span', { class: 'dot', 'aria-hidden': 'true' }),
+          toneMark(status.tone),
           link.job
             ? h(
                 'a',

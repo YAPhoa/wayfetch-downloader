@@ -278,32 +278,21 @@ export function aboutSection(context) {
   // Automatic checks, saved at once at the revision shown.
   /** @type {Settings | null} */
   let settings = null;
-  const automatic = /** @type {[boolean, string][]} */ ([
-    [false, 'Off'],
-    [true, 'On'],
-  ]).map(([value, text]) =>
-    h(
-      'label',
-      null,
-      h('input', {
-        type: 'radio',
-        name: 'automatic-update-checks',
-        value: String(value),
-        'data-key': `automatic-update-checks-${value ? 'on' : 'off'}`,
-        disabled: true,
-        onchange: () => void setAutomatic(value),
-      }),
-      h('span', null, text),
-    ),
-  );
-  const inputs = automatic.map((label) => /** @type {HTMLInputElement} */ (label.querySelector('input')));
+  const automatic = h('input', {
+    type: 'checkbox',
+    role: 'switch',
+    class: 'switch',
+    'data-key': 'automatic-update-checks',
+    'aria-labelledby': 'automatic-update-checks-name',
+    disabled: true,
+    onchange: () => void setAutomatic(automatic.checked),
+  });
   const automaticNote = h('span', { class: 'hint', 'data-key': 'automatic-update-checks-note' });
   /** @param {Settings} saved */
   const showSettings = (saved) => {
     settings = saved;
-    inputs[0].checked = !saved.automatic_update_checks;
-    inputs[1].checked = saved.automatic_update_checks;
-    for (const input of inputs) input.disabled = false;
+    automatic.checked = saved.automatic_update_checks;
+    automatic.disabled = false;
     show(automaticNote, 'Daily');
   };
   const readSettings = async () => {
@@ -317,7 +306,7 @@ export function aboutSection(context) {
   const setAutomatic = async (on) => {
     const hello = context.hello() ?? (await client.hello().catch(() => null));
     if (!hello || !settings) return;
-    for (const input of inputs) input.disabled = true;
+    automatic.disabled = true;
     try {
       await client.updateSettings({
         idempotencyKey: idempotencyKey(),
@@ -377,7 +366,7 @@ export function aboutSection(context) {
             h('span', { class: 'setting-name', id: 'automatic-update-checks-name' }, 'Check automatically'),
             automaticNote,
           ),
-          h('div', { class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'automatic-update-checks-name' }, automatic),
+          automatic,
         ),
       ),
     ),

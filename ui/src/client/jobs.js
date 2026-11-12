@@ -26,6 +26,23 @@
  */
 
 /**
+ * The state shape a tone is marked with, so a link's or plugin's status
+ * reads like a download's.
+ * @type {Readonly<Record<Tone, Status>>}
+ */
+export const TONE_STATUS = Object.freeze({ run: 'active', ok: 'done', warn: 'failed', bad: 'failed', calm: 'queued' });
+
+/**
+ * Whether bytes are arriving, by the latest progress sample: a transfer
+ * that is connected but receiving nothing (over the sample's window) is
+ * still.
+ * @param {{ bytes_per_second: number } | undefined} sample
+ */
+export function receiving(sample) {
+  return (sample?.bytes_per_second ?? 0) > 0;
+}
+
+/**
  * The commands a job accepts in its current state, mirroring the engine's
  * rules (`JobState::request_*`) so a view offers only those. The engine
  * still decides: a job may change before the command arrives.

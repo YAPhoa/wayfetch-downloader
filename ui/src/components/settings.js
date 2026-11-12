@@ -11,6 +11,7 @@ import { openDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
 import { browseServerFolders } from './folders.js';
 import { icon } from './icons.js';
+import { Menu, pickerButton } from './menu.js';
 import { aboutSection } from './about.js';
 import { accountsSection } from './accounts.js';
 import { filtersSection } from './filters.js';
@@ -575,30 +576,46 @@ export class SettingsPage {
       'aria-describedby': 'speed-limit-about speed-limit-policy speed-limit-problem',
       oninput: () => update(),
     });
-    const unit = h(
-      'select',
-      { id: 'speed-limit-unit', 'data-key': 'speed-unit', 'aria-label': 'Speed limit unit', onchange: () => update() },
-      RATE_UNITS.map((name) => h('option', { value: name }, `${name}/s`)),
-    );
+    // The unit, a choice of one from the themed picker the Format column uses.
+    /** @type {RateUnit} */
+    let unitValue = 'MiB';
+    const unitMenu = new Menu('Speed limit units', () => unit.setAttribute('aria-expanded', String(unitMenu.owner === 'speed-unit')));
+    const unit = pickerButton({
+      menu: unitMenu,
+      owner: 'speed-unit',
+      label: `${unitValue}/s`,
+      name: 'Speed limit unit',
+      open: (anchor) =>
+        unitMenu.show(
+          RATE_UNITS.map((name) => ({
+            key: name,
+            label: `${name}/s`,
+            checked: name === unitValue,
+            run: () => {
+              setUnit(name);
+              update();
+            },
+          })),
+          anchor,
+          { owner: 'speed-unit', label: 'Unit', restore: () => unit.focus() },
+        ),
+    });
+    /** @param {RateUnit} name */
+    const setUnit = (name) => {
+      unitValue = name;
+      unit.setAttribute('aria-label', `Speed limit unit: ${name}/s`);
+      show(/** @type {HTMLElement} */ (unit.querySelector('.picker-label')), `${name}/s`);
+    };
     const speedPolicy = h('span', { class: 'hint', id: 'speed-limit-policy' });
 
-    const extractRadio = (/** @type {boolean} */ value, /** @type {string} */ text) =>
-      h(
-        'label',
-        null,
-        h('input', {
-          type: 'radio',
-          name: 'extract-archives',
-          value: String(value),
-          'data-key': `extract-${value ? 'on' : 'off'}`,
-          onchange: () => update(),
-        }),
-        h('span', null, text),
-      );
-    const extractOffLabel = extractRadio(false, 'Off');
-    const extractOnLabel = extractRadio(true, 'On');
-    const extractOff = /** @type {HTMLInputElement} */ (extractOffLabel.querySelector('input'));
-    const extractOn = /** @type {HTMLInputElement} */ (extractOnLabel.querySelector('input'));
+    const extractOn = h('input', {
+      type: 'checkbox',
+      role: 'switch',
+      class: 'switch',
+      'data-key': 'extract-archives',
+      'aria-labelledby': 'extract-archives-name',
+      onchange: () => update(),
+    });
     const speedProblem = h('span', { class: 'problem', id: 'speed-limit-problem' });
 
     const message = h('p', { class: 'message', role: 'status' });
@@ -713,12 +730,7 @@ export class SettingsPage {
                 'Each archive is kept and unpacked into a new folder beside it. Multi-part archives wait for every part.',
               ),
             ),
-            h(
-              'div',
-              { class: 'segmented', role: 'radiogroup', 'aria-labelledby': 'extract-archives-name' },
-              extractOffLabel,
-              extractOnLabel,
-            ),
+            extractOn,
           ),
         ),
         h('div', { class: 'group-foot' }, message, useDefault, cancel, saveButton),
@@ -747,14 +759,13 @@ export class SettingsPage {
       unlimited.checked = !shown.limited;
       if (shown.limited) {
         rate.value = shown.amount;
-        unit.value = shown.unit;
+        setUnit(shown.unit);
       }
     };
 
     /** @param {boolean} on */
     const showExtract = (on) => {
       extractOn.checked = on;
-      extractOff.checked = !on;
     };
 
     /**
@@ -771,12 +782,12 @@ export class SettingsPage {
       const speedSetting = settings.download_speed_limit;
       const applied = speedFields(speedSetting.value);
       const changed = limited.checked
-        ? !applied.limited || rate.value.trim() !== applied.amount || unit.value !== applied.unit
+        ? !applied.limited || rate.value.trim() !== applied.amount || unitValue !== applied.unit
         : applied.limited;
       /** @type {{ changed: boolean, limit: SpeedLimit | null, error: string | null }} */
       let speed = { changed, limit: 'unlimited', error: null };
       if (limited.checked) {
-        const parsed = parseRate(rate.value, /** @type {RateUnit} */ (unit.value), speedSetting);
+        const parsed = parseRate(rate.value, unitValue, speedSetting);
         speed = {
           changed,
           limit: parsed.value === null ? null : { bytes_per_second: parsed.value },
@@ -808,7 +819,6 @@ export class SettingsPage {
       rate.disabled = speedFixed || !limited.checked;
       unit.disabled = rate.disabled;
       extractOn.disabled = !canChange || saving;
-      extractOff.disabled = extractOn.disabled;
       const editable = canChange;
       const changed = count.changed || speed.changed || extract.changed;
       saveButton.hidden = !editable;
@@ -847,7 +857,7 @@ export class SettingsPage {
       show(speedPolicy, describeSpeedLimit(settings.download_speed_limit, client.local), denied);
       show(message, said);
       update();
-      if (!section.contains(form)) show(section, form);
+      if (!section.contains(form)) show(section, form, unitMenu.element);
     };
 
     /**

@@ -65,7 +65,7 @@ test('finished archives unpack beside them, and a protected one asks for its pas
 
     // Settings shows the plugin, and unpacking after download is on.
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
-    await expect(page.locator('[data-key="extract-on"]')).toBeChecked();
+    await expect(page.locator('[data-key="extract-archives"]')).toBeChecked();
     await page.getByRole('link', { name: 'Plugins' }).click();
     const sevenZip = page.locator('tr[data-plugin="7zip"]');
     await expect(sevenZip.locator('td.version')).toHaveText('26.04');
@@ -122,7 +122,7 @@ test('finished archives unpack beside them, and a protected one asks for its pas
 
     // Turned off, archives stay packed until asked.
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
-    await page.locator('[data-key="extract-off"]').check();
+    await page.locator('[data-key="extract-archives"]').uncheck();
     await page.locator('[data-key="downloads-save"]').click();
     await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Back to Downloads' }).click();
