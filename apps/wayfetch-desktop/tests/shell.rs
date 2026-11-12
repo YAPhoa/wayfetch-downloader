@@ -292,9 +292,9 @@ impl Shell {
         .await;
     }
 
-    /// Clicks the element `css` names, once it exists. The page redraws
-    /// a row when its job changes, so an element found just before a
-    /// redraw is looked up again.
+    /// Clicks the element `css` names, once it exists and nothing covers
+    /// it. The page redraws a row when its job changes, so an element
+    /// found just before a redraw is looked up again.
     async fn click(&self, css: &str) {
         eventually(|| async {
             // A redraw can invalidate the WebDriver reference while it
@@ -311,12 +311,19 @@ impl Shell {
             };
             match clicked {
                 Ok(()) => Some(()),
+                // A dialog or menu playing its close still covers the
+                // page for a moment, so the click is tried again.
                 Err(fantoccini::error::CmdError::Standard(e))
-                    if e.error == fantoccini::error::ErrorStatus::StaleElementReference =>
+                    if matches!(
+                        e.error,
+                        fantoccini::error::ErrorStatus::StaleElementReference
+                            | fantoccini::error::ErrorStatus::ElementClickIntercepted
+                            | fantoccini::error::ErrorStatus::ElementNotInteractable
+                    ) =>
                 {
                     None
                 }
-                Err(e) => panic!("clicking {css}: {e}"),
+                Err(e) => panic!("clicking {css}: {e:?}"),
             }
         })
         .await;
