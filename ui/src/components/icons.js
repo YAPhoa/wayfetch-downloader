@@ -3,6 +3,8 @@
 // fill), always next to a visible or accessible label and hidden from
 // assistive technology themselves.
 
+import { TONE_STATUS } from '../client/jobs.js';
+
 /**
  * An SVG element: its tag, attributes and children.
  * @typedef {[string, Record<string, string>, ...Shape[]]} Shape
@@ -95,6 +97,22 @@ export const ICONS = /** @satisfies {Record<string, Shape[]>} */ ({
 
 /** @typedef {keyof typeof ICONS} IconName */
 
+/**
+ * A shape per download state on a 12-unit grid, so a state reads without
+ * its colour: disc, bars, ring, triangle, slashed ring, check. Painted in
+ * `--status-color` by `.mark` in style.css.
+ */
+export const MARKS = /** @satisfies {Record<string, Shape[]>} */ ({
+  active: [['circle', { cx: '6', cy: '6', r: '5', fill: 'currentColor' }]],
+  paused: [['rect', { x: '1.9', y: '1.25', width: '3.1', height: '9.5', rx: '0.9', fill: 'currentColor' }], ['rect', { x: '7', y: '1.25', width: '3.1', height: '9.5', rx: '0.9', fill: 'currentColor' }]],
+  queued: [['circle', { cx: '6', cy: '6', r: '4.1', stroke: 'currentColor' }]],
+  failed: [['path', { d: 'M6 1.6 10.9 10.2H1.1Z', fill: 'currentColor', stroke: 'currentColor' }]],
+  cancelled: [['circle', { cx: '6', cy: '6', r: '4.1', stroke: 'currentColor' }], ['path', { d: 'M3.1 8.9 8.9 3.1', stroke: 'currentColor' }]],
+  done: [['path', { d: 'M1.8 6.5 4.7 9.3 10.2 3', stroke: 'currentColor' }]],
+});
+
+/** @typedef {keyof typeof MARKS} MarkName */
+
 const SVG = 'http://www.w3.org/2000/svg';
 
 /**
@@ -111,15 +129,53 @@ function draw([tag, attributes, ...children]) {
 }
 
 /**
+ * An `size`-unit SVG of `shapes`, hidden from assistive technology.
+ * @param {number} size
+ * @param {string} className
+ * @param {readonly Shape[]} shapes
+ */
+function svgOf(size, className, shapes) {
+  const svg = document.createElementNS(SVG, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  svg.setAttribute('class', className);
+  svg.append(...shapes.map(draw));
+  return svg;
+}
+
+/**
  * The icon named `name`.
  * @param {IconName} name
  */
 export function icon(name) {
-  const svg = document.createElementNS(SVG, 'svg');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('aria-hidden', 'true');
-  svg.setAttribute('focusable', 'false');
-  svg.setAttribute('class', `icon icon-${name}`);
-  svg.append(.../** @type {readonly Shape[]} */ (ICONS[name]).map(draw));
+  return svgOf(24, `icon icon-${name}`, ICONS[name]);
+}
+
+/**
+ * The state mark named `name`; its label beside it says the same in words.
+ * @param {MarkName} name
+ */
+export function mark(name) {
+  return svgOf(12, `mark mark-${name}`, MARKS[name]);
+}
+
+/**
+ * A download state's mark, in the state's colour; a state the UI does not
+ * know is a neutral disc.
+ * @param {MarkName | null} status
+ */
+export function stateMark(status) {
+  const svg = mark(status ?? 'active');
+  svg.setAttribute('data-status', status ?? 'unknown');
   return svg;
+}
+
+/**
+ * A link's or plugin's status mark: its tone's shape, in the text colour
+ * its tone gives the cell.
+ * @param {import('../client/jobs.js').Tone} tone
+ */
+export function toneMark(tone) {
+  return mark(TONE_STATUS[tone]);
 }

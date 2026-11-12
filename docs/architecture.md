@@ -110,7 +110,7 @@ In the transfer/extraction sections, “daemon” denotes the **engine-owning pr
 
 This document is a forward-looking specification. Its requirements come from the problem domain: HTTP semantics, provider and account behavior, crash-safe storage, archive handling, NAS deployment, and the operator workflow in section 1. Section 3 states the behavioral requirements that shaped the architecture.
 
-No third-party application source, translated code, fixtures, constants, or native binaries are incorporated in this repository. The only third-party artwork is the web UI's typeface: IBM Plex Sans, Latin subset, weights 400, 500 and 600 as WOFF2 (`ui/src/fonts/`), taken unmodified from the `@fontsource/ibm-plex-sans` 5.3.0 npm package. It is Copyright 2019 IBM Corp. under the SIL Open Font License 1.1, reproduced in `ui/src/fonts/OFL.txt`, which ships with it in `wayfetchd`. Nothing has been compiled, executed, profiled, or exercised against a live provider, and no comparative benchmark exists.
+No third-party application source, translated code, fixtures, constants, or native binaries are incorporated in this repository. The only third-party artwork is the web UI's typefaces: IBM Plex Sans, Latin subset, weights 400, 500 and 600, and IBM Plex Mono, Latin subset, weight 400, as WOFF2 (`ui/src/fonts/`), taken unmodified from the `@fontsource/ibm-plex-sans` 5.3.0 and `@fontsource/ibm-plex-mono` 5.3.0 npm packages. They are Copyright 2019 and 2017 IBM Corp. under the SIL Open Font License 1.1, reproduced in `ui/src/fonts/OFL.txt`, which ships with them in `wayfetchd`. Nothing has been compiled, executed, profiled, or exercised against a live provider, and no comparative benchmark exists.
 
 ### 2.2 Licensing boundary
 

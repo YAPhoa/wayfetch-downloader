@@ -1,5 +1,6 @@
-/* The "Ledger" look: a dense, desktop-first operator view. IBM Plex Sans is
-   bundled (fonts/OFL.txt), with system fonts as the fallback. One blue,
+/* The "Ledger" look: a dense, desktop-first operator view. IBM Plex Sans,
+   and Plex Mono for paths, are bundled (fonts/OFL.txt), with system fonts as
+   the fallback. One blue,
    taken from the logo, in three roles: --brand fills and rings, --accent
    carries blue text, --primary sits under white text. Text tokens meet WCAG
    AA (4.5:1) on every surface and row shade in both themes; --control and
@@ -27,6 +28,15 @@
   font-weight: 600;
   font-display: swap;
   src: url('fonts/ibm-plex-sans-latin-600-normal.woff2') format('woff2');
+}
+
+/* Paths and addresses: the same on every system, and as light as the Sans. */
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/ibm-plex-mono-latin-400-normal.woff2') format('woff2');
 }
 
 :root {
@@ -74,12 +84,13 @@
   --status-cancelled: #7a8599;
   --status-done: #1e8e4e;
   --status-done-fill: #a9ddbe;
+  --sheen: rgb(255 255 255 / 60%);
   --shadow-1: 0 1px 2px rgb(15 27 51 / 10%);
   --shadow-2: 0 10px 28px rgb(15 27 51 / 16%), 0 1px 3px rgb(15 27 51 / 10%);
   --radius-s: 4px;
   --radius: 6px;
   --radius-l: 10px;
-  --mono: ui-monospace, monospace;
+  --mono: 'IBM Plex Mono', ui-monospace, monospace;
   --row-pad: 5px 12px;
   --font-size: 13px;
   font-family: 'IBM Plex Sans', system-ui, sans-serif;
@@ -127,6 +138,7 @@
   --status-cancelled: #8a97ae;
   --status-done: #3dd68c;
   --status-done-fill: #1f6b49;
+  --sheen: rgb(255 255 255 / 40%);
   --shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
   --shadow-2: 0 12px 32px rgb(0 0 0 / 50%), 0 0 0 1px #2c3b57;
 }
@@ -257,14 +269,22 @@ code { font-family: var(--mono); }
 .tone-bad { color: var(--bad); }
 .tone-calm { color: var(--muted); }
 
-.dot {
+/* A state's mark: a shape (icons.js `MARKS`) in the state's colour, or in
+   the text colour a tone gives its cell. */
+.mark {
   display: inline-block;
   vertical-align: middle;
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
+  margin: 1px;
   flex: none;
-  border-radius: 50%;
-  background: var(--status-color, currentColor);
+  overflow: visible;
+  color: var(--status-color, currentColor);
+  fill: none;
+  stroke: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* Download states: the mark and progress fill take the state's colour;
@@ -490,7 +510,7 @@ code { font-family: var(--mono); }
 
 /* All has a list mark; a state's dot sits in the same 14px slot. */
 .filter .icon { color: var(--muted); }
-.filter .dot { margin: 0 2px; }
+.filter .mark { margin: 1px; }
 .filter .filter-label { flex: 1; }
 .filter .count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
 .filter { font-weight: 400; }
@@ -620,7 +640,57 @@ table.jobs {
 /* The downloading mark in --accent keeps 3:1 on the stronger tint. */
 .jobs tbody tr.selected [data-status='active'] { --status-color: var(--accent); }
 
-.state .dot { margin: -2px 8px 0 0; }
+.state .mark { margin: -2px 8px 0 1px; }
+
+/* The heartbeat: a download receiving bytes beats twice and rests every
+   1.6 s (BEAT_MS in downloads.js, which phases it to the page clock). Its
+   mark gives off a fading halo and a light band crosses its bar's fill. Only
+   transform and opacity move; nothing moves under reduced motion. */
+[data-beat] .state .mark { animation: thump 1.6s ease-in-out infinite; animation-delay: var(--beat-delay, 0ms); }
+[data-beat] .state { position: relative; }
+[data-beat] .state::before {
+  content: '';
+  position: absolute;
+  left: 1px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: var(--status-active);
+  opacity: 0;
+  pointer-events: none;
+  animation: halo 1.6s ease-out infinite;
+  animation-delay: var(--beat-delay, 0ms);
+}
+/* In the table the mark sits after the cell's 12px padding. */
+[data-beat] td.state::before { left: 13px; }
+.bar .fill { position: relative; overflow: hidden; }
+[data-beat] .bar .fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--sheen) 50%, transparent);
+  transform: translateX(-100%);
+  animation: sweep 1.6s ease-in-out infinite;
+  animation-delay: var(--beat-delay, 0ms);
+}
+@keyframes halo {
+  0% { transform: scale(1); opacity: 0.6; }
+  24% { transform: scale(2.3); opacity: 0; }
+  25% { transform: scale(1); opacity: 0; }
+  26% { transform: scale(1); opacity: 0.45; }
+  52%, 100% { transform: scale(2); opacity: 0; }
+}
+@keyframes thump {
+  0%, 22%, 48%, 100% { transform: scale(1); }
+  7% { transform: scale(1.2); }
+  32% { transform: scale(1.12); }
+}
+@keyframes sweep {
+  0% { transform: translateX(-100%); }
+  55%, 100% { transform: translateX(100%); }
+}
 
 .bar-cell { display: flex; align-items: center; gap: 8px; }
 .bar-cell .bar { flex: 0 1 140px; }
@@ -997,6 +1067,7 @@ dd .link-text { overflow-wrap: anywhere; }
 .selection-summary button.link { padding-top: 0; padding-bottom: 0; }
 .selection-summary .path { color: var(--ink); font-family: var(--mono); overflow-wrap: anywhere; }
 .selection-summary:empty { display: none; }
+.selection-summary.steady:empty { display: flex; }
 
 .notice button.link { margin-left: 8px; }
 
@@ -1134,39 +1205,58 @@ th[aria-sort] button.sort { color: var(--ink); }
 .settings-nav { font-size: 14px; }
 .settings-link { min-height: 36px; }
 
-/* A group box, as in a desktop app's preferences: a header strip in the
-   table-header style, rows divided by rules, and an optional footer of
-   actions. */
+/* A group, as in a desktop app's preferences: its label above a plain
+   card of rows divided by rules, with an optional footer of actions. The
+   card is drawn on the parts after the label, so the label sits outside. */
 
 .settings-group {
-  display: block;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  gap: 0;
   margin: 0;
   padding: 0;
+  border: 0;
+}
+
+.settings-group > :not(.group-head) {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: var(--radius-l);
+  border-block-width: 0;
   background: var(--card);
+}
+
+.settings-group > :not(.group-head):first-child,
+.settings-group > .group-head + * {
+  border-top-width: 1px;
+  border-top-left-radius: var(--radius-l);
+  border-top-right-radius: var(--radius-l);
+}
+
+/* A footer is ruled off from the rows above it. */
+.settings-group > .group-foot, .settings-group > .filters-foot { border-top-width: 1px; }
+
+/* The last part closes the card. */
+.settings-group > :not(.group-head):last-child {
+  border-bottom-width: 1px;
+  border-bottom-left-radius: var(--radius-l);
+  border-bottom-right-radius: var(--radius-l);
 }
 
 .group-head {
   display: flex;
-  float: left;
-  width: 100%;
-  box-sizing: border-box;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 12px;
-  min-height: 44px;
-  padding: 6px 12px 6px 16px;
-  border-bottom: 1px solid var(--line);
+  width: 100%;
+  min-height: 30px;
+  padding: 0 0 8px;
   color: var(--muted);
 }
 
-.group-title { flex: 1; color: var(--ink); font-weight: 600; }
+.group-title { flex: 1; color: var(--ink); font-size: 13px; font-weight: 600; }
 .group-note { font-size: 13px; }
 .group-head button { min-height: 30px; padding: 0 12px; }
-.group-rows, .group-empty, .group-foot, .settings-group .table-scroll { clear: both; }
 .group-empty { margin: 0; padding: 16px; color: var(--muted); }
 
 /* A download folder: its path, then Make default and Remove unless it is
@@ -1214,8 +1304,10 @@ th[aria-sort] button.sort { color: var(--ink); }
    buttons, which stay together at the end. */
 .group-foot .message { flex: 1 1 240px; min-width: 0; margin-right: 8px; }
 .group-foot .message + button { margin-left: auto; }
-/* A foot holding only an empty status line takes no room. */
-.group-foot:not(:has(> :not(:empty))) { display: none; }
+/* A foot holding only an empty status line takes no room, but still
+   closes the card. */
+.group-foot:not(:has(> :not(:empty))) { min-height: 0; padding: 0; border-top-width: 0; }
+.group-foot:not(:has(> :not(:empty))) > * { display: none; }
 .group-foot button { white-space: nowrap; }
 
 /* Settings > About: the result of an update check as a badge, after its link and before the
@@ -1437,7 +1529,7 @@ th[aria-sort] button.sort { color: var(--ink); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; animation: none !important; }
+  *, ::before, ::after { transition: none !important; animation: none !important; }
 }
 
 /* The final explicit file-deletion choice in the removal dialog. */

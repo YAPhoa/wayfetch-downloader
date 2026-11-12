@@ -75,6 +75,18 @@ async function expectState(page, job, state) {
 }
 
 /**
+ * Picks the speed limit's unit from its themed picker.
+ * @param {import('@playwright/test').Page} page
+ * @param {import('@playwright/test').Locator} picker
+ * @param {'KiB' | 'MiB'} unit
+ */
+async function chooseUnit(page, picker, unit) {
+  await picker.click();
+  await page.getByRole('menuitemradio', { name: `${unit}/s` }).click();
+  await expect(picker).toHaveAccessibleName(`Speed limit unit: ${unit}/s`);
+}
+
+/**
  * Selects a job, so the toolbar acts on it.
  * @param {import('@playwright/test').Page} page
  * @param {string} job
@@ -550,17 +562,16 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   );
   await expect(page.locator('[data-key="open-settings"].has-update')).not.toHaveCount(0);
   // Checking automatically is on by default, and turning it off is saved.
-  const automaticOn = pane.getByRole('radio', { name: 'On' });
-  const automaticOff = pane.getByRole('radio', { name: 'Off' });
-  await expect(automaticOn).toBeChecked();
-  await automaticOff.check();
-  await expect(automaticOff).toBeEnabled();
+  const automatic = pane.getByRole('switch', { name: 'Check automatically' });
+  await expect(automatic).toBeChecked();
+  await automatic.uncheck();
+  await expect(automatic).toBeEnabled();
   await page.reload();
-  await expect(automaticOff).toBeChecked();
-  await automaticOn.check();
-  await expect(automaticOn).toBeEnabled();
+  await expect(automatic).not.toBeChecked();
+  await automatic.check();
+  await expect(automatic).toBeEnabled();
   await page.reload();
-  await expect(automaticOn).toBeChecked();
+  await expect(automatic).toBeChecked();
   await expectFitsWindow(page);
   await page.goBack();
   await expect(displayLink).toHaveAttribute('aria-current', 'page');
@@ -579,8 +590,9 @@ test('everyday controls: settings, the row menu, rename, remove, and copy link',
   const table = accounts.getByRole('table', { name: 'Accounts' });
   await expect(table.getByRole('columnheader')).toHaveText(['Service', 'Account', 'Status', 'Expires', 'Actions']);
   await expect(table.locator('tbody tr')).toHaveText(['No accounts added yet.']);
-  // With nothing to report, no empty foot is left under the table.
-  await expect(accounts.locator('.group-foot')).toBeHidden();
+  // With nothing to report, no empty foot is left under the table: it
+  // only draws the card's closing edge.
+  expect(await accounts.locator('.group-foot').evaluate((el) => el.getBoundingClientRect().height)).toBeLessThanOrEqual(1);
   await expect(accounts.getByText(/Links you add directly download without an account/)).toBeVisible();
   await expect(accounts.locator('.service-card')).toHaveCount(0);
   await expect(accounts.locator('input, select, textarea')).toHaveCount(0);
@@ -1327,7 +1339,7 @@ test('the download limit and speed limit are server settings every window shares
         unlimited: choice.getByRole('radio', { name: 'Unlimited' }),
         limited: choice.getByRole('radio', { name: 'Limit to' }),
         rate: pane.getByRole('spinbutton', { name: 'Total download speed limit' }),
-        unit: pane.getByLabel('Speed limit unit'),
+        unit: pane.getByRole('button', { name: /^Speed limit unit/ }),
         count: pane.getByLabel('Maximum simultaneous downloads'),
         save: pane.getByRole('button', { name: 'Save' }),
         useDefault: pane.getByRole('button', { name: 'Use defaults' }),
@@ -1347,10 +1359,10 @@ test('the download limit and speed limit are server settings every window shares
     await expect(a.rate).toBeFocused();
     await expect(a.save).toBeDisabled();
     await a.rate.fill('0.5');
-    await a.unit.selectOption('KiB');
+    await chooseUnit(first, a.unit, 'KiB');
     await expect(a.pane.getByText('Enter a speed from 1 KiB/s to 1 TiB/s.')).toBeVisible();
     await a.rate.fill('1.5');
-    await a.unit.selectOption('MiB');
+    await chooseUnit(first, a.unit, 'MiB');
     await expect(a.pane.getByText('Enter a speed from 1 KiB/s to 1 TiB/s.')).toHaveCount(0);
 
     // Saving both at once, while the other window has a draft of its own.
@@ -1363,7 +1375,7 @@ test('the download limit and speed limit are server settings every window shares
     // The other window shows the saved limit, which its draft did not touch.
     await expect(b.limited).toBeChecked();
     await expect(b.rate).toHaveValue('1.5');
-    await expect(b.unit).toHaveValue('MiB');
+    await expect(b.unit).toHaveAccessibleName('Speed limit unit: MiB/s');
     await expect(b.pane.getByText('Allowed: Unlimited, or 1 KiB/s–1 TiB/s. Saved; the default is Unlimited.')).toBeVisible();
     await b.count.fill('3');
 
@@ -2117,7 +2129,7 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     const bar = c.getByRole('progressbar', { name: 'bulk-c.bin progress' });
     await expect(bar).toHaveAttribute('aria-valuenow', '100');
     await expect(bar).toHaveAttribute('aria-valuetext', 'Done; 100% downloaded');
-    await expect(c.locator('.dot')).toHaveAttribute('data-status', 'done');
+    await expect(c.locator('.mark')).toHaveAttribute('data-status', 'done');
 
     // The table's footer says which rows are shown; one page pages nowhere.
     const pager = page.locator('.downloads-view .pager');
@@ -2270,7 +2282,7 @@ test('a transferring download shows live progress, speed, and time left', async 
     const pane = page.locator('.settings-content');
     await pane.getByRole('radio', { name: 'Limit to' }).check();
     await pane.getByRole('spinbutton', { name: 'Total download speed limit' }).fill('512');
-    await pane.getByLabel('Speed limit unit').selectOption('KiB');
+    await chooseUnit(page, pane.getByRole('button', { name: /^Speed limit unit/ }), 'KiB');
     await pane.getByRole('button', { name: 'Save' }).click();
     await expect(pane.getByText('Saved.', { exact: true })).toBeVisible();
 
@@ -2290,8 +2302,10 @@ test('a transferring download shows live progress, speed, and time left', async 
     await expect(speed).toHaveText(/^\d+\.\d KiB\/s$/);
     await expect(left).toHaveText(/^\d+ s$/);
     await expect(page.locator('.statusbar .speed')).toHaveText(/^Down \d+\.\d KiB\/s$/);
+    // Receiving bytes, its row beats.
+    await expect(live).toHaveAttribute('data-beat', '');
 
-    // Paused, it shows neither speed nor time left.
+    // Paused, it shows neither speed nor time left, and goes still.
     await live.click({ button: 'right' });
     const menu = await openMenu(page);
     await menu.getByRole('menuitem', { name: 'Pause' }).click();
@@ -2299,6 +2313,7 @@ test('a transferring download shows live progress, speed, and time left', async 
     await expect(speed).toHaveText('');
     await expect(left).toHaveText('');
     await expect(page.locator('.statusbar .speed')).toHaveText('');
+    await expect(live).not.toHaveAttribute('data-beat');
   } finally {
     await context.close();
     await own.remove();

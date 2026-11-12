@@ -14,7 +14,7 @@ ui/
 │   ├── index.html / main.js    # Browser shell (owner setup, sign-in, session recovery)
 │   ├── shell/desktop.html      # Desktop WebView entry point (no sign-in needed)
 │   ├── style.css / theme.js    # Light/dark theme, density, and the dense table layout
-│   ├── fonts/                  # Bundled IBM Plex Sans WOFF2 (SIL OFL 1.1)
+│   ├── fonts/                  # Bundled IBM Plex Sans and Mono WOFF2 (SIL OFL 1.1)
 │   ├── data/services.json      # Searchable provider/hoster catalogue
 │   ├── client/                 # Transport-neutral WayfetchClient contract, JobFeed, sorting
 │   │   └── generated/          # TypeScript wire definitions exported from Rust by ts-rs
@@ -48,7 +48,7 @@ ui/
 ## Security & Asset Serving
 
 - **Content Security Policy & Trusted Types**: `wayfetchd` serves the UI with a strict CSP that permits scripts, styles, fonts, and connections only from `'self'`, forbids framing (`frame-ancestors 'none'`), disallow inline styles, and enforces `require-trusted-types-for 'script'`. All DOM nodes are built through `h()` (`src/components/dom.js`) so untrusted filenames and diagnostic messages are always rendered as plain text.
-- **Zero external requests & cache busting**: All assets (including the IBM Plex Sans WOFF2 font files in `src/fonts/`) are compiled into the binary. `/` is revalidated on every load, while versioned assets under `/assets/VERSION/` (where `VERSION` is a content digest of the bundle) are cached immutable.
+- **Zero external requests & cache busting**: All assets (including the IBM Plex Sans and Mono WOFF2 font files in `src/fonts/`) are compiled into the binary. `/` is revalidated on every load, while versioned assets under `/assets/VERSION/` (where `VERSION` is a content digest of the bundle) are cached immutable.
 
 ## Type Checking, Wire Types (`ts-rs`) & Testing
 

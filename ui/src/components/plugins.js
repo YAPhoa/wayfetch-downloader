@@ -6,7 +6,7 @@ import { WayfetchError, idempotencyKey } from '../client/contract.js';
 import { pluginStatus, pluginUse } from '../client/media.js';
 import { confirmDialog } from './dialog.js';
 import { focusedKey, h, refocus, show } from './dom.js';
-import { icon } from './icons.js';
+import { icon, toneMark } from './icons.js';
 import { Menu, rowMenuHandlers } from './menu.js';
 
 /**
@@ -271,7 +271,7 @@ export function pluginsSection(context) {
       h(
         'td',
         { class: `plugin-status tone-${tone}` },
-        h('span', { class: 'status-label' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), status),
+        h('span', { class: 'status-label' }, toneMark(/** @type {import('../client/jobs.js').Tone} */ (tone)), status),
         working !== id && plugin.problem && h('span', { class: 'status-detail' }, plugin.problem),
       ),
       h('td', { class: 'use' }, pluginUse(plugin)),
