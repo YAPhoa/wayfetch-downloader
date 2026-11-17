@@ -20,7 +20,9 @@ use wayfetch_protocol::query::{
 };
 use wayfetch_protocol::{InstanceId, ProtocolError};
 
-use super::{OrCorrupt, Store, StoreError, files, key, links, media, operations, outbox, sql};
+use super::{
+    OrCorrupt, Store, StoreError, files, key, links, media, operations, outbox, queue, sql,
+};
 use crate::transfer::transport::Reach;
 
 /// Columns read by [`RawJob::read`]. `bytes_done` is the durable progress of
@@ -616,7 +618,7 @@ impl Store {
     }
 
     /// Up to `limit` jobs ready for the coordinator to pick up, skipping
-    /// `running`: recovering jobs first, then queued ones, oldest first.
+    /// `running`: recovering jobs first, then queued ones in queue order.
     /// Jobs without a destination are included only if `unassigned`, when
     /// there is a default to give them. The scheduler reads only as many as
     /// it has free slots, so waiting jobs stay in the database rather than
@@ -647,7 +649,7 @@ impl Store {
                  j.route_service, j.route_account, j.media_service, j.media_choice, \
                  s.public_only FROM jobs j JOIN source_links s ON s.id = j.source_link_id \
                  WHERE j.stage IN ('queued', 'recovering') AND (?2 OR j.root_id IS NOT NULL) \
-                 ORDER BY j.stage = 'recovering' DESC, j.id LIMIT ?1",
+                 ORDER BY j.stage = 'recovering' DESC, j.queue_rank, j.id LIMIT ?1",
             )?
             .query_map(params![fetch, unassigned], |row| {
                 Ok((
@@ -775,17 +777,18 @@ impl Store {
                 filter,
                 after,
                 page_size,
+                order,
             } => {
-                let (conditions, mut values) = filter_clause(filter);
-                let after = match after {
-                    // Past the stored range: nothing follows.
-                    Some(id) => sql(*id).unwrap_or(i64::MAX),
-                    None => 0,
-                };
-                values.insert(0, after.into());
+                let (conditions, filtered) = filter_clause(filter);
+                let page = queue::keyset(&tx, *order, *after)?;
+                let mut values = page.values;
+                values.extend(filtered);
                 let before: i64 = tx
                     .query_row(
-                        &format!("SELECT COUNT(*) FROM jobs j WHERE j.id <= ?{conditions}"),
+                        &format!(
+                            "SELECT COUNT(*) FROM jobs j WHERE {}{conditions}",
+                            page.through
+                        ),
                         params_from_iter(values.iter()),
                         |row| row.get(0),
                     )
@@ -794,8 +797,9 @@ impl Store {
                 values.push((i64::from(page_size.get()) + 1).into());
                 let mut items = tx
                     .prepare(&format!(
-                        "SELECT {JOB_COLUMNS} FROM {JOB_FROM} WHERE j.id > ?{conditions} \
-                         ORDER BY j.id LIMIT ?"
+                        "SELECT {JOB_COLUMNS} FROM {JOB_FROM} WHERE {}{conditions} \
+                         ORDER BY {} LIMIT ?",
+                        page.after, page.order
                     ))
                     .map_err(StoreError::from)?
                     .query_map(params_from_iter(values), RawJob::read)

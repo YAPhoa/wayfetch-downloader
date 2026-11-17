@@ -14,6 +14,7 @@ import {
   extractRequest,
   jobCommandRequest,
   linksCommandRequest,
+  moveJobsRequest,
   removeRootRequest,
   settingsRequest,
   submitRequest,
@@ -132,11 +133,12 @@ export class HttpClient {
     return this.request('GET', '/v1/capabilities');
   }
 
-  /** @param {{ after?: JobId | null, pageSize: number, stages?: readonly JobStage[] | null }} request */
-  listJobs({ after, pageSize, stages }) {
+  /** @param {Args<'listJobs'>[0]} request */
+  listJobs({ after, pageSize, stages, order }) {
     const query = new URLSearchParams({ page_size: String(pageSize) });
     if (after) query.set('after', after);
     if (stages) query.set('stage', stages.join(','));
+    if (order) query.set('order', order);
     return this.request('GET', `/v1/jobs?${query}`);
   }
 
@@ -185,6 +187,11 @@ export class HttpClient {
    */
   jobCommand(job, change) {
     return this.request('POST', `/v1/jobs/${encodeURIComponent(job)}/commands`, { body: jobCommandRequest(change) });
+  }
+
+  /** @param {Args<'moveJobs'>[0]} request */
+  moveJobs(request) {
+    return this.request('POST', '/v1/queue/move', { body: moveJobsRequest(request) });
   }
 
   /**

@@ -10,6 +10,7 @@
     "allow-extract",
     "allow-collect-links",
     "allow-links-command",
+    "allow-move-jobs",
     "allow-update-settings",
     "allow-remove-root",
     "allow-change-plugin",

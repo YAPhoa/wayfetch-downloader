@@ -11,6 +11,7 @@ import { JobFeed } from '../client/feed.js';
 import {
   GROUPS,
   availableActions,
+  canMove,
   canRemove,
   canRename,
   describe,
@@ -52,6 +53,8 @@ import { toolbar } from './toolbar.js';
  * @typedef {import('../client/contract.js').JobId} JobId
  * @typedef {import('../client/contract.js').StateAction} StateAction
  * @typedef {import('../client/contract.js').JobAction} JobAction
+ * @typedef {import('../client/contract.js').QueueEnd} QueueEnd
+ * @typedef {import('../client/contract.js').RefusedJob} RefusedJob
  * @typedef {import('../client/contract.js').ProgressSample} ProgressSample
  * @typedef {import('../client/contract.js').Settings} Settings
  * @typedef {import('../client/contract.js').RootId} RootId
@@ -89,10 +92,25 @@ const ACTION_OUTCOMES = {
   retry: ['Retrying', 'not retried'],
 };
 
+/** The ends of the queue waiting downloads move to, in toolbar order. @type {readonly QueueEnd[]} */
+const QUEUE_ENDS = ['top', 'bottom'];
+
+/**
+ * What moving to each end of the queue is called in a menu and in the
+ * toolbar, with the toolbar's icon.
+ * @type {Record<QueueEnd, { label: string, short: string, icon: import('./icons.js').IconName }>}
+ */
+const MOVES = {
+  top: { label: 'Move to top', short: 'Top', icon: 'arrow-up' },
+  bottom: { label: 'Move to bottom', short: 'Bottom', icon: 'arrow-down' },
+};
+
 /** Why a menu item does not apply, when the job's state is the reason. */
 const NOT_FINISHED = 'Once it has finished';
+const NOT_WAITING = 'Only while waiting to start';
 const PENDING = 'Waiting for the server to answer';
 const NO_CONTROL = 'You may only view downloads';
+const NOT_CONNECTED = 'Not connected yet. Try again in a moment.';
 
 /** @type {Record<FeedStatus, string>} */
 const STATUS_LABELS = {
@@ -137,6 +155,24 @@ function commandFailed(error) {
     default:
       return error.message;
   }
+}
+
+/**
+ * What a command did to several downloads, as sentences: what it did to
+ * `done` of them, why the engine refused any, and how many of those
+ * selected it does not apply to.
+ * @param {{ did: (what: string) => string, didNot: string, label: string }} command
+ * @param {number} done
+ * @param {readonly { message: string }[]} refused
+ * @param {number} skipped
+ * @returns {string[]}
+ */
+function outcome({ did, didNot, label }, done, refused, skipped) {
+  return [
+    done > 0 && `${did(count(done, 'download'))}.`,
+    refused.length > 0 && `${count(refused.length, 'download')} ${didNot}: ${refusals(refused, 'downloads')}`,
+    skipped > 0 && `${count(skipped, 'selected download')} ${skipped === 1 ? 'was' : 'were'} left as ${skipped === 1 ? 'it was' : 'they were'}: ${label} does not apply.`,
+  ].filter((part) => typeof part === 'string');
 }
 
 /** @param {string} path */
@@ -355,6 +391,24 @@ export class Downloads {
         },
         icon(ACTION_ICONS[action]),
         ACTION_LABELS[action],
+      ),
+    );
+    this.moveButtons = QUEUE_ENDS.map((to) =>
+      h(
+        'button',
+        {
+          type: 'button',
+          class: `tool move-${to}`,
+          'data-move': to,
+          title: MOVES[to].label,
+          disabled: true,
+          onclick: (/** @type {MouseEvent} */ event) => {
+            /** @type {HTMLButtonElement} */ (event.currentTarget).disabled = true;
+            void this.move(this.targets(), to);
+          },
+        },
+        icon(MOVES[to].icon),
+        MOVES[to].short,
       ),
     );
     /** Links in the collected list, once read. @type {number | null} */
@@ -801,7 +855,12 @@ export class Downloads {
   downloadsToolbar() {
     const { search } = this;
     return this.toolbar(
-      h('div', { class: 'tool-group', role: 'group', 'aria-label': 'Selected downloads' }, this.actionButtons),
+      h(
+        'div',
+        { class: 'tool-group', role: 'group', 'aria-label': 'Selected downloads' },
+        this.actionButtons,
+        this.moveButtons,
+      ),
       h(
         'div',
         { class: 'search' },
@@ -909,6 +968,15 @@ export class Downloads {
   }
 
   /**
+   * Those of `jobs` that can be moved in the queue from this view now.
+   * @param {readonly JobSummary[]} jobs
+   */
+  movable(jobs) {
+    if (!this.canControl) return [];
+    return jobs.filter((job) => !this.inFlight.has(job.id) && canMove(job));
+  }
+
+  /**
    * What a state command is called for `jobs`: with the name of one, or
    * with how many of several it applies to.
    * @param {StateAction} action
@@ -930,6 +998,13 @@ export class Downloads {
       button.disabled = accepting.length === 0;
       button.setAttribute('aria-label', this.actionLabel(action, jobs));
       if (action === 'retry') button.title = jobs.length === 1 && accepting.length > 0 ? retryPlan(jobs[0]) : '';
+    }
+    const movable = this.movable(jobs);
+    for (const button of this.moveButtons) {
+      const to = /** @type {QueueEnd} */ (button.dataset.move);
+      const what = jobs.length === 1 ? jobName(jobs[0]) : count(movable.length || jobs.length, 'download');
+      button.disabled = movable.length === 0;
+      button.setAttribute('aria-label', jobs.length > 0 ? `Move ${what} to the ${to} of the queue` : MOVES[to].label);
     }
   }
 
@@ -970,18 +1045,89 @@ export class Downloads {
     );
     const n = accepted.filter(Boolean).length;
     const [did, didNot] = ACTION_OUTCOMES[action];
-    const skipped = jobs.length - accepting.length;
-    const parts = [
-      n > 0 && `${did} ${count(n, 'download')}.`,
-      refused.length > 0 && `${count(refused.length, 'download')} ${didNot}: ${refusals(refused, 'downloads')}`,
-      skipped > 0 && `${count(skipped, 'selected download')} ${skipped === 1 ? 'was' : 'were'} left as ${skipped === 1 ? 'it was' : 'they were'}: ${ACTION_LABELS[action]} does not apply.`,
-      confirm.length > 0 &&
+    const parts = outcome(
+      { did: (what) => `${did} ${what}`, didNot, label: ACTION_LABELS[action] },
+      n,
+      refused,
+      jobs.length - accepting.length,
+    );
+    if (confirm.length > 0) {
+      parts.push(
         `${count(confirm.length, 'download')} through an account must be retried on ${confirm.length === 1 ? 'its' : 'their'} own, since the provider may be asked again.`,
-    ].filter(Boolean);
+      );
+    }
+    this.tell(parts, n);
+  }
+
+  /**
+   * Says what a command on several downloads did: as a success when it
+   * did all it was asked to, otherwise as a notice.
+   * @param {readonly string[]} parts
+   * @param {number} done how many downloads it applied to
+   */
+  tell(parts, done) {
     const text = parts.join(' ');
-    if (n > 0 && parts.length === 1) this.done(text);
+    if (done > 0 && parts.length === 1) this.done(text);
     else this.notice = text;
     this.schedule();
+  }
+
+  /**
+   * Moves those of `jobs` waiting to start to the `to` end of the queue,
+   * keeping their order, in one command at the revisions shown, and says
+   * what happened as `sendAll` does. The list is read again at once, so
+   * the Queued view shows the new order without waiting for events.
+   * @param {readonly JobSummary[]} jobs
+   * @param {QueueEnd} to
+   */
+  async move(jobs, to) {
+    const movable = this.movable(jobs);
+    const hello = this.feed.hello;
+    if (movable.length === 0) return;
+    if (!hello) {
+      this.notice = NOT_CONNECTED;
+      this.schedule();
+      return;
+    }
+    for (const job of movable) this.inFlight.add(job.id);
+    this.notice = '';
+    this.schedule();
+    /** @type {{ moved: JobId[], refused: RefusedJob[] }} */
+    let result;
+    try {
+      const answer = await this.client.moveJobs({
+        idempotencyKey: idempotencyKey(),
+        target: hello.instance,
+        jobs: movable.map((job) => ({ job: job.id, revision: job.revision })),
+        to,
+      });
+      result = answer.type === 'jobs_moved' ? answer : { moved: [], refused: [] };
+    } catch (error) {
+      if (!(error instanceof WayfetchError)) throw error;
+      if (error.code === 'unauthenticated') this.signedOut();
+      else this.notice = commandFailed(error);
+      this.schedule();
+      return;
+    } finally {
+      for (const job of movable) this.inFlight.delete(job.id);
+    }
+    const { moved, refused } = result;
+    const place = `to the ${to} of the queue`;
+    if (jobs.length === 1) {
+      const name = jobName(jobs[0]);
+      if (moved.length > 0) this.done(`Moved ${name} ${place}.`);
+      else this.notice = `${name}: ${refused.map((r) => r.message).join(' ')}`;
+      this.schedule();
+    } else {
+      const parts = outcome(
+        { did: (what) => `Moved ${what} ${place}`, didNot: 'not moved', label: MOVES[to].label },
+        moved.length,
+        refused,
+        jobs.length - movable.length,
+      );
+      this.tell(parts, moved.length);
+    }
+    await this.feed.showPage(this.feed.pageAfter).catch((error) => this.report(error));
   }
 
   /**
@@ -1000,7 +1146,7 @@ export class Downloads {
   async send(job, action, { name, password, repeatProviderOperation, refused } = {}) {
     const hello = this.feed.hello;
     if (!hello) {
-      (refused ?? ((text) => (this.notice = text)))('Not connected yet. Try again in a moment.');
+      (refused ?? ((text) => (this.notice = text)))(NOT_CONNECTED);
       this.schedule();
       return false;
     }
@@ -1168,7 +1314,7 @@ export class Downloads {
       hint: control ? undefined : NO_CONTROL,
       run: () => void this.sendAll(jobs, action),
     }));
-    entries.push('separator', {
+    entries.push('separator', ...this.moveEntries(jobs, control ? NOT_WAITING : NO_CONTROL), 'separator', {
       key: 'remove',
       label: 'Remove…',
       disabled: !control || removable.length === 0,
@@ -1176,6 +1322,24 @@ export class Downloads {
       run: () => void this.remove(removable),
     });
     return entries;
+  }
+
+  /**
+   * Moving `jobs` to either end of the queue, for a menu: disabled, with
+   * `hint`, when none of them can be moved.
+   * @param {readonly JobSummary[]} jobs
+   * @param {string | undefined} hint
+   * @returns {MenuEntry[]}
+   */
+  moveEntries(jobs, hint) {
+    const disabled = this.movable(jobs).length === 0;
+    return QUEUE_ENDS.map((to) => ({
+      key: `move-${to}`,
+      label: MOVES[to].label,
+      disabled,
+      hint: disabled ? hint : undefined,
+      run: () => void this.move(jobs, to),
+    }));
   }
 
   /**
@@ -1270,6 +1434,9 @@ export class Downloads {
         disabled: !actions.has('retry'),
         run: () => void this.retry(job),
       },
+      'separator',
+      ...this.moveEntries([job], why(NOT_WAITING)),
+      'separator',
       {
         key: 'remove',
         label: 'Remove…',
@@ -1616,7 +1783,7 @@ export class Downloads {
     this.group = key;
     this.earlier = [];
     this.notice = '';
-    this.feed.showStages(group.stages).catch((error) => this.report(error));
+    this.feed.showStages(group.stages, group.order).catch((error) => this.report(error));
     this.render();
   }
 

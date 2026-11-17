@@ -2257,6 +2257,80 @@ test('ticked downloads are paused, resumed, cancelled, and removed together', as
     await expect(page.locator('tr[data-job]')).toHaveCount(0);
     await expect(summary).toBeEmpty();
     await expect(own.published('bulk-c.bin')).rejects.toThrow();
+
+    // Waiting downloads move to either end of the queue, and the one at
+    // the top takes the next free slot.
+    await page.goto(`${own.origin}/settings/downloads`);
+    const settings = page.locator('.settings-content');
+    await settings.getByLabel('Maximum simultaneous downloads').fill('1');
+    await settings.getByRole('button', { name: 'Save' }).click();
+    await expect(settings.getByText('Saved.', { exact: true })).toBeVisible();
+    await page.goto(own.origin);
+    await page.getByRole('button', { name: 'Add links' }).click();
+    await page
+      .getByLabel('Links, text with links in it, or a page’s HTML')
+      .fill(
+        [
+          fixture.put('queue-run.bin', 10 * MIB, 9 * MIB),
+          fixture.put('queue-1.bin', MIB),
+          fixture.put('queue-2.bin', MIB),
+          fixture.put('queue-3.bin', 10 * MIB, 9 * MIB),
+        ].join('\n'),
+      );
+    await page.getByRole('button', { name: 'Collect links' }).click();
+    await expect(page.locator('.links-page .selection-summary strong')).toHaveText('4 links selected');
+    await page.getByRole('button', { name: 'Start selected' }).click();
+    await expect(page.getByText('Started 4 downloads.')).toBeVisible();
+    await expect(byName('queue-run.bin').locator('td[data-state]')).toHaveText('Downloading');
+    const top = page.locator('.downloads-view [data-move="top"]');
+    const bottom = page.locator('.downloads-view [data-move="bottom"]');
+    // A running download does not move.
+    await byName('queue-run.bin').getByRole('checkbox').check();
+    await expect(top).toBeDisabled();
+    await byName('queue-run.bin').getByRole('button', { name: 'Actions for queue-run.bin' }).click();
+    menu = await openMenu(page);
+    await expect(menu.getByRole('menuitem', { name: 'Move to top' })).toBeDisabled();
+    await expect(menu.getByRole('menuitem', { name: 'Move to top' })).toContainText('Only while waiting to start');
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Clear selection' }).click();
+
+    // The Queued view lists downloads in the order they start.
+    await page.locator('.filters button', { hasText: 'Queued' }).click();
+    const queued = page.locator('tr[data-job] td.name');
+    await expect(queued).toHaveText(['queue-1.bin', 'queue-2.bin', 'queue-3.bin']);
+    await expect(top).toBeDisabled();
+    await expect(bottom).toBeDisabled();
+    await byName('queue-3.bin').getByRole('checkbox').check();
+    await expect(top).toHaveAccessibleName('Move queue-3.bin to the top of the queue');
+    // By keyboard, as the other toolbar commands.
+    await top.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByText('Moved queue-3.bin to the top of the queue.')).toBeVisible();
+    await expect(queued).toHaveText(['queue-3.bin', 'queue-1.bin', 'queue-2.bin']);
+    // An unticked row's menu moves that row alone.
+    await byName('queue-1.bin').getByRole('button', { name: 'Actions for queue-1.bin' }).click();
+    menu = await openMenu(page);
+    await menu.getByRole('menuitem', { name: 'Move to bottom' }).click();
+    await expect(page.getByText('Moved queue-1.bin to the bottom of the queue.')).toBeVisible();
+    await expect(queued).toHaveText(['queue-3.bin', 'queue-2.bin', 'queue-1.bin']);
+    // Column sort still sorts the page, and a third click returns to the
+    // order they start in.
+    const nameHeader = page.locator('.downloads-view th.name');
+    await nameHeader.getByRole('button').click();
+    await expect(queued).toHaveText(['queue-1.bin', 'queue-2.bin', 'queue-3.bin']);
+    await nameHeader.getByRole('button').click();
+    await nameHeader.getByRole('button').click();
+    await expect(page.locator('.downloads-view th[aria-sort]')).toHaveCount(0);
+    await expect(queued).toHaveText(['queue-3.bin', 'queue-2.bin', 'queue-1.bin']);
+
+    fixture.release('queue-run.bin');
+    await expect(queued).toHaveText(['queue-2.bin', 'queue-1.bin']);
+    await page.locator('.filters button', { hasText: 'All' }).click();
+    await expect(byName('queue-run.bin').locator('td[data-state]')).toHaveText('Done');
+    await expect(byName('queue-3.bin').locator('td[data-state]')).toHaveText('Downloading');
+    await expect(byName('queue-2.bin').locator('td[data-state]')).toHaveText('Queued');
+    await expect(byName('queue-1.bin').locator('td[data-state]')).toHaveText('Queued');
+    fixture.release('queue-3.bin');
   } finally {
     await context.close();
     await own.remove();

@@ -47,6 +47,10 @@ class FakeClient {
     this.refuse = null;
     this.pageReads = 0;
     this.countReads = 0;
+    /** Each job's place in the queue, 0 when unset. @type {Map<string, number>} */
+    this.ranks = new Map();
+    /** The order the last page was read in. @type {string | undefined} */
+    this.lastOrder = undefined;
     /** @type {readonly import('../../src/client/contract.js').Permission[]} */
     this.permissions = ['read'];
     this.local = false;
@@ -162,14 +166,19 @@ class FakeClient {
     };
   }
 
-  /** @param {{ after?: string | null, pageSize: number, stages?: readonly string[] | null }} request */
-  async listJobs({ after, pageSize, stages }) {
+  /** @param {{ after?: string | null, pageSize: number, stages?: readonly string[] | null, order?: string }} request */
+  async listJobs({ after, pageSize, stages, order }) {
     if (this.refuse) throw this.refuse;
     this.pageReads += 1;
-    const start = after ? Number(after.slice(4)) : 0;
-    const all = [...this.jobs.values()].filter(
-      (j) => Number(j.id.slice(4)) > start && (!stages || stages.includes(j.stage)),
-    );
+    this.lastOrder = order;
+    /** @param {string} id @returns {[number, number]} */
+    const key = (id) => [order === 'queue' ? (this.ranks.get(id) ?? 0) : 0, Number(id.slice(4))];
+    /** @param {[number, number]} a @param {[number, number]} b */
+    const compare = (a, b) => a[0] - b[0] || a[1] - b[1];
+    const start = after ? key(after) : null;
+    const all = [...this.jobs.values()]
+      .filter((j) => (!start || compare(key(j.id), start) > 0) && (!stages || stages.includes(j.stage)))
+      .sort((a, b) => compare(key(a.id), key(b.id)));
     const items = all.slice(0, pageSize);
     return {
       items,
@@ -201,6 +210,11 @@ class FakeClient {
 
   /** @returns {Promise<never>} */
   async jobCommand() {
+    throw new Error('unused');
+  }
+
+  /** @returns {Promise<never>} */
+  async moveJobs() {
     throw new Error('unused');
   }
 
@@ -710,4 +724,35 @@ test('jobs entering or leaving a stage filter are listed or replaced', async () 
   await settle();
   assert.deepEqual(ids(), ['job-1', 'job-3']);
   assert.equal(feed.nextAfter, 'job-3');
+});
+
+test('the Queued list reads its page again when a job moves or is added', async () => {
+  const client = new FakeClient();
+  for (const n of [1, 2]) client.change('job_added', job(n));
+  client.change('job_added', job(3, { stage: 'transferring', display: 'transferring' }));
+  const feed = await started(client, 3);
+  await feed.showStages(['queued'], 'queue');
+  assert.equal(client.lastOrder, 'queue');
+  const ids = () => feed.jobs.map((j) => j.id);
+  assert.deepEqual(ids(), ['job-1', 'job-2']);
+
+  // Moved to the bottom: same state, new place.
+  client.ranks.set('job-1', 1);
+  client.change('job_changed', job(1));
+  await settle();
+  assert.deepEqual(ids(), ['job-2', 'job-1']);
+  // A new job waits ahead of one moved to the bottom.
+  client.change('job_added', job(4));
+  await settle();
+  assert.deepEqual(ids(), ['job-2', 'job-4', 'job-1']);
+  // A job the list cannot show changing reads nothing.
+  const reads = client.pageReads;
+  client.change('job_changed', job(3, { stage: 'verifying', display: 'verifying', revision: 2 }));
+  await settle();
+  assert.equal(client.pageReads, reads);
+
+  // Other lists are in the order jobs were added.
+  await feed.showStages(null);
+  assert.equal(client.lastOrder, 'added');
+  assert.deepEqual(ids(), ['job-1', 'job-2', 'job-3']);
 });

@@ -295,14 +295,12 @@ impl TryFrom<Vec<LinkRef>> for LinkRefs {
     type Error = ProtocolError;
 
     fn try_from(links: Vec<LinkRef>) -> Result<Self, Self::Error> {
-        bounded(&links, "no links")?;
-        let mut seen = std::collections::HashSet::with_capacity(links.len());
-        if !links.iter().all(|l| seen.insert(l.link)) {
-            return Err(ProtocolError::new(
-                ErrorCode::InvalidRequest,
-                "a link is named more than once",
-            ));
-        }
+        distinct(
+            &links,
+            |l| l.link,
+            "no links",
+            "a link is named more than once",
+        )?;
         Ok(Self(links))
     }
 }
@@ -311,6 +309,55 @@ impl From<LinkRefs> for Vec<LinkRef> {
     fn from(value: LinkRefs) -> Self {
         value.0
     }
+}
+
+/// A job, at the revision the client last saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct JobRef {
+    /// The job.
+    pub job: JobId,
+    /// Its revision as the client saw it.
+    pub revision: Revision,
+}
+
+/// A bounded, non-empty list of jobs, each named once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<JobRef>", into = "Vec<JobRef>")]
+pub struct JobRefs(Vec<JobRef>);
+
+impl JobRefs {
+    /// The jobs, in the order given.
+    pub fn as_slice(&self) -> &[JobRef] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<JobRef>> for JobRefs {
+    type Error = ProtocolError;
+
+    fn try_from(jobs: Vec<JobRef>) -> Result<Self, Self::Error> {
+        distinct(&jobs, |j| j.job, "no jobs", "a job is named more than once")?;
+        Ok(Self(jobs))
+    }
+}
+
+impl From<JobRefs> for Vec<JobRef> {
+    fn from(value: JobRefs) -> Self {
+        value.0
+    }
+}
+
+/// Which end of the queue [`Command::MoveJobs`] moves jobs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum QueueEnd {
+    /// Before every other job, including jobs added later.
+    Top,
+    /// After every other job, including jobs added later.
+    Bottom,
 }
 
 /// Checks a command's list holds 1 to [`MAX_SUBMIT_ITEMS`] entries.
@@ -323,6 +370,21 @@ fn bounded<T>(items: &[T], empty: &str) -> Result<(), ProtocolError> {
         )),
         _ => Ok(()),
     }
+}
+
+/// [`bounded`], and no two entries with the same `key`.
+fn distinct<T, K: std::hash::Hash + Eq>(
+    items: &[T],
+    key: impl Fn(&T) -> K,
+    empty: &str,
+    repeated: &str,
+) -> Result<(), ProtocolError> {
+    bounded(items, empty)?;
+    let mut seen = std::collections::HashSet::with_capacity(items.len());
+    if !items.iter().all(|item| seen.insert(key(item))) {
+        return Err(ProtocolError::new(ErrorCode::InvalidRequest, repeated));
+    }
+    Ok(())
 }
 
 /// A mutation request.
@@ -417,6 +479,18 @@ pub enum Command {
         /// The new file name: one path component, checked against the
         /// engine's filename policy.
         name: String,
+    },
+    /// Move waiting (queued) jobs to the top or bottom of the queue, in
+    /// the order they were already queued, so they start before or after
+    /// every other waiting job, including jobs added later. A job keeps
+    /// its place when it waits again after running, failing, or a pause.
+    /// A job that is not waiting, changed since the client saw it, or is
+    /// gone is refused, and the others move.
+    MoveJobs {
+        /// The jobs.
+        jobs: JobRefs,
+        /// Where to.
+        to: QueueEnd,
     },
     /// Remove a finished, failed, or cancelled job from lists and counts.
     /// Its files, partial data, and records stay.
@@ -667,6 +741,7 @@ impl Command {
             | Self::UpdateSettings { .. }
             | Self::Rename { .. }
             | Self::DeleteFiles { .. }
+            | Self::MoveJobs { .. }
             | Self::Remove { .. }
             | Self::RemoveRoot { .. }
             | Self::Extract { .. }
@@ -777,6 +852,15 @@ pub enum CommandResult {
         /// The links it was refused for.
         refused: Vec<RefusedLink>,
     },
+    /// Jobs were moved in the queue, for [`Command::MoveJobs`]; the
+    /// others named stay where they were.
+    JobsMoved {
+        /// The jobs moved, in their new queue order. Their revisions are
+        /// unchanged.
+        moved: Vec<JobId>,
+        /// The jobs it was refused for.
+        refused: Vec<RefusedJob>,
+    },
     /// An authorization started, or is still waiting, for
     /// [`Command::AuthorizeAccount`]: show its code.
     AuthorizationStarted(Authorization),
@@ -833,6 +917,20 @@ pub struct RefusedLink {
     /// `revision_conflict` for one that changed, `not_applicable` for an
     /// invalid link, one already started, or a destination that cannot be
     /// used.
+    pub code: ErrorCode,
+    /// What to do about it.
+    pub message: DiagnosticText,
+}
+
+/// A job a command on several jobs was refused for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RefusedJob {
+    /// The job.
+    pub job: JobId,
+    /// Why, as an error code: `not_found` for a job that is gone,
+    /// `revision_conflict` for one that changed, `not_applicable` for one
+    /// the command does not apply to in its state.
     pub code: ErrorCode,
     /// What to do about it.
     pub message: DiagnosticText,
@@ -1082,6 +1180,40 @@ mod tests {
         assert_eq!(
             "accounts".parse::<Permission>().unwrap(),
             Permission::Accounts
+        );
+    }
+
+    #[test]
+    fn moving_jobs_is_control_over_distinct_jobs() {
+        let json = json!({
+            "type": "move_jobs",
+            "jobs": [{"job": "job-3", "revision": 2}, {"job": "job-1", "revision": 1}],
+            "to": "top",
+        });
+        let command = serde_json::from_value::<Command>(json.clone()).unwrap();
+        assert_eq!(command.required_permissions(), [Permission::Control]);
+        assert_eq!(serde_json::to_value(&command).unwrap(), json);
+        let twice = json!({
+            "type": "move_jobs",
+            "jobs": [{"job": "job-3", "revision": 2}, {"job": "job-3", "revision": 1}],
+            "to": "bottom",
+        });
+        let err = serde_json::from_value::<Command>(twice).unwrap_err();
+        assert!(err.to_string().contains("more than once"), "{err}");
+        let none = json!({"type": "move_jobs", "jobs": [], "to": "top"});
+        assert!(serde_json::from_value::<Command>(none).is_err());
+        let sideways =
+            json!({"type": "move_jobs", "jobs": [{"job": "job-3", "revision": 2}], "to": "middle"});
+        assert!(serde_json::from_value::<Command>(sideways).is_err());
+        let many: Vec<_> = (1..=MAX_SUBMIT_ITEMS as u64 + 1)
+            .map(|i| JobRef {
+                job: JobId::from_u64(i).unwrap(),
+                revision: Revision::INITIAL,
+            })
+            .collect();
+        assert_eq!(
+            JobRefs::try_from(many).unwrap_err().code,
+            ErrorCode::LimitExceeded
         );
     }
 

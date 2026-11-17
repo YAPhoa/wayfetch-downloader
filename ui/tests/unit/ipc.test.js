@@ -53,11 +53,17 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 const HELLO = /** @type {any} */ ({ type: 'hello', instance: 'i', boot_epoch: 1 });
 
 test('queries and commands carry the protocol JSON', async () => {
-  const core = new FakeCore({ query: () => ({ type: 'jobs' }), job_command: () => ({}), submit: () => ({}) });
+  const core = new FakeCore({
+    query: () => ({ type: 'jobs' }),
+    job_command: () => ({}),
+    submit: () => ({}),
+    move_jobs: () => ({ type: 'jobs_moved', moved: ['job-2'], refused: [] }),
+  });
   const client = new DesktopIpcClient(core);
   assert.ok(client.permissions.includes('delete_files'));
   await client.listJobs({ after: /** @type {any} */ ('job-3'), pageSize: 50, stages: ['paused'] });
   await client.listJobs({ after: null, pageSize: 50, stages: null });
+  await client.listJobs({ after: null, pageSize: 50, stages: ['queued'], order: 'queue' });
   await client.inspectJob(/** @type {any} */ ('job-1'));
   await client.countJobs();
   await client.submit({ idempotencyKey: 'k', target: 't', items: ['https://a.example/'] });
@@ -67,9 +73,17 @@ test('queries and commands carry the protocol JSON', async () => {
     action: 'pause',
     expectedRevision: 4,
   });
+  const moved = await client.moveJobs({
+    idempotencyKey: 'k3',
+    target: 't',
+    jobs: [{ job: /** @type {any} */ ('job-2'), revision: 3 }],
+    to: 'top',
+  });
+  assert.deepEqual(moved, { type: 'jobs_moved', moved: ['job-2'], refused: [] });
   assert.deepEqual(core.calledWith('query'), [
     { query: { type: 'list_jobs', page_size: 50, after: 'job-3', filter: { stages: ['paused'] } } },
     { query: { type: 'list_jobs', page_size: 50 } },
+    { query: { type: 'list_jobs', page_size: 50, filter: { stages: ['queued'] }, order: 'queue' } },
     { query: { type: 'inspect_job', job: 'job-1' } },
     { query: { type: 'count_jobs' } },
   ]);
@@ -81,6 +95,9 @@ test('queries and commands carry the protocol JSON', async () => {
       job: 'job-1',
       request: { idempotency_key: 'k2', target: 't', action: 'pause', expected_revision: 4 },
     },
+  ]);
+  assert.deepEqual(core.calledWith('move_jobs'), [
+    { request: { idempotency_key: 'k3', target: 't', jobs: [{ job: 'job-2', revision: 3 }], to: 'top' } },
   ]);
 });
 

@@ -23,8 +23,8 @@ use wayfetch_engine::transfer::transport::{OpenRequest, Response, Transport, Tra
 use wayfetch_engine::transfer::writer::{BoxFuture, ChunkSource};
 use wayfetch_engine::{EngineOwner, IntegerPolicy, SpeedLimitPolicy, Timeouts};
 use wayfetch_protocol::command::{
-    AppliedLink, CollectMode, CollectText, LinkRef, LinkRefs, MAX_COLLECTED_LINKS,
-    MAX_SUBMIT_ITEMS, PreferenceChange, SpeedLimitChange,
+    AppliedLink, CollectMode, CollectText, JobRef, JobRefs, LinkRef, LinkRefs, MAX_COLLECTED_LINKS,
+    MAX_SUBMIT_ITEMS, PreferenceChange, QueueEnd, SpeedLimitChange,
 };
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::id::{JobId, RootId};
@@ -32,7 +32,7 @@ use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::domain::version::Revision;
 use wayfetch_protocol::event::{EventKind, ResyncReason};
 use wayfetch_protocol::query::{
-    BoundedSetting, CollectedLink, JobFilter, JobSummary, LinkCheck, LinkPage, PageSize,
+    BoundedSetting, CollectedLink, JobFilter, JobOrder, JobSummary, LinkCheck, LinkPage, PageSize,
     SettingSource, Settings, SpeedLimit, SpeedLimitSetting,
 };
 use wayfetch_protocol::{
@@ -317,6 +317,7 @@ async fn a_direct_download_is_published_and_listed_after_restart() {
         },
         after: None,
         page_size: PageSize::DEFAULT,
+        order: JobOrder::Added,
     };
     let QueryResult::Jobs(page) = owner.handle().query(completed, ALL).await.unwrap() else {
         panic!()
@@ -331,6 +332,7 @@ async fn a_direct_download_is_published_and_listed_after_restart() {
         },
         after: Some(done_id),
         page_size: PageSize::DEFAULT,
+        order: JobOrder::Added,
     };
     for (stages, before) in [(vec![JobStage::Complete], 1), (vec![JobStage::Failed], 0)] {
         let QueryResult::Jobs(page) = owner.handle().query(page_after(stages), ALL).await.unwrap()
@@ -620,6 +622,66 @@ async fn max_active_downloads_bounds_concurrent_transfers() {
         complete(&owner, id).await;
     }
     assert_eq!(env.server.most_open_bodies.load(Ordering::SeqCst), 2);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_moved_to_the_top_takes_the_next_free_slot() {
+    let mut env = env();
+    env.policy.max_active_downloads.default = Some(1);
+    let paths = ["/a.bin", "/b.bin", "/c.bin", "/d.bin"];
+    let mut running = Resource::new(body(8 * KIB));
+    running.stall_at = Some(4 * KIB);
+    env.server.put(paths[0], running);
+    for path in &paths[1..] {
+        env.server.put(path, Resource::new(body(4 * KIB)));
+    }
+    let owner = env.start().await;
+    let ids = submit(&owner, &paths).await;
+    wait_for(&owner, ids[0], |j| j.bytes_done > 0).await;
+
+    let last = job(&owner, ids[3]).await;
+    let moved = owner
+        .handle()
+        .execute(
+            envelope(
+                &owner,
+                Command::MoveJobs {
+                    jobs: JobRefs::try_from(vec![JobRef {
+                        job: last.id,
+                        revision: last.revision,
+                    }])
+                    .unwrap(),
+                    to: QueueEnd::Top,
+                },
+            ),
+            ALL,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        moved,
+        CommandResult::JobsMoved {
+            moved: vec![last.id],
+            refused: vec![],
+        }
+    );
+    // The running job is not interrupted by the move.
+    assert_eq!(job(&owner, ids[0]).await.stage, JobStage::Transferring);
+    env.server.update(paths[0], |r| r.stall_at = None);
+    for id in &ids {
+        complete(&owner, *id).await;
+    }
+    // One slot, so each starts after the one before it finished.
+    let started: Vec<String> = env
+        .server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.url.path().to_owned())
+        .collect();
+    assert_eq!(started, ["/a.bin", "/d.bin", "/b.bin", "/c.bin"]);
     shutdown(owner).await;
 }
 

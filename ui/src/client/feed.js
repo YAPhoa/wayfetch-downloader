@@ -15,6 +15,7 @@ import { WayfetchError, serves } from './contract.js';
  * @typedef {import('./contract.js').JobSummary} JobSummary
  * @typedef {import('./contract.js').JobCounts} JobCounts
  * @typedef {import('./contract.js').JobStage} JobStage
+ * @typedef {import('./contract.js').JobOrder} JobOrder
  * @typedef {import('./contract.js').EventCursor} EventCursor
  * @typedef {import('./contract.js').StreamItem} StreamItem
  * @typedef {import('./contract.js').EventKind} EventKind
@@ -123,6 +124,9 @@ export class JobFeed {
     /** The stages the list shows, or null for every stage. */
     /** @type {readonly JobStage[] | null} */
     this.stages = null;
+    /** The order the list is read in. */
+    /** @type {JobOrder} */
+    this.order = 'added';
     /** The current page's jobs, in order. */
     /** @type {JobId[]} */
     this.pageIds = [];
@@ -228,11 +232,14 @@ export class JobFeed {
   }
 
   /**
-   * Lists only jobs in `stages`, or every job, from the first page.
+   * Lists only jobs in `stages`, or every job, in `order`, from the first
+   * page.
    * @param {readonly JobStage[] | null} stages
+   * @param {JobOrder} [order]
    */
-  async showStages(stages) {
+  async showStages(stages, order = 'added') {
     this.stages = stages;
+    this.order = order;
     this.pageAfter = null;
     this.pageIds = [];
     this.page = new Map();
@@ -404,11 +411,16 @@ export class JobFeed {
    */
   async loadPage(run) {
     const request = ++this.pageRequests;
-    const { pageAfter: after, stages, view } = this;
+    const { pageAfter: after, stages, order, view } = this;
     for (let attempt = 1; ; attempt += 1) {
-      const page = await this.client.listJobs({ after, pageSize: this.pageSize, stages });
+      const page = await this.client.listJobs({ after, pageSize: this.pageSize, stages, order });
       if (run !== this.run || !this.answers(view, page.as_of)) return undefined;
-      if (after !== this.pageAfter || stages !== this.stages || request < this.pageShown) {
+      if (
+        after !== this.pageAfter ||
+        stages !== this.stages ||
+        order !== this.order ||
+        request < this.pageShown
+      ) {
         return undefined;
       }
       if (this.isBehind(page.as_of) && attempt < SNAPSHOT_ATTEMPTS) continue;
@@ -523,15 +535,7 @@ export class JobFeed {
         if (kind.type === 'job_added' || kind.type === 'job_changed') {
           const listed = this.page.has(kind.job.id);
           this.hold(kind.job, item.cursor.position);
-          // A job that entered or left the filter shifts the page's rows.
-          // So may one off this page entering or leaving it before the page.
-          if (
-            kind.type === 'job_changed' &&
-            this.stages !== null &&
-            (listed !== this.admits(kind.job) || (!listed && this.pageAfter !== null))
-          ) {
-            this.repage.request();
-          }
+          if (kind.type === 'job_changed' && this.shifts(listed, kind.job)) this.repage.request();
           this.recount.request();
         }
         if (kind.type === 'job_removed') {
@@ -567,15 +571,35 @@ export class JobFeed {
   }
 
   /**
+   * Whether a change to `job`, which the page held if `listed`, shifts the
+   * page's rows: it entered or left the filter, or one off this page
+   * entered or left it before the page. In queue order, a job the list
+   * shows may also have moved.
+   * @param {boolean} listed
+   * @param {JobSummary} job
+   */
+  shifts(listed, job) {
+    const admitted = this.admits(job);
+    if (this.order === 'queue' && (listed || admitted)) return true;
+    return this.stages !== null && (listed !== admitted || (!listed && this.pageAfter !== null));
+  }
+
+  /**
    * A new job joins the current page if it is the last page and has room;
-   * if it is full, the page gains a next page instead.
+   * if it is full, the page gains a next page instead. In queue order it
+   * waits ahead of jobs moved to the bottom, so the page is read again.
    * @param {JobSummary} job
    * @param {number} position
    */
   added(job, position) {
+    if (this.page.has(job.id) || !this.admits(job)) return;
+    if (this.order === 'queue') {
+      this.repage.request();
+      return;
+    }
     // New jobs have the highest IDs, so they belong at the end of the
     // last page.
-    if (this.page.has(job.id) || this.nextAfter !== null || !this.admits(job)) return;
+    if (this.nextAfter !== null) return;
     const last = this.pageIds.at(-1);
     if (last !== undefined && this.pageIds.length >= this.pageSize) {
       this.nextAfter = last;

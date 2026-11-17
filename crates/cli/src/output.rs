@@ -11,6 +11,7 @@ use serde::Serialize;
 use wayfetch_engine::ShutdownReport;
 use wayfetch_engine::domain::id::{BatchId, JobId};
 use wayfetch_engine::domain::version::Revision;
+use wayfetch_engine::protocol::command::QueueEnd;
 use wayfetch_engine::protocol::event::{DurableEvent, EventKind, ProgressSample, ResyncReason};
 use wayfetch_engine::protocol::query::JobSummary;
 use wayfetch_engine::protocol::{InstanceId, ProtocolError};
@@ -27,6 +28,8 @@ commands:
   cancel JOB      stop a job, keeping its partial data
   retry JOB       start a failed or cancelled job again, continuing its
                   saved data when possible
+  top JOB...      start waiting jobs before every other waiting job
+  bottom JOB...   start waiting jobs after every other waiting job
   help            show this help
   quit            shut down; unfinished jobs continue on the next start";
 
@@ -81,6 +84,13 @@ pub enum Output<'a> {
         revision: Revision,
         /// Whether anything changed.
         changed: bool,
+    },
+    /// A job was moved to the top or bottom of the queue.
+    Moved {
+        /// The job.
+        job: JobId,
+        /// Where to.
+        to: QueueEnd,
     },
     /// The command list.
     Help {
@@ -170,6 +180,10 @@ impl Message for Output<'_> {
                     if *changed { "requested" } else { "no change" }
                 )
             }
+            Self::Moved { job, to } => match to {
+                QueueEnd::Top => format!("{job}: moved to the top of the queue"),
+                QueueEnd::Bottom => format!("{job}: moved to the bottom of the queue"),
+            },
             Self::Help { text } => (*text).to_owned(),
             Self::Error { message, .. } => format!("error: {message}"),
             Self::Dropped { count } => {

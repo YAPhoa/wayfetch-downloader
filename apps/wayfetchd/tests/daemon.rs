@@ -1004,6 +1004,97 @@ async fn finished_jobs_are_renamed_and_removed_over_http() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn waiting_jobs_are_moved_in_the_queue_over_http() {
+    let server = Server::https().await;
+    let dirs = Dirs::ready(&server);
+    let daemon = Daemon::start(&dirs).await;
+    let client = daemon.owner();
+    let (_, settings) = client.get("/v1/settings").await;
+    let one = client.command(json!({
+        "expected_revision": settings["revision"],
+        "max_active_downloads": {"set": 1},
+    }));
+    assert_eq!(client.put("/v1/settings", &one).await.0, StatusCode::OK);
+    stalled(&server, "/a.bin");
+    server.put("/b.bin", Resource::new(body(1024)));
+    server.put("/c.bin", Resource::new(body(1024)));
+    let running = client.submit(&server.url("/a.bin")).await;
+    client.stage(&running, "transferring").await;
+    let b = client.submit(&server.url("/b.bin")).await;
+    let c = client.submit(&server.url("/c.bin")).await;
+
+    let queued = |order: &'static str| {
+        let client = &client;
+        async move {
+            let (status, page) = client
+                .get(&format!("/v1/jobs?stage=queued&order={order}"))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|j| j["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(queued("queue").await, [b.clone(), c.clone()]);
+    let (status, _) = client.get("/v1/jobs?order=priority").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let refs = |ids: &[&str]| {
+        let client = &client;
+        let ids: Vec<String> = ids.iter().map(|&id| id.to_owned()).collect();
+        async move {
+            let mut refs = Vec::new();
+            for id in ids {
+                let revision = client.job(&id).await["revision"].clone();
+                refs.push(json!({"job": id, "revision": revision}));
+            }
+            refs
+        }
+    };
+    let top = client.command(json!({"jobs": refs(&[&c, &running]).await, "to": "top"}));
+    // Moving needs the control permission.
+    let (status, _) = daemon
+        .client(READER_TOKEN)
+        .post("/v1/queue/move", &top)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, moved) = client.post("/v1/queue/move", &top).await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(moved["type"], "jobs_moved", "{moved}");
+    assert_eq!(moved["moved"], json!([c]));
+    assert_eq!(
+        (&moved["refused"][0]["job"], &moved["refused"][0]["code"]),
+        (&json!(running), &json!("not_applicable"))
+    );
+    // A retry replays the result.
+    assert_eq!(client.post("/v1/queue/move", &top).await.1, moved);
+    assert_eq!(queued("queue").await, [c.clone(), b.clone()]);
+    assert_eq!(queued("added").await, [b.clone(), c.clone()]);
+    let unknown = client.command(json!({"jobs": refs(&[&b]).await, "to": "middle"}));
+    assert_eq!(
+        client.post("/v1/queue/move", &unknown).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // The moved job takes the slot when it frees.
+    release(&server, "/a.bin");
+    client.stage(&b, "complete").await;
+    client.stage(&c, "complete").await;
+    let mut started = Vec::new();
+    for request in server.log() {
+        if request.method == "GET" && !started.contains(&request.path) {
+            started.push(request.path);
+        }
+    }
+    assert_eq!(started, ["/a.bin", "/c.bin", "/b.bin"]);
+
+    daemon.stop("TERM").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn links_are_collected_reviewed_and_started_over_http() {
     let server = Server::https().await;
     let dirs = Dirs::ready(&server);

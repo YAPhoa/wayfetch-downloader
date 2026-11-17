@@ -974,7 +974,9 @@ Global pause must not unintentionally change account capability or mark every jo
 
 ### 7.3 Candidate selection and reservations
 
-The coordinator maintains only a bounded ready window fetched from the store. Select fairly across packages and providers using priority plus aging. Do not build an in-memory heap containing every waiting job. Query the next durable deadline rather than allocating a sleeping task for every row.
+The coordinator maintains only a bounded ready window fetched from the store. Do not build an in-memory heap containing every waiting job. Query the next durable deadline rather than allocating a sleeping task for every row.
+
+The window is read in queue order: jobs recovering after a restart first, then queued jobs by ascending `queue_rank`, then by job ID, through the `(stage, queue_rank, id)` index. Every job starts at rank 0, so unmoved jobs start in the order they were added. The user moves selected waiting jobs to the top or bottom of the queue (`move_jobs`, `control` permission, each job at its expected revision); the moved jobs take ranks below or above every job's and keep their order among themselves, so only the moved rows are written. A job that is not waiting is refused individually and keeps its rank. The rank stays with the job for its life: a moved job that runs, fails, and is retried, or is paused and resumed, waits at the same place again, and the rank survives restarts. A move changes the job's place, not its state, so it does not bump the revision. Jobs added later wait behind those moved to the top and ahead of those moved to the bottom. Fair selection across packages and providers, priorities, and aging are not implemented.
 
 Admission creates a reservation bundle containing the required transfer slots, account/provider permits, session lease, memory allowance, destination ownership, and disk reservation. Acquire it centrally in a fixed policy order and release it through an RAII-style guard plus recovery reconciliation. If the DB claim fails, release all transient reservations.
 
@@ -1260,7 +1262,8 @@ A comparison with another download manager requires an independently recorded ru
 | `POST /v1/inputs` | Idempotent bounded ingestion; returns durable batch ID |
 | `GET /v1/inputs/{id}` | Paginated discovery/checking results and mixed-status summary |
 | `POST /v1/staging/links`, `POST /v1/staging/commands` | Collect links for review; start, remove, or move selected collected links, reporting each refused one |
-| `GET /v1/jobs` | Keyset pagination, stable filters/order, summary fields only |
+| `GET /v1/jobs` | Keyset pagination, stable filters/order (`order=added` or `order=queue`), summary fields only |
+| `POST /v1/queue/move` | Move selected waiting jobs to the top or bottom of the queue at their revisions, reporting each refused one |
 | `GET /v1/job-counts` | Jobs per stage under the same filters, with the `as_of` cursor; no job rows |
 | `POST /v1/jobs/{id}/commands` | Version-checked start/pause/cancel/retry/destination changes |
 | `GET /v1/packages` | Package summaries without loading all children |

@@ -272,6 +272,7 @@ fn run_on(
             ipc::extract,
             ipc::collect_links,
             ipc::links_command,
+            ipc::move_jobs,
             ipc::update_settings,
             ipc::remove_root,
             ipc::change_plugin,

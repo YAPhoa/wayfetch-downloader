@@ -15,6 +15,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0002_root_initialized.sql")),
     M::up(include_str!("migrations/0003_automatic_update_checks.sql")),
     M::up(include_str!("migrations/0004_link_filters.sql")),
+    M::up(include_str!("migrations/0005_queue_order.sql")),
 ];
 
 /// Newest schema version this engine knows.
@@ -82,6 +83,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(automatic, 1);
+    }
+
+    #[test]
+    fn jobs_of_an_earlier_database_keep_their_order() {
+        // Schema version 4 had no queue order: jobs started by ID.
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(MIGRATIONS)
+            .to_version(&mut conn, 4)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO packages (id, name, created_at) VALUES (1, 'p', 0); \
+             INSERT INTO input_batches (id, package_id, input_count, created_at) \
+                 VALUES (1, 1, 2, 0); \
+             INSERT INTO source_links (id, batch_id, ordinal, input_url) \
+                 VALUES (1, 1, 0, 'https://files.example/a'), (2, 1, 1, 'https://files.example/b'); \
+             INSERT INTO jobs (id, source_link_id, package_id, desired_state, stage, \
+                 generation, revision, created_at, updated_at) \
+                 VALUES (2, 1, 1, 'running', 'queued', 1, 1, 0, 0), \
+                        (1, 2, 1, 'running', 'queued', 1, 1, 0, 0);",
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
+        let order: Vec<(i64, i64)> = conn
+            .prepare("SELECT id, queue_rank FROM jobs ORDER BY queue_rank, id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(order, [(1, 0), (2, 0)]);
     }
 
     #[test]

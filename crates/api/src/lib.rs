@@ -181,6 +181,7 @@ impl Api {
             .route("/v1/jobs/{id}/commands", post(routes::job_command))
             .route("/v1/jobs/{id}/extract", post(routes::extract))
             .route("/v1/jobs/{id}/source", get(routes::job_source))
+            .route("/v1/queue/move", post(routes::move_jobs))
             .route(
                 "/v1/staging/links",
                 get(routes::list_links).post(routes::collect_links),

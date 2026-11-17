@@ -24,11 +24,11 @@ use wayfetch_engine::domain::id::{AccountId, JobId, PackageId, SourceLinkId};
 use wayfetch_engine::domain::job::JobStage;
 use wayfetch_engine::protocol::account::{AccountSummary, Authorization, AuthorizationId};
 use wayfetch_engine::protocol::command::CommandResult;
-use wayfetch_engine::protocol::query::{FolderListing, JobFilter, PageSize, RootSummary};
+use wayfetch_engine::protocol::query::{FolderListing, JobFilter, JobOrder, PageSize, RootSummary};
 use wayfetch_engine::protocol::request::{
     AccountCommandRequest, AddRootRequest, AuthorizeAccountRequest, ChangePluginRequest,
-    CollectRequest, ExtractRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest,
-    SubmitRequest, TryLinkFilterRequest, UpdateSettingsRequest,
+    CollectRequest, ExtractRequest, JobCommandRequest, LinksCommandRequest, MoveJobsRequest,
+    RemoveRootRequest, SubmitRequest, TryLinkFilterRequest, UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::{
     CommandEnvelope, ErrorCode, EventCursor, Hello, InstanceId, Query, QueryResult, StreamItem,
@@ -152,6 +152,16 @@ pub async fn job_command(
     JsonBody(request): JsonBody<JobCommandRequest>,
 ) -> ApiResult<CommandResult> {
     execute(&app, &grant, request.into_envelope(job_id(&id)?)?).await
+}
+
+/// Moves waiting jobs to the top or bottom of the queue, each at the
+/// revision the client saw. Needs the `control` permission.
+pub async fn move_jobs(
+    State(app): State<AppState>,
+    Extension(grant): Extension<Grant>,
+    JsonBody(request): JsonBody<MoveJobsRequest>,
+) -> ApiResult<CommandResult> {
+    execute(&app, &grant, request.into_envelope()?).await
 }
 
 /// Unpacks a downloaded archive next to it, with the password the request
@@ -350,6 +360,8 @@ pub struct ListParams {
     /// Comma-separated stages.
     stage: Option<String>,
     package: Option<String>,
+    /// `added` (the default) or `queue`.
+    order: Option<String>,
 }
 
 /// A page of jobs.
@@ -364,6 +376,13 @@ pub async fn list_jobs(
         filter: job_filter(params.stage.as_deref(), params.package.as_deref())?,
         after: params.after.as_deref().map(job_id).transpose()?,
         page_size: page_size(params.page_size.as_deref())?,
+        order: params
+            .order
+            .as_deref()
+            .map(JobOrder::from_str)
+            .transpose()
+            .map_err(|_| ApiError::new(ErrorCode::InvalidRequest, "unknown order"))?
+            .unwrap_or_default(),
     };
     Ok(Json(app.engine.query(query, &grant.0).await?))
 }

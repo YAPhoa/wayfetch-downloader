@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 0, minor: 4 });
+export const PROTOCOL = Object.freeze({ major: 0, minor: 5 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -55,6 +55,10 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 4 });
  * @typedef {import('./generated/PluginSummary.js').PluginSummary} PluginSummary
  * @typedef {import('./generated/PluginChange.js').PluginChange} PluginChange
  * @typedef {import('./generated/RefusedLink.js').RefusedLink} RefusedLink
+ * @typedef {import('./generated/JobRef.js').JobRef} JobRef
+ * @typedef {import('./generated/QueueEnd.js').QueueEnd} QueueEnd
+ * @typedef {import('./generated/RefusedJob.js').RefusedJob} RefusedJob
+ * @typedef {import('./generated/JobOrder.js').JobOrder} JobOrder
  * @typedef {import('./generated/EventKind.js').EventKind} EventKind
  * @typedef {import('./generated/AccountId.js').AccountId} AccountId
  * @typedef {import('./generated/AccountRef.js').AccountRef} AccountRef
@@ -72,6 +76,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 4 });
  * @typedef {import('./generated/SubmitRequest.js').SubmitRequest} SubmitRequest
  * @typedef {import('./generated/CollectRequest.js').CollectRequest} CollectRequest
  * @typedef {import('./generated/LinksCommandRequest.js').LinksCommandRequest} LinksCommandRequest
+ * @typedef {import('./generated/MoveJobsRequest.js').MoveJobsRequest} MoveJobsRequest
  * @typedef {import('./generated/RemoveRootRequest.js').RemoveRootRequest} RemoveRootRequest
  * @typedef {import('./generated/ChangePluginRequest.js').ChangePluginRequest} ChangePluginRequest
  * @typedef {import('./generated/AuthorizeAccountRequest.js').AuthorizeAccountRequest} AuthorizeAccountRequest
@@ -117,6 +122,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 4 });
  *     after?: JobId | null,
  *     pageSize: number,
  *     stages?: readonly JobStage[] | null,
+ *     order?: JobOrder,
  *   }) => Promise<JobPage>,
  *   inspectJob: (job: JobId) => Promise<JobSnapshot>,
  *   countJobs: () => Promise<JobCounts>,
@@ -142,6 +148,12 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 4 });
  *   }) => Promise<CommandResult>,
  *   linkSource: (link: LinkId) => Promise<string>,
  *   jobCommand: (job: JobId, request: JobChange) => Promise<CommandResult>,
+ *   moveJobs: (request: {
+ *     idempotencyKey: string,
+ *     target: string,
+ *     jobs: JobRef[],
+ *     to: QueueEnd,
+ *   }) => Promise<CommandResult>,
  *   jobSource: (job: JobId) => Promise<string>,
  *   extract: (job: JobId, request: ExtractChange) => Promise<CommandResult>,
  *   settings: () => Promise<Settings>,
@@ -325,6 +337,11 @@ export function linksCommandRequest({ idempotencyKey, target, action, links, des
   if (routing !== undefined) request.routing = routing;
   if (media !== undefined) request.media = media;
   return request;
+}
+
+/** @param {Args<'moveJobs'>[0]} request @returns {MoveJobsRequest} */
+export function moveJobsRequest({ idempotencyKey, target, jobs, to }) {
+  return { idempotency_key: idempotencyKey, target, jobs, to };
 }
 
 /** @param {Args<'removeRoot'>[0]} request @returns {RemoveRootRequest} */

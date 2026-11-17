@@ -11,6 +11,7 @@ const COMMANDS: &[&str] = &[
     "extract",
     "collect_links",
     "links_command",
+    "move_jobs",
     "update_settings",
     "remove_root",
     "change_plugin",

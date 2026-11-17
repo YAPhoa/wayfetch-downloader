@@ -501,6 +501,16 @@ impl JobState {
         Ok(())
     }
 
+    /// Checks that the job is waiting to start at `expected`, for a change
+    /// of its place in the queue, which leaves its state as it is.
+    pub fn check_waiting(&self, expected: Revision) -> Result<(), JobError> {
+        self.check_revision(expected)?;
+        if self.stage != JobStage::Queued {
+            return Err(self.not_applicable());
+        }
+        Ok(())
+    }
+
     /// Checks that the job can be removed from lists at `expected`: it must
     /// be complete, failed, or cancelled. Removal hides the job; its state
     /// is unchanged.
@@ -664,6 +674,24 @@ mod tests {
         let stale = job.revision();
         job.request_retry(stale).unwrap();
         assert!(job.check_remove(stale).is_err());
+    }
+
+    #[test]
+    fn only_waiting_jobs_change_place_in_the_queue() {
+        for &stage in ALL {
+            let job = settled(stage);
+            let waiting = job.check_waiting(job.revision()).is_ok();
+            assert_eq!(waiting, stage == Queued, "{stage}");
+        }
+        let mut job = JobState::new();
+        let stale = job.revision();
+        job.request_pause(stale).unwrap();
+        job.request_resume(job.revision()).unwrap();
+        assert!(matches!(
+            job.check_waiting(stale),
+            Err(JobError::RevisionConflict { .. })
+        ));
+        assert_eq!(job.check_waiting(job.revision()), Ok(()));
     }
 
     #[test]

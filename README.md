@@ -92,6 +92,7 @@ Inside a session (`JOB` accepts `job-1` or `1`):
 | `pause JOB` / `resume JOB` | Pause (keeping partial data) or resume a job |
 | `cancel JOB` | Stop a job while retaining partial data |
 | `retry JOB` | Restart a failed or cancelled job, resuming saved bytes when the server's file validator still matches |
+| `top JOB...` / `bottom JOB...` | Move waiting jobs to the start or end of the queue, keeping their order |
 | `help` | Print session command summary |
 | `quit` / `exit` | Shut down gracefully (`EOF`, `Ctrl+C`, and `SIGTERM` do the same) |
 

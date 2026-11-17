@@ -70,12 +70,13 @@ All mutations require `"target"` (the `instance` UUID from `GET /v1/capabilities
 | `GET /v1/ready` | *None* | Readiness probe: `200 {"ready": true}` or `503` with `reason`: `starting`, `shutting_down`, `engine_failed`, `engine_unavailable`, `download_root_unavailable`, or `check_timed_out` (2s cap; single-flight) |
 | `GET /v1/capabilities` | `read` | Handshake: `instance`, `boot_epoch`, `protocol`, `head` event cursor, and `limits` |
 | `POST /v1/inputs` | `submit` | Start direct downloads immediately: `{"idempotency_key", "target", "items": [URL...], "package"?}` |
-| `GET /v1/jobs` | `read` | Page of jobs (`after`, `page_size`, `stage=a,b`, `package`) with `before` count and `as_of` cursor |
+| `GET /v1/jobs` | `read` | Page of jobs (`after`, `page_size`, `stage=a,b`, `package`, `order=added`\|`queue`) with `before` count and `as_of` cursor |
 | `GET /v1/jobs/{id}` | `read` | Inspect one job and its `as_of` cursor |
 | `GET /v1/job-counts` | `read` | Counts per stage (`{"stages": {"queued": 3, ...}, "as_of"}`): `stage=a,b`, `package` |
 | `POST /v1/jobs/{id}/commands` | `control` (+ `delete_files` / `provider_downloads`) | `{"idempotency_key", "target", "action": "pause"\|"resume"\|"cancel"\|"retry"\|"remove"\|"delete_files"\|"rename"\|"cancel_extraction", "expected_revision"}`, plus `"name"` for `rename`, `"expected_generation"` (the job's `extraction.generation`) for `cancel_extraction`, and `"repeat_provider_operation": true` for `retry` when a provider response was lost |
 | `POST /v1/jobs/{id}/extract` | `control` | Unpack a finished archive beside it: `{"idempotency_key", "target", "expected_revision", "expected_generation"?, "password"?}`, as a new run after the one `expected_generation` names (absent if it has none). The password is kept in memory for that archive's next attempt only, never stored or logged |
 | `GET /v1/jobs/{id}/source` | `sources` | The raw URL the job was submitted with |
+| `POST /v1/queue/move` | `control` | Move waiting jobs to one end of the queue, keeping their order: `{"idempotency_key", "target", "jobs": [{"job", "revision"}...], "to": "top"\|"bottom"}`; each job that is gone, changed, or not waiting is listed under `refused` |
 | `POST /v1/staging/links` | `submit` | Collect links without downloading: `{"idempotency_key", "target", "text", "base_url"?, "mode"?: "analyze"\|"supported_only", "destination"?: "root-N"}` (`text` up to 512 KiB of URLs or HTML) |
 | `GET /v1/staging/links` | `read` | Page of collected links (`after`, `page_size`) with `total`, `before`, `checking`, and `as_of` |
 | `POST /v1/staging/commands` | `submit` / `control` / `provider_downloads` | `{"idempotency_key", "target", "action": "start"\|"remove"\|"move"\|"check"\|"analyze"\|"choose_media", "links": [{"link", "revision"}...]}`, plus `"destination"` for `move`, `"media"` for `choose_media`, and optional `"routing": "direct"\|"automatic"` or `"account"` for `start` |

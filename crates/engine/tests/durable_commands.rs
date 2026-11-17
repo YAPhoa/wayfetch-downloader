@@ -4,7 +4,7 @@ use tokio::runtime::Handle;
 use wayfetch_engine::{EngineBuilder, EngineConfig, EngineOwner, ShutdownRequest};
 use wayfetch_protocol::command::{InputUrl, SubmitItems};
 use wayfetch_protocol::domain::job::{DisplayState, JobStage};
-use wayfetch_protocol::query::{JobFilter, JobSummary, PageSize};
+use wayfetch_protocol::query::{JobFilter, JobOrder, JobSummary, PageSize};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, IdempotencyKey, Permission, Query,
     QueryResult,
@@ -36,6 +36,7 @@ async fn jobs(owner: &EngineOwner) -> Vec<JobSummary> {
         filter: JobFilter::default(),
         after: None,
         page_size: PageSize::DEFAULT,
+        order: JobOrder::Added,
     };
     match owner.handle().query(query, ALL).await.unwrap() {
         QueryResult::Jobs(page) => page.items,
