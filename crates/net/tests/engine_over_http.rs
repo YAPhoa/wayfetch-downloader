@@ -1,6 +1,6 @@
 //! The engine downloading over real sockets through its public API: HTTPS
 //! transfers, resume after a restart and its refusals, failures that must
-//! not publish, the egress policy, and the shared speed limit.
+//! not publish or retry, the egress policy, and the shared speed limit.
 
 #[path = "../../engine/tests/support/mod.rs"]
 mod engine_support;
@@ -284,13 +284,15 @@ async fn a_resume_redirected_to_another_resource_on_the_same_origin_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stalled_and_truncated_transfers_fail_without_publishing() {
+async fn stalled_and_truncated_transfers_wait_to_retry_without_publishing() {
     let mut env = env().await;
     env.timeouts = Timeouts {
         connect: Duration::from_millis(500),
         response: Duration::from_millis(500),
         idle_read: Duration::from_millis(300),
     };
+    env.retries.first_delay = Duration::from_secs(600);
+    env.retries.max_delay = Duration::from_secs(600);
     env.server.route("/no-headers.bin", Route::Raw(Raw::Hang));
     env.server.put(
         "/stalled.bin",
@@ -310,9 +312,9 @@ async fn stalled_and_truncated_transfers_fail_without_publishing() {
     let paths = ["/no-headers.bin", "/stalled.bin", "/truncated.bin"];
     let ids = submit(&env, &owner, &paths).await;
     for (id, path) in ids.into_iter().zip(paths) {
-        // T09 and T08: each deadline or the short body fails the job; no
-        // partial is published.
-        let failed = wait_for(&owner, id, |j| j.stage == JobStage::Failed).await;
+        // T09 and T08: each deadline or the short body stops the attempt
+        // to retry later; no partial is published.
+        let failed = wait_for(&owner, id, engine_support::waiting).await;
         assert_eq!(
             failed.failure.unwrap().code,
             FailureCode::RequestTimeout,
@@ -321,6 +323,28 @@ async fn stalled_and_truncated_transfers_fail_without_publishing() {
         assert!(failed.artifact.is_none(), "{path}");
         assert!(!env.root.join(&path[1..]).exists(), "{path}");
     }
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browser_check_fails_the_job_for_a_person_without_retrying() {
+    let env = env().await;
+    env.server.route(
+        "/checked.bin",
+        Route::Raw(Raw::Bytes(Bytes::from_static(
+            b"HTTP/1.1 503 Service Unavailable\r\ncf-mitigated: challenge\r\n\
+              Retry-After: 1\r\nContent-Length: 0\r\n\r\n",
+        ))),
+    );
+    let owner = env.start().await;
+    let [id] = submit(&env, &owner, &["/checked.bin"]).await[..] else {
+        panic!()
+    };
+    let failed = wait_for(&owner, id, |j| j.stage == JobStage::Failed).await;
+    let failure = failed.failure.unwrap();
+    assert_eq!(failure.code, FailureCode::ChallengeRequired);
+    assert!(failure.retry_at.is_none() && failure.attempt.is_none());
+    assert_eq!(env.server.hits("/checked.bin"), 1);
     shutdown(owner).await;
 }
 

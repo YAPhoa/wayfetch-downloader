@@ -85,6 +85,9 @@ pub struct TransportError {
     /// The HTTP status the server refused the request with, if it
     /// answered.
     pub status: Option<u16>,
+    /// How long the server asked to be left alone (`Retry-After` on a
+    /// `429` or `503`): the least an automatic retry waits.
+    pub retry_after: Option<Duration>,
 }
 
 /// Sends requests for the engine.

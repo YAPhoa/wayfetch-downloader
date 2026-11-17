@@ -553,6 +553,8 @@ async fn statuses_are_classified() {
         ("/gone", "410 Gone"),
         ("/denied", "403 Forbidden"),
         ("/busy", "503 Service Unavailable"),
+        ("/limited", "429 Too Many Requests\r\nRetry-After: 7"),
+        ("/challenge", "403 Forbidden\r\ncf-mitigated: challenge"),
     ] {
         let raw = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
         server.route(path, Route::Raw(Raw::Bytes(raw.into())));
@@ -563,6 +565,16 @@ async fn statuses_are_classified() {
     assert_eq!(code_of("/gone").await, FailureCode::LeaseNotFound);
     assert_eq!(code_of("/denied").await, FailureCode::LeaseExpired);
     assert_eq!(code_of("/busy").await, FailureCode::RequestTimeout);
+    // A busy server's wait comes along; a bot check needs a person, and
+    // is not an expired link.
+    let limited = open(&transport, &request(&server.url("/limited")))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (limited.code, limited.retry_after),
+        (FailureCode::RequestTimeout, Some(Duration::from_secs(7)))
+    );
+    assert_eq!(code_of("/challenge").await, FailureCode::ChallengeRequired);
 }
 
 fn lease(source: LeaseSource, replay: ReplayPolicy) -> Transfer {

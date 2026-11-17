@@ -17,11 +17,12 @@ use wayfetch_protocol::{
 };
 
 use super::links::{self, Unusable};
-use super::operations::{self, OperationState};
+use super::operations;
 use super::{
     OrCorrupt, Store, StoreError, accounts, deletions, extractions, files, jobs, key, outbox,
-    renames, roots, sql,
+    renames, retries, roots, sql,
 };
+use crate::config::Retries;
 
 /// What the coordinator knows about destinations when a command runs.
 #[derive(Debug, Clone, Default)]
@@ -57,7 +58,7 @@ impl Store {
         context: &CommandContext,
         now: UtcTimestamp,
     ) -> Result<CommandResult, ProtocolError> {
-        let converter = self.media_converter;
+        let (converter, retries) = (self.media_converter, self.retries);
         let tx = self.write()?;
         if let Some(result) = replayed(&tx, envelope, instance)? {
             return Ok(result);
@@ -115,6 +116,7 @@ impl Store {
                 *job,
                 *expected_revision,
                 *repeat_provider_operation,
+                &retries,
                 now,
             )?,
             Command::UpdateSettings {
@@ -373,25 +375,43 @@ fn request(
 
 /// Starts a failed or stopped cancelled job again under a new generation,
 /// reserving its newest staging file so the attempt continues its saved
-/// data. A retry deadline still ahead is refused, and so is a provider
-/// operation with an unknown outcome unless the user confirmed repeating
-/// it (`repeat`).
+/// data; a job waiting for an automatic retry starts now, keeping its
+/// generation and the file reserved for it. A deadline the source set
+/// that is still ahead is refused, and so is a provider operation with an
+/// unknown outcome unless the user confirmed repeating it (`repeat`).
 fn retry(
     tx: &Transaction<'_>,
     id: JobId,
     expected: Revision,
     repeat: bool,
+    retries: &Retries,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
     deletions::check_idle(tx, id)?;
     let mut job = jobs::load_listed(tx, id)?;
     let previous = job.state;
+    let waiting = job.waiting();
     // Revision and stage first: a stale or inapplicable request says so.
     let mut next = job.state;
-    next.request_retry(expected).map_err(StoreError::from)?;
-    if let Some(at) = job.failure.as_ref().and_then(|f| f.retry_at)
-        && at > now
-    {
+    if waiting {
+        next.request_retry_now(expected)
+    } else {
+        next.request_retry(expected)
+    }
+    .map_err(StoreError::from)?;
+    // A waiting job's own backoff gives way; the server's wait does not,
+    // unless it lies further ahead than any wait the policy sets.
+    let deadline = if waiting {
+        job.retry
+            .not_before
+            .filter(|&at| retries::ahead(retries, at, now))
+    } else {
+        job.failure
+            .as_ref()
+            .and_then(|f| f.retry_at)
+            .filter(|&at| at > now)
+    };
+    if let Some(at) = deadline {
         return Err(ProtocolError {
             retry_at: Some(at),
             ..ProtocolError::new(
@@ -400,12 +420,7 @@ fn retry(
             )
         });
     }
-    let unknown = operations::open(tx, id)?.is_some_and(|op| {
-        matches!(
-            op.state,
-            OperationState::Intended | OperationState::Ambiguous
-        )
-    });
+    let unknown = operations::outcome_unknown(tx, id)?;
     if unknown && !repeat {
         return Err(ProtocolError::new(
             ErrorCode::NotApplicable,
@@ -418,8 +433,11 @@ fn retry(
         operations::confirm(tx, id)?;
     }
     job.state = next;
-    files::reserve_for_retry(tx, id, job.state.generation())?;
+    if !waiting {
+        files::reserve_for_retry(tx, id, job.state.generation())?;
+    }
     jobs::set_restart_reason(tx, &mut job, None)?;
+    retries::reset(tx, &mut job)?;
     jobs::save(tx, &mut job, &previous, None, now)?;
     Ok(CommandResult::JobUpdated {
         job: id,

@@ -259,6 +259,7 @@ impl Transport for Storage {
                     code: FailureCode::RequestTimeout,
                     message: format!("HTTP {status}"),
                     status: Some(status),
+                    retry_after: None,
                 });
             }
             let data = host.stored.lock().unwrap().clone();

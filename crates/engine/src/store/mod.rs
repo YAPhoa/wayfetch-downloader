@@ -20,6 +20,7 @@ mod operations;
 mod outbox;
 mod progress;
 mod renames;
+mod retries;
 mod roots;
 #[cfg(test)]
 mod scenarios;
@@ -162,6 +163,8 @@ pub struct Store {
     info: StoreInfo,
     /// Whether media choices needing the converter can be made.
     media_converter: bool,
+    /// How transient failures are retried.
+    retries: crate::config::Retries,
 }
 
 impl Store {
@@ -195,6 +198,7 @@ impl Store {
             conn,
             info,
             media_converter: false,
+            retries: crate::config::Retries::DEFAULT,
         })
     }
 

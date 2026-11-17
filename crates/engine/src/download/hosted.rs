@@ -14,7 +14,7 @@ use wayfetch_domain::job::JobStage;
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_protocol::query::FailureSummary;
 
-use super::{Download, Stop, Target, failed, file_name, now, park_fs, target_name, why};
+use super::{Download, Stop, Target, failed, file_name, now, park_fs, refused, target_name, why};
 use crate::fs::{Root, StagingFile};
 use crate::hosting::{Decoder, Encoding, FileHost, HostError, HostedFile};
 use crate::transfer::lease::Representation;
@@ -188,7 +188,7 @@ impl Download {
             Err(e) => {
                 return Err(match e.status.and_then(|status| host.refused(status)) {
                     Some(explained) => host_failure(explained),
-                    None => failed(e.code, e.message),
+                    None => refused(e),
                 });
             }
         };
@@ -318,6 +318,7 @@ fn host_failure(e: HostError) -> Stop {
         code: e.code,
         retry_at: e.retry_after.and_then(|after| now().checked_add(after)),
         message: Some(DiagnosticText::new(&e.message)),
+        attempt: None,
     })
 }
 

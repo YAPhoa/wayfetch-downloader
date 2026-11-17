@@ -78,6 +78,17 @@ pub(crate) enum OperationOutcome {
     Ambiguous(String),
 }
 
+/// Whether the job's open operation may have reached the provider without
+/// its answer being known, so asking again may repeat that work.
+pub(super) fn outcome_unknown(tx: &Transaction<'_>, job: JobId) -> Result<bool, StoreError> {
+    Ok(open(tx, job)?.is_some_and(|op| {
+        matches!(
+            op.state,
+            OperationState::Intended | OperationState::Ambiguous
+        )
+    }))
+}
+
 /// The job's open operation, if any.
 pub(super) fn open(tx: &Transaction<'_>, job: JobId) -> Result<Option<Operation>, StoreError> {
     type Row = (

@@ -1519,6 +1519,37 @@ test('Retry continues a cancelled download, once, and says when it had to start 
     'the file on the server changed since the saved data was downloaded',
   );
   expect((await daemon.published(CHANGED, daemon.archive)).equals(content(0, 10 * MIB))).toBe(true);
+  await page.getByRole('button', { name: 'Close details' }).click();
+
+  // A busy source is tried again on its own: the download waits in the
+  // queue and says until when and which retry it is. Retry respects the
+  // wait the source asked for; Pause drops it and Resume starts at once.
+  const BUSY = 'busy.bin';
+  await add(page, fixture.busy(BUSY, MIB, 600));
+  await page.getByRole('button', { name: /^Queued \(/ }).click();
+  const busy = page.locator('tr[data-job]').filter({ hasText: BUSY });
+  await expect(busy.locator('td[data-state]')).toHaveText('Waiting to retry');
+  const third = /** @type {string} */ (await busy.getAttribute('data-job'));
+  await select(page, third);
+  await expect(page.locator('dd[data-fact="state"]')).toHaveText('Waiting to retry');
+  await expect(page.locator('[data-note="retry"]')).toHaveText(
+    /^Wayfetch tries again on its own after .+ \(retry 1 of 10\)\.$/,
+  );
+  const retryBusy = page.getByRole('button', { name: `Retry ${BUSY}` });
+  await expect(retryBusy).toHaveAttribute('title', 'Starts the download again, now instead of waiting');
+  const asked = fixture.requested.length;
+  await retryBusy.click();
+  await expect(page.getByText(`${BUSY}: The source asked Wayfetch to wait. You can retry after`)).toBeVisible();
+  await page.getByRole('tab', { name: 'Engine details' }).click();
+  await expect(page.locator('dd[data-fact="retry"]')).toHaveText('1 of 10');
+  expect(fixture.requested.length).toBe(asked);
+  fixture.release(BUSY);
+  await page.getByRole('button', { name: `Pause ${BUSY}` }).click();
+  await expect(page.locator('dd[data-fact="stage"]')).toHaveText('paused');
+  await expect(page.locator('dd[data-fact="retry"]')).toHaveCount(0);
+  await page.getByRole('button', { name: `Resume ${BUSY}` }).click();
+  await expect(page.locator('dd[data-fact="stage"]')).toHaveText('complete');
+  expect((await daemon.published(BUSY, daemon.archive)).equals(content(0, MIB))).toBe(true);
   await context.close();
 });
 

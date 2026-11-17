@@ -59,8 +59,36 @@ export function availableActions(job) {
   if (job.desired === 'paused') actions.push('resume');
   if (job.desired !== 'cancelled' && job.stage !== 'complete') actions.push('cancel');
   // A cancel still stopping keeps its active stage until it settles.
-  if (job.stage === 'failed' || job.stage === 'cancelled') actions.push('retry');
+  if (job.stage === 'failed' || job.stage === 'cancelled' || waitingToRetry(job)) actions.push('retry');
   return actions;
+}
+
+/**
+ * Whether `job` waits to be retried on its own after a failure that may
+ * pass: it stays queued, holding no download slot, until its failure's
+ * retry time, and then until a slot is free.
+ * @param {JobSummary} job
+ */
+export function waitingToRetry(job) {
+  return job.stage === 'queued' && job.desired === 'running' && typeof job.failure?.retry_at === 'number';
+}
+
+/**
+ * When Wayfetch tries `job` again on its own, and which retry of how many
+ * in a row without new data that is; or that it stopped trying.
+ * @param {JobSummary} job
+ */
+export function retryNote(job) {
+  const failure = job.failure;
+  if (waitingToRetry(job) && failure?.retry_at) {
+    const at = new Date(failure.retry_at).toLocaleString();
+    const which = failure.attempt ? ` (retry ${failure.attempt.number} of ${failure.attempt.limit})` : '';
+    return `Wayfetch tries again on its own after ${at}${which}.`;
+  }
+  if (job.stage === 'failed' && failure?.code === 'request_timeout') {
+    return 'Wayfetch stopped trying on its own. Retry once the source is back.';
+  }
+  return undefined;
 }
 
 /**
@@ -70,9 +98,9 @@ export function availableActions(job) {
  * @param {JobSummary} job
  */
 export function retryPlan(job) {
-  return job.bytes_done > 0
-    ? `Continues from the ${formatBytes(job.bytes_done)} saved when it can`
-    : 'Starts the download again';
+  const plan =
+    job.bytes_done > 0 ? `Continues from the ${formatBytes(job.bytes_done)} saved when it can` : 'Starts the download again';
+  return waitingToRetry(job) ? `${plan}, now instead of waiting` : plan;
 }
 
 /**
@@ -211,7 +239,7 @@ export function unpackNote(job) {
 const FAILURES = Object.freeze({
   request_timeout: {
     short: 'timed out',
-    explain: 'The source stopped answering. Wayfetch tries again on its own.',
+    explain: 'The source stopped answering or was too busy.',
   },
   lease_expired: {
     short: 'link expired',
@@ -320,8 +348,8 @@ export function groupCount(group, counts) {
 }
 
 /**
- * A job's state in plain words, such as "Failed: link expired", and its
- * status. A state this UI does not know keeps the engine's name and no
+ * A job's state in plain words, such as "Failed: link expired" or
+ * "Waiting to retry", and its status. A state this UI does not know keeps the engine's name and no
  * status.
  * @param {JobSummary} job
  * @returns {{ label: string, status: Status | null }}
@@ -332,6 +360,7 @@ export function describe(job) {
   /** @type {[string, Status | null]} */
   const [name, status] = STATES[job.display] ?? [String(job.display), null];
   const failure = job.failure;
+  if (job.display === 'queued' && waitingToRetry(job)) return { label: 'Waiting to retry', status };
   if (failure && job.display === 'failed') {
     return { label: `${name}: ${FAILURES[failure.code].short}`, status };
   }

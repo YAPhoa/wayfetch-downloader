@@ -211,6 +211,22 @@ pub struct FailureSummary {
     /// Redacted context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<DiagnosticText>,
+    /// Which automatic retry `retry_at` schedules, while a queued job
+    /// waits for it. Protocol 0.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub attempt: Option<RetryAttempt>,
+}
+
+/// One automatic retry of a transient failure, of the attempts the engine
+/// makes in a row without new durable data before it gives up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct RetryAttempt {
+    /// This retry's number, from 1.
+    pub number: u32,
+    /// The most retries in a row.
+    pub limit: u32,
 }
 
 /// A job's client-visible state. Durable fields only; live transfer rate is

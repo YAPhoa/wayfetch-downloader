@@ -20,9 +20,11 @@ import {
   percent,
   progress,
   restartNote,
+  retryNote,
   retryPlan,
   unpackActions,
   unpackNote,
+  waitingToRetry,
 } from '../../src/client/jobs.js';
 
 /**
@@ -136,6 +138,32 @@ test('every state filter but All has a status', () => {
 test('the file name is the artifact path’s last component', () => {
   assert.equal(fileName(job({})), undefined);
   assert.equal(fileName(job({ artifact: { root: 'root-1', path: 'a/b &lt;c&gt;.bin', size: 1 } })), 'b &lt;c&gt;.bin');
+});
+
+test('a job waiting to retry on its own is queued, says when, and can be retried now', () => {
+  const at = Date.UTC(2026, 10, 17, 12, 3);
+  const failure = { code: /** @type {const} */ ('request_timeout'), retry_at: at, attempt: { number: 3, limit: 10 } };
+  const waiting = job({ failure, bytes_done: 2048 });
+  assert.equal(waitingToRetry(waiting), true);
+  assert.deepEqual(describe(waiting), { label: 'Waiting to retry', status: 'queued' });
+  assert.deepEqual(availableActions(waiting), ['pause', 'cancel', 'retry']);
+  assert.equal(canRemove(waiting), false);
+  assert.equal(retryPlan(waiting), 'Continues from the 2.0 KiB saved when it can, now instead of waiting');
+  assert.equal(
+    retryNote(waiting),
+    `Wayfetch tries again on its own after ${new Date(at).toLocaleString()} (retry 3 of 10).`,
+  );
+  // Paused or cancelled, it no longer waits; a plain queued job never did.
+  for (const other of [job({ failure, desired: 'paused' }), job({ failure, desired: 'cancelled' }), job({})]) {
+    assert.equal(waitingToRetry(other), false);
+    assert.equal(retryNote(other), undefined);
+    assert.equal(describe(other).label, 'Queued');
+  }
+  assert.deepEqual(availableActions(job({})), ['pause', 'cancel']);
+  // Once its retries run out it fails like any other job, and says so.
+  const spent = job({ stage: 'failed', display: 'failed', failure: { code: 'request_timeout' } });
+  assert.equal(describe(spent).label, 'Failed: timed out');
+  assert.match(String(retryNote(spent)), /stopped trying on its own/);
 });
 
 test('job names follow engine hints until publication or rename supplies the final file', () => {

@@ -645,6 +645,8 @@ async fn a_retry_killed_at_any_step_keeps_its_saved_data_and_publishes_once() {
             idle_read: Duration::from_millis(100),
             ..wayfetch_engine::Timeouts::DEFAULT
         };
+        // Retried by hand, not automatically.
+        env.retries.attempts = 0;
         let data = body(64 * KIB + 9);
         let at = 24 * KIB;
         env.server.put(

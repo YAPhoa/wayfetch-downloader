@@ -15,7 +15,7 @@ use percent_encoding::percent_decode_str;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use wayfetch_domain::failure::FailureCode;
+use wayfetch_domain::failure::{FailureCode, NextAction};
 use wayfetch_domain::id::{AttemptId, JobId, ResourceId, RouteId};
 use wayfetch_domain::job::{DesiredState, JobError, JobStage, Outcome};
 use wayfetch_domain::name::{DiagnosticText, HostName};
@@ -120,6 +120,20 @@ fn failed(code: FailureCode, message: impl ToString) -> Stop {
     Stop::Park(JobStage::Failed, code, message.to_string())
 }
 
+/// Fails on a request the transport says was refused. A server that asked
+/// to be left alone for a while says until when.
+fn refused(e: TransportError) -> Stop {
+    match e.retry_after.and_then(|after| now().checked_add(after)) {
+        Some(at) => Stop::Fail(FailureSummary {
+            code: e.code,
+            retry_at: Some(at),
+            message: Some(DiagnosticText::new(&e.message)),
+            attempt: None,
+        }),
+        None => failed(e.code, e.message),
+    }
+}
+
 /// Fails on a filesystem error, with the code that says whether the
 /// destination needs fixing.
 fn park_fs(err: &FsError) -> Stop {
@@ -183,6 +197,10 @@ pub(crate) struct Download {
     pub(crate) progress: Progress,
     /// The meter of the body being written, while one is.
     pub(crate) metering: Option<Metering>,
+    /// The total durable bytes of the partial this attempt continues (0
+    /// for none), once known: an automatic retry counts an attempt that
+    /// added to them as progress, wherever in the file.
+    pub(crate) resumed_from: Option<u64>,
 }
 
 /// What makes a media download.
@@ -209,11 +227,30 @@ impl Download {
             Err(stop) => stop,
         };
         let (job, generation, from) = (self.job.job, self.job.generation, self.job.stage);
+        let resumed_from = self.resumed_from;
+        let random = ring::rand::generate::<[u8; 4]>(&ring::rand::SystemRandom::new())
+            .map_or(0, |r| u32::from_be_bytes(r.expose()));
         // A stale generation is rejected here too, which is what a
         // cancellation that raced this failure needs.
         let _ = self
             .store
             .call(move |store| match stopped {
+                Stop::Park(JobStage::Failed, code, message)
+                    if code.next_action() == NextAction::RetryWithBackoff =>
+                {
+                    let failure = FailureSummary {
+                        code,
+                        retry_at: None,
+                        message: Some(DiagnosticText::new(&message)),
+                        attempt: None,
+                    };
+                    store.wait_to_retry(job, generation, failure, resumed_from, random, now())
+                }
+                Stop::Fail(failure)
+                    if failure.code.next_action() == NextAction::RetryWithBackoff =>
+                {
+                    store.wait_to_retry(job, generation, failure, resumed_from, random, now())
+                }
                 Stop::Park(to, code, message) => store.record_stage(
                     job,
                     to,
@@ -222,6 +259,7 @@ impl Download {
                         code,
                         retry_at: None,
                         message: Some(DiagnosticText::new(&message)),
+                        attempt: None,
                     }),
                     now(),
                 ),
@@ -234,6 +272,7 @@ impl Download {
                         code: FailureCode::IntegrityMismatch,
                         retry_at: None,
                         message: Some(DiagnosticText::new("staging file lost during publication")),
+                        attempt: None,
                     }),
                     now(),
                 ),
@@ -617,6 +656,19 @@ impl Download {
         root: &Arc<Root>,
         media: bool,
     ) -> Result<Option<Continued>, Stop> {
+        let continued = self.continued_partial(root, media).await;
+        if let Ok(continued) = &continued {
+            self.resumed_from = Some(continued.as_ref().map_or(0, |c| c.partial.durable_bytes));
+        }
+        continued
+    }
+
+    /// [`Self::continue_partial`].
+    async fn continued_partial(
+        &mut self,
+        root: &Arc<Root>,
+        media: bool,
+    ) -> Result<Option<Continued>, Stop> {
         let (job, generation, epoch) = (self.job.job, self.job.generation, self.boot_epoch);
         let Some(partial) = self.call(move |s| s.latest_staging(job)).await?? else {
             return Ok(None);
@@ -735,9 +787,7 @@ impl Download {
     /// Sends `request` within the response deadline, unless the job is
     /// interrupted first, with oversized validators dropped.
     async fn send(&self, request: &OpenRequest) -> Result<Response, Stop> {
-        self.send_or_refused(request)
-            .await?
-            .map_err(|e| failed(e.code, e.message))
+        self.send_or_refused(request).await?.map_err(refused)
     }
 
     /// [`Self::send`], keeping the transport's error.
@@ -932,22 +982,36 @@ impl Download {
             Ok(StreamEnd::Cancelled) => {
                 // A pause keeps the generation, so its last bytes count. A
                 // cancel's checkpoint is stale and rejected.
-                if let Ok(Some(synced)) = writer.checkpoint().await {
-                    let _ = self.call(move |s| s.commit_checkpoint(synced)).await;
-                }
+                self.keep_written(&mut writer).await;
                 Err(Stop::Interrupted)
             }
-            Err(WriteError::Stalled(after)) => Err(failed(
-                FailureCode::RequestTimeout,
-                format!("no data for {after:?}"),
-            )),
-            Err(WriteError::Source(e)) => Err(failed(FailureCode::RequestTimeout, e)),
+            // What arrived before a body stalled or broke is the start of
+            // the same representation, so the next attempt continues it.
+            Err(WriteError::Stalled(after)) => {
+                self.keep_written(&mut writer).await;
+                Err(failed(
+                    FailureCode::RequestTimeout,
+                    format!("no data for {after:?}"),
+                ))
+            }
+            Err(WriteError::Source(e)) => {
+                self.keep_written(&mut writer).await;
+                Err(failed(FailureCode::RequestTimeout, e))
+            }
             Err(e @ (WriteError::Overflow { .. } | WriteError::Truncated { .. })) => {
                 Err(failed(FailureCode::IntegrityMismatch, e))
             }
             Err(e @ WriteError::File(_)) => Err(failed(FailureCode::DestinationUnavailable, e)),
             // The commit loop stopped first and said why.
             Err(WriteError::CheckpointsClosed) => Err(Stop::Abandon),
+        }
+    }
+
+    /// Makes what `writer` wrote since its last checkpoint durable, if the
+    /// job still accepts it.
+    async fn keep_written(&self, writer: &mut IntervalWriter) {
+        if let Ok(Some(synced)) = writer.checkpoint().await {
+            let _ = self.call(move |s| s.commit_checkpoint(synced)).await;
         }
     }
 
@@ -1218,6 +1282,7 @@ mod tests {
                 code: FailureCode::DestinationUnavailable,
                 retry_at: None,
                 message: None,
+                attempt: None,
             };
             store
                 .record_stage(job, JobStage::Failed, generation, Some(failure), now())
@@ -1270,6 +1335,7 @@ mod tests {
             host: None,
             progress: Progress::new(epoch),
             metering: None,
+            resumed_from: None,
             job: Admission {
                 job,
                 stage,
