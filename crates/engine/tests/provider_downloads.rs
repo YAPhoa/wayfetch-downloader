@@ -529,6 +529,7 @@ impl Transport for HostTransport {
                 framing,
                 representation,
                 filename: file.filename,
+                media_type: None,
                 body: Box::new(Body {
                     host: host.clone(),
                     path,

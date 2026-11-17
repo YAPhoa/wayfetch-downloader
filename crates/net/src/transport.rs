@@ -416,6 +416,7 @@ impl HttpTransport {
             framing: response.framing,
             representation: response.representation.clone(),
             filename: response.filename.clone(),
+            media_type: response.media_type.clone(),
         };
         let id = {
             let mut broker = self.broker.lock().expect("unpoisoned");
@@ -535,6 +536,7 @@ impl HttpTransport {
             framing: head.framing,
             representation: head.representation,
             filename: head.filename,
+            media_type: head.media_type,
             body: Box::new(Body::new(response, read_buffer)),
         })
     }

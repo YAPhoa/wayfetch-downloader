@@ -785,6 +785,21 @@ fn source_names_are_safe_and_provider_metadata_survives_restart_without_a_respon
         ("https://files.example/%5Csecret.zip", None),
         ("https://files.example/%0Asecret.zip", None),
         ("https://files.example/CON.zip", None),
+        // A signed link names the file it asks its server to send; only
+        // that name is kept.
+        (
+            "https://files.example/o/7f3a9?X-Amz-Signature=private-token\
+             &response-content-disposition=attachment%3B%20filename%3D%22Report.pdf%22",
+            Some("Report.pdf"),
+        ),
+        (
+            "https://files.example/c/blob?sig=private-token&rscd=attachment%3Bfilename%3Dreport",
+            None,
+        ),
+        (
+            "https://files.example/o/a.zip?rscd=attachment%3Bfilename%3D..%2Fx.zip",
+            Some("a.zip"),
+        ),
     ] {
         f.submit(&[url]);
         let id = f.store.stage_pending(1, NOW).unwrap()[0];

@@ -288,6 +288,7 @@ impl Transport for Storage {
                     ..Representation::default()
                 },
                 filename: None,
+                media_type: None,
                 body: Box::new(Body {
                     host: host.clone(),
                     data: data.slice(usize::try_from(start).unwrap()..),

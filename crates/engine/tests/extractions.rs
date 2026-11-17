@@ -85,6 +85,7 @@ impl Transport for Served {
                     resource: None,
                 },
                 filename: None,
+                media_type: None,
                 body: Box::new(Body {
                     files: self.0.clone(),
                     path,

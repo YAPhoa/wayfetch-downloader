@@ -27,6 +27,7 @@ pub mod hosting;
 pub mod lifecycle;
 mod link_filter;
 pub mod media;
+pub mod naming;
 mod preferences;
 mod progress;
 mod published;

@@ -958,7 +958,7 @@ impl Listed {
             host: url.as_ref().and_then(|u| HostName::new(u.host_str()?).ok()),
             name_hint: self.name.filter(|_| checked).or_else(|| {
                 url.as_ref()
-                    .and_then(crate::download::url_file_name)
+                    .and_then(|url| crate::naming::Naming::of(url).name())
                     .map(|name| name.as_str().to_owned())
             }),
             text: self.invalid.then(|| shown_text(&self.text)),

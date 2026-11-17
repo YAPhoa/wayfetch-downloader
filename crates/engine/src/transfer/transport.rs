@@ -59,6 +59,8 @@ pub struct Response {
     pub representation: Representation,
     /// A file name the server suggested (`Content-Disposition`), if any.
     pub filename: Option<String>,
+    /// `Content-Type` without parameters, lower case, if sent.
+    pub media_type: Option<String>,
     /// The body.
     pub body: Box<dyn ChunkSource>,
 }
@@ -69,6 +71,7 @@ impl std::fmt::Debug for Response {
             .field("framing", &self.framing)
             .field("representation", &self.representation)
             .field("filename", &self.filename)
+            .field("media_type", &self.media_type)
             .finish_non_exhaustive()
     }
 }

@@ -531,7 +531,7 @@ pub fn title_file_name(title: &str, extension: Option<&str>) -> Option<RelativeP
         Some(ext) => format!("{stem}.{ext}"),
         None => stem.to_owned(),
     };
-    crate::download::file_name(&name)
+    crate::naming::file_name(&name)
 }
 
 #[cfg(test)]

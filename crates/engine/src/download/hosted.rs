@@ -14,9 +14,10 @@ use wayfetch_domain::job::JobStage;
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_protocol::query::FailureSummary;
 
-use super::{Download, Stop, Target, failed, file_name, now, park_fs, target_name, why};
+use super::{Download, Stop, Target, failed, now, park_fs, target_name, why};
 use crate::fs::{Root, StagingFile};
 use crate::hosting::{Decoder, Encoding, FileHost, HostError, HostedFile};
+use crate::naming::file_name;
 use crate::transfer::lease::Representation;
 use crate::transfer::range::{self, Plan};
 use crate::transfer::transport::OpenRequest;
