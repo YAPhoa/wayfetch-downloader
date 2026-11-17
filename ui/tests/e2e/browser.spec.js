@@ -1277,7 +1277,7 @@ test('the download limit and speed limit are server settings every window shares
   const b = parts(second);
   await expect(a.limit).toHaveValue('4');
   await expect(a.pane.getByText('Allowed: 1–64. Using the default.')).toBeVisible();
-  await expect(a.pane.getByText('Applies to the server', { exact: true })).toBeVisible();
+  await expect(a.pane.getByLabel('Downloads', { exact: true }).getByText('Applies to the server', { exact: true })).toBeVisible();
   await expect(a.save).toBeDisabled();
   await expect(a.useDefault).toBeDisabled();
 
@@ -1412,6 +1412,7 @@ test('the download limit and speed limit are server settings every window shares
     const keep = (page) => page.locator('.settings-content').getByRole('switch', { name: 'Keep the server’s file date' });
     await expect(keep(first)).not.toBeChecked();
     await expect(first.getByText('A finished file takes the modified date its server reports, if any.')).toBeVisible();
+    await expect(first.locator('.settings-content').getByLabel('Finished files').getByText('Applies to the server', { exact: true })).toBeVisible();
     await keep(first).click();
     await expect(first.getByText('Finished files now keep the server’s date.')).toBeVisible();
     await expect(keep(first)).toBeChecked();
