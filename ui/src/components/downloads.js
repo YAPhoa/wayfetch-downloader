@@ -96,13 +96,13 @@ const ACTION_OUTCOMES = {
 const QUEUE_ENDS = ['top', 'bottom'];
 
 /**
- * What moving to each end of the queue is called in a menu and in the
- * toolbar, with the toolbar's icon.
- * @type {Record<QueueEnd, { label: string, short: string, icon: import('./icons.js').IconName }>}
+ * What moving to each end of the queue is called, with the icon that
+ * stands for it in the toolbar.
+ * @type {Record<QueueEnd, { label: string, icon: import('./icons.js').IconName }>}
  */
 const MOVES = {
-  top: { label: 'Move to top', short: 'Top', icon: 'arrow-up' },
-  bottom: { label: 'Move to bottom', short: 'Bottom', icon: 'arrow-down' },
+  top: { label: 'Move to top', icon: 'arrow-up' },
+  bottom: { label: 'Move to bottom', icon: 'arrow-down' },
 };
 
 /** Why a menu item does not apply, when the job's state is the reason. */
@@ -398,9 +398,12 @@ export class Downloads {
         'button',
         {
           type: 'button',
-          class: `tool move-${to}`,
+          // Icons alone, so the toolbar fits beside the filter field;
+          // the name is spoken and shown on hover.
+          class: `tool move move-${to}`,
           'data-move': to,
           title: MOVES[to].label,
+          'aria-label': MOVES[to].label,
           disabled: true,
           onclick: (/** @type {MouseEvent} */ event) => {
             /** @type {HTMLButtonElement} */ (event.currentTarget).disabled = true;
@@ -408,7 +411,6 @@ export class Downloads {
           },
         },
         icon(MOVES[to].icon),
-        MOVES[to].short,
       ),
     );
     /** Links in the collected list, once read. @type {number | null} */
