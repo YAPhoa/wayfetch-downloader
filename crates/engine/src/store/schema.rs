@@ -15,6 +15,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0002_root_initialized.sql")),
     M::up(include_str!("migrations/0003_automatic_update_checks.sql")),
     M::up(include_str!("migrations/0004_link_filters.sql")),
+    M::up(include_str!("migrations/0005_automatic_retries.sql")),
 ];
 
 /// Newest schema version this engine knows.

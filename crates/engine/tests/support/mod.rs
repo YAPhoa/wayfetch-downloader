@@ -19,7 +19,7 @@ use wayfetch_engine::hosting::FileHost;
 use wayfetch_engine::media::{Converter, MediaService, PluginControl};
 use wayfetch_engine::transfer::transport::Transport;
 use wayfetch_engine::{
-    EngineBuilder, EngineConfig, EngineOwner, Limits, Policy, ShutdownRequest, Timeouts,
+    EngineBuilder, EngineConfig, EngineOwner, Limits, Policy, Retries, ShutdownRequest, Timeouts,
 };
 use wayfetch_protocol::command::{InputUrl, SubmitItems};
 use wayfetch_protocol::domain::id::{JobId, RootId};
@@ -54,6 +54,7 @@ pub struct Env<S> {
     transport: Arc<dyn Transport>,
     pub limits: Limits,
     pub timeouts: Timeouts,
+    pub retries: Retries,
     pub policy: Policy,
     /// The credential key file engines are configured with, if any.
     pub credential_key: Option<PathBuf>,
@@ -103,6 +104,7 @@ impl<S> Env<S> {
                 ..Limits::DEFAULT
             },
             timeouts: Timeouts::DEFAULT,
+            retries: Retries::DEFAULT,
             policy: Policy::DEFAULT,
             credential_key: None,
             providers: Vec::new(),
@@ -133,6 +135,7 @@ impl<S> Env<S> {
         config.download_root = Some(self.root.clone());
         config.limits = self.limits.clone();
         config.timeouts = self.timeouts;
+        config.retries = self.retries;
         config.policy = self.policy;
         config.credential_key = self.credential_key.clone();
         let mut builder =
@@ -268,6 +271,11 @@ pub async fn wait_for(
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+/// Whether the job waits in the queue for an automatic retry.
+pub fn waiting(job: &JobSummary) -> bool {
+    job.stage == JobStage::Queued && job.failure.as_ref().is_some_and(|f| f.retry_at.is_some())
 }
 
 pub async fn complete(owner: &EngineOwner, id: JobId) -> JobSummary {

@@ -486,6 +486,7 @@ impl Transport for HostTransport {
                     code: FailureCode::LeaseNotFound,
                     message: "HTTP 404".into(),
                     status: Some(404),
+                    retry_after: None,
                 });
             };
             if file.refuse {
@@ -493,6 +494,7 @@ impl Transport for HostTransport {
                     code: FailureCode::LeaseExpired,
                     message: "HTTP 403".into(),
                     status: Some(403),
+                    retry_after: None,
                 });
             }
             let len = file.body.len() as u64;

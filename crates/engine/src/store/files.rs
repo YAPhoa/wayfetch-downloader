@@ -24,6 +24,8 @@ pub struct Partial {
     pub record: StagingRecord,
     /// End of the durable coverage, 0 if none.
     pub durable_end: u64,
+    /// Durable bytes in all, wherever they lie.
+    pub durable_bytes: u64,
     /// Whether the coverage is exactly `0..durable_end`, so a sequential
     /// transfer can continue from its end.
     pub contiguous: bool,
@@ -325,6 +327,7 @@ impl Store {
         let (_, coverage) = progress::load_coverage(&tx, job, record.generation)?;
         let durable_end = coverage.iter().next_back().map_or(0, |r| r.end);
         Ok(Some(Partial {
+            durable_bytes: coverage.iter().map(|r| r.end - r.start).sum(),
             contiguous: is_complete(coverage.iter(), durable_end),
             record,
             durable_end,

@@ -943,7 +943,7 @@ fn admission_reads_only_free_slots_recovering_first() {
     let mut f = f.reopen();
     f.store.recover_after_restart(NOW).unwrap();
 
-    let ready = f.store.admissible(2, &[], true).unwrap();
+    let ready = f.store.admissible(2, &[], true, NOW).unwrap();
     let picked: Vec<_> = ready.iter().map(|a| (a.job, a.stage)).collect();
     assert_eq!(
         picked,
@@ -952,10 +952,10 @@ fn admission_reads_only_free_slots_recovering_first() {
     assert_eq!(ready[1].url, "https://files.example/a.bin");
     assert_eq!(ready[0].generation, f.summary(second).generation);
     // Running jobs are skipped, and nothing is read without a free slot.
-    let ready = f.store.admissible(2, &[second], true).unwrap();
+    let ready = f.store.admissible(2, &[second], true, NOW).unwrap();
     let picked: Vec<_> = ready.iter().map(|a| a.job).collect();
     assert_eq!(picked, vec![first, third]);
-    assert!(f.store.admissible(0, &[], true).unwrap().is_empty());
+    assert!(f.store.admissible(0, &[], true, NOW).unwrap().is_empty());
 }
 
 #[test]
@@ -1493,6 +1493,7 @@ fn a_retry_hands_its_partial_to_the_next_generation_in_this_process() {
         code: FailureCode::RequestTimeout,
         retry_at: None,
         message: None,
+        attempt: None,
     };
     assert!(
         f.store
@@ -1611,7 +1612,9 @@ fn only_failed_and_settled_cancelled_jobs_are_retried() {
 fn a_retry_deadline_still_ahead_is_refused_with_the_failure_kept() {
     let mut f = Fixture::new();
     let (job, _) = transferring(&mut f, BootEpoch::INITIAL);
-    let later = UtcTimestamp::from_unix_millis(NOW.unix_millis() + 60_000);
+    // Hours ahead, as a quota reset may be: further than any automatic
+    // retry waits, and still a deadline.
+    let later = UtcTimestamp::from_unix_millis(NOW.unix_millis() + 6 * 3_600_000);
     fail(&mut f, job, Some(later));
     let before = f.summary(job);
     let envelope = CommandEnvelope {
@@ -1758,6 +1761,7 @@ fn a_retried_job_releases_or_completes_an_unfinished_publication() {
         code: FailureCode::IntegrityMismatch,
         retry_at: None,
         message: None,
+        attempt: None,
     };
     f.store
         .record_stage(job, JobStage::Failed, generation, Some(failure), NOW)
@@ -1967,4 +1971,90 @@ fn deletion_refuses_active_stale_and_wrong_instance_requests_without_intent() {
     );
     assert!(f.root_dir.path().join("done.bin").is_file());
     assert!(!super::deletions::pending(&f.store.read().unwrap(), done.id).unwrap());
+}
+
+fn timed_out() -> FailureSummary {
+    FailureSummary {
+        code: FailureCode::RequestTimeout,
+        retry_at: None,
+        message: Some(DiagnosticText::new("no data for 60s")),
+        attempt: None,
+    }
+}
+
+#[test]
+fn a_transient_failure_waits_in_the_queue_until_its_deadline() {
+    let mut f = Fixture::new();
+    let job = f.job();
+    f.advance(job, JobStage::Resolving).unwrap();
+    f.advance(job, JobStage::Transferring).unwrap();
+    let attempt = f.summary(job).generation;
+    f.store
+        .wait_to_retry(job, attempt, timed_out(), Some(0), 0, NOW)
+        .unwrap();
+    let waiting = f.summary(job);
+    let deadline = NOW.checked_add(std::time::Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        (waiting.stage, waiting.display),
+        (JobStage::Queued, DisplayState::Stage(JobStage::Queued))
+    );
+    assert!(waiting.generation > attempt);
+    let failure = waiting.failure.unwrap();
+    assert_eq!(failure.retry_at, Some(deadline));
+    assert_eq!(failure.attempt.map(|a| (a.number, a.limit)), Some((1, 10)));
+    // A late report from the attempt changes nothing.
+    assert!(
+        f.store
+            .wait_to_retry(job, attempt, timed_out(), Some(0), 0, NOW)
+            .is_err()
+    );
+
+    // Not admitted, and the one deadline the coordinator times, until due.
+    assert!(f.store.admissible(1, &[], true, NOW).unwrap().is_empty());
+    assert_eq!(f.store.next_retry(NOW).unwrap(), Some(deadline));
+    let due = f.store.admissible(1, &[], true, deadline).unwrap();
+    assert_eq!(due[0].job, job);
+    assert_eq!(f.store.next_retry(deadline).unwrap(), None);
+    // A clock set back further than any wait can be does not stall it.
+    let set_back = UtcTimestamp::from_unix_millis(NOW.unix_millis() - 2 * 3600 * 1000);
+    assert_eq!(
+        f.store.admissible(1, &[], true, set_back).unwrap()[0].job,
+        job
+    );
+    assert_eq!(f.store.next_retry(set_back).unwrap(), None);
+}
+
+#[test]
+fn a_server_wait_is_bounded_and_a_spent_budget_fails_the_job() {
+    let mut f = Fixture::new();
+    f.store.set_retries(crate::config::Retries {
+        attempts: 1,
+        ..crate::config::Retries::DEFAULT
+    });
+    let job = f.job();
+    let fail = |f: &mut Fixture, retry_at| {
+        f.advance(job, JobStage::Resolving).unwrap();
+        let generation = f.summary(job).generation;
+        let failure = FailureSummary {
+            retry_at,
+            ..timed_out()
+        };
+        f.store
+            .wait_to_retry(job, generation, failure, Some(0), u32::MAX, NOW)
+            .unwrap();
+        f.summary(job)
+    };
+    // A week's Retry-After waits the hour allowed, not the backoff.
+    let week = NOW.checked_add(std::time::Duration::from_secs(7 * 24 * 3600));
+    let waiting = fail(&mut f, week);
+    let hour = NOW.checked_add(std::time::Duration::from_secs(3600));
+    assert_eq!(waiting.failure.unwrap().retry_at, hour);
+    let failed = fail(&mut f, None);
+    assert_eq!(failed.stage, JobStage::Failed);
+    let failure = failed.failure.unwrap();
+    assert_eq!((failure.retry_at, failure.attempt), (None, None));
+    assert_eq!(
+        failure.message.unwrap().as_str(),
+        "no data for 60s; gave up after 2 attempts in a row without new data"
+    );
 }

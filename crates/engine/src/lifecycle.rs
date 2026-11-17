@@ -239,6 +239,7 @@ impl EngineBuilder {
                 let state_dir = StateDir::open(&config.state_dir)?;
                 let mut store = Store::open(state_dir.path())?;
                 store.set_media_converter(converter_ready);
+                store.set_retries(config.retries);
                 // A plugin may have been installed since a check failed.
                 store.retry_failed_media(now())?;
                 store.requeue_checks()?;
@@ -322,6 +323,7 @@ impl EngineBuilder {
             progress: progress.clone(),
             published: head,
             pruned_at: Instant::now(),
+            next_retry: None,
             accounts: accounts::AccountService::new(self.providers, vault, credential_key),
             routing: routing::RoutingService::default(),
             media: media::MediaServices::new(
@@ -791,6 +793,14 @@ fn prune(store: &mut Store, limits: &crate::config::Limits) -> Result<(), StoreE
     Ok(())
 }
 
+/// Waits until `at`; never, for `None`.
+async fn sleep_until(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Jobs one admission pass may block before it yields to other work. The
 /// pass then asks for another, so jobs behind any number of blocked ones
 /// still start.
@@ -831,6 +841,7 @@ fn admit(
             code: FailureCode::DestinationUnavailable,
             retry_at: None,
             message: Some(DiagnosticText::new(why)),
+            attempt: None,
         };
         let _ = store.record_stage(
             job.job,
@@ -847,7 +858,8 @@ fn admit(
     let mut blocked = 0;
     while admitted.len() < free {
         let wanted = free - admitted.len();
-        let Ok(ready) = store.admissible(wanted, &skipped, fallback.is_some() || unplaced) else {
+        let Ok(ready) = store.admissible(wanted, &skipped, fallback.is_some() || unplaced, now())
+        else {
             break;
         };
         let last = ready.len() < wanted;
@@ -1160,6 +1172,9 @@ struct Coordinator {
     /// Position of the last event broadcast.
     published: u64,
     pruned_at: Instant,
+    /// When the earliest automatic retry still ahead is due, on the
+    /// monotonic clock: the one timer for every waiting job (section 7.3).
+    next_retry: Option<tokio::time::Instant>,
     /// Accounts: the vault, sign-ins, and checks.
     accounts: accounts::AccountService,
     /// Bounded cached capability discovery for automatic starts.
@@ -1211,6 +1226,7 @@ impl Coordinator {
         self.clean_extractions().await;
         self.changed().await;
         loop {
+            let retry = self.next_retry;
             tokio::select! {
                 biased;
                 () = self.supervisor.cancel.cancelled() => break,
@@ -1219,6 +1235,10 @@ impl Coordinator {
                     Some(request) => self.handle(request).await,
                     None => break,
                 },
+                () = sleep_until(retry), if retry.is_some() => {
+                    self.next_retry = None;
+                    self.changed().await;
+                }
             }
         }
     }
@@ -2047,15 +2067,25 @@ impl Coordinator {
         };
         let limit = usize::try_from(self.max_active_downloads().value).unwrap_or(usize::MAX);
         let free = limit.saturating_sub(self.running.len());
+        // A full engine needs no timer: a download ending admits again.
+        self.next_retry = None;
         if free == 0 {
             return;
         }
         self.recall_destinations().await;
         let excluded: Vec<JobId> = self.running.keys().chain(&self.held).copied().collect();
         let (roots, identifying) = (self.destinations.clone(), self.identifying);
-        let (admitted, more) = self
-            .with_store(move |store| admit(store, free, &excluded, &roots, identifying))
+        let (admitted, more, next) = self
+            .with_store(move |store| {
+                let (admitted, more) = admit(store, free, &excluded, &roots, identifying);
+                (admitted, more, store.next_retry(now()))
+            })
             .await;
+        self.next_retry = next.ok().flatten().map(|at| {
+            let wait = at.unix_millis().saturating_sub(now().unix_millis());
+            tokio::time::Instant::now()
+                + Duration::from_millis(u64::try_from(wait).unwrap_or_default())
+        });
         if more {
             // After the requests already waiting.
             let _ = self.client.0.try_send(Internal::Admit);
@@ -2093,6 +2123,7 @@ impl Coordinator {
                     .and_then(|url| self.hosts.recognize(&url).cloned()),
                 progress: self.progress.clone(),
                 metering: None,
+                resumed_from: None,
                 job,
                 attempt,
             };

@@ -57,6 +57,10 @@ struct Resource {
     filename: Option<String>,
     /// How a range request is answered instead of honoring it.
     range_reply: Option<RangeReply>,
+    /// Requests still to answer `503 Service Unavailable`.
+    busy: usize,
+    /// The `Retry-After` a busy answer carries.
+    retry_after: Option<Duration>,
 }
 
 /// An unusable answer to a range request.
@@ -79,6 +83,8 @@ impl Resource {
             no_headers: false,
             filename: None,
             range_reply: None,
+            busy: 0,
+            retry_after: None,
         }
     }
 
@@ -113,6 +119,19 @@ impl Server {
 
     fn update(&self, path: &str, change: impl FnOnce(&mut Resource)) {
         change(self.resources.lock().unwrap().get_mut(path).unwrap());
+    }
+
+    /// The answer to a request while the resource at `path` is busy.
+    fn answer_busy(&self, path: &str) -> Option<TransportError> {
+        let mut resources = self.resources.lock().unwrap();
+        let resource = resources.get_mut(path).filter(|r| r.busy > 0)?;
+        resource.busy -= 1;
+        Some(TransportError {
+            code: FailureCode::RequestTimeout,
+            message: "HTTP 503 Service Unavailable".into(),
+            status: Some(503),
+            retry_after: resource.retry_after,
+        })
     }
 
     fn stall_at(&self, path: &str) -> Option<usize> {
@@ -206,11 +225,15 @@ impl Transport for Fake {
             let server = &self.0;
             server.requests.lock().unwrap().push(request.clone());
             let path = request.url.path().to_owned();
+            if let Some(busy) = server.answer_busy(&path) {
+                return Err(busy);
+            }
             let Some(resource) = server.resources.lock().unwrap().get(&path).cloned() else {
                 return Err(TransportError {
                     code: FailureCode::ResourceDeleted,
                     message: "404".into(),
                     status: Some(404),
+                    retry_after: None,
                 });
             };
             if resource.no_headers {
@@ -505,13 +528,15 @@ async fn two_profiles_share_a_download_folder_and_each_resumes_its_own_partial()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stalled_headers_and_bodies_fail_at_their_deadlines() {
+async fn stalled_headers_and_bodies_stop_at_their_deadlines_to_retry_later() {
     let mut env = env();
     env.timeouts = Timeouts {
         connect: Duration::from_millis(50),
         response: Duration::from_millis(100),
         idle_read: Duration::from_millis(100),
     };
+    env.retries.first_delay = Duration::from_secs(600);
+    env.retries.max_delay = Duration::from_secs(600);
     let mut no_headers = Resource::new(body(KIB));
     no_headers.no_headers = true;
     env.server.put("/no-headers.bin", no_headers);
@@ -521,12 +546,12 @@ async fn stalled_headers_and_bodies_fail_at_their_deadlines() {
     let owner = env.start().await;
     let ids = submit(&owner, &["/no-headers.bin", "/stalled.bin"]).await;
     for id in ids {
-        let failed = wait_for(&owner, id, |j| j.stage == JobStage::Failed).await;
+        let failed = wait_for(&owner, id, support::waiting).await;
         let failure = failed.failure.unwrap();
         assert_eq!(failure.code, FailureCode::RequestTimeout);
         assert!(failed.artifact.is_none());
     }
-    // A failed transfer frees its slot and its response.
+    // A transfer waiting to retry frees its slot and its response.
     assert_eq!(env.server.open_bodies.load(Ordering::SeqCst), 0);
     shutdown(owner).await;
 }
@@ -1067,14 +1092,14 @@ async fn throttling_is_not_inactivity_and_a_throttled_transfer_pauses_and_resume
     let ranges = env.server.ranges_requested();
     assert_eq!(ranges.last().unwrap(), &Some((held.bytes_done, None)));
 
-    // A source that really stops still fails at the idle deadline.
+    // A source that really stops still stops at the idle deadline.
     let mut stalled = Resource::new(data.clone());
     stalled.stall_at = Some(4 * KIB);
     env.server.put("/stalled.bin", stalled);
     let [id] = submit(&owner, &["/stalled.bin"]).await[..] else {
         panic!()
     };
-    let failed = wait_for(&owner, id, |j| j.stage == JobStage::Failed).await;
+    let failed = wait_for(&owner, id, support::waiting).await;
     assert_eq!(
         failed.failure.map(|f| f.code),
         Some(FailureCode::RequestTimeout)
@@ -3205,13 +3230,15 @@ fn retry(owner: &EngineOwner, job: &JobSummary) -> CommandEnvelope {
     )
 }
 
-/// An environment whose stalled transfers fail quickly.
+/// An environment whose stalled transfers fail quickly, and are not
+/// retried automatically, so a test retries them by hand.
 fn failing_env() -> Env {
     let mut env = env();
     env.timeouts = Timeouts {
         idle_read: Duration::from_millis(100),
         ..Timeouts::DEFAULT
     };
+    env.retries.attempts = 0;
     env
 }
 
@@ -3748,5 +3775,315 @@ async fn failed_data_deletion_keeps_job_visible_and_allows_an_explicit_keep_choi
     assert_eq!(counted(&owner).await, 0);
     assert!(env.root.join("changed.bin").is_file());
     assert_eq!(refused(&owner, request).await, ErrorCode::NotFound);
+    shutdown(owner).await;
+}
+
+// Automatic retry: a transient failure waits for a deadline in the queue,
+// then continues the saved data as a manual retry does.
+
+/// An environment whose stalled transfers stop quickly and are retried
+/// after `first_delay`, without jitter.
+fn retrying_env(first_delay: Duration) -> Env {
+    let mut env = env();
+    env.timeouts.idle_read = Duration::from_millis(100);
+    env.retries.first_delay = first_delay;
+    env.retries.max_delay = env.retries.max_delay.max(first_delay);
+    env.retries.jitter_percent = 0;
+    env
+}
+
+/// Puts `data` at `path`, stalling at `at`, and waits for the job
+/// submitted for it to wait for an automatic retry with `at` bytes
+/// durable.
+async fn waiting_at(
+    env: &Env,
+    owner: &EngineOwner,
+    path: &str,
+    data: &Bytes,
+    at: usize,
+) -> JobSummary {
+    let mut resource = Resource::new(data.clone());
+    resource.stall_at = Some(at);
+    env.server.put(path, resource);
+    let [id] = submit(owner, &[path]).await[..] else {
+        panic!()
+    };
+    let waiting = wait_for(owner, id, support::waiting).await;
+    assert_eq!(waiting.bytes_done, at as u64);
+    waiting
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_transfer_waits_without_a_slot_then_continues_its_saved_bytes() {
+    let mut env = retrying_env(Duration::from_millis(1500));
+    env.policy.max_active_downloads = IntegerPolicy {
+        default: Some(1),
+        ..IntegerPolicy::unrestricted(wayfetch_engine::Preference::MAX_ACTIVE_DOWNLOADS)
+    };
+    let data = body(48 * KIB + 5);
+    let owner = env.start().await;
+    let waiting = waiting_at(&env, &owner, "/flaky.bin", &data, 20 * KIB).await;
+    let failure = waiting.failure.clone().unwrap();
+    assert_eq!(failure.code, FailureCode::RequestTimeout);
+    assert_eq!(failure.attempt.map(|a| (a.number, a.limit)), Some((1, 10)));
+    let at = failure.retry_at.unwrap().unix_millis();
+    // The first retry waits the first delay, and nothing runs meanwhile.
+    let scheduled = at - now_millis();
+    assert!((1000..=1500).contains(&scheduled), "{scheduled}");
+    assert_eq!(env.staging_files(), 1);
+
+    // The one download slot is free while it waits.
+    env.server.put("/other.bin", Resource::new(body(4 * KIB)));
+    let [other] = submit(&owner, &["/other.bin"]).await[..] else {
+        panic!()
+    };
+    complete(&owner, other).await;
+    assert!(now_millis() < at, "the other job waited for the retry");
+
+    env.server.update("/flaky.bin", |r| r.stall_at = None);
+    let done = complete(&owner, waiting.id).await;
+    assert!(now_millis() >= at);
+    // The wait already moved it to the generation that continues.
+    assert_eq!(done.generation, waiting.generation);
+    assert!(done.failure.is_none() && done.restart_reason.is_none());
+    assert_eq!(env.published("flaky.bin"), data);
+    // It asked only for what it lacked: the saved bytes were continued.
+    let flaky: Vec<_> = env
+        .server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/flaky.bin")
+        .map(|r| r.range)
+        .collect();
+    assert_eq!(flaky, vec![None, Some((20 * KIB as u64, None))]);
+    assert_eq!(env.server.served("/flaky.bin"), data.len());
+    assert_eq!(env.staging_files(), 0);
+    shutdown(owner).await;
+}
+
+fn now_millis() -> i64 {
+    wayfetch_protocol::domain::time::UtcTimestamp::from_system_time(std::time::SystemTime::now())
+        .unix_millis()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_server_retry_after_is_the_least_wait_and_holds_off_a_manual_retry() {
+    let mut env = retrying_env(Duration::from_millis(50));
+    env.retries.max_server_delay = Duration::from_secs(600);
+    let data = body(8 * KIB);
+    let owner = env.start().await;
+    for (path, busy, after) in [
+        ("/busy.bin", 1, Duration::from_secs(1)),
+        ("/away.bin", 1, Duration::from_secs(3600)),
+    ] {
+        let mut resource = Resource::new(data.clone());
+        resource.busy = busy;
+        resource.retry_after = Some(after);
+        env.server.put(path, resource);
+    }
+    let [busy, away] = submit(&owner, &["/busy.bin", "/away.bin"]).await[..] else {
+        panic!()
+    };
+    let waiting = wait_for(&owner, busy, support::waiting).await;
+    let at = waiting.failure.unwrap().retry_at.unwrap().unix_millis();
+    // The server's second, not the first delay of 50 ms.
+    assert!(at - now_millis() > 500, "{}", at - now_millis());
+    let done = complete(&owner, busy).await;
+    assert!(now_millis() >= at);
+    assert_eq!(done.bytes_done, data.len() as u64);
+
+    // A server's hour is cut to the longest wait allowed, and a person's
+    // retry respects it as well.
+    let waiting = wait_for(&owner, away, support::waiting).await;
+    let at = waiting.failure.as_ref().unwrap().retry_at.unwrap();
+    let ahead = at.unix_millis() - now_millis();
+    assert!((500_000..=600_000).contains(&ahead), "{ahead}");
+    let err = owner
+        .handle()
+        .execute(retry(&owner, &waiting), ALL)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotApplicable);
+    assert_eq!(err.retry_at, Some(at));
+    assert_eq!(job(&owner, away).await, waiting);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retries_without_new_data_run_out_and_new_data_starts_the_count_again() {
+    // Long enough to move the stall before the first retry.
+    let mut env = retrying_env(Duration::from_millis(300));
+    env.retries.attempts = 2;
+    let data = body(32 * KIB);
+    let owner = env.start().await;
+    let first = waiting_at(&env, &owner, "/stuck.bin", &data, 8 * KIB).await;
+    assert_eq!(first.failure.unwrap().attempt.unwrap().number, 1);
+    // The first retry gets further before it stalls, so the next one is
+    // the first again.
+    env.server
+        .update("/stuck.bin", |r| r.stall_at = Some(16 * KIB));
+    let further = wait_for(&owner, first.id, |j| {
+        support::waiting(j) && j.bytes_done == 16 * KIB as u64
+    })
+    .await;
+    assert_eq!(further.failure.unwrap().attempt.unwrap().number, 1);
+    // Two more that save nothing spend the budget.
+    let failed = wait_for(&owner, first.id, |j| j.stage == JobStage::Failed).await;
+    let failure = failed.failure.unwrap();
+    assert_eq!(failure.code, FailureCode::RequestTimeout);
+    assert_eq!(failure.retry_at, None);
+    assert_eq!(failure.attempt, None);
+    let message = failure.message.unwrap();
+    assert!(
+        message
+            .as_str()
+            .ends_with("gave up after 3 attempts in a row without new data"),
+        "{message:?}"
+    );
+    assert_eq!(failed.bytes_done, 16 * KIB as u64);
+    let requests = env.server.requests.lock().unwrap().len();
+    assert_eq!(requests, 4);
+
+    // A busy server that never lets up gives out the same way.
+    let mut busy = Resource::new(data.clone());
+    busy.busy = usize::MAX;
+    env.server.put("/down.bin", busy);
+    let [down] = submit(&owner, &["/down.bin"]).await[..] else {
+        panic!()
+    };
+    let failed = wait_for(&owner, down, |j| j.stage == JobStage::Failed).await;
+    assert!(
+        failed
+            .failure
+            .as_ref()
+            .and_then(|f| f.message.as_ref())
+            .unwrap()
+            .as_str()
+            .contains("gave up after 3 attempts")
+    );
+    // The person's retry starts a fresh budget.
+    env.server.update("/down.bin", |r| r.busy = 0);
+    owner
+        .handle()
+        .execute(retry(&owner, &failed), ALL)
+        .await
+        .unwrap();
+    complete(&owner, down).await;
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_survives_a_restart_and_ends_at_its_deadline() {
+    let env = retrying_env(Duration::from_millis(1500));
+    let data = body(24 * KIB);
+    let owner = env.start().await;
+    let waiting = waiting_at(&env, &owner, "/later.bin", &data, 12 * KIB).await;
+    shutdown(owner).await;
+    env.server.update("/later.bin", |r| r.stall_at = None);
+
+    let owner = env.start().await;
+    let after = job(&owner, waiting.id).await;
+    assert_eq!(after.failure, waiting.failure);
+    assert_eq!(
+        (after.stage, after.generation),
+        (JobStage::Queued, waiting.generation)
+    );
+    let at = waiting.failure.unwrap().retry_at.unwrap().unix_millis();
+    let done = complete(&owner, waiting.id).await;
+    assert!(now_millis() >= at);
+    assert_eq!(env.published("later.bin"), data);
+    assert_eq!(
+        env.server.ranges_requested(),
+        vec![None, Some((12 * KIB as u64, None))]
+    );
+    // The wait already moved it to the generation that continues.
+    assert_eq!(done.generation, waiting.generation);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_job_can_be_retried_now_paused_or_cancelled() {
+    let env = retrying_env(Duration::from_secs(600));
+    let data = body(24 * KIB);
+    let owner = env.start().await;
+    let now = waiting_at(&env, &owner, "/now.bin", &data, 4 * KIB).await;
+    let paused = waiting_at(&env, &owner, "/paused.bin", &data, 8 * KIB).await;
+    let cancelled = waiting_at(&env, &owner, "/cancelled.bin", &data, 12 * KIB).await;
+    // An engine restart keeps a wait too long to end in a test.
+    shutdown(owner).await;
+    let owner = env.start().await;
+    let handle_now = owner.handle();
+    assert_eq!(job(&owner, now.id).await, now);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(env.server.requests.lock().unwrap().len(), 3);
+    for path in ["/now.bin", "/paused.bin", "/cancelled.bin"] {
+        env.server.update(path, |r| r.stall_at = None);
+    }
+
+    // Retry starts it at once, with the generation that holds its data.
+    let result = handle_now.execute(retry(&owner, &now), ALL).await;
+    assert!(matches!(
+        result,
+        Ok(CommandResult::JobUpdated { changed: true, .. })
+    ));
+    let done = complete(&owner, now.id).await;
+    assert_eq!(done.generation, now.generation);
+    assert_eq!(env.published("now.bin"), data);
+
+    // Pause drops the wait; resuming continues at once.
+    let pause = Command::Pause {
+        job: paused.id,
+        expected_revision: paused.revision,
+    };
+    handle_now
+        .execute(envelope(&owner, pause), ALL)
+        .await
+        .unwrap();
+    let held = job(&owner, paused.id).await;
+    assert_eq!((held.stage, held.failure.clone()), (JobStage::Paused, None));
+    let resume = Command::Resume {
+        job: paused.id,
+        expected_revision: held.revision,
+    };
+    handle_now
+        .execute(envelope(&owner, resume), ALL)
+        .await
+        .unwrap();
+    complete(&owner, paused.id).await;
+    assert_eq!(env.published("paused.bin"), data);
+
+    // Cancel ends the wait and keeps the data; the job can then be removed.
+    let cancel = Command::Cancel {
+        job: cancelled.id,
+        expected_revision: cancelled.revision,
+    };
+    handle_now
+        .execute(envelope(&owner, cancel), ALL)
+        .await
+        .unwrap();
+    let stopped = job(&owner, cancelled.id).await;
+    assert_eq!(stopped.stage, JobStage::Cancelled);
+    assert_eq!(stopped.bytes_done, 12 * KIB as u64);
+    let remove = Command::Remove {
+        job: cancelled.id,
+        expected_revision: stopped.revision,
+    };
+    handle_now
+        .execute(envelope(&owner, remove), ALL)
+        .await
+        .unwrap();
+    let ranges = env.server.ranges_requested();
+    assert_eq!(
+        ranges,
+        vec![
+            None,
+            None,
+            None,
+            Some((4 * KIB as u64, None)),
+            Some((8 * KIB as u64, None))
+        ]
+    );
     shutdown(owner).await;
 }

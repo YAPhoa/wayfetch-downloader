@@ -480,6 +480,17 @@ impl JobState {
         self.commit(next)
     }
 
+    /// Lets a queued job start without waiting out its automatic retry
+    /// deadline; the caller checks that it has one. Only the revision
+    /// advances: the generation, and the partial held for it, stay.
+    pub fn request_retry_now(&mut self, expected: Revision) -> Result<Outcome, JobError> {
+        self.check_revision(expected)?;
+        if self.stage != JobStage::Queued || self.desired != DesiredState::Running {
+            return Err(self.not_applicable());
+        }
+        self.commit(*self)
+    }
+
     /// Accepts a new name for a completed job's published file, advancing
     /// the revision. The caller renames the file and records the name.
     pub fn request_rename(&mut self, expected: Revision) -> Result<Outcome, JobError> {
@@ -839,6 +850,25 @@ mod tests {
                 job.request_retry(job.revision()).is_err(),
                 "retry from {stage}"
             );
+        }
+    }
+
+    #[test]
+    fn retrying_now_keeps_a_queued_job_and_its_generation() {
+        let mut job = running(Queued);
+        let (g, r) = (job.generation(), job.revision());
+        assert_eq!(job.request_retry_now(r), Ok(Outcome::Changed));
+        assert_eq!((job.stage(), job.generation()), (Queued, g));
+        assert!(job.revision() > r);
+        assert!(matches!(
+            job.request_retry_now(r),
+            Err(JobError::RevisionConflict { .. })
+        ));
+        for &stage in ALL.iter().filter(|&&s| s != Queued) {
+            let mut job = settled(stage);
+            let before = job;
+            assert!(job.request_retry_now(job.revision()).is_err(), "{stage}");
+            assert_eq!(job, before);
         }
     }
 

@@ -143,6 +143,7 @@ fn failure(code: FailureCode, message: &str, retry_at: Option<UtcTimestamp>) -> 
         code,
         retry_at,
         message: Some(DiagnosticText::new(message)),
+        attempt: None,
     }
 }
 

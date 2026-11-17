@@ -1109,7 +1109,7 @@ mod tests {
                 account: None,
                 routing: Some(StartRouting::Direct),
             });
-            let admitted = f.store.admissible(1, &[], true).unwrap();
+            let admitted = f.store.admissible(1, &[], true, NOW).unwrap();
             assert_eq!(admitted[0].reach, reach);
         }
     }
@@ -1127,7 +1127,10 @@ mod tests {
                 account: None,
                 routing: Some(StartRouting::Direct),
             });
-            assert_eq!(f.store.admissible(1, &[], true).unwrap()[0].reach, reach);
+            assert_eq!(
+                f.store.admissible(1, &[], true, NOW).unwrap()[0].reach,
+                reach
+            );
         }
     }
 }

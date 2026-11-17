@@ -37,13 +37,14 @@ export function content(start, end) {
 }
 
 /**
- * @typedef {{ size: number, stallAt: number | null, etag: string, filename: string | null, waiters: (() => void)[] }} FixtureFile
+ * @typedef {{ size: number, stallAt: number | null, etag: string, filename: string | null, busy: number | null, waiters: (() => void)[] }} FixtureFile
  */
 
 /**
  * A plain-HTTP server on 127.0.0.1 serving generated files with ranges
  * and a strong validator, and web pages. A file can stall at an offset
- * until released, so a test can act while its download is in progress.
+ * until released, so a test can act while its download is in progress,
+ * or answer downloads as a busy server does until released.
  * `HEAD`, which link checks send, answers a file's headers and is logged
  * apart from downloads.
  */
@@ -78,8 +79,21 @@ export class Fixture {
    * @param {string | null} [filename]
    */
   put(name, size, stallAt = null, filename = null) {
-    this.files.set(name, { size, stallAt, filename, etag: '"v1"', waiters: [] });
+    this.files.set(name, { size, stallAt, filename, etag: '"v1"', busy: null, waiters: [] });
     return `${this.base}/files/${encodeURIComponent(name)}`;
+  }
+
+  /**
+   * Serves `name` with `size` bytes, but answers each download with 503
+   * Service Unavailable and `Retry-After: seconds` until released.
+   * @param {string} name
+   * @param {number} size
+   * @param {number} seconds
+   */
+  busy(name, size, seconds) {
+    const url = this.put(name, size);
+    /** @type {FixtureFile} */ (this.files.get(name)).busy = seconds;
+    return url;
   }
 
   /**
@@ -96,6 +110,7 @@ export class Fixture {
   release(name) {
     const file = /** @type {FixtureFile} */ (this.files.get(name));
     file.stallAt = null;
+    file.busy = null;
     for (const wake of file.waiters.splice(0)) wake();
   }
 
@@ -133,6 +148,10 @@ export class Fixture {
     }
     if (!file || (request.method !== 'GET' && request.method !== 'HEAD')) {
       response.writeHead(404).end();
+      return;
+    }
+    if (file.busy !== null && request.method === 'GET') {
+      response.writeHead(503, { 'Retry-After': String(file.busy), 'Content-Length': 0 }).end();
       return;
     }
     let start = 0;

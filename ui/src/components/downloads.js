@@ -27,6 +27,7 @@ import {
   progress,
   receiving,
   restartNote,
+  retryNote,
   retryPlan,
   unpackActions,
   unpackNote,
@@ -2069,6 +2070,7 @@ export class Downloads {
           unpackNote(job),
         ),
       job.failure && h('p', { class: `note tone-${state.status === 'failed' ? 'bad' : 'warn'}` }, explain(job.failure)),
+      retryNote(job) && h('p', { class: 'note tone-warn', 'data-note': 'retry' }, retryNote(job)),
       restartNote(job) && h('p', { class: 'note tone-warn', 'data-note': 'restart' }, restartNote(job)),
     );
   }
@@ -2209,6 +2211,7 @@ export class Downloads {
         ['Failure code', job.failure?.code],
         ['Diagnostic', job.failure?.message],
         ['Next retry', job.failure?.retry_at && new Date(job.failure.retry_at).toLocaleString()],
+        ['Retry', job.failure?.attempt && `${job.failure.attempt.number} of ${job.failure.attempt.limit}`],
         ['Restarted because', job.restart_reason],
       ]),
     );

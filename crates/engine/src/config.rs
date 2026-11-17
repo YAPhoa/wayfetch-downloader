@@ -73,6 +73,27 @@ pub struct Limits {
     pub command_retention: Duration,
 }
 
+/// Automatic retries of a transient failure, such as a timeout or a busy
+/// server (architecture section 7.4): exponential backoff with jitter, a
+/// server's `Retry-After` as the minimum wait, and a budget of attempts in
+/// a row that saved no new data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retries {
+    /// Retries in a row without new durable data before the job fails; 0
+    /// turns automatic retries off.
+    pub attempts: u32,
+    /// The wait before the first retry; each further one doubles it.
+    pub first_delay: Duration,
+    /// The longest self-chosen wait.
+    pub max_delay: Duration,
+    /// The longest wait a server's `Retry-After` can ask for, so a hostile
+    /// header cannot park a job for days.
+    pub max_server_delay: Duration,
+    /// Up to this share of a self-chosen wait, in percent, is taken off at
+    /// random, so jobs that failed together do not all return together.
+    pub jitter_percent: u8,
+}
+
 /// Separate deadlines for each phase of a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timeouts {
@@ -114,6 +135,8 @@ pub struct EngineConfig {
     pub limits: Limits,
     /// Request deadlines.
     pub timeouts: Timeouts,
+    /// Automatic retries of transient failures.
+    pub retries: Retries,
     /// The file holding the key that encrypts provider credentials, kept
     /// outside the state directory and its database. Without one, no
     /// account can be added. The engine creates it, owner-only, only for a
@@ -439,6 +462,64 @@ impl Default for Timeouts {
     }
 }
 
+impl Retries {
+    /// Defaults: 10 retries, from 5 s doubling to 5 min, at most 1 h for a
+    /// server's wait, and 20% jitter.
+    pub const DEFAULT: Self = Self {
+        attempts: 10,
+        first_delay: Duration::from_secs(5),
+        max_delay: Duration::from_secs(5 * 60),
+        max_server_delay: Duration::from_secs(3600),
+        jitter_percent: 20,
+    };
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        bounds("retries.attempts", 0, 100).check(u64::from(self.attempts))?;
+        bounds("retries.first_delay_ms", 10, 10 * 60 * SECOND_MS)
+            .check_duration(self.first_delay)?;
+        bounds(
+            "retries.max_delay_ms",
+            u64::try_from(self.first_delay.as_millis()).unwrap_or(u64::MAX),
+            HOUR_MS,
+        )
+        .check_duration(self.max_delay)?;
+        bounds("retries.max_server_delay_ms", SECOND_MS, 24 * HOUR_MS)
+            .check_duration(self.max_server_delay)?;
+        bounds("retries.jitter_percent", 0, 50).check(u64::from(self.jitter_percent))
+    }
+
+    /// The wait before retry `number` (from 1): the first delay doubled
+    /// for each retry before it, at most the longest delay, less up to the
+    /// jitter share; `random` picks how much of that share.
+    pub fn delay(&self, number: u32, random: u32) -> Duration {
+        let doubled = self
+            .first_delay
+            .saturating_mul(1 << number.saturating_sub(1).min(31));
+        let delay = doubled.min(self.max_delay);
+        let share =
+            f64::from(random) / f64::from(u32::MAX) * f64::from(self.jitter_percent) / 100.0;
+        delay.mul_f64(1.0 - share)
+    }
+
+    /// A server's requested wait, at most the longest one allowed.
+    pub fn server_delay(&self, requested: Duration) -> Duration {
+        requested.min(self.max_server_delay)
+    }
+
+    /// The longest wait these retries can schedule. A deadline further
+    /// ahead can only come from a clock set back since, so it counts as due
+    /// rather than stalling the job.
+    pub fn horizon(&self) -> Duration {
+        self.max_delay.max(self.max_server_delay)
+    }
+}
+
+impl Default for Retries {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 impl EngineConfig {
     /// Default request queue capacity.
     pub const DEFAULT_REQUEST_QUEUE: NonZeroUsize = NonZeroUsize::new(256).unwrap();
@@ -462,6 +543,7 @@ impl EngineConfig {
             download_root: None,
             limits: Limits::DEFAULT,
             timeouts: Timeouts::DEFAULT,
+            retries: Retries::DEFAULT,
             policy: Policy::DEFAULT,
             credential_key: None,
         }
@@ -495,6 +577,7 @@ impl EngineConfig {
         }
         self.limits.validate()?;
         self.timeouts.validate()?;
+        self.retries.validate()?;
         self.policy.validate()
     }
 }
@@ -560,6 +643,56 @@ mod tests {
         let mut c = config();
         c.shutdown_timeout = Duration::ZERO;
         assert_eq!(out_of_range(&c), "shutdown_timeout_ms");
+
+        let mut c = config();
+        c.retries.attempts = 101;
+        assert_eq!(out_of_range(&c), "retries.attempts");
+
+        let mut c = config();
+        c.retries.first_delay = Duration::ZERO;
+        assert_eq!(out_of_range(&c), "retries.first_delay_ms");
+
+        let mut c = config();
+        c.retries.max_delay = c.retries.first_delay / 2;
+        assert_eq!(out_of_range(&c), "retries.max_delay_ms");
+
+        let mut c = config();
+        c.retries.max_server_delay = Duration::from_secs(30 * 24 * 3600);
+        assert_eq!(out_of_range(&c), "retries.max_server_delay_ms");
+
+        let mut c = config();
+        c.retries.jitter_percent = 51;
+        assert_eq!(out_of_range(&c), "retries.jitter_percent");
+    }
+
+    #[test]
+    fn retries_back_off_exponentially_up_to_the_cap() {
+        let retries = Retries {
+            jitter_percent: 0,
+            ..Retries::DEFAULT
+        };
+        let secs = |n| retries.delay(n, u32::MAX).as_secs();
+        assert_eq!(
+            (1..=8).map(secs).collect::<Vec<_>>(),
+            [5, 10, 20, 40, 80, 160, 300, 300]
+        );
+        // Far past the cap, nothing overflows.
+        assert_eq!(secs(u32::MAX), 300);
+        assert_eq!(
+            retries.server_delay(Duration::from_secs(7 * 24 * 3600)),
+            Duration::from_secs(3600)
+        );
+        assert_eq!(retries.horizon(), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn jitter_only_shortens_a_self_chosen_wait_by_its_share() {
+        let retries = Retries::DEFAULT;
+        assert_eq!(retries.delay(1, 0), Duration::from_secs(5));
+        assert_eq!(retries.delay(1, u32::MAX), Duration::from_secs(4));
+        let middle = retries.delay(3, u32::MAX / 2);
+        assert!(middle > Duration::from_secs(17) && middle < Duration::from_secs(19));
+        assert!(retries.delay(20, u32::MAX) >= Duration::from_secs(240));
     }
 
     #[test]

@@ -1,12 +1,13 @@
 //! Reading a response's status and headers into what the engine checks:
-//! framing, representation, and a suggested file name.
+//! framing, representation, a suggested file name, and for a refusal, what
+//! it means and how long the server asked to be left alone.
 //!
 //! Parsing is strict: a malformed `Content-Range` or `Content-Length` is a
 //! failure, never a guess, and an encoded body is refused rather than
 //! decoded, so byte offsets always address the stored representation.
 
 use std::fmt::Write as _;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use percent_encoding::percent_decode_str;
 use reqwest::StatusCode;
@@ -35,6 +36,7 @@ pub(crate) fn error(code: FailureCode, message: impl Into<String>) -> TransportE
         code,
         message: message.into(),
         status: None,
+        retry_after: None,
     }
 }
 
@@ -49,6 +51,9 @@ pub(crate) fn read(
     headers: &HeaderMap,
     url: &Url,
 ) -> Result<ResponseHead, TransportError> {
+    if let Some(challenge) = challenge(headers) {
+        return Err(challenge);
+    }
     refuse_encoding(headers)?;
     let length = content_length(headers)?;
     let framing = match status {
@@ -63,7 +68,7 @@ pub(crate) fn read(
                 },
             },
         },
-        other => return Err(status_failure(other, true)),
+        other => return Err(status_failure(other, headers, true)),
     };
     let complete = match framing {
         Framing::Full { length } => length,
@@ -101,8 +106,16 @@ fn timestamp(at: SystemTime) -> UtcTimestamp {
 
 /// Classifies a status that carries no body to download. `replay_safe` is
 /// false for a request whose repetition could repeat an action: a server
-/// error after it leaves the outcome unknown.
-pub(crate) fn status_failure(status: StatusCode, replay_safe: bool) -> TransportError {
+/// error after it leaves the outcome unknown. A busy server's
+/// `Retry-After` comes along as the least wait before trying again.
+pub(crate) fn status_failure(
+    status: StatusCode,
+    headers: &HeaderMap,
+    replay_safe: bool,
+) -> TransportError {
+    if let Some(challenge) = challenge(headers) {
+        return challenge;
+    }
     let code = match status.as_u16() {
         500..=599 if !replay_safe => FailureCode::OperationAmbiguous,
         408 | 429 | 500..=599 => FailureCode::RequestTimeout,
@@ -112,10 +125,46 @@ pub(crate) fn status_failure(status: StatusCode, replay_safe: bool) -> Transport
         // be gone (failure matrix, 7.4).
         _ => FailureCode::LeaseNotFound,
     };
+    let busy = matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    );
     TransportError {
         status: Some(status.as_u16()),
+        retry_after: busy
+            .then(|| retry_after(headers, SystemTime::now()))
+            .flatten(),
         ..error(code, format!("HTTP {status}"))
     }
+}
+
+/// A bot check answered instead of the file: Cloudflare marks its challenge
+/// pages with `cf-mitigated: challenge`. Only a person in a browser can pass
+/// one, so it is not retried, and the link has not expired.
+fn challenge(headers: &HeaderMap) -> Option<TransportError> {
+    let challenged = headers.get_all("cf-mitigated").iter().any(|value| {
+        value
+            .to_str()
+            .is_ok_and(|v| v.trim().eq_ignore_ascii_case("challenge"))
+    });
+    challenged.then(|| {
+        error(
+            FailureCode::ChallengeRequired,
+            "the site answered with a browser check (a Cloudflare challenge) instead of the file",
+        )
+    })
+}
+
+/// The wait `Retry-After` asks for at `now` (RFC 9110 section 10.2.3):
+/// delay-seconds, or an HTTP-date, which is no wait once it has passed. A
+/// malformed or repeated header asks for nothing.
+fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
+    let value = header_str(headers, header::RETRY_AFTER).ok()??;
+    if let Some(seconds) = digits(value) {
+        return Some(Duration::from_secs(seconds));
+    }
+    let at = httpdate::parse_http_date(value).ok()?;
+    Some(at.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 /// What a link check reads from an answer's headers. Lenient where
@@ -528,8 +577,14 @@ mod tests {
 
     #[test]
     fn statuses_are_classified_by_what_they_mean_for_a_lease() {
-        let code =
-            |status: u16, safe| status_failure(StatusCode::from_u16(status).unwrap(), safe).code;
+        let code = |status: u16, safe| {
+            status_failure(
+                StatusCode::from_u16(status).unwrap(),
+                &HeaderMap::new(),
+                safe,
+            )
+            .code
+        };
         assert_eq!(code(404, true), FailureCode::LeaseNotFound);
         assert_eq!(code(410, true), FailureCode::LeaseNotFound);
         assert_eq!(code(403, true), FailureCode::LeaseExpired);
@@ -539,6 +594,52 @@ mod tests {
         // unknown.
         assert_eq!(code(500, false), FailureCode::OperationAmbiguous);
         assert_eq!(code(404, false), FailureCode::LeaseNotFound);
+    }
+
+    #[test]
+    fn a_challenge_page_needs_a_person_whatever_its_status() {
+        let challenged = headers(&[("cf-mitigated", "challenge"), ("content-length", "10")]);
+        for status in [403, 429, 503] {
+            let err = status_failure(StatusCode::from_u16(status).unwrap(), &challenged, true);
+            assert_eq!(err.code, FailureCode::ChallengeRequired, "{status}");
+            assert!(err.message.contains("browser check"), "{}", err.message);
+            assert_eq!(err.retry_after, None);
+        }
+        let err = read(StatusCode::OK, &challenged, &url()).unwrap_err();
+        assert_eq!(err.code, FailureCode::ChallengeRequired);
+        // Another mitigation is not a challenge.
+        let blocked = headers(&[("cf-mitigated", "block")]);
+        let err = status_failure(StatusCode::FORBIDDEN, &blocked, true);
+        assert_eq!(err.code, FailureCode::LeaseExpired);
+    }
+
+    #[test]
+    fn a_busy_server_says_how_long_to_wait() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(784_111_777);
+        let wait = |value: &'static str| retry_after(&headers(&[("retry-after", value)]), now);
+        assert_eq!(wait("120"), Some(Duration::from_secs(120)));
+        assert_eq!(wait("0"), Some(Duration::ZERO));
+        assert_eq!(
+            wait("Sun, 06 Nov 1994 08:50:37 GMT"),
+            Some(Duration::from_secs(60))
+        );
+        // A date already past asks for no wait.
+        assert_eq!(wait("Sun, 06 Nov 1994 08:48:37 GMT"), Some(Duration::ZERO));
+        for bad in ["-5", "1.5", "soon", "", "Sun, 06 Nov 1994"] {
+            assert_eq!(wait(bad), None, "{bad:?}");
+        }
+        let twice = headers(&[("retry-after", "5"), ("retry-after", "6")]);
+        assert_eq!(retry_after(&twice, now), None);
+
+        let busy = headers(&[("retry-after", "30")]);
+        for status in [429, 503] {
+            let err = status_failure(StatusCode::from_u16(status).unwrap(), &busy, true);
+            assert_eq!(err.code, FailureCode::RequestTimeout);
+            assert_eq!(err.retry_after, Some(Duration::from_secs(30)), "{status}");
+        }
+        // Only a busy server's wait is a wait for this request.
+        let err = status_failure(StatusCode::INTERNAL_SERVER_ERROR, &busy, true);
+        assert_eq!(err.retry_after, None);
     }
 
     #[test]

@@ -37,8 +37,8 @@ pub mod transfer;
 pub mod updates;
 
 pub use config::{
-    ConfigError, EngineConfig, IntegerPolicy, Limits, Policy, Preference, SpeedLimitPolicy,
-    Timeouts,
+    ConfigError, EngineConfig, IntegerPolicy, Limits, Policy, Preference, Retries,
+    SpeedLimitPolicy, Timeouts,
 };
 pub use destinations::{RootError, initialize_new_root, initialize_root};
 #[cfg(feature = "failpoints")]

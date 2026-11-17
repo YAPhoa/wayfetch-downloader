@@ -133,6 +133,7 @@ impl Transport for HostTransport {
                     code: FailureCode::LeaseNotFound,
                     message: "HTTP 404".into(),
                     status: Some(404),
+                    retry_after: None,
                 })?;
             let len = stream.data.len() as u64;
             let range = request

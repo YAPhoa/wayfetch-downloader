@@ -27,14 +27,16 @@ use crate::transfer::transport::Reach;
 /// the job's newest partial; the next three describe its published file,
 /// then come the submitted link, the job's destination root, whether the
 /// user removed it from lists, and why its latest attempt restarted from
-/// zero, and the provider route it was started through.
+/// zero, and the provider route it was started through; last, its automatic
+/// retries.
 const JOB_COLUMNS: &str = "j.id, j.package_id, j.desired_state, j.stage, j.generation, \
      j.revision, j.bytes_total, j.failure_code, j.failure_retry_at, j.failure_message, \
      COALESCE((SELECT p.durable_bytes FROM partials p WHERE p.job_id = j.id \
                ORDER BY p.generation DESC LIMIT 1), 0), \
      a.root_id, a.target_path, a.size_bytes, s.input_url, j.root_id, j.removed_at IS NOT NULL, \
      j.restart_reason, j.route_service, j.route_account, j.suggested_name, \
-     j.media_service, j.media_choice, x.state, x.output, x.problem, x.generation";
+     j.media_service, j.media_choice, x.state, x.output, x.problem, x.generation, \
+     j.retry_attempt, j.retry_limit, j.retry_not_before";
 
 /// The tables [`JOB_COLUMNS`] reads. A job publishes at most one file and
 /// has exactly one source link.
@@ -83,6 +85,12 @@ fn parked(stage: JobStage) -> bool {
     stage == JobStage::Failed
 }
 
+/// Whether a job at `stage` keeps `failure`: a parked one, or a queued
+/// one waiting for the automatic retry its deadline names.
+fn keeps(stage: JobStage, failure: &FailureSummary) -> bool {
+    parked(stage) || (stage == JobStage::Queued && failure.retry_at.is_some())
+}
+
 /// A stored job, decoded and validated.
 pub(super) struct StoredJob {
     pub(super) id: JobId,
@@ -103,9 +111,17 @@ pub(super) struct StoredJob {
     name: Option<String>,
     media: Option<JobMedia>,
     extraction: Option<ExtractionSummary>,
+    /// Its automatic retries.
+    pub(super) retry: super::retries::RetryRow,
 }
 
 impl StoredJob {
+    /// Whether it is queued waiting for an automatic retry.
+    pub(super) fn waiting(&self) -> bool {
+        self.state.stage() == JobStage::Queued
+            && self.failure.as_ref().is_some_and(|f| f.retry_at.is_some())
+    }
+
     /// The published file's name as an archive, if it is one.
     pub(super) fn archive(&self) -> Option<crate::extract::ArchiveName> {
         let path = &self.artifact.as_ref()?.path;
@@ -187,6 +203,7 @@ struct RawJob {
     name: Option<String>,
     media: (Option<String>, Option<String>),
     extraction: (Option<String>, Option<String>, Option<String>, Option<i64>),
+    retry: (i64, Option<i64>, Option<i64>),
 }
 
 impl RawJob {
@@ -215,6 +232,7 @@ impl RawJob {
             name: row.get(20)?,
             media: (row.get(21)?, row.get(22)?),
             extraction: (row.get(23)?, row.get(24)?, row.get(25)?, row.get(26)?),
+            retry: (row.get(27)?, row.get(28)?, row.get(29)?),
         })
     }
 
@@ -236,6 +254,7 @@ impl RawJob {
             .or_else(|| source_name(&self.input_url))
             .map(|name| name.as_str().to_owned());
         let extraction = super::extractions::decode(self.extraction)?;
+        let retry = super::retries::RetryRow::decode(self.retry)?;
         let mut job = StoredJob {
             id: key(self.id)?,
             state,
@@ -249,6 +268,7 @@ impl RawJob {
                         code: FailureCode::from_str(&code).or_corrupt("failure code")?,
                         retry_at: self.failure_retry_at.map(UtcTimestamp::from_unix_millis),
                         message: self.failure_message.as_deref().map(DiagnosticText::new),
+                        attempt: None,
                     })
                 })
                 .transpose()?,
@@ -270,7 +290,13 @@ impl RawJob {
             name,
             media: decode_media(self.media.0, self.media.1.as_deref())?,
             extraction,
+            retry,
         };
+        if job.waiting()
+            && let Some(failure) = &mut job.failure
+        {
+            failure.attempt = job.retry.attempt();
+        }
         job.offer_extraction();
         Ok(job)
     }
@@ -332,8 +358,8 @@ pub(super) fn load_listed(tx: &Transaction<'_>, id: JobId) -> Result<StoredJob, 
 }
 
 /// Persists `job.state` over the row last read at `previous` revision, sets
-/// the failure if the new stage is parked (clearing it otherwise), and
-/// appends `job_changed`.
+/// the failure if the new stage is parked or waiting for an automatic retry
+/// (clearing it otherwise), and appends `job_changed`.
 pub(super) fn save(
     tx: &Transaction<'_>,
     job: &mut StoredJob,
@@ -341,7 +367,7 @@ pub(super) fn save(
     failure: Option<FailureSummary>,
     now: UtcTimestamp,
 ) -> Result<(), StoreError> {
-    let failure = failure.filter(|_| parked(job.state.stage()));
+    let failure = failure.filter(|f| keeps(job.state.stage(), f));
     let desired: &'static str = job.state.desired().into();
     let updated = tx.execute(
         "UPDATE jobs SET desired_state = ?1, stage = ?2, generation = ?3, revision = ?4, \
@@ -389,6 +415,22 @@ pub(super) fn save(
         },
         now,
     )?;
+    Ok(())
+}
+
+/// Steps a transferring job of generation `presented` back to resolving,
+/// the way to the queue; any other stage is left as it is.
+pub(super) fn step_back(
+    tx: &Transaction<'_>,
+    job: &mut StoredJob,
+    presented: Generation,
+    now: UtcTimestamp,
+) -> Result<(), StoreError> {
+    if job.state.stage() == JobStage::Transferring {
+        let previous = job.state;
+        job.state.advance(JobStage::Resolving, presented)?;
+        save(tx, job, &previous, None, now)?;
+    }
     Ok(())
 }
 
@@ -558,6 +600,7 @@ impl Store {
             code: f.code(),
             retry_at: f.earliest_retry(),
             message: f.context().cloned(),
+            attempt: None,
         });
         self.record_stage(id, to, presented, failure, now)
     }
@@ -600,11 +643,7 @@ impl Store {
     ) -> Result<Outcome, StoreError> {
         let tx = self.write()?;
         let mut job = load(&tx, id)?;
-        if job.state.stage() == JobStage::Transferring {
-            let previous = job.state;
-            job.state.advance(JobStage::Resolving, presented)?;
-            save(&tx, &mut job, &previous, None, now)?;
-        }
+        step_back(&tx, &mut job, presented, now)?;
         let previous = job.state;
         let outcome = job.state.advance(JobStage::Queued, presented)?;
         if outcome == Outcome::Changed {
@@ -616,17 +655,20 @@ impl Store {
     }
 
     /// Up to `limit` jobs ready for the coordinator to pick up, skipping
-    /// `running`: recovering jobs first, then queued ones, oldest first.
-    /// Jobs without a destination are included only if `unassigned`, when
-    /// there is a default to give them. The scheduler reads only as many as
-    /// it has free slots, so waiting jobs stay in the database rather than
-    /// in memory.
+    /// `running`: recovering jobs first, then queued ones, oldest first,
+    /// except those waiting for an automatic retry that is not due at
+    /// `now`. Jobs without a destination are included only if `unassigned`,
+    /// when there is a default to give them. The scheduler reads only as
+    /// many as it has free slots, so waiting jobs stay in the database
+    /// rather than in memory.
     pub fn admissible(
         &mut self,
         limit: usize,
         running: &[JobId],
         unassigned: bool,
+        now: UtcTimestamp,
     ) -> Result<Vec<Admission>, StoreError> {
+        let (due, implausible) = super::retries::due_window(&self.retries, now);
         let tx = self.read()?;
         let fetch = i64::try_from(limit.saturating_add(running.len())).unwrap_or(i64::MAX);
         type Row = (
@@ -647,9 +689,11 @@ impl Store {
                  j.route_service, j.route_account, j.media_service, j.media_choice, \
                  s.public_only FROM jobs j JOIN source_links s ON s.id = j.source_link_id \
                  WHERE j.stage IN ('queued', 'recovering') AND (?2 OR j.root_id IS NOT NULL) \
+                 AND (j.stage = 'recovering' OR j.failure_retry_at IS NULL \
+                      OR j.failure_retry_at <= ?3 OR j.failure_retry_at > ?4) \
                  ORDER BY j.stage = 'recovering' DESC, j.id LIMIT ?1",
             )?
-            .query_map(params![fetch, unassigned], |row| {
+            .query_map(params![fetch, unassigned, due, implausible], |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,

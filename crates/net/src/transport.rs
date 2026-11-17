@@ -528,7 +528,11 @@ impl HttpTransport {
             status,
             StatusCode::OK | StatusCode::PARTIAL_CONTENT | StatusCode::RANGE_NOT_SATISFIABLE
         ) {
-            return Err(head::status_failure(status, replay_safe));
+            return Err(head::status_failure(
+                status,
+                response.headers(),
+                replay_safe,
+            ));
         }
         let head = head::read(status, response.headers(), &url)?;
         Ok(Response {
