@@ -1531,6 +1531,8 @@ test('Retry continues a cancelled download, once, and says when it had to start 
   await expect(busy.locator('td[data-state]')).toHaveText('Waiting to retry');
   const third = /** @type {string} */ (await busy.getAttribute('data-job'));
   await select(page, third);
+  // The details keep the tab chosen last.
+  await page.getByRole('tab', { name: 'General' }).click();
   await expect(page.locator('dd[data-fact="state"]')).toHaveText('Waiting to retry');
   await expect(page.locator('[data-note="retry"]')).toHaveText(
     /^Wayfetch tries again on its own after .+ \(retry 1 of 10\)\.$/,
