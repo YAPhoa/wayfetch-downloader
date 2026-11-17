@@ -144,6 +144,13 @@ All mutations require `"target"` (the `instance` UUID from `GET /v1/capabilities
 - **Downloads**: each attempt asks again for Dropbox's temporary download URL. Saved bytes are continued only for the same link, size, and `ETag` or `Last-Modified` (a link can be pointed at a replaced file of the same size); if Dropbox sends neither, or either changed, the download starts again from zero.
 - **Limits**: when Dropbox suspends a link for too much traffic (HTTP `429`), the download fails with `host_unavailable_via_provider` and a retry time a day later. Folder links and password-protected links are recognized and reported as not supported yet.
 
+### File Hosts (Pixeldrain)
+
+- **Public links**: `pixeldrain.com/u/<id>` file links and `/l/<id>` list (album) links, on `pixeldrain.com`, `pixeldrain.net`, or `pixeldra.in` (and the same IDs under `/api/file/` and `/api/list/`), are recognized locally and downloaded without an account or API key.
+- **Checks and lists**: checking a file link reads its name, size, and SHA-256 from Pixeldrain's file details, which are not counted as a download. Checking a list link puts each of its files on the Links list (at most 1000), each with a link of its own.
+- **Downloads**: bytes come from Pixeldrain's API with range requests. A file ID never names other bytes, so saved bytes are continued under the ID, size, and SHA-256; before publication the finished file is read once and checked against the SHA-256, and a file that fails is not published.
+- **Limits**: Pixeldrain treats download managers as hotlinking, so without premium a file may need a captcha on pixeldrain.com first; Wayfetch reports that (`permission_denied`) and never solves or bypasses it. A used-up free daily limit fails with `host_unavailable_via_provider` and a retry time a few hours later; too many connections or HTTP `429` retry in a minute. Filesystem share links (`/d/<id>`) are recognized and reported as not supported yet.
+
 ### Video Links, Archives & Plugins (`yt-dlp`, `ffmpeg` & 7-Zip)
 
 - **YouTube resolution**: `youtube.com/watch`, `youtu.be`, `/shorts/`, `/live/`, and `/embed/` single-video links are inspected via `yt-dlp` (using Deno as the unprivileged JS runtime for player scripts, with caches under `STATE_DIR/cache/yt-dlp`). Users can choose **Best available**, a maximum resolution (e.g. `1080p`), or audio-only (`MP3` or `M4A`).

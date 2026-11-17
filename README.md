@@ -29,7 +29,7 @@ The current release is **0.1.2**. The workspace crates, desktop packages, and re
 |---|---|
 | Multi-host accounts | Real-Debrid |
 | Video services | YouTube (through `yt-dlp`) |
-| File hosts | MEGA (public file and folder links, no account); Dropbox (public file links, no account) |
+| File hosts | MEGA (public file and folder links, no account); Dropbox (public file links, no account); Pixeldrain (public file and list links, no account) |
 | Direct links | Any public HTTP(S) URL |
 
 ## Repository Structure & Documentation Map
