@@ -402,6 +402,10 @@ pub enum Command {
         /// Whether the engine checks for a newer release on its own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         automatic_update_checks: Option<bool>,
+        /// Whether a finished download's file takes the modification time
+        /// its server reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep_server_file_date: Option<bool>,
         /// The link filters, replacing all of them. Links already collected
         /// stay.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -987,6 +991,7 @@ mod tests {
             download_speed_limit: None,
             extract_archives: None,
             automatic_update_checks: None,
+            keep_server_file_date: None,
             link_filters: None,
         };
         assert_eq!(
@@ -1000,6 +1005,7 @@ mod tests {
             download_speed_limit: None,
             extract_archives: None,
             automatic_update_checks: None,
+            keep_server_file_date: None,
             link_filters: None,
         };
         assert_eq!(

@@ -39,6 +39,16 @@ impl UtcTimestamp {
         Self(millis)
     }
 
+    /// The system time this names, or `None` outside its range.
+    pub fn to_system_time(self) -> Option<SystemTime> {
+        let span = Duration::from_millis(self.0.unsigned_abs());
+        if self.0 >= 0 {
+            UNIX_EPOCH.checked_add(span)
+        } else {
+            UNIX_EPOCH.checked_sub(span)
+        }
+    }
+
     /// This timestamp plus a duration, or `None` on overflow.
     pub fn checked_add(self, duration: Duration) -> Option<Self> {
         let millis = i64::try_from(duration.as_millis()).ok()?;
@@ -60,6 +70,17 @@ mod tests {
     fn converts_system_time() {
         let t = UNIX_EPOCH + Duration::from_millis(1_500);
         assert_eq!(UtcTimestamp::from_system_time(t).unix_millis(), 1_500);
+    }
+
+    #[test]
+    fn converts_back_to_system_time() {
+        for millis in [0, 1_500, -2_000] {
+            let t = UtcTimestamp::from_unix_millis(millis);
+            assert_eq!(
+                t.to_system_time().map(UtcTimestamp::from_system_time),
+                Some(t)
+            );
+        }
     }
 
     #[test]

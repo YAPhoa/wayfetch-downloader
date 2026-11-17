@@ -542,11 +542,13 @@ impl Destinations {
             plugins,
             extract_archives,
             automatic_update_checks,
+            keep_server_file_date,
             link_filters,
         } = preferences;
         Settings {
             extract_archives,
             automatic_update_checks,
+            keep_server_file_date,
             link_filters,
             max_active_downloads,
             download_speed_limit,
@@ -576,6 +578,7 @@ pub(crate) struct Preferences {
     pub(crate) plugins: Vec<wayfetch_protocol::media::PluginSummary>,
     pub(crate) extract_archives: bool,
     pub(crate) automatic_update_checks: bool,
+    pub(crate) keep_server_file_date: bool,
     pub(crate) link_filters: LinkFilters,
 }
 

@@ -47,6 +47,11 @@ extract_archives: boolean,
  */
 automatic_update_checks: boolean, 
 /**
+ * Whether a finished download's file takes the modification time its
+ * server reported.
+ */
+keep_server_file_date: boolean, 
+/**
  * The link filters, which keep matching links out of the collected
  * list.
  */

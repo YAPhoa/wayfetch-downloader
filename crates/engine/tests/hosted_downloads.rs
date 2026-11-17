@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use support::{ALL, KIB, body, complete, envelope, job, shutdown, submit, wait_for};
+use support::{
+    ALL, KIB, body, complete, envelope, job, keep_server_file_date, shutdown, submit, wait_for,
+};
 use url::Url;
 use wayfetch_engine::EngineOwner;
 use wayfetch_engine::hosting::{
@@ -24,6 +26,7 @@ use wayfetch_protocol::command::{CollectMode, CollectText};
 use wayfetch_protocol::domain::failure::FailureCode;
 use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::domain::name::ProviderId;
+use wayfetch_protocol::domain::time::UtcTimestamp;
 use wayfetch_protocol::query::{CollectedLink, JobSummary, LinkCheck, PageSize};
 use wayfetch_protocol::{Command, Query, QueryResult};
 
@@ -110,6 +113,9 @@ struct Host {
     /// For a host that stores files as they are, the `ETag` of the version
     /// it stores, if it has one; `None` for an encoding host.
     version: Option<Mutex<Option<String>>>,
+    /// The `Last-Modified` storage sends, which a host that stores files
+    /// as they are vouches for.
+    modified: Mutex<Option<UtcTimestamp>>,
 }
 
 impl Host {
@@ -132,6 +138,7 @@ impl Host {
             stored: Mutex::new(stored),
             plain,
             version,
+            modified: Mutex::new(None),
             stall_at: Mutex::new(None),
             refuse: Mutex::new(None),
             resolves: AtomicUsize::new(0),
@@ -193,6 +200,7 @@ impl FileHost for Host {
                 }),
                 validators: unencoded.then(|| Representation {
                     strong_etag: self.etag(),
+                    last_modified: *self.modified.lock().unwrap(),
                     ..Representation::default()
                 }),
             })
@@ -285,6 +293,7 @@ impl Transport for Storage {
                 representation: Representation {
                     length: Some(len),
                     strong_etag: etag,
+                    last_modified: *host.modified.lock().unwrap(),
                     ..Representation::default()
                 },
                 filename: None,
@@ -448,6 +457,7 @@ async fn a_folder_lists_its_files_on_the_links_list_and_each_is_checked_by_the_h
         download_speed_limit: None,
         extract_archives: None,
         automatic_update_checks: None,
+        keep_server_file_date: None,
         link_filters: Some(filters),
     };
     owner
@@ -617,4 +627,30 @@ async fn a_file_without_validators_is_never_continued() {
         "{requests:?}"
     );
     shutdown(owner).await;
+}
+
+#[tokio::test]
+async fn a_hosted_file_keeps_the_date_its_host_vouches_for_when_asked() {
+    let plain = body(4 * KIB);
+    let date = UtcTimestamp::from_unix_millis(784_111_777_000);
+    // A host that names versions by validators vouches for the date; one
+    // whose identity and check prove the content does not.
+    for (host, dated) in [
+        (Host::unencoded(plain.clone(), Some("\"v1\"")), true),
+        (Host::new(plain.clone()), false),
+    ] {
+        *host.modified.lock().unwrap() = Some(date);
+        let env = env_with(host);
+        let owner = env.start().await;
+        keep_server_file_date(&owner, true).await;
+        let id = submit(&owner, [FILE.to_owned()]).await[0];
+        complete(&owner, id).await;
+        assert_eq!(env.published(NAME), plain);
+        let modified = std::fs::metadata(env.root.join(NAME))
+            .and_then(|m| m.modified())
+            .map(UtcTimestamp::from_system_time)
+            .unwrap();
+        assert_eq!(modified == date, dated, "{modified}");
+        shutdown(owner).await;
+    }
 }

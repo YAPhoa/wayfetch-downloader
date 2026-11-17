@@ -57,7 +57,7 @@ import { toolbar } from './toolbar.js';
  */
 export const SECTIONS = [
   { id: 'downloads', label: 'Downloads', about: 'How downloads run.', icon: 'download' },
-  { id: 'folder', label: 'Download folders', about: 'Where new downloads are saved.', icon: 'folder' },
+  { id: 'folder', label: 'Download folders', about: 'Where new downloads are saved, and how.', icon: 'folder' },
   { id: 'filters', label: 'Link filters', about: 'Links to leave out when you add links.', icon: 'filter' },
   {
     id: 'accounts',
@@ -950,7 +950,10 @@ export class SettingsPage {
     return section;
   }
 
-  /** The folders new downloads may be saved to, and the default, read from the engine. */
+  /**
+   * The folders new downloads may be saved to, the default, and how
+   * finished files are kept, read from the engine.
+   */
   destinationSection() {
     const { context } = this;
     const { client } = context;
@@ -966,53 +969,64 @@ export class SettingsPage {
     let shown = null;
 
     /**
-     * The folders in `settings`, saying `said`.
+     * The folders and file handling in `settings`, saying `said` in the
+     * group `place`.
      * @param {Settings} settings
      * @param {string} said
+     * @param {'folders' | 'files'} [place]
      */
-    const render = (settings, said = '') => {
+    const render = (settings, said = '', place = 'folders') => {
       context.onSettings(settings);
       shown = settings;
       const canChange = client.permissions.includes('control');
-      const message = h('p', { class: 'message', role: 'status' }, said);
+      const message = h('p', { class: 'message', role: 'status' }, place === 'folders' ? said : '');
+      const filesMessage = h('p', { class: 'message', role: 'status' }, place === 'files' ? said : '');
+      const messages = { folders: message, files: filesMessage };
 
       /**
-       * Runs `work` from `button`, which stays disabled meanwhile, then
-       * shows the folders again with what `work` says; a failure is shown
-       * as `explain` words it.
-       * @param {HTMLButtonElement} button
+       * Runs `work` from `control`, which stays disabled meanwhile, then
+       * shows the settings again with what `work` says in `at`; a failure
+       * is shown there as `explain` words it, and a switch is put back.
+       * @param {HTMLButtonElement | HTMLInputElement} control
        * @param {() => Promise<string | null>} work resolves to what to say, or null to keep the folders as shown
        * @param {(error: WayfetchError) => string} [explain]
+       * @param {'folders' | 'files'} [at]
        */
-      const run = async (button, work, explain = notSaved) => {
+      const run = async (control, work, explain = notSaved, at = 'folders') => {
+        const said = messages[at];
+        const putBack = () => {
+          if (control instanceof HTMLInputElement) control.checked = control.defaultChecked;
+        };
         const hello = context.hello();
         if (!hello) {
-          show(message, 'Not connected yet. Try again in a moment.');
+          putBack();
+          show(said, 'Not connected yet. Try again in a moment.');
           return;
         }
         working = focusedKey(destination);
-        button.disabled = true;
+        control.disabled = true;
         busy = true;
-        show(message, '');
+        show(said, '');
         try {
-          const said = await work();
-          if (said === null) {
+          const done = await work();
+          if (done === null) {
             busy = false;
             return;
           }
           const current = await client.settings();
           busy = false;
-          render(current, said);
+          render(current, done, at);
         } catch (error) {
           busy = false;
+          putBack();
           if (error instanceof WayfetchError && error.code === 'revision_conflict') {
-            await reload('The settings were changed elsewhere and have been reloaded. Try again.');
+            await reload('The settings were changed elsewhere and have been reloaded. Try again.', at);
             return;
           }
-          failure(context, error, (text) => show(message, text), explain);
+          failure(context, error, (text) => show(said, text), explain);
         } finally {
-          if (button.isConnected) {
-            button.disabled = false;
+          if (control.isConnected) {
+            control.disabled = false;
             refocus(destination, working);
           }
           working = null;
@@ -1115,6 +1129,28 @@ export class SettingsPage {
                 ),
             ]
           : null;
+      // Saved at once, like the folder actions.
+      const keepDate = h('input', {
+        type: 'checkbox',
+        role: 'switch',
+        class: 'switch',
+        'data-key': 'keep-server-file-date',
+        'aria-labelledby': 'keep-server-file-date-name',
+        'aria-describedby': 'keep-server-file-date-about',
+        checked: settings.keep_server_file_date,
+        disabled: !canChange,
+        onchange: () =>
+          void run(
+            keepDate,
+            async () => {
+              const on = keepDate.checked;
+              await client.updateSettings({ ...command(), keepServerFileDate: on });
+              return on ? 'Finished files now keep the server’s date.' : 'Finished files are now dated when they finish.';
+            },
+            notSaved,
+            'files',
+          ),
+      });
       const choose =
         canChange &&
         adding &&
@@ -1157,6 +1193,36 @@ export class SettingsPage {
           'Downloads already added keep their folder.',
           client.local && ' Choose any folder on this computer to add it.',
         ),
+        h(
+          'div',
+          { class: 'settings-group', role: 'group', 'aria-labelledby': 'files-title' },
+          h(
+            'div',
+            { class: 'group-head' },
+            h('span', { class: 'group-title', id: 'files-title' }, 'Finished files'),
+            h('span', { class: 'group-note' }, client.local ? 'This app’s downloads' : 'Applies to the server'),
+          ),
+          h(
+            'div',
+            { class: 'group-rows' },
+            h(
+              'div',
+              { class: 'setting-row' },
+              h(
+                'div',
+                { class: 'setting-text' },
+                h('span', { class: 'setting-name', id: 'keep-server-file-date-name' }, 'Keep the server’s file date'),
+                h(
+                  'span',
+                  { class: 'hint', id: 'keep-server-file-date-about' },
+                  'A finished file takes the modified date its server reports, if any.',
+                ),
+              ),
+              keepDate,
+            ),
+          ),
+          h('div', { class: 'group-foot' }, filesMessage),
+        ),
       );
       // Keyboard focus stays on the same control, or moves from one that
       // is gone to the first enabled one.
@@ -1169,13 +1235,14 @@ export class SettingsPage {
     };
 
     /**
-     * Reads the settings again.
+     * Reads the settings again, saying `said` in the group `place`.
      * @param {string} said
+     * @param {'folders' | 'files'} [place]
      */
-    const reload = async (said = '') => {
+    const reload = async (said = '', place = undefined) => {
       busy = false;
       try {
-        render(await client.settings(), said);
+        render(await client.settings(), said, place);
       } catch (error) {
         failure(context, error, (text) =>
           show(

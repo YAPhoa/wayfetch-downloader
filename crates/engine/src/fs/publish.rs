@@ -3,6 +3,7 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use cap_std::fs::Dir;
 
@@ -49,18 +50,21 @@ pub enum RenameCheck {
 
 impl Root {
     /// Publishes a finished staging file at `target` as an artifact of
-    /// `size` bytes, creating missing parent directories. The caller has
-    /// recorded a publication intent for that size first.
+    /// `size` bytes, creating missing parent directories, modified at
+    /// `modified` if given. The caller has recorded a publication intent
+    /// for that size first.
     ///
-    /// Extra bytes are cut off while the file is private, then it is
-    /// synced, hard-linked to the target (never replacing anything there),
-    /// checked, and the staging name removed. Any crash leaves a state
-    /// [`Root::reconcile_publication`] can classify.
+    /// Extra bytes are cut off while the file is private, its time is set,
+    /// then it is synced, hard-linked to the target (never replacing
+    /// anything there), checked, and the staging name removed. Any crash
+    /// leaves a state [`Root::reconcile_publication`] can classify, and a
+    /// file found published already has its time.
     pub fn publish(
         &self,
         staging: StagingFile,
         target: &RelativePath,
         size: u64,
+        modified: Option<SystemTime>,
     ) -> Result<(), FsError> {
         self.verify()?;
         let record = staging.record();
@@ -79,9 +83,17 @@ impl Root {
                 .set_len(size)
                 .map_err(FsError::io("trim staging file"))?;
         }
-        staging
-            .sync_data()
-            .map_err(FsError::io("sync staging file"))?;
+        // Trimming changes the time, so it is set after. A time that
+        // cannot be set leaves the file as it is; it never fails the
+        // download. Identity checks use device, inode, and birth time,
+        // never this time.
+        let dated = modified.is_some_and(|at| staging.set_modified(at).is_ok());
+        if dated {
+            staging.sync_all()
+        } else {
+            staging.sync_data()
+        }
+        .map_err(FsError::io("sync staging file"))?;
         let (parent, name) = target.split_last();
         let parent = self
             .parent_dir(parent, true)?
@@ -412,7 +424,7 @@ mod tests {
                 let staging = staged(root, round + 1, bytes);
                 let record = staging.record().clone();
                 barrier.wait();
-                (root.publish(staging, &target, 4), record)
+                (root.publish(staging, &target, 4, None), record)
             };
             let (a, b, publish) = (&a, &b, &publish);
             let results = std::thread::scope(|scope| {
@@ -440,11 +452,43 @@ mod tests {
     }
 
     #[test]
+    fn a_published_file_takes_the_time_given_after_it_is_trimmed() {
+        let (tmp, root) = root();
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(784_111_777);
+        // Longer than the artifact, so publication trims it first.
+        let staging = staged(&root, 1, b"artifact and more");
+        let record = staging.record().clone();
+        root.publish(staging, &path("dated.bin"), 8, Some(at))
+            .unwrap();
+        let published = tmp.path().join("dated.bin");
+        assert_eq!(std::fs::read(&published).unwrap(), b"artifact");
+        assert_eq!(
+            std::fs::metadata(&published).unwrap().modified().unwrap(),
+            at
+        );
+        // The time changes nothing that identifies the file.
+        assert_eq!(
+            root.reconcile_publication(&record, &path("dated.bin"), 8)
+                .unwrap(),
+            PublicationCheck::Published
+        );
+        let staging = staged(&root, 2, b"undated");
+        root.publish(staging, &path("undated.bin"), 7, None)
+            .unwrap();
+        let modified = std::fs::metadata(tmp.path().join("undated.bin"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(modified > at);
+    }
+
+    #[test]
     fn publishes_without_clobbering() {
         let (tmp, root) = root();
         let staging = staged(&root, 1, b"artifact");
         let record = staging.record().clone();
-        root.publish(staging, &path("Movies/new/a.bin"), 8).unwrap();
+        root.publish(staging, &path("Movies/new/a.bin"), 8, None)
+            .unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join("Movies/new/a.bin")).unwrap(),
             b"artifact"
@@ -461,7 +505,7 @@ mod tests {
         let staging = staged(&root, 2, b"other");
         let record = staging.record().clone();
         assert!(matches!(
-            root.publish(staging, &path("b.bin"), 5),
+            root.publish(staging, &path("b.bin"), 5, None),
             Err(FsError::TargetExists(_))
         ));
         assert_eq!(
@@ -475,7 +519,7 @@ mod tests {
         );
         // The staged file is intact for another name.
         let staging = root.reopen_staging(&record, 5).unwrap();
-        root.publish(staging, &path("b (1).bin"), 5).unwrap();
+        root.publish(staging, &path("b (1).bin"), 5, None).unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join("b (1).bin")).unwrap(),
             b"other"
@@ -528,7 +572,7 @@ mod tests {
         // Bytes past the certified size never reach the artifact.
         let staging = staged(&root, 1, b"helloSTALE");
         let record = staging.record().clone();
-        root.publish(staging, &path("a.bin"), 5).unwrap();
+        root.publish(staging, &path("a.bin"), 5, None).unwrap();
         assert_eq!(std::fs::read(tmp.path().join("a.bin")).unwrap(), b"hello");
         assert_eq!(
             root.reconcile_publication(&record, &path("a.bin"), 5)
@@ -555,7 +599,7 @@ mod tests {
         let staging = staged(&root, 2, b"abc");
         let record = staging.record().clone();
         assert!(matches!(
-            root.publish(staging, &path("b.bin"), 5),
+            root.publish(staging, &path("b.bin"), 5, None),
             Err(FsError::StagingShrunk {
                 len: 3,
                 needed: 5,
@@ -619,7 +663,7 @@ mod tests {
     pub(super) fn published(root: &Root, at: &str, bytes: &[u8]) -> PublishedFile {
         let staging = staged(root, 1, bytes);
         let identity = staging.record().identity;
-        root.publish(staging, &path(at), bytes.len() as u64)
+        root.publish(staging, &path(at), bytes.len() as u64, None)
             .unwrap();
         PublishedFile {
             path: path(at),
@@ -767,7 +811,10 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), tmp.path().join("escape")).unwrap();
         let staging = staged(&root, 1, b"x");
-        assert!(root.publish(staging, &path("escape/a.bin"), 1).is_err());
+        assert!(
+            root.publish(staging, &path("escape/a.bin"), 1, None)
+                .is_err()
+        );
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 }

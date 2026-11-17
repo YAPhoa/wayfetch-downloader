@@ -234,6 +234,11 @@ pub struct UpdateSettingsRequest {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub automatic_update_checks: Option<bool>,
+    /// Whether a finished download's file takes the modification time its
+    /// server reported.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub keep_server_file_date: Option<bool>,
     /// The link filters, replacing all of them.
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
@@ -253,6 +258,7 @@ impl UpdateSettingsRequest {
                 download_speed_limit: self.download_speed_limit,
                 extract_archives: self.extract_archives,
                 automatic_update_checks: self.automatic_update_checks,
+                keep_server_file_date: self.keep_server_file_date,
                 link_filters: self.link_filters,
             },
         }
@@ -827,6 +833,7 @@ mod tests {
                 download_speed_limit: None,
                 extract_archives: None,
                 automatic_update_checks: None,
+                keep_server_file_date: None,
                 link_filters: None,
             }
         );
@@ -846,6 +853,7 @@ mod tests {
                 download_speed_limit: None,
                 extract_archives: None,
                 automatic_update_checks: None,
+                keep_server_file_date: None,
                 link_filters: None,
             }
         );
@@ -872,6 +880,20 @@ mod tests {
             reset.max_active_downloads,
             Some(PreferenceChange::UseDefault)
         );
+        let dated: UpdateSettingsRequest = serde_json::from_value(json!({
+            "idempotency_key": IdempotencyKey::generate(),
+            "target": InstanceId::generate(),
+            "expected_revision": 2,
+            "keep_server_file_date": true,
+        }))
+        .unwrap();
+        assert!(matches!(
+            dated.into_envelope().command,
+            Command::UpdateSettings {
+                keep_server_file_date: Some(true),
+                ..
+            }
+        ));
         let path = serde_json::from_value::<UpdateSettingsRequest>(json!({
             "idempotency_key": IdempotencyKey::generate(),
             "target": InstanceId::generate(),

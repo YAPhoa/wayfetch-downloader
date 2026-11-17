@@ -310,6 +310,7 @@ impl EngineBuilder {
             max_active: saved.max_active_downloads,
             speed_limit,
             link_filters: saved.link_filters,
+            keep_server_file_date: saved.keep_server_file_date,
             bandwidth,
             probes,
             file_jobs: Claims::default(),
@@ -1136,6 +1137,9 @@ struct Coordinator {
     /// The link filters, as the settings show them; collecting reads
     /// them from the store.
     link_filters: LinkFilters,
+    /// Whether published files take their server's modification time, as
+    /// the settings show it; publication reads it from the store.
+    keep_server_file_date: bool,
     /// The budget every download's body is written from, set to the
     /// effective speed limit.
     bandwidth: Arc<Bandwidth>,
@@ -1471,6 +1475,7 @@ impl Coordinator {
             self.extractions.automatic = saved.extract_archives;
             self.updates.set_automatic(saved.automatic_update_checks);
             self.link_filters = saved.link_filters;
+            self.keep_server_file_date = saved.keep_server_file_date;
         }
         // Only the run the request named stops, even when an exact replay
         // answers with the first request's result after a later run began.
@@ -1664,6 +1669,7 @@ impl Coordinator {
                 download_speed_limit,
                 extract_archives,
                 automatic_update_checks,
+                keep_server_file_date,
                 link_filters,
                 ..
             } => {
@@ -1675,6 +1681,7 @@ impl Coordinator {
                     && download_speed_limit.is_none()
                     && extract_archives.is_none()
                     && automatic_update_checks.is_none()
+                    && keep_server_file_date.is_none()
                     && link_filters.is_none()
                 {
                     return Err(ProtocolError::new(
@@ -1835,6 +1842,7 @@ impl Coordinator {
             plugins,
             extract_archives: self.extractions.automatic,
             automatic_update_checks: self.updates.automatic(),
+            keep_server_file_date: self.keep_server_file_date,
             link_filters: self.link_filters.clone(),
         };
         self.supervisor.spawn(async move {

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use support::{
-    ALL, KIB, ROOT, body, complete, envelope, job, jobs, shutdown, staging_dir, wait_for,
+    ALL, KIB, ROOT, body, complete, envelope, job, jobs, settings, shutdown, staging_dir, wait_for,
 };
 use wayfetch_engine::fs::Root;
 use wayfetch_engine::transfer::lease::Representation;
@@ -33,7 +33,7 @@ use wayfetch_protocol::domain::version::Revision;
 use wayfetch_protocol::event::{EventKind, ResyncReason};
 use wayfetch_protocol::query::{
     BoundedSetting, CollectedLink, JobFilter, JobSummary, LinkCheck, LinkPage, PageSize,
-    SettingSource, Settings, SpeedLimit, SpeedLimitSetting,
+    SettingSource, SpeedLimit, SpeedLimitSetting,
 };
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, Permission, ProtocolError, Query,
@@ -637,6 +637,7 @@ fn max_active(
             download_speed_limit: None,
             extract_archives: None,
             automatic_update_checks: None,
+            keep_server_file_date: None,
             link_filters: None,
         },
     )
@@ -799,6 +800,7 @@ async fn the_operator_policy_bounds_and_locks_the_download_limit() {
                     download_speed_limit: None,
                     extract_archives: None,
                     automatic_update_checks: None,
+                    keep_server_file_date: None,
                     link_filters: None,
                 },
             ),
@@ -851,6 +853,7 @@ fn speed_limit(
             download_speed_limit: Some(change),
             extract_archives: None,
             automatic_update_checks: None,
+            keep_server_file_date: None,
             link_filters: None,
         },
     )
@@ -1151,6 +1154,7 @@ async fn the_operator_policy_caps_the_speed_limit_and_unlimited_cannot_bypass_it
                 download_speed_limit: Some(SpeedLimitChange::Set(speed)),
                 extract_archives: None,
                 automatic_update_checks: None,
+                keep_server_file_date: None,
                 link_filters: None,
             },
         )
@@ -1540,13 +1544,6 @@ async fn a_storage_failure_during_recovery_waits_for_the_next_start() {
 // Destinations (ADR-17, ADR-29): the default root for new jobs, and roots
 // a host registers on its user's request.
 
-async fn settings(owner: &EngineOwner) -> Settings {
-    match owner.handle().query(Query::Settings {}, ALL).await.unwrap() {
-        QueryResult::Settings(settings) => settings,
-        other => panic!("{other:?}"),
-    }
-}
-
 fn choose(owner: &EngineOwner, revision: Revision, root: RootId) -> CommandEnvelope {
     envelope(
         owner,
@@ -1557,6 +1554,7 @@ fn choose(owner: &EngineOwner, revision: Revision, root: RootId) -> CommandEnvel
             download_speed_limit: None,
             extract_archives: None,
             automatic_update_checks: None,
+            keep_server_file_date: None,
             link_filters: None,
         },
     )

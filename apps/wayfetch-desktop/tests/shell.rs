@@ -1332,7 +1332,8 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
     })
     .await;
 
-    // A narrow window stacks the sections above the content.
+    // A narrow window stacks the sections above the content, which the
+    // page scrolls to when it is taller than the window.
     shell.client.set_window_size(480, 640).await.unwrap();
     shell
         .wait_for(
@@ -1340,7 +1341,7 @@ async fn the_settings_page_switches_sections_and_saves_a_chosen_folder() {
                <= document.querySelector('.settings-content').getBoundingClientRect().top",
         )
         .await;
-    fits_window(&shell, ".settings-nav").await;
+    in_window(&shell, ".settings-nav").await;
 
     // Back to Downloads, with focus on the gear; links are now collected
     // for the chosen folder.
@@ -1424,14 +1425,27 @@ fn section_shown(section: &str, path: &str) -> String {
 /// and the element `css` lies inside it.
 async fn fits_window(shell: &Shell, css: &str) {
     let fits = shell
+        .js(
+            "const { scrollHeight, clientHeight } = document.documentElement;
+             return scrollHeight === clientHeight;",
+        )
+        .await;
+    assert_eq!(fits, json!(true), "the page does not fit the window");
+    in_window(shell, css).await;
+}
+
+/// Whether the element `css` lies inside the window, on a page that may
+/// scroll below it.
+async fn in_window(shell: &Shell, css: &str) {
+    let inside = shell
         .js(&format!(
             "const box = document.querySelector('{css}').getBoundingClientRect();
-             const {{ scrollHeight, clientHeight, clientWidth }} = document.documentElement;
-             return scrollHeight === clientHeight && box.left >= 0 && box.top >= 0
+             const {{ clientHeight, clientWidth }} = document.documentElement;
+             return box.left >= 0 && box.top >= 0
                && box.right <= clientWidth && box.bottom <= clientHeight;"
         ))
         .await;
-    assert_eq!(fits, json!(true), "{css} does not fit the window");
+    assert_eq!(inside, json!(true), "{css} is not inside the window");
 }
 
 #[tokio::test(flavor = "multi_thread")]
