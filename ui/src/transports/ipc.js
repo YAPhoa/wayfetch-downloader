@@ -15,6 +15,7 @@ import {
   extractRequest,
   jobCommandRequest,
   linksCommandRequest,
+  moveJobsRequest,
   removeRootRequest,
   settingsRequest,
   submitRequest,
@@ -114,12 +115,13 @@ export class DesktopIpcClient {
     return this.call('hello');
   }
 
-  /** @param {{ after?: JobId | null, pageSize: number, stages?: readonly JobStage[] | null }} request */
-  listJobs({ after, pageSize, stages }) {
+  /** @param {Args<'listJobs'>[0]} request */
+  listJobs({ after, pageSize, stages, order }) {
     /** @type {Query} */
     const query = { type: 'list_jobs', page_size: pageSize };
     if (after) query.after = after;
     if (stages) query.filter = { stages: [...stages] };
+    if (order) query.order = order;
     return this.call('query', { query });
   }
 
@@ -175,6 +177,11 @@ export class DesktopIpcClient {
    */
   jobCommand(job, change) {
     return this.call('job_command', { job, request: jobCommandRequest(change) });
+  }
+
+  /** @param {Args<'moveJobs'>[0]} request */
+  moveJobs(request) {
+    return this.call('move_jobs', { request: moveJobsRequest(request) });
   }
 
   /**

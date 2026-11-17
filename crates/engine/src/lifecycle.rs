@@ -1372,7 +1372,8 @@ impl Coordinator {
             | Command::RemoveAccount { .. }
             | Command::ChangePlugin { .. }
             | Command::Extract { .. }
-            | Command::CancelExtraction { .. } => None,
+            | Command::CancelExtraction { .. }
+            | Command::MoveJobs { .. } => None,
         };
         if let Command::Extract { .. } = envelope.command
             && let Some(why) = self.extractions.unavailable()
@@ -1766,7 +1767,8 @@ impl Coordinator {
             | Command::RemoveAccount { .. }
             | Command::ChangePlugin { .. }
             | Command::Extract { .. }
-            | Command::CancelExtraction { .. } => {}
+            | Command::CancelExtraction { .. }
+            | Command::MoveJobs { .. } => {}
         }
         Ok(Unusable::new())
     }

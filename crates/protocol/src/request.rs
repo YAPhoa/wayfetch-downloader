@@ -12,8 +12,8 @@ use wayfetch_domain::version::{Generation, Revision};
 
 use crate::account::{AccountAlias, AccountRef};
 use crate::command::{
-    CollectMode, CollectText, Command, CommandEnvelope, IdempotencyKey, InputUrl, LinkRef,
-    LinkRefs, PreferenceChange, SpeedLimitChange, StartRouting, SubmitItems,
+    CollectMode, CollectText, Command, CommandEnvelope, IdempotencyKey, InputUrl, JobRef, JobRefs,
+    LinkRef, LinkRefs, PreferenceChange, QueueEnd, SpeedLimitChange, StartRouting, SubmitItems,
 };
 use crate::error::{ErrorCode, ProtocolError};
 use crate::filter::{LinkFilters, LinkRule};
@@ -583,6 +583,36 @@ impl LinksCommandRequest {
     }
 }
 
+/// Moves waiting jobs to the top or bottom of the queue, each at the
+/// revision the client saw.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct MoveJobsRequest {
+    /// Identifies the command across retries.
+    pub idempotency_key: IdempotencyKey,
+    /// The instance the client believes it is talking to.
+    pub target: InstanceId,
+    /// The jobs, each at the revision the client saw.
+    pub jobs: Vec<JobRef>,
+    /// Where to.
+    pub to: QueueEnd,
+}
+
+impl MoveJobsRequest {
+    /// The command envelope.
+    pub fn into_envelope(self) -> Result<CommandEnvelope, ProtocolError> {
+        Ok(CommandEnvelope {
+            idempotency_key: self.idempotency_key,
+            target: self.target,
+            command: Command::MoveJobs {
+                jobs: JobRefs::try_from(self.jobs)?,
+                to: self.to,
+            },
+        })
+    }
+}
+
 /// Permits a folder on the engine's host as a destination, by its path.
 /// The path is checked and the folder initialized by the engine; choosing
 /// it as the default is a separate settings change.
@@ -743,6 +773,36 @@ mod tests {
                 job,
                 expected_revision: Revision::from_u64(3).unwrap()
             }
+        );
+    }
+
+    #[test]
+    fn a_move_names_each_job_at_its_revision() {
+        let request = |jobs: serde_json::Value| {
+            serde_json::from_value::<MoveJobsRequest>(json!({
+                "idempotency_key": IdempotencyKey::generate(),
+                "target": InstanceId::generate(),
+                "jobs": jobs,
+                "to": "bottom",
+            }))
+            .unwrap()
+            .into_envelope()
+        };
+        let envelope = request(json!([{"job": "job-4", "revision": 2}])).unwrap();
+        assert_eq!(
+            envelope.command,
+            Command::MoveJobs {
+                jobs: JobRefs::try_from(vec![JobRef {
+                    job: JobId::from_u64(4).unwrap(),
+                    revision: Revision::from_u64(2).unwrap(),
+                }])
+                .unwrap(),
+                to: QueueEnd::Bottom,
+            }
+        );
+        assert_eq!(
+            request(json!([])).unwrap_err().code,
+            ErrorCode::InvalidRequest
         );
     }
 

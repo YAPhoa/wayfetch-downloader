@@ -20,7 +20,7 @@ use super::links::{self, Unusable};
 use super::operations::{self, OperationState};
 use super::{
     OrCorrupt, Store, StoreError, accounts, deletions, extractions, files, jobs, key, outbox,
-    renames, roots, sql,
+    queue, renames, roots, sql,
 };
 
 /// What the coordinator knows about destinations when a command runs.
@@ -150,6 +150,7 @@ impl Store {
                 job,
                 expected_revision,
             } => remove(&tx, *job, *expected_revision, now)?,
+            Command::MoveJobs { jobs, to } => queue::move_jobs(&tx, jobs, *to, now)?,
             Command::RemoveRoot {
                 expected_revision,
                 root,

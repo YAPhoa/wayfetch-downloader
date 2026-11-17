@@ -20,8 +20,8 @@ use wayfetch_engine::protocol::command::CommandResult;
 use wayfetch_engine::protocol::query::RootSummary;
 use wayfetch_engine::protocol::request::{
     AccountCommandRequest, AuthorizeAccountRequest, ChangePluginRequest, CollectRequest,
-    ExtractRequest, JobCommandRequest, LinksCommandRequest, RemoveRootRequest, SubmitRequest,
-    UpdateSettingsRequest,
+    ExtractRequest, JobCommandRequest, LinksCommandRequest, MoveJobsRequest, RemoveRootRequest,
+    SubmitRequest, UpdateSettingsRequest,
 };
 use wayfetch_engine::protocol::update::{UpdateCheck, UpdateOutcome};
 use wayfetch_engine::protocol::{
@@ -114,6 +114,14 @@ pub async fn links_command(
     request: Value,
 ) -> IpcResult<CommandResult> {
     let envelope = decode::<LinksCommandRequest>(request)?.into_envelope()?;
+    desktop.engine.execute(envelope, GRANTED).await
+}
+
+/// Moves waiting jobs to the top or bottom of the queue, each at the
+/// revision the renderer saw.
+#[tauri::command]
+pub async fn move_jobs(desktop: State<'_, Desktop>, request: Value) -> IpcResult<CommandResult> {
+    let envelope = decode::<MoveJobsRequest>(request)?.into_envelope()?;
     desktop.engine.execute(envelope, GRANTED).await
 }
 

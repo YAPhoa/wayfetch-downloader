@@ -5,6 +5,7 @@ import type { Authorization } from "./Authorization.js";
 import type { BatchId } from "./BatchId.js";
 import type { JobId } from "./JobId.js";
 import type { PluginChanged } from "./PluginChanged.js";
+import type { RefusedJob } from "./RefusedJob.js";
 import type { RefusedLink } from "./RefusedLink.js";
 import type { Revision } from "./Revision.js";
 
@@ -75,7 +76,16 @@ applied: Array<AppliedLink>,
 /**
  * The links it was refused for.
  */
-refused: Array<RefusedLink>, } | { "type": "authorization_started" } & Authorization | { "type": "account_authorized", 
+refused: Array<RefusedLink>, } | { "type": "jobs_moved", 
+/**
+ * The jobs moved, in their new queue order. Their revisions are
+ * unchanged.
+ */
+moved: Array<JobId>, 
+/**
+ * The jobs it was refused for.
+ */
+refused: Array<RefusedJob>, } | { "type": "authorization_started" } & Authorization | { "type": "account_authorized", 
 /**
  * The account.
  */

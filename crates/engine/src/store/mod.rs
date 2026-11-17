@@ -19,6 +19,7 @@ mod media;
 mod operations;
 mod outbox;
 mod progress;
+mod queue;
 mod renames;
 mod roots;
 #[cfg(test)]

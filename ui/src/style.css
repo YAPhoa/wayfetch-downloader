@@ -394,9 +394,10 @@ code { font-family: var(--mono); }
 }
 
 /* Both queue views reserve the same action width, so their different
-   commands do not move the search field or change when it wraps. */
+   commands do not move the search field or change when it wraps: room
+   for Downloads' four state commands and its two queue moves. */
 .queue-toolbar .tool-group {
-  flex: 0 0 352px;
+  flex: 0 0 420px;
   max-width: 100%;
   flex-wrap: wrap;
 }

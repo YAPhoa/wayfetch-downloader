@@ -24,7 +24,7 @@ use wayfetch_engine::{
 use wayfetch_protocol::command::{InputUrl, SubmitItems};
 use wayfetch_protocol::domain::id::{JobId, RootId};
 use wayfetch_protocol::domain::job::JobStage;
-use wayfetch_protocol::query::{JobFilter, JobSummary, PageSize};
+use wayfetch_protocol::query::{JobFilter, JobOrder, JobSummary, PageSize};
 use wayfetch_protocol::{Command, CommandEnvelope, IdempotencyKey, Permission, Query, QueryResult};
 
 pub const ALL: &[Permission] = Permission::ALL;
@@ -231,6 +231,7 @@ pub async fn jobs(owner: &EngineOwner) -> Vec<JobSummary> {
         filter: JobFilter::default(),
         after: None,
         page_size: PageSize::DEFAULT,
+        order: JobOrder::Added,
     };
     match owner.handle().query(query, ALL).await.unwrap() {
         QueryResult::Jobs(page) => page.items,

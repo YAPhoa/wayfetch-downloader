@@ -10,9 +10,11 @@ use wayfetch_domain::job::{DesiredState, DisplayState, JobStage, Outcome};
 use wayfetch_domain::name::DiagnosticText;
 use wayfetch_domain::time::UtcTimestamp;
 use wayfetch_domain::version::{BootEpoch, Generation, Revision};
-use wayfetch_protocol::command::{InputUrl, SubmitItems};
+use wayfetch_protocol::command::{InputUrl, JobRef, JobRefs, QueueEnd, SubmitItems};
 use wayfetch_protocol::event::EventKind;
-use wayfetch_protocol::query::{ArtifactSummary, FailureSummary, JobFilter, JobSummary, PageSize};
+use wayfetch_protocol::query::{
+    ArtifactSummary, FailureSummary, JobFilter, JobOrder, JobSummary, PageSize,
+};
 use wayfetch_protocol::{
     Command, CommandEnvelope, CommandResult, ErrorCode, IdempotencyKey, InstanceId, ProtocolError,
     Query, QueryResult,
@@ -409,6 +411,7 @@ fn job_pages_are_keyset_ordered_and_filtered() {
             },
             after,
             page_size: PageSize::try_from(2).unwrap(),
+            order: JobOrder::Added,
         };
         match f.store.query(&query, f.instance).unwrap() {
             QueryResult::Jobs(page) => page,
@@ -474,6 +477,256 @@ fn job_counts_follow_stages_and_filters() {
     assert_eq!(packaged.stages.values().sum::<u64>(), in_package as u64);
     let nowhere = count(&mut f, vec![], PackageId::from_u64(u64::MAX));
     assert!(nowhere.stages.is_empty());
+}
+
+/// Moves `jobs`, each at the revision it has, to the `to` end of the
+/// queue: the jobs moved, and the code each refused one got.
+fn move_jobs(
+    f: &mut Fixture,
+    jobs: &[JobId],
+    to: QueueEnd,
+) -> (Vec<JobId>, Vec<(JobId, ErrorCode)>) {
+    let refs: Vec<_> = jobs
+        .iter()
+        .map(|&job| JobRef {
+            job,
+            revision: f.summary(job).revision,
+        })
+        .collect();
+    let command = Command::MoveJobs {
+        jobs: JobRefs::try_from(refs).unwrap(),
+        to,
+    };
+    match f.run(IdempotencyKey::generate(), command).unwrap() {
+        CommandResult::JobsMoved { moved, refused } => {
+            (moved, refused.iter().map(|r| (r.job, r.code)).collect())
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The order the waiting jobs start in.
+fn starts(f: &mut Fixture) -> Vec<JobId> {
+    let ready = f.store.admissible(100, &[], true).unwrap();
+    ready.into_iter().map(|a| a.job).collect()
+}
+
+/// The queued list in queue order, `size` jobs a page, with how many
+/// jobs come before each page.
+fn queued_pages(f: &mut Fixture, size: u16) -> Vec<(u64, Vec<JobId>)> {
+    let mut pages = Vec::new();
+    let mut after = None;
+    loop {
+        let query = Query::ListJobs {
+            filter: JobFilter {
+                stages: vec![JobStage::Queued],
+                package: None,
+            },
+            after,
+            page_size: PageSize::try_from(size).unwrap(),
+            order: JobOrder::Queue,
+        };
+        let QueryResult::Jobs(page) = f.store.query(&query, f.instance).unwrap() else {
+            panic!()
+        };
+        let before = page.before.unwrap();
+        pages.push((before, page.items.iter().map(|j| j.id).collect()));
+        match page.next_after {
+            Some(next) => after = Some(next),
+            None => return pages,
+        }
+    }
+}
+
+#[test]
+fn waiting_jobs_move_to_either_end_in_the_order_they_were_queued() {
+    let mut f = Fixture::new();
+    let [a, b, c, d, e] = [(); 5].map(|()| f.job());
+    // Unmoved jobs tie, and start in the order they were added.
+    assert_eq!(starts(&mut f), [a, b, c, d, e]);
+    let events = f.events().len();
+
+    // Named in any order, the moved jobs keep their order among themselves.
+    assert_eq!(
+        move_jobs(&mut f, &[d, b], QueueEnd::Top),
+        (vec![b, d], vec![])
+    );
+    assert_eq!(starts(&mut f), [b, d, a, c, e]);
+    assert_eq!(
+        move_jobs(&mut f, &[b, a], QueueEnd::Bottom),
+        (vec![b, a], vec![])
+    );
+    assert_eq!(starts(&mut f), [d, c, e, b, a]);
+    // Every move tells other clients, with the job as it is.
+    let changed: Vec<_> = f.events()[events..]
+        .iter()
+        .map(|kind| match kind {
+            EventKind::JobChanged { job } => job.id,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(changed, [b, d, b, a]);
+
+    // A job added later waits behind the top and ahead of the bottom.
+    let late = f.job();
+    assert_eq!(starts(&mut f), [d, c, e, late, b, a]);
+    // The queued list pages in the same order, saying where each page is.
+    assert_eq!(
+        queued_pages(&mut f, 4),
+        [(0, vec![d, c, e, late]), (4, vec![b, a])]
+    );
+    // Moving again puts the newest move first.
+    move_jobs(&mut f, &[a], QueueEnd::Top);
+    assert_eq!(starts(&mut f), [a, d, c, e, late, b]);
+}
+
+#[test]
+fn only_waiting_jobs_move_and_the_rest_are_refused_one_by_one() {
+    let mut f = Fixture::new();
+    let [waiting, running, paused, other] = [(); 4].map(|()| f.job());
+    f.advance(running, JobStage::Resolving).unwrap();
+    let revision = f.summary(paused).revision;
+    f.run(
+        IdempotencyKey::generate(),
+        Command::Pause {
+            job: paused,
+            expected_revision: revision,
+        },
+    )
+    .unwrap();
+    let stale = f.summary(other).revision;
+    let gone = JobId::from_u64(99).unwrap();
+    let command = Command::MoveJobs {
+        jobs: JobRefs::try_from(vec![
+            JobRef {
+                job: running,
+                revision: f.summary(running).revision,
+            },
+            JobRef {
+                job: gone,
+                revision: Revision::INITIAL,
+            },
+            JobRef {
+                job: paused,
+                revision: f.summary(paused).revision,
+            },
+            JobRef {
+                job: other,
+                revision: stale.next().unwrap(),
+            },
+            JobRef {
+                job: waiting,
+                revision: f.summary(waiting).revision,
+            },
+        ])
+        .unwrap(),
+        to: QueueEnd::Bottom,
+    };
+    let CommandResult::JobsMoved { moved, refused } =
+        f.run(IdempotencyKey::generate(), command).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(moved, [waiting]);
+    let codes: Vec<_> = refused.iter().map(|r| (r.job, r.code)).collect();
+    assert_eq!(
+        codes,
+        [
+            (running, ErrorCode::NotApplicable),
+            (gone, ErrorCode::NotFound),
+            (paused, ErrorCode::NotApplicable),
+            (other, ErrorCode::RevisionConflict),
+        ]
+    );
+    assert!(refused.iter().all(|r| !r.message.as_str().is_empty()));
+    // A move changes no job's state or revision.
+    assert_eq!(f.summary(other).revision, stale);
+    // The refused jobs kept their place: once waiting again, the paused
+    // one starts by when it was added, ahead of the one moved down.
+    let revision = f.summary(paused).revision;
+    f.run(
+        IdempotencyKey::generate(),
+        Command::Resume {
+            job: paused,
+            expected_revision: revision,
+        },
+    )
+    .unwrap();
+    assert_eq!(starts(&mut f), [paused, other, waiting]);
+    // Nothing waiting among them moves nothing.
+    assert_eq!(
+        move_jobs(&mut f, &[running], QueueEnd::Top),
+        (vec![], vec![(running, ErrorCode::NotApplicable)])
+    );
+}
+
+#[test]
+fn a_moved_job_keeps_its_place_across_a_restart_and_a_retry() {
+    let mut f = Fixture::new();
+    let [a, b, c] = [(); 3].map(|()| f.job());
+    move_jobs(&mut f, &[c], QueueEnd::Top);
+    move_jobs(&mut f, &[a], QueueEnd::Bottom);
+    let mut f = f.reopen();
+    f.store.recover_after_restart(NOW).unwrap();
+    assert_eq!(starts(&mut f), [c, b, a]);
+
+    // It runs, fails, and is retried: it waits at the top again.
+    f.advance(c, JobStage::Resolving).unwrap();
+    assert_eq!(starts(&mut f), [b, a]);
+    f.advance(c, JobStage::Transferring).unwrap();
+    fail(&mut f, c, None);
+    let retry = retry_command(&mut f, c);
+    f.run(IdempotencyKey::generate(), retry).unwrap();
+    assert_eq!(starts(&mut f), [c, b, a]);
+    // A replayed move changes nothing more.
+    let command = Command::MoveJobs {
+        jobs: JobRefs::try_from(vec![JobRef {
+            job: b,
+            revision: f.summary(b).revision,
+        }])
+        .unwrap(),
+        to: QueueEnd::Top,
+    };
+    let key = IdempotencyKey::generate();
+    let first = f.run(key, command.clone()).unwrap();
+    let events = f.events().len();
+    assert_eq!(f.run(key, command).unwrap(), first);
+    assert_eq!(f.events().len(), events);
+    assert_eq!(starts(&mut f), [b, c, a]);
+}
+
+#[test]
+fn queue_order_reads_follow_an_index() {
+    let mut f = Fixture::new();
+    let tx = f.store.read().unwrap();
+    let plan = |sql: &str| {
+        let mut statement = tx.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap();
+        rows.map(Result::unwrap).collect::<Vec<_>>().join("; ")
+    };
+    // The queued list walks the index in order and sorts nothing.
+    let list = plan(
+        "SELECT j.id FROM jobs j WHERE (j.queue_rank, j.id) > (0, 0) \
+         AND j.removed_at IS NULL AND j.stage IN ('queued') \
+         ORDER BY j.queue_rank, j.id LIMIT 51",
+    );
+    assert!(list.contains("jobs_queue"), "{list}");
+    assert!(!list.contains("TEMP B-TREE"), "{list}");
+    // Admission searches the index for each waiting stage.
+    let admission = plan(
+        "SELECT j.id FROM jobs j WHERE j.stage IN ('queued', 'recovering') \
+         ORDER BY j.stage = 'recovering' DESC, j.queue_rank, j.id LIMIT 4",
+    );
+    assert!(admission.contains("jobs_queue"), "{admission}");
+    // Each end of the queue is one index probe.
+    for aggregate in ["MIN", "MAX"] {
+        let end = plan(&format!(
+            "SELECT COALESCE({aggregate}(queue_rank), 0) FROM jobs"
+        ));
+        assert!(end.contains("jobs_by_queue_rank"), "{end}");
+    }
 }
 
 #[test]

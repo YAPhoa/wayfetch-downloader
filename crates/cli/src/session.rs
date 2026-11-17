@@ -10,9 +10,11 @@ use std::process::ExitCode;
 
 use wayfetch_engine::domain::id::JobId;
 use wayfetch_engine::domain::version::Revision;
-use wayfetch_engine::protocol::command::{CommandResult, InputUrl, SubmitItems};
+use wayfetch_engine::protocol::command::{
+    CommandResult, InputUrl, JobRef, JobRefs, QueueEnd, SubmitItems,
+};
 use wayfetch_engine::protocol::event::Subscribe;
-use wayfetch_engine::protocol::query::{JobFilter, JobSummary, PageSize};
+use wayfetch_engine::protocol::query::{JobFilter, JobOrder, JobSummary, PageSize};
 use wayfetch_engine::protocol::{
     Command, CommandEnvelope, ErrorCode, IdempotencyKey, Permission, ProtocolError, Query,
     QueryResult, StreamItem,
@@ -207,6 +209,8 @@ impl Session<'_> {
                 })
                 .await
             }
+            "top" => self.move_jobs(first, words, QueueEnd::Top).await,
+            "bottom" => self.move_jobs(first, words, QueueEnd::Bottom).await,
             _ => self.submit(text.split_ascii_whitespace()).await,
         };
         result.map(|()| Next::Continue)
@@ -243,6 +247,7 @@ impl Session<'_> {
                 | CommandResult::SettingsUpdated { .. }
                 | CommandResult::LinksCollected { .. }
                 | CommandResult::LinksApplied { .. }
+                | CommandResult::JobsMoved { .. }
                 | CommandResult::AuthorizationStarted(_)
                 | CommandResult::AccountAuthorized { .. }
                 | CommandResult::AccountUpdated { .. }
@@ -250,6 +255,50 @@ impl Session<'_> {
             ) => unexpected().into(),
             Err(e) => e.into(),
         })
+    }
+
+    /// Moves the jobs named in `words` to the `to` end of the queue, each
+    /// at the revision just read, and says which moved and which did not.
+    async fn move_jobs<'a>(
+        &self,
+        verb: &str,
+        words: impl Iterator<Item = &'a str>,
+        to: QueueEnd,
+    ) -> Result<(), Stop> {
+        let jobs = words.map(parse_job).collect::<Option<Vec<_>>>();
+        let Some(jobs) = jobs.filter(|jobs| !jobs.is_empty()) else {
+            return self.print(&usage(verb, "JOB...", "job-1 job-2"));
+        };
+        let mut named = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            match self.inspect(job).await {
+                Ok(summary) => named.push(JobRef {
+                    job,
+                    revision: summary.revision,
+                }),
+                Err(e) => return self.print(&e.into()),
+            }
+        }
+        let result = match JobRefs::try_from(named) {
+            Ok(jobs) => self.execute(Command::MoveJobs { jobs, to }).await,
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(CommandResult::JobsMoved { moved, refused }) => {
+                for job in moved {
+                    self.print(&Output::Moved { job, to })?;
+                }
+                for refusal in refused {
+                    self.print(&Output::Error {
+                        code: refusal.code.to_string(),
+                        message: format!("{}: {}", refusal.job, refusal.message),
+                    })?;
+                }
+                Ok(())
+            }
+            Ok(_) => self.print(&unexpected().into()),
+            Err(e) => self.print(&e.into()),
+        }
     }
 
     /// Submits the URLs in `words` as one batch. A rejected URL is
@@ -291,6 +340,7 @@ impl Session<'_> {
                 | CommandResult::SettingsUpdated { .. }
                 | CommandResult::LinksCollected { .. }
                 | CommandResult::LinksApplied { .. }
+                | CommandResult::JobsMoved { .. }
                 | CommandResult::AuthorizationStarted(_)
                 | CommandResult::AccountAuthorized { .. }
                 | CommandResult::AccountUpdated { .. }
@@ -309,6 +359,7 @@ impl Session<'_> {
                 filter: JobFilter::default(),
                 after,
                 page_size: PageSize::DEFAULT,
+                order: JobOrder::Added,
             };
             let page = match self.engine.query(query, OPERATOR).await {
                 Ok(QueryResult::Jobs(page)) => page,
@@ -361,11 +412,16 @@ fn one_job<'a>(
 ) -> Result<JobId, Output<'static>> {
     match (words.next().and_then(parse_job), words.next()) {
         (Some(job), None) => Ok(job),
-        _ => Err(Output::error(
-            "invalid_input",
-            &format!("usage: {verb} JOB, for example `{verb} job-1`"),
-        )),
+        _ => Err(usage(verb, "JOB", "job-1")),
     }
+}
+
+/// How `verb` is used, with its `arguments` and an `example` of them.
+fn usage(verb: &str, arguments: &str, example: &str) -> Output<'static> {
+    Output::error(
+        "invalid_input",
+        &format!("usage: {verb} {arguments}, for example `{verb} {example}`"),
+    )
 }
 
 /// The engine answered with a result of the wrong kind.

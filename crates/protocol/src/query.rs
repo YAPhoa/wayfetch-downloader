@@ -92,6 +92,21 @@ fn bounded_stages<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<JobStage
     Ok(stages)
 }
 
+/// The order [`Query::ListJobs`] lists jobs in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum JobOrder {
+    /// The order the jobs were added in: ascending ID.
+    #[default]
+    Added,
+    /// The order queued jobs start in: their place in the queue
+    /// ([`crate::Command::MoveJobs`]), then ascending ID. Jobs being
+    /// recovered after a restart start before any of them.
+    Queue,
+}
+
 /// A read request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -102,7 +117,7 @@ pub enum Query {
         /// The job.
         job: JobId,
     },
-    /// A page of jobs in ascending ID order.
+    /// A page of jobs, in the order `order` names.
     ListJobs {
         /// Which jobs.
         #[serde(default)]
@@ -116,6 +131,10 @@ pub enum Query {
         #[serde(default)]
         #[cfg_attr(feature = "ts", ts(as = "Option<u16>", optional))]
         page_size: PageSize,
+        /// The order of the list.
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(as = "Option<JobOrder>", optional))]
+        order: JobOrder,
     },
     /// How many jobs are in each stage.
     CountJobs {
@@ -815,20 +834,23 @@ mod tests {
             Query::ListJobs {
                 filter: JobFilter::default(),
                 after: None,
-                page_size: PageSize::DEFAULT
+                page_size: PageSize::DEFAULT,
+                order: JobOrder::Added,
             }
         );
         let q: Query = from_value(json!({
             "type": "list_jobs",
             "filter": {"stages": ["queued", "paused"]},
             "after": "job-9",
-            "page_size": 50
+            "page_size": 50,
+            "order": "queue"
         }))
         .unwrap();
         let Query::ListJobs {
             filter,
             after,
             page_size,
+            order,
         } = q
         else {
             panic!()
@@ -836,6 +858,7 @@ mod tests {
         assert_eq!(filter.stages, [JobStage::Queued, JobStage::Paused]);
         assert_eq!(after, JobId::from_u64(9));
         assert_eq!(page_size.get(), 50);
+        assert_eq!(order, JobOrder::Queue);
     }
 
     #[test]

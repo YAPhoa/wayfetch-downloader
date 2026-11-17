@@ -8,6 +8,7 @@
  * @typedef {import('./contract.js').ProgressSample} ProgressSample
  * @typedef {import('./contract.js').JobCounts} JobCounts
  * @typedef {import('./contract.js').ExtractionState} ExtractionState
+ * @typedef {import('./contract.js').JobOrder} JobOrder
  * @typedef {import('./generated/FailureCode.js').FailureCode} FailureCode
  * @typedef {import('./generated/FailureSummary.js').FailureSummary} FailureSummary
  *
@@ -125,6 +126,15 @@ export function mayHaveDeleted(code) {
  */
 export function canRemove(job) {
   return job.stage === 'complete' || job.stage === 'failed' || job.stage === 'cancelled';
+}
+
+/**
+ * Whether a job can be moved in the queue: only while it waits to start
+ * (`JobState::check_waiting`).
+ * @param {JobSummary} job
+ */
+export function canMove(job) {
+  return job.stage === 'queued';
 }
 
 /**
@@ -291,8 +301,10 @@ function stages(...list) {
 
 /**
  * The state filters a list offers, with the stages each one shows.
- * `status` is null for All, which is every state rather than one.
- * @type {readonly { key: string, label: string, status: Status | null, stages: readonly JobStage[] | null }[]}
+ * `status` is null for All, which is every state rather than one. Queued
+ * lists jobs in the order they start (`order`); the rest in the order
+ * they were added.
+ * @type {readonly { key: string, label: string, status: Status | null, stages: readonly JobStage[] | null, order?: JobOrder }[]}
  */
 export const GROUPS = Object.freeze([
   { key: 'all', label: 'All', status: null, stages: null },
@@ -303,7 +315,7 @@ export const GROUPS = Object.freeze([
     stages: stages('resolving', 'transferring', 'verifying', 'publishing', 'recovering'),
   },
   { key: 'paused', label: 'Paused', status: 'paused', stages: stages('paused') },
-  { key: 'queued', label: 'Queued', status: 'queued', stages: stages('queued') },
+  { key: 'queued', label: 'Queued', status: 'queued', stages: stages('queued'), order: 'queue' },
   { key: 'failed', label: 'Failed', status: 'failed', stages: stages('failed') },
   { key: 'cancelled', label: 'Cancelled', status: 'cancelled', stages: stages('cancelled') },
   { key: 'done', label: 'Done', status: 'done', stages: stages('complete') },

@@ -2,6 +2,7 @@
 import type { AuthorizationId } from "./AuthorizationId.js";
 import type { JobFilter } from "./JobFilter.js";
 import type { JobId } from "./JobId.js";
+import type { JobOrder } from "./JobOrder.js";
 import type { LinkRule } from "./LinkRule.js";
 import type { SourceLinkId } from "./SourceLinkId.js";
 
@@ -24,7 +25,11 @@ after?: JobId,
 /**
  * Items per page.
  */
-page_size?: number, } | { "type": "count_jobs", 
+page_size?: number, 
+/**
+ * The order of the list.
+ */
+order?: JobOrder, } | { "type": "count_jobs", 
 /**
  * Which jobs.
  */

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import {
   availableActions,
+  canMove,
   canRemove,
   canRename,
   describe,
@@ -53,6 +54,13 @@ test('only published files are renamed, and only ended jobs removed', () => {
   }
   for (const stage of /** @type {const} */ (['queued', 'transferring', 'paused', 'publishing'])) {
     assert.equal(canRemove(job({ stage })), false, stage);
+  }
+});
+
+test('only downloads waiting to start move in the queue', () => {
+  assert.equal(canMove(job({ stage: 'queued' })), true);
+  for (const stage of /** @type {const} */ (['recovering', 'resolving', 'transferring', 'paused', 'failed', 'complete'])) {
+    assert.equal(canMove(job({ stage })), false, stage);
   }
 });
 
@@ -130,6 +138,11 @@ test('every state filter but All has a status', () => {
   assert.deepEqual(
     GROUPS.map((g) => g.status),
     [null, 'active', 'paused', 'queued', 'failed', 'cancelled', 'done'],
+  );
+  // Queued lists downloads in the order they start; the rest as added.
+  assert.deepEqual(
+    GROUPS.filter((g) => g.order).map((g) => [g.key, g.order]),
+    [['queued', 'queue']],
   );
 });
 
