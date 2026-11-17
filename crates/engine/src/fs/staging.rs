@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io;
 use std::ops::Range;
+use std::time::SystemTime;
 
 use cap_std::fs::OpenOptions;
 use wayfetch_domain::id::{JobId, RootId};
@@ -69,6 +70,18 @@ impl StagingFile {
     /// Synchronizes the file's data to stable storage. Blocking.
     pub fn sync_data(&self) -> io::Result<()> {
         self.file.sync_data()
+    }
+
+    /// Sets the file's modification time. Only for publication, after its
+    /// last change. Blocking.
+    pub(super) fn set_modified(&self, at: SystemTime) -> io::Result<()> {
+        self.file.set_modified(at)
+    }
+
+    /// Synchronizes the file's data and metadata, its times included, to
+    /// stable storage. Blocking.
+    pub(super) fn sync_all(&self) -> io::Result<()> {
+        self.file.sync_all()
     }
 
     /// Synchronizes the file, then certifies `ranges` of it for the job

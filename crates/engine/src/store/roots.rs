@@ -214,6 +214,8 @@ pub(crate) struct SavedSettings {
     pub(crate) extract_archives: bool,
     /// Whether the engine checks for a newer release on its own.
     pub(crate) automatic_update_checks: bool,
+    /// Whether published files take their server's modification time.
+    pub(crate) keep_server_file_date: bool,
     /// The link filters.
     pub(crate) link_filters: LinkFilters,
 }
@@ -254,16 +256,18 @@ pub(super) fn active_filters(tx: &Transaction<'_>) -> Result<Filters, StoreError
 }
 
 fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
-    let (revision, root, max_active, speed, extract, updates): (
+    let (revision, root, max_active, speed, extract, updates, keep_date): (
         i64,
         Option<i64>,
         Option<i64>,
         Option<i64>,
         bool,
         bool,
+        bool,
     ) = tx.query_row(
         "SELECT revision, default_root, max_active_downloads, download_speed_limit, \
-         extract_archives, automatic_update_checks FROM settings WHERE id = 1",
+         extract_archives, automatic_update_checks, keep_server_file_date \
+         FROM settings WHERE id = 1",
         [],
         |row| {
             Ok((
@@ -273,6 +277,7 @@ fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
                 row.get(3)?,
                 row.get(4)?,
                 row.get(5)?,
+                row.get(6)?,
             ))
         },
     )?;
@@ -285,6 +290,7 @@ fn settings(tx: &Transaction<'_>) -> Result<SavedSettings, StoreError> {
         download_speed_limit: speed.map(read_speed_limit).transpose()?,
         extract_archives: extract,
         automatic_update_checks: updates,
+        keep_server_file_date: keep_date,
         link_filters: link_filters(tx)?,
     })
 }
@@ -364,6 +370,7 @@ pub(super) fn update_settings(
     download_speed_limit: Option<SpeedLimitChange>,
     extract_archives: Option<bool>,
     automatic_update_checks: Option<bool>,
+    keep_server_file_date: Option<bool>,
     link_filters: Option<&LinkFilters>,
     now: UtcTimestamp,
 ) -> Result<CommandResult, ProtocolError> {
@@ -383,6 +390,7 @@ pub(super) fn update_settings(
         },
         extract_archives: extract_archives.unwrap_or(saved.extract_archives),
         automatic_update_checks: automatic_update_checks.unwrap_or(saved.automatic_update_checks),
+        keep_server_file_date: keep_server_file_date.unwrap_or(saved.keep_server_file_date),
         link_filters: link_filters
             .cloned()
             .unwrap_or_else(|| saved.link_filters.clone()),
@@ -406,7 +414,7 @@ pub(super) fn update_settings(
     tx.execute(
         "UPDATE settings SET revision = ?1, default_root = ?2, max_active_downloads = ?3, \
          download_speed_limit = ?4, extract_archives = ?5, automatic_update_checks = ?6, \
-         updated_at = ?7, link_filters = ?8 WHERE id = 1",
+         updated_at = ?7, link_filters = ?8, keep_server_file_date = ?9 WHERE id = 1",
         params![
             sql(next)?,
             wanted.default_root.map(sql).transpose()?,
@@ -416,6 +424,7 @@ pub(super) fn update_settings(
             wanted.automatic_update_checks,
             now.unix_millis(),
             serde_json::to_string(&wanted.link_filters).or_corrupt("link_filters")?,
+            wanted.keep_server_file_date,
         ],
     )
     .map_err(StoreError::from)?;
@@ -574,8 +583,19 @@ mod tests {
         );
         let first = first.revision;
         let tx = store.write().unwrap();
-        let updated =
-            update_settings(&tx, first, Some(root), None, None, None, None, None, now()).unwrap();
+        let updated = update_settings(
+            &tx,
+            first,
+            Some(root),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            now(),
+        )
+        .unwrap();
         assert_eq!(
             updated,
             CommandResult::SettingsUpdated {
@@ -583,14 +603,26 @@ mod tests {
                 changed: true
             }
         );
-        let stale = update_settings(&tx, first, Some(root), None, None, None, None, None, now())
-            .unwrap_err();
+        let stale = update_settings(
+            &tx,
+            first,
+            Some(root),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            now(),
+        )
+        .unwrap_err();
         assert_eq!(stale.code, ErrorCode::RevisionConflict);
         assert_eq!(stale.current_revision, first.next().ok());
         let same = update_settings(
             &tx,
             first.next().unwrap(),
             Some(root),
+            None,
             None,
             None,
             None,
@@ -626,12 +658,25 @@ mod tests {
         let root = store.allocate_root(Path::new("/a"), false, now()).unwrap();
         let tx = store.write().unwrap();
         let first = settings(&tx).unwrap().revision;
-        update_settings(&tx, first, Some(root), None, None, None, None, None, now()).unwrap();
+        update_settings(
+            &tx,
+            first,
+            Some(root),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            now(),
+        )
+        .unwrap();
         let change = |revision: Revision, change| match update_settings(
             &tx,
             revision,
             None,
             Some(change),
+            None,
             None,
             None,
             None,
@@ -672,6 +717,7 @@ mod tests {
             None,
             max_active,
             speed,
+            None,
             None,
             None,
             None,
@@ -722,13 +768,42 @@ mod tests {
             None,
             Some(false),
             None,
+            None,
             now(),
         )
         .unwrap();
         assert!(!settings(&tx).unwrap().automatic_update_checks);
+        // Keeping server file dates is off until turned on.
+        assert!(!settings(&tx).unwrap().keep_server_file_date);
+        let current = settings(&tx).unwrap().revision;
+        update_settings(
+            &tx,
+            current,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            None,
+            now(),
+        )
+        .unwrap();
+        assert!(settings(&tx).unwrap().keep_server_file_date);
         // A stale revision changes neither.
-        let stale = update_settings(&tx, second, None, None, unlimited, None, None, None, now())
-            .unwrap_err();
+        let stale = update_settings(
+            &tx,
+            second,
+            None,
+            None,
+            unlimited,
+            None,
+            None,
+            None,
+            None,
+            now(),
+        )
+        .unwrap_err();
         assert_eq!(stale.code, ErrorCode::RevisionConflict);
         assert_eq!(settings(&tx).unwrap().download_speed_limit, None);
     }

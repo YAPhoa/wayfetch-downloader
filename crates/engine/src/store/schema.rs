@@ -15,6 +15,7 @@ const MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("migrations/0002_root_initialized.sql")),
     M::up(include_str!("migrations/0003_automatic_update_checks.sql")),
     M::up(include_str!("migrations/0004_link_filters.sql")),
+    M::up(include_str!("migrations/0005_keep_server_file_date.sql")),
 ];
 
 /// Newest schema version this engine knows.
@@ -82,6 +83,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(automatic, 1);
+    }
+
+    #[test]
+    fn a_database_upgrades_with_server_file_dates_off() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::from_slice(MIGRATIONS)
+            .to_version(&mut conn, 4)
+            .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), LATEST);
+        let keep: i64 = conn
+            .query_row(
+                "SELECT keep_server_file_date FROM settings WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(keep, 0);
+        assert!(
+            conn.execute("UPDATE settings SET keep_server_file_date = 2", [])
+                .is_err()
+        );
     }
 
     #[test]

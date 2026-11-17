@@ -11,7 +11,7 @@
  * The protocol version this UI speaks (`ProtocolVersion::CURRENT`).
  * @type {Readonly<ProtocolVersion>}
  */
-export const PROTOCOL = Object.freeze({ major: 0, minor: 4 });
+export const PROTOCOL = Object.freeze({ major: 0, minor: 5 });
 
 /**
  * The wire types, generated from their Rust definitions by ts-rs into
@@ -201,6 +201,7 @@ export const PROTOCOL = Object.freeze({ major: 0, minor: 4 });
  *   downloadSpeedLimit?: SpeedLimitChange,
  *   extractArchives?: boolean,
  *   automaticUpdateChecks?: boolean,
+ *   keepServerFileDate?: boolean,
  *   linkFilters?: LinkFilters,
  * }} SettingsChange
  */
@@ -267,6 +268,7 @@ export function settingsRequest({
   downloadSpeedLimit,
   extractArchives,
   automaticUpdateChecks,
+  keepServerFileDate,
   linkFilters,
 }) {
   /** @type {UpdateSettingsRequest} */
@@ -276,6 +278,7 @@ export function settingsRequest({
   if (downloadSpeedLimit !== undefined) request.download_speed_limit = downloadSpeedLimit;
   if (extractArchives !== undefined) request.extract_archives = extractArchives;
   if (automaticUpdateChecks !== undefined) request.automatic_update_checks = automaticUpdateChecks;
+  if (keepServerFileDate !== undefined) request.keep_server_file_date = keepServerFileDate;
   if (linkFilters !== undefined) request.link_filters = linkFilters;
   return request;
 }

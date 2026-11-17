@@ -488,9 +488,10 @@ impl Download {
                 let file = self
                     .reopen(root, intent.staging.clone(), intent.size)
                     .await?;
+                let modified = self.file_date(&intent.staging).await?;
                 let (r, target, size) = (root.clone(), intent.target.clone(), intent.size);
                 match self
-                    .blocking(move || r.publish(file, &target, size))
+                    .blocking(move || r.publish(file, &target, size, modified))
                     .await?
                 {
                     Ok(()) => {}
@@ -979,6 +980,7 @@ impl Download {
     ) -> Result<(), Stop> {
         let (job, generation) = (self.job.job, self.job.generation);
         let record = file.record().clone();
+        let modified = self.file_date(&record).await?;
         let mut file = Some(file);
         for n in first..first + NAME_ATTEMPTS {
             let Ok(target) = name.numbered(n) else {
@@ -998,7 +1000,10 @@ impl Download {
                 None => self.reopen(root, record.clone(), size).await?,
             };
             let (r, t) = (root.clone(), target.clone());
-            match self.blocking(move || r.publish(staging, &t, size)).await? {
+            match self
+                .blocking(move || r.publish(staging, &t, size, modified))
+                .await?
+            {
                 Ok(()) => {
                     self.call(move |s| s.complete_publication(job, generation, now()))
                         .await??;
@@ -1015,6 +1020,20 @@ impl Download {
             FailureCode::DestinationUnavailable,
             format!("no free name like {name} after {NAME_ATTEMPTS} attempts"),
         ))
+    }
+
+    /// The time to give the file published from `record`: when its server
+    /// last modified it, if the user keeps server file dates and the
+    /// server said. A time in the future is not taken, and nothing here
+    /// fails the download.
+    async fn file_date(&self, record: &StagingRecord) -> Result<Option<SystemTime>, Stop> {
+        let record = record.clone();
+        let date = self.call(move |s| s.server_file_date(&record)).await?;
+        Ok(date
+            .ok()
+            .flatten()
+            .filter(|at| *at <= now())
+            .and_then(UtcTimestamp::to_system_time))
     }
 
     /// Moves the job to `to` under its generation.
@@ -1146,19 +1165,23 @@ mod tests {
     /// `hello` as `a.bin`; `crash` changes the files as the crash left
     /// them. Returns the recovering job as the next start sees it.
     fn crashed_publishing(crash: impl FnOnce(&Root, &Path, &StagingRecord)) -> Crashed {
-        interrupted_publishing(crash, false)
+        interrupted_publishing(crash, false, None)
     }
 
     /// [`crashed_publishing`], except that the job failed during
     /// publication instead, in the same engine start, and the user retried
     /// it: returns its next attempt, just admitted.
     fn retried_publishing(crash: impl FnOnce(&Root, &Path, &StagingRecord)) -> Crashed {
-        interrupted_publishing(crash, true)
+        interrupted_publishing(crash, true, None)
     }
 
+    /// [`crashed_publishing`] or, if `retried`, [`retried_publishing`];
+    /// with `server_date`, the user keeps server file dates and the
+    /// response said the file was last modified then.
     fn interrupted_publishing(
         crash: impl FnOnce(&Root, &Path, &StagingRecord),
         retried: bool,
+        server_date: Option<UtcTimestamp>,
     ) -> Crashed {
         let state = tempfile::tempdir().unwrap();
         let root_dir = tempfile::tempdir().unwrap();
@@ -1177,6 +1200,25 @@ mod tests {
         store
             .execute(&submit, instance, &Default::default(), now())
             .unwrap();
+        if server_date.is_some() {
+            let keep = CommandEnvelope {
+                idempotency_key: IdempotencyKey::generate(),
+                target: instance,
+                command: Command::UpdateSettings {
+                    expected_revision: wayfetch_domain::version::Revision::from_u64(1).unwrap(),
+                    default_root: None,
+                    max_active_downloads: None,
+                    download_speed_limit: None,
+                    extract_archives: None,
+                    automatic_update_checks: None,
+                    keep_server_file_date: Some(true),
+                    link_filters: None,
+                },
+            };
+            store
+                .execute(&keep, instance, &Default::default(), now())
+                .unwrap();
+        }
         let job = store.stage_pending(1, now()).unwrap()[0];
         let generation = store.job_state(job).unwrap().generation();
         let advance = |store: &mut Store, stage| {
@@ -1194,7 +1236,7 @@ mod tests {
         let representation = Representation {
             length: Some(5),
             strong_etag: Some("\"v1\"".into()),
-            last_modified: None,
+            last_modified: server_date,
             resource: None,
         };
         store
@@ -1305,7 +1347,7 @@ mod tests {
             ("before the link", |_, _, _| {}),
             ("after the link", |root, _, record| {
                 let file = root.reopen_staging(record, 5).unwrap();
-                root.publish(file, &target(), 5).unwrap();
+                root.publish(file, &target(), 5, None).unwrap();
             }),
         ];
         for (name, crash) in cases {
@@ -1364,7 +1406,7 @@ mod tests {
     async fn a_retried_job_completes_a_linked_publication_without_publishing_twice() {
         let mut retried = retried_publishing(|root, _, record| {
             let file = root.reopen_staging(record, 5).unwrap();
-            root.publish(file, &target(), 5).unwrap();
+            root.publish(file, &target(), 5, None).unwrap();
         });
         let done = retried.recover().await;
         assert_eq!(done.stage, JobStage::Complete);
@@ -1392,6 +1434,30 @@ mod tests {
             assert_eq!(done.artifact.unwrap().path, at, "{name}");
             assert_eq!(retried.read(at), b"hello", "{name}");
             assert!(!retried.staging_exists(), "{name}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_publication_finished_after_a_crash_or_retry_keeps_the_server_file_date() {
+        let past = UtcTimestamp::from_unix_millis(784_111_777_000);
+        let future = now()
+            .checked_add(std::time::Duration::from_secs(86_400))
+            .unwrap();
+        for (retried, date, kept) in [
+            (false, past, true),
+            (true, past, true),
+            (false, future, false),
+        ] {
+            let case = format!("retried {retried}, date {date}");
+            let mut job = interrupted_publishing(|_, _, _| {}, retried, Some(date));
+            let done = job.recover().await;
+            assert_eq!(done.stage, JobStage::Complete, "{case}");
+            assert_eq!(job.read("a.bin"), b"hello", "{case}");
+            let modified = std::fs::metadata(job.root_dir.path().join("a.bin"))
+                .and_then(|m| m.modified())
+                .map(UtcTimestamp::from_system_time)
+                .unwrap();
+            assert_eq!(modified == date, kept, "{case}: {modified}");
         }
     }
 

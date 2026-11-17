@@ -600,7 +600,9 @@ fn publication_reserves_its_target_and_completes_the_job() {
         .unwrap();
 
     let file = f.files.remove(&(job, generation)).unwrap();
-    f.root.publish(file, &intent.target, intent.size).unwrap();
+    f.root
+        .publish(file, &intent.target, intent.size, None)
+        .unwrap();
     f.store.complete_publication(job, generation, NOW).unwrap();
     let done = f.summary(job);
     assert_eq!(done.stage, JobStage::Complete);
@@ -644,7 +646,7 @@ fn a_valid_empty_file_publishes_without_coverage() {
         .begin_publication(job, generation, &path("empty.txt"), 0, NOW)
         .unwrap();
     let file = f.files.remove(&(job, generation)).unwrap();
-    f.root.publish(file, &path("empty.txt"), 0).unwrap();
+    f.root.publish(file, &path("empty.txt"), 0, None).unwrap();
     f.store.complete_publication(job, generation, NOW).unwrap();
     assert_eq!(
         std::fs::metadata(f.root_dir.path().join("empty.txt"))
@@ -678,7 +680,9 @@ fn restart_during_publication_reconciles_from_the_intent() {
     // The old generation can no longer complete it.
     assert!(f.store.complete_publication(job, generation, NOW).is_err());
     let file = f.root.reopen_staging(&intent.staging, intent.size).unwrap();
-    f.root.publish(file, &intent.target, intent.size).unwrap();
+    f.root
+        .publish(file, &intent.target, intent.size, None)
+        .unwrap();
     assert_eq!(
         f.root
             .reconcile_publication(&intent.staging, &intent.target, intent.size)
@@ -699,7 +703,7 @@ fn a_conflicting_target_releases_the_reservation() {
         .begin_publication(job, generation, &path("a.bin"), 4, NOW)
         .unwrap();
     let file = f.files.remove(&(job, generation)).unwrap();
-    assert!(f.root.publish(file, &path("a.bin"), 4).is_err());
+    assert!(f.root.publish(file, &path("a.bin"), 4, None).is_err());
     let intent = f.store.pending_publication(job).unwrap().unwrap();
     assert_eq!(
         f.root
@@ -712,7 +716,7 @@ fn a_conflicting_target_releases_the_reservation() {
         .begin_publication(job, generation, &path("a (1).bin"), 4, NOW)
         .unwrap();
     let file = f.root.reopen_staging(&intent.staging, 4).unwrap();
-    f.root.publish(file, &path("a (1).bin"), 4).unwrap();
+    f.root.publish(file, &path("a (1).bin"), 4, None).unwrap();
     f.store.complete_publication(job, generation, NOW).unwrap();
     assert_eq!(
         std::fs::read(f.root_dir.path().join("a.bin")).unwrap(),
@@ -1240,7 +1244,7 @@ fn published(f: &mut Fixture, at: &str, bytes: &[u8]) -> JobSummary {
         .begin_publication(job, generation, &path(at), size, NOW)
         .unwrap();
     let file = f.files.remove(&(job, generation)).unwrap();
-    f.root.publish(file, &path(at), size).unwrap();
+    f.root.publish(file, &path(at), size, None).unwrap();
     f.store.complete_publication(job, generation, NOW).unwrap();
     f.summary(job)
 }

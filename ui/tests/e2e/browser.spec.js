@@ -1401,6 +1401,26 @@ test('the download limit and speed limit are server settings every window shares
     ]);
     expect(wide).toBe(width);
   }
+
+  // Keeping the server's file date is a switch under Download folders,
+  // saved at once and shared with every window.
+  {
+    await first.setViewportSize({ width: 1280, height: 720 });
+    await first.goto(`${daemon.origin}/settings/folder`);
+    await second.goto(`${daemon.origin}/settings/folder`);
+    /** @param {import('@playwright/test').Page} page */
+    const keep = (page) => page.locator('.settings-content').getByRole('switch', { name: 'Keep the server’s file date' });
+    await expect(keep(first)).not.toBeChecked();
+    await expect(first.getByText('A finished file takes the modified date its server reports, if any.')).toBeVisible();
+    await keep(first).click();
+    await expect(first.getByText('Finished files now keep the server’s date.')).toBeVisible();
+    await expect(keep(first)).toBeChecked();
+    await expect(keep(second)).toBeChecked();
+    await keep(second).click();
+    await expect(second.getByText('Finished files are now dated when they finish.')).toBeVisible();
+    await expect(keep(first)).not.toBeChecked();
+    await expectFitsWindow(first);
+  }
   await context.close();
 });
 

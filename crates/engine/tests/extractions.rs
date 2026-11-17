@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use support::{ALL, envelope, job, shutdown, wait_for};
+use support::{ALL, envelope, job, settings, shutdown, wait_for};
 use wayfetch_engine::EngineOwner;
 use wayfetch_engine::extract::{Archive, Entry, EntryKind, ExtractError, Extractor, Halt};
 use wayfetch_engine::transfer::lease::Representation;
@@ -22,11 +22,10 @@ use wayfetch_protocol::domain::id::JobId;
 use wayfetch_protocol::domain::job::JobStage;
 use wayfetch_protocol::event::EventKind;
 use wayfetch_protocol::media::{PluginRole, PluginState, PluginSummary};
-use wayfetch_protocol::query::{ExtractionState, JobSummary, Settings};
+use wayfetch_protocol::query::{ExtractionState, JobSummary};
 use wayfetch_protocol::request::ExtractRequest;
 use wayfetch_protocol::{
-    Command, CommandResult, ErrorCode, IdempotencyKey, ProtocolError, Query, QueryResult,
-    StreamItem, Subscribe,
+    Command, CommandResult, ErrorCode, IdempotencyKey, ProtocolError, StreamItem, Subscribe,
 };
 
 /// Files served at every path; a held path's body does not end until it
@@ -312,13 +311,6 @@ async fn command(owner: &EngineOwner, command: Command) -> Result<CommandResult,
     owner.handle().execute(envelope(owner, command), ALL).await
 }
 
-async fn settings(owner: &EngineOwner) -> Settings {
-    match owner.handle().query(Query::Settings {}, ALL).await.unwrap() {
-        QueryResult::Settings(settings) => settings,
-        other => panic!("{other:?}"),
-    }
-}
-
 /// What the root holds, other than Wayfetch's private folder.
 fn listing(root: &Path) -> Vec<String> {
     let mut names: Vec<_> = std::fs::read_dir(root)
@@ -401,6 +393,7 @@ async fn turned_off_archives_stay_packed_until_asked() {
             download_speed_limit: None,
             extract_archives: Some(false),
             automatic_update_checks: None,
+            keep_server_file_date: None,
             link_filters: None,
         },
     )

@@ -24,7 +24,7 @@ use wayfetch_engine::{
 use wayfetch_protocol::command::{InputUrl, SubmitItems};
 use wayfetch_protocol::domain::id::{JobId, RootId};
 use wayfetch_protocol::domain::job::JobStage;
-use wayfetch_protocol::query::{JobFilter, JobSummary, PageSize};
+use wayfetch_protocol::query::{JobFilter, JobSummary, PageSize, Settings};
 use wayfetch_protocol::{Command, CommandEnvelope, IdempotencyKey, Permission, Query, QueryResult};
 
 pub const ALL: &[Permission] = Permission::ALL;
@@ -224,6 +224,34 @@ pub async fn submit(owner: &EngineOwner, urls: impl IntoIterator<Item = String>)
         .await
         .unwrap();
     jobs(owner).await[before..].iter().map(|j| j.id).collect()
+}
+
+/// The settings, as a client reads them.
+pub async fn settings(owner: &EngineOwner) -> Settings {
+    match owner.handle().query(Query::Settings {}, ALL).await.unwrap() {
+        QueryResult::Settings(settings) => settings,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Turns keeping the server's file date on or off.
+pub async fn keep_server_file_date(owner: &EngineOwner, on: bool) {
+    let command = Command::UpdateSettings {
+        expected_revision: settings(owner).await.revision,
+        default_root: None,
+        max_active_downloads: None,
+        download_speed_limit: None,
+        extract_archives: None,
+        automatic_update_checks: None,
+        keep_server_file_date: Some(on),
+        link_filters: None,
+    };
+    owner
+        .handle()
+        .execute(envelope(owner, command), ALL)
+        .await
+        .unwrap();
+    assert_eq!(settings(owner).await.keep_server_file_date, on);
 }
 
 pub async fn jobs(owner: &EngineOwner) -> Vec<JobSummary> {

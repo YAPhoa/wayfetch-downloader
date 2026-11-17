@@ -103,6 +103,8 @@ test('a settings change sends only what changes', () => {
     set: 'unlimited',
   });
   assert.equal('download_speed_limit' in settingsRequest(base), false);
+  assert.equal(settingsRequest({ ...base, keepServerFileDate: false }).keep_server_file_date, false);
+  assert.equal('keep_server_file_date' in settingsRequest(base), false);
 });
 
 const MIB = 1024 * 1024;

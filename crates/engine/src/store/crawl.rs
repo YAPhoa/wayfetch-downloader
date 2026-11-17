@@ -790,6 +790,7 @@ mod tests {
                 download_speed_limit: None,
                 extract_archives: None,
                 automatic_update_checks: None,
+                keep_server_file_date: None,
                 link_filters: Some(
                     serde_json::from_value(serde_json::json!({
                         "enabled": true, "filters": filters,
@@ -994,6 +995,7 @@ mod tests {
                 download_speed_limit: None,
                 extract_archives: None,
                 automatic_update_checks: None,
+                keep_server_file_date: None,
                 link_filters: Some(wayfetch_protocol::filter::LinkFilters {
                     enabled: false,
                     ..wayfetch_protocol::filter::LinkFilters::default()

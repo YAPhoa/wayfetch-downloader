@@ -6,10 +6,13 @@
 mod engine_support;
 mod support;
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use engine_support::{CHECKPOINT, KIB, body, complete, jobs, settled, shutdown, wait_for};
+use engine_support::{
+    CHECKPOINT, KIB, body, complete, jobs, keep_server_file_date, settings, settled, shutdown,
+    wait_for,
+};
 use sha2::{Digest, Sha256};
 use support::{Raw, Resource, Route, Server, https_env};
 use wayfetch_engine::protocol::query::SpeedLimit;
@@ -121,6 +124,48 @@ async fn empty_files_and_suggested_names_publish() {
     // T01: a valid empty file, named by the server.
     assert_eq!(done.artifact.unwrap().path, "résumé.txt");
     assert_eq!(env.published("résumé.txt"), b"");
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_file_keeps_the_server_date_only_when_asked_and_known() {
+    let env = env().await;
+    let date = UNIX_EPOCH + Duration::from_secs(784_111_777);
+    let future = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(86_400));
+    let cases = [
+        ("/off.bin", Some("Sun, 06 Nov 1994 08:49:37 GMT"), false),
+        ("/dated.bin", Some("Sun, 06 Nov 1994 08:49:37 GMT"), true),
+        ("/undated.bin", None, false),
+        ("/invalid.bin", Some("yesterday"), false),
+        ("/future.bin", Some(future.as_str()), false),
+    ];
+    for (path, modified, _) in cases {
+        let resource = Resource::new(body(KIB));
+        env.server.put(
+            path,
+            match modified {
+                Some(value) => resource.header("Last-Modified", value),
+                None => resource,
+            },
+        );
+    }
+    let owner = env.start().await;
+    assert!(!settings(&owner).await.keep_server_file_date);
+    for (path, _, dated) in cases {
+        keep_server_file_date(&owner, path != "/off.bin").await;
+        let [id] = submit(&env, &owner, &[path]).await[..] else {
+            panic!()
+        };
+        let done = complete(&owner, id).await;
+        let name = done.artifact.unwrap().path;
+        assert_eq!(env.published(&name), body(KIB), "{path}");
+        let modified = std::fs::metadata(env.root.join(&name))
+            .and_then(|m| m.modified())
+            .unwrap();
+        assert_eq!(modified == date, dated, "{path}");
+        // Any other file is dated when it was written.
+        assert!(dated || modified > date, "{path}");
+    }
     shutdown(owner).await;
 }
 

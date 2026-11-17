@@ -124,6 +124,7 @@ impl Store {
                 download_speed_limit,
                 extract_archives,
                 automatic_update_checks,
+                keep_server_file_date,
                 link_filters,
             } => roots::update_settings(
                 &tx,
@@ -133,6 +134,7 @@ impl Store {
                 *download_speed_limit,
                 *extract_archives,
                 *automatic_update_checks,
+                *keep_server_file_date,
                 link_filters.as_ref(),
                 now,
             )?,

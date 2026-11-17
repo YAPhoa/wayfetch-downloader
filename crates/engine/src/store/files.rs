@@ -334,6 +334,27 @@ impl Store {
         }))
     }
 
+    /// When the server said the representation in `record`'s staging file
+    /// was last modified, if the user keeps server file dates and the
+    /// response said. A media download records no such time.
+    pub(crate) fn server_file_date(
+        &mut self,
+        record: &StagingRecord,
+    ) -> Result<Option<UtcTimestamp>, StoreError> {
+        let tx = self.read()?;
+        let modified: Option<i64> = tx
+            .query_row(
+                "SELECT f.representation_modified FROM staging_files f, settings s \
+                 WHERE s.id = 1 AND s.keep_server_file_date = 1 AND f.job_id = ?1 \
+                 AND f.root_id = ?2 AND f.name = ?3",
+                params![sql(record.job)?, sql(record.root)?, record.name],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(modified.map(UtcTimestamp::from_unix_millis))
+    }
+
     /// Records what the response that started the job generation's staging
     /// file reported (its representation and suggested file name), and the
     /// job's expected size. Once recorded it does not change: a later

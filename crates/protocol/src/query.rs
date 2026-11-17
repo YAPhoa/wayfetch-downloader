@@ -463,6 +463,10 @@ pub struct Settings {
     /// Whether the engine checks for a newer release on its own.
     #[serde(default)]
     pub automatic_update_checks: bool,
+    /// Whether a finished download's file takes the modification time its
+    /// server reported.
+    #[serde(default)]
+    pub keep_server_file_date: bool,
     /// The link filters, which keep matching links out of the collected
     /// list.
     #[serde(default)]
@@ -973,6 +977,7 @@ mod tests {
             }],
             extract_archives: true,
             automatic_update_checks: true,
+            keep_server_file_date: false,
             link_filters: LinkFilters::default(),
         });
         assert_eq!(
@@ -1000,6 +1005,7 @@ mod tests {
                 }],
                 "extract_archives": true,
                 "automatic_update_checks": true,
+                "keep_server_file_date": false,
                 "link_filters": {"enabled": true, "filters": []},
             })
         );
