@@ -125,6 +125,60 @@ async fn empty_files_and_suggested_names_publish() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn signed_links_and_typed_answers_name_their_files() {
+    let env = env().await;
+    // A signed object-storage link whose server does not send the name
+    // the link asks for.
+    let signed = "/o/7f3a9?X-Amz-Signature=private-token\
+                  &response-content-disposition=attachment%3B%20filename%3D%22Q3%20report.pdf%22";
+    let cases = [
+        (signed, "application/pdf", "Q3 report.pdf"),
+        ("/files/download", "image/jpeg", "download.jpg"),
+        ("/files/raw", "application/octet-stream", "raw"),
+        ("/files/page", "text/html", "page"),
+    ];
+    for (path, content_type, _) in cases {
+        env.server.put(
+            path,
+            Resource::new(body(KIB)).header("Content-Type", content_type),
+        );
+    }
+    let owner = env.start().await;
+    let ids = submit(&env, &owner, &cases.map(|(path, ..)| path)).await;
+    for (id, (path, _, expected)) in ids.into_iter().zip(cases) {
+        let done = complete(&owner, id).await;
+        assert_eq!(done.artifact.unwrap().path, expected, "{path}");
+        assert_eq!(done.name.as_deref(), Some(expected), "{path}");
+        assert_eq!(env.published(expected), body(KIB), "{path}");
+    }
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_download_keeps_the_name_it_recorded() {
+    let env = env().await;
+    let data = body(64 * KIB);
+    let resource = Resource::new(data.clone()).header("Content-Type", "application/pdf");
+    let id = interrupt_at(&env, "/files/blob", resource, 20 * KIB).await;
+    // The same representation, now described differently.
+    env.server.update("/files/blob", |r| {
+        r.headers = vec![
+            ("Content-Type".into(), "image/png".into()),
+            (
+                "Content-Disposition".into(),
+                "attachment; filename=\"other.zip\"".into(),
+            ),
+        ];
+    });
+    let owner = env.start().await;
+    let done = complete(&owner, id).await;
+    assert_eq!(env.server.ranges("/files/blob").len(), 2);
+    assert_eq!(done.artifact.unwrap().path, "blob.pdf");
+    assert_eq!(env.published("blob.pdf"), data);
+    shutdown(owner).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_resume_the_server_does_not_honor_restarts_from_zero() {
     type Change = fn(&mut Resource);
     let cases: [(&str, Change); 4] = [

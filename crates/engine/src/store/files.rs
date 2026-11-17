@@ -360,7 +360,7 @@ impl Store {
                 current.state.desired() == wayfetch_domain::job::DesiredState::Running
                     && !current.removed
             })
-            .and_then(crate::download::file_name)
+            .and_then(crate::naming::file_name)
             .map(|n| n.as_str().to_owned());
         let length = representation
             .length

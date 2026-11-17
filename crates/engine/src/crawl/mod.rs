@@ -15,6 +15,7 @@ use url::Url;
 use wayfetch_domain::name::ProviderId;
 use wayfetch_protocol::query::CheckReason;
 
+use crate::naming::Naming;
 use crate::transfer::lease::Representation;
 use crate::transfer::transport::Reach;
 use crate::transfer::writer::BoxFuture;
@@ -140,7 +141,8 @@ pub fn looks_like_file(url: &Url) -> bool {
 pub enum Checked {
     /// It serves a file.
     File {
-        /// The name its server suggested, if any.
+        /// The name it would be downloaded under, if its answer or address
+        /// gives one.
         name: Option<String>,
         /// Its size, when the server said.
         size: Option<u64>,
@@ -180,8 +182,8 @@ impl Checker {
     }
 }
 
-/// What an answer says about the link, without its page's links.
-fn classify(answer: &Inspection) -> Checked {
+/// What an answer about `url` says, without its page's links.
+fn classify(answer: &Inspection, url: &Url) -> Checked {
     let status = answer.status;
     let http = || format!("The server answered HTTP {status}.");
     match status {
@@ -199,8 +201,14 @@ fn classify(answer: &Inspection) -> Checked {
                     "The server reported a size no file can have.".into(),
                 )
             } else {
+                let naming = Naming {
+                    disposition: answer.filename.as_deref(),
+                    url: Some(url),
+                    media_type: answer.content_type.as_deref(),
+                    ..Naming::default()
+                };
                 Checked::File {
-                    name: answer.filename.clone(),
+                    name: naming.name().map(|name| name.as_str().to_owned()),
                     size: answer.length,
                 }
             }
@@ -252,7 +260,7 @@ pub async fn check(inspector: &dyn Inspector, url: &Url, reach: Reach, analyze: 
             Err(e) => return failed(e),
         };
     }
-    let checked = classify(&answer);
+    let checked = classify(&answer, url);
     if !(analyze && matches!(checked, Checked::Page { .. })) {
         return checked;
     }
@@ -262,7 +270,7 @@ pub async fn check(inspector: &dyn Inspector, url: &Url, reach: Reach, analyze: 
             Err(e) => return failed(e),
         };
         // The page may have changed into something else meanwhile.
-        let again = classify(&answer);
+        let again = classify(&answer, url);
         if !matches!(again, Checked::Page { .. }) {
             return again;
         }
@@ -385,6 +393,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_file_is_named_as_its_download_would_be() {
+        for (link, content_type, expected) in [
+            (
+                "https://bucket.example/o/7f3a9?X-Amz-Signature=secret\
+                 &response-content-disposition=attachment%3B%20filename%3D%22Q3.pdf%22",
+                "application/pdf",
+                "Q3.pdf",
+            ),
+            ("https://a.example/dl/1234", "image/jpeg", "1234.jpg"),
+            (
+                "https://a.example/dl/1234",
+                "application/octet-stream",
+                "1234",
+            ),
+        ] {
+            let script = Script::new(vec![Ok(answer(200, content_type))]);
+            let checked = check(&script, &url(link), Reach::Allowed, false).await;
+            assert_eq!(
+                checked,
+                Checked::File {
+                    name: Some(expected.into()),
+                    size: None
+                },
+                "{link}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_refused_head_is_asked_again_with_one_byte() {
         // A valid empty file answers a first-byte request with 416.
         let empty = Inspection {
@@ -403,7 +440,7 @@ mod tests {
         assert_eq!(
             checked,
             Checked::File {
-                name: None,
+                name: Some("empty.bin".into()),
                 size: Some(0)
             }
         );

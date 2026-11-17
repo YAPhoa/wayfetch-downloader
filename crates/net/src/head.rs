@@ -1,5 +1,6 @@
 //! Reading a response's status and headers into what the engine checks:
-//! framing, representation, and a suggested file name.
+//! framing, representation, and what names the file. The engine's naming
+//! rules read the name headers' values.
 //!
 //! Parsing is strict: a malformed `Content-Range` or `Content-Length` is a
 //! failure, never a guess, and an encoded body is refused rather than
@@ -8,13 +9,13 @@
 use std::fmt::Write as _;
 use std::time::SystemTime;
 
-use percent_encoding::percent_decode_str;
 use reqwest::StatusCode;
 use reqwest::header::{self, HeaderMap};
 use sha2::{Digest, Sha256};
 use url::Url;
 use wayfetch_engine::domain::failure::FailureCode;
 use wayfetch_engine::domain::time::UtcTimestamp;
+use wayfetch_engine::naming::{Disposition, media_type};
 use wayfetch_engine::transfer::lease::Representation;
 use wayfetch_engine::transfer::range::Framing;
 use wayfetch_engine::transfer::transport::TransportError;
@@ -28,6 +29,8 @@ pub struct ResponseHead {
     pub representation: Representation,
     /// The file name `Content-Disposition` suggested, if any.
     pub filename: Option<String>,
+    /// `Content-Type` without parameters, lower case, if sent.
+    pub media_type: Option<String>,
 }
 
 pub(crate) fn error(code: FailureCode, message: impl Into<String>) -> TransportError {
@@ -76,7 +79,10 @@ pub(crate) fn read(
             resource: Some(resource(url)),
             ..validators(headers)?
         },
-        filename: header_str(headers, header::CONTENT_DISPOSITION)?.and_then(disposition_filename),
+        filename: header_str(headers, header::CONTENT_DISPOSITION)?
+            .and_then(|v| Disposition::parse(v).filename),
+        // Only names the file, so a malformed type is only unknown.
+        media_type: content_type(headers),
     })
 }
 
@@ -156,24 +162,25 @@ pub(crate) fn describe(status: StatusCode, headers: &HeaderMap) -> Described {
     };
     let disposition = header_str(headers, header::CONTENT_DISPOSITION)
         .ok()
-        .flatten();
+        .flatten()
+        .map(Disposition::parse)
+        .unwrap_or_default();
     Described {
-        content_type: header_str(headers, header::CONTENT_TYPE)
-            .ok()
-            .flatten()
-            .and_then(|v| v.split(';').next())
-            .map(|v| v.trim().to_ascii_lowercase())
-            .filter(|v| !v.is_empty()),
+        content_type: content_type(headers),
         length,
-        filename: disposition.and_then(disposition_filename),
-        attachment: disposition.is_some_and(|v| {
-            params(v)
-                .next()
-                .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("attachment"))
-        }),
+        filename: disposition.filename,
+        attachment: disposition.attachment,
         encoded,
         validators: validators(headers).unwrap_or_default(),
     }
+}
+
+/// The media type `Content-Type` names, if it is one readable value.
+fn content_type(headers: &HeaderMap) -> Option<String> {
+    header_str(headers, header::CONTENT_TYPE)
+        .ok()
+        .flatten()
+        .and_then(media_type)
 }
 
 /// The strong `ETag` and `Last-Modified` in `headers`.
@@ -314,66 +321,6 @@ fn strong_etag(value: &str) -> Option<String> {
     (!opaque.contains('"')).then(|| value.to_owned())
 }
 
-/// The file name a `Content-Disposition` suggests (RFC 6266): `filename*`
-/// in UTF-8 if present, else `filename`. The engine validates the name.
-fn disposition_filename(value: &str) -> Option<String> {
-    let mut plain = None;
-    for param in params(value).skip(1) {
-        let (name, raw) = param.split_once('=')?;
-        let name = name.trim();
-        let raw = raw.trim();
-        if name.eq_ignore_ascii_case("filename*") {
-            let (charset, rest) = raw.split_once('\'')?;
-            let (_language, encoded) = rest.split_once('\'')?;
-            if charset.eq_ignore_ascii_case("utf-8") {
-                return percent_decode_str(encoded)
-                    .decode_utf8()
-                    .ok()
-                    .map(|name| name.into_owned());
-            }
-        } else if name.eq_ignore_ascii_case("filename") {
-            plain = Some(unquote(raw)?);
-        }
-    }
-    plain
-}
-
-/// Splits a header value at semicolons outside quoted strings.
-fn params(value: &str) -> impl Iterator<Item = &str> {
-    let mut quoted = false;
-    let mut escaped = false;
-    let mut start = 0;
-    let mut cuts = Vec::new();
-    for (i, c) in value.char_indices() {
-        match c {
-            _ if escaped => escaped = false,
-            '\\' if quoted => escaped = true,
-            '"' => quoted = !quoted,
-            ';' if !quoted => {
-                cuts.push(&value[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    cuts.push(&value[start..]);
-    cuts.into_iter()
-}
-
-/// A token, or a quoted string with its escapes removed.
-fn unquote(raw: &str) -> Option<String> {
-    let Some(inner) = raw.strip_prefix('"') else {
-        return Some(raw.to_owned());
-    };
-    let inner = inner.strip_suffix('"')?;
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        out.push(if c == '\\' { chars.next()? } else { c });
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
     use reqwest::header::HeaderValue;
@@ -419,6 +366,7 @@ mod tests {
                 ("etag", "\"v1\""),
                 ("last-modified", "Sun, 06 Nov 1994 08:49:37 GMT"),
                 ("content-disposition", "attachment; filename=\"a b.zip\""),
+                ("content-type", "Application/PDF; charset=binary"),
             ]),
             &url(),
         )
@@ -435,6 +383,7 @@ mod tests {
             Some(resource(&url()).as_str())
         );
         assert_eq!(head.filename.as_deref(), Some("a b.zip"));
+        assert_eq!(head.media_type.as_deref(), Some("application/pdf"));
 
         let head = read(
             StatusCode::PARTIAL_CONTENT,
@@ -539,25 +488,5 @@ mod tests {
         // unknown.
         assert_eq!(code(500, false), FailureCode::OperationAmbiguous);
         assert_eq!(code(404, false), FailureCode::LeaseNotFound);
-    }
-
-    #[test]
-    fn disposition_names_prefer_the_utf8_form() {
-        let name = |v| disposition_filename(v);
-        assert_eq!(
-            name("attachment; filename=\"plain.zip\"; filename*=UTF-8''%E2%82%AC%20rates.zip")
-                .as_deref(),
-            Some("€ rates.zip")
-        );
-        assert_eq!(
-            name("attachment; filename=token.bin").as_deref(),
-            Some("token.bin")
-        );
-        assert_eq!(
-            name(r#"attachment; filename="semi;colon \"q\".txt""#).as_deref(),
-            Some("semi;colon \"q\".txt")
-        );
-        assert_eq!(name("inline").as_deref(), None);
-        assert_eq!(name("attachment; filename=\"unterminated").as_deref(), None);
     }
 }

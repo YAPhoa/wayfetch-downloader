@@ -11,7 +11,6 @@ use std::any::Any;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use percent_encoding::percent_decode_str;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -31,6 +30,7 @@ use crate::fs::{FsError, PublicationCheck, RelativePath, Root, StagingFile, Stag
 use crate::hosting::FileHost;
 use crate::lifecycle::{Resolution, ResolvedLink, SoleAttempt, StoreClient};
 use crate::media::{Converter, MediaService};
+use crate::naming::Naming;
 use crate::progress::{Metering, Progress};
 use crate::store::{Admission, Partial, Store, StoreError};
 use crate::transfer::lease::{
@@ -282,31 +282,33 @@ impl Download {
                 return self.finish(&root, c.file, size, name).await;
             }
         };
-        // Only a usable name is kept, so a long or hostile header cannot
-        // make the response unrecordable. The download host's suggestion
-        // comes first, then the provider's; both are only hints.
-        let suggested = match &continued {
-            Some(c) => c.partial.suggested_name.clone(),
-            None => response
-                .filename
-                .as_deref()
-                .and_then(file_name)
-                .or_else(|| link.as_ref()?.link.filename.as_deref().and_then(file_name))
-                .map(|name| name.as_str().to_owned()),
+        // A continued download keeps the name it recorded. A new one is
+        // named now and records it, so a resume cannot rename it: by the
+        // download host's suggestion, then the provider's, then the link,
+        // with the response's type. Only a valid name is kept, so a long
+        // or hostile header cannot make the response unrecordable.
+        let name = match &continued {
+            Some(c) => target_name(self.job.job, c.partial.suggested_name.as_deref(), named),
+            None => Naming {
+                disposition: response.filename.as_deref(),
+                provider: link.as_ref().and_then(|l| l.link.filename.as_deref()),
+                url: Some(named),
+                media_type: response.media_type.as_deref(),
+            }
+            .or_job(self.job.job),
         };
         self.advance(JobStage::Transferring).await?;
         let file = match continued {
             Some(c) => c.file,
             None => {
                 let representation = response.representation.clone();
-                self.create_staging(&root, representation, suggested.clone())
-                    .await?
+                let recorded = Some(name.as_str().to_owned());
+                self.create_staging(&root, representation, recorded).await?
             }
         };
         self.meter(target.start, target.end);
         let (size, file) = self.stream(file, response, &target).await?;
         self.metering = None;
-        let name = target_name(self.job.job, suggested.as_deref(), named);
         self.finish(&root, file, size, name).await
     }
 
@@ -1050,33 +1052,15 @@ impl Download {
     }
 }
 
-/// The artifact's name: the server's suggestion, else the URL's last path
-/// segment, else a name derived from the job. Only a single valid path
-/// component is accepted, so neither can choose a directory.
+/// The artifact's name from a name recorded or suggested earlier, else
+/// what the link gives, else the job's.
 fn target_name(job: JobId, suggested: Option<&str>, url: &Url) -> RelativePath {
-    suggested
-        .and_then(file_name)
-        .or_else(|| url_file_name(url))
-        .unwrap_or_else(|| {
-            RelativePath::new(&format!("download-{}", job.get())).expect("a valid file name")
-        })
-}
-
-/// The URL's last path segment as a file name, if it is a valid one.
-pub(crate) fn url_file_name(url: &Url) -> Option<RelativePath> {
-    url.path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .and_then(|segment| percent_decode_str(segment).decode_utf8().ok())
-        .and_then(|name| file_name(&name))
-}
-
-/// `name` as a single valid path component, which cannot choose a
-/// directory.
-pub(crate) fn file_name(name: &str) -> Option<RelativePath> {
-    if name.contains('/') {
-        return None;
+    Naming {
+        provider: suggested,
+        url: Some(url),
+        ..Naming::default()
     }
-    RelativePath::new(name).ok()
+    .or_job(job)
 }
 
 #[cfg(test)]

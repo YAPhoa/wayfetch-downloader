@@ -253,6 +253,7 @@ impl Transport for Fake {
                 framing,
                 representation,
                 filename: resource.filename.clone(),
+                media_type: None,
                 body: Box::new(Body {
                     server: server.clone(),
                     path,

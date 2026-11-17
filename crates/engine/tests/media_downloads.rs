@@ -164,6 +164,7 @@ impl Transport for HostTransport {
                     ..Representation::default()
                 },
                 filename: None,
+                media_type: None,
                 body: Box::new(Body {
                     host: host.clone(),
                     path,

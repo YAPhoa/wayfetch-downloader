@@ -232,7 +232,7 @@ impl RawJob {
         let name = self
             .name
             .as_deref()
-            .and_then(crate::download::file_name)
+            .and_then(crate::naming::file_name)
             .or_else(|| source_name(&self.input_url))
             .map(|name| name.as_str().to_owned());
         let extraction = super::extractions::decode(self.extraction)?;
@@ -291,18 +291,15 @@ fn decode_media(
         .transpose()
 }
 
-/// Only filename-like source segments are useful public hints. Opaque path
-/// IDs without extensions are omitted. The query, fragment, and user
-/// information never enter the hint.
+/// What the source link names the file before any answer, if the name
+/// has an extension: one without may still take the response type's, so
+/// opaque path IDs are not shown. The rest of the query, the fragment, and
+/// user information never enter the hint.
 fn source_name(source: &str) -> Option<crate::fs::RelativePath> {
     let url = url::Url::parse(source).ok()?;
-    let name = crate::download::url_file_name(&url)?;
-    let (stem, extension) = name.as_str().rsplit_once('.')?;
-    (!stem.is_empty()
-        && !extension.is_empty()
-        && extension.len() <= 16
-        && extension.bytes().all(|b| b.is_ascii_alphanumeric()))
-    .then_some(name)
+    crate::naming::Naming::of(&url)
+        .name()
+        .filter(|name| crate::naming::has_extension(name.as_str()))
 }
 
 /// Loads a job, or `NotFound`.
@@ -491,7 +488,7 @@ impl Store {
         name: &str,
         now: UtcTimestamp,
     ) -> Result<(), StoreError> {
-        let Some(name) = crate::download::file_name(name) else {
+        let Some(name) = crate::naming::file_name(name) else {
             return Ok(());
         };
         let tx = self.write()?;

@@ -636,6 +636,7 @@ mod tests {
                     },
                     representation: Representation::default(),
                     filename: None,
+                    media_type: None,
                     body: Box::new(Once(Some(data.into()))),
                 })
             })

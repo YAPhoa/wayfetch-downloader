@@ -196,6 +196,7 @@ impl Transport for Files {
                     resource: None,
                 },
                 filename: None,
+                media_type: None,
                 body: Box::new(Body(Some(data))),
             })
         })

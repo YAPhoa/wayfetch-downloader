@@ -268,7 +268,7 @@ impl Filters {
     /// its server gives, so conditions on the name wait for the check
     /// too; one never checked cannot meet conditions only a check tells.
     pub(crate) fn judge(&self, link: &Link<'_>) -> Verdict {
-        let name = crate::download::url_file_name(link.url);
+        let name = crate::naming::Naming::of(link.url).name();
         let name = name.as_ref().map(|n| n.as_str());
         let mut wait = false;
         for rule in &self.0 {
@@ -291,7 +291,7 @@ impl Filters {
     /// that `answer` tells what it found: by the name the server gave, or
     /// else the one in its address.
     pub(crate) fn leaves_out(&self, link: &Link<'_>, answer: &Answer<'_>) -> bool {
-        let from_url = crate::download::url_file_name(link.url);
+        let from_url = crate::naming::Naming::of(link.url).name();
         let name = answer
             .name
             .or_else(|| from_url.as_ref().map(|n| n.as_str()));

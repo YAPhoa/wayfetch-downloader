@@ -6446,7 +6446,6 @@ dependencies = [
  "httparse",
  "httpdate",
  "ipnet",
- "percent-encoding",
  "rcgen",
  "reqwest",
  "rusqlite",

@@ -242,7 +242,7 @@ impl Store {
                 *size,
                 // Only a name that could be a file's is kept.
                 name.as_deref()
-                    .filter(|n| crate::download::file_name(n).is_some()),
+                    .filter(|n| crate::naming::file_name(n).is_some()),
             ),
             Checked::Page { .. } => (CheckOutcome::Page, None, None, None, None),
             Checked::Offline(reason, message) => (
